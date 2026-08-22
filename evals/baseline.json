@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "dataset": "golden-events-v1",
+  "precision": 0.80,
+  "recall": 0.65,
+  "citation_coverage": 1.0,
+  "temporal_integrity": 1.0,
+  "composite_score": 0.80
+}

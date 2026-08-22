@@ -1,0 +1,98 @@
+name: market-loop-agent
+
+x-backend: &backend
+  build:
+    context: .
+    dockerfile: backend/Dockerfile
+  env_file: .env
+  volumes:
+    - ./reports:/app/reports
+    - ./.git:/app/.git
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: agent
+      POSTGRES_PASSWORD: agent
+      POSTGRES_DB: agent
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/001-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agent -d agent"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  fmp-mcp:
+    profiles: ["mcp"]
+    build:
+      context: https://github.com/imbenrabi/Financial-Modeling-Prep-MCP-Server.git#17fbe04cfd0322c6e8a0794e99ae95d7b4908e25
+    environment:
+      FMP_ACCESS_TOKEN: ${FMP_ACCESS_TOKEN:-}
+      FMP_TOOL_SETS: search,company,quotes,statements,calendar,charts,news,crypto,sec-filings,earnings,dcf
+      PORT: 8080
+    ports:
+      - "8081:8080"
+
+  api:
+    <<: *backend
+    command: uvicorn backend.app.main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+
+  io-worker:
+    <<: *backend
+    command: celery -A backend.app.worker:celery_app worker -Q io,default --concurrency=4 --loglevel=INFO
+
+  llm-worker:
+    <<: *backend
+    command: celery -A backend.app.worker:celery_app worker -Q llm --concurrency=1 --loglevel=INFO
+
+  evolution-worker:
+    <<: *backend
+    profiles: ["evolution"]
+    build:
+      context: .
+      dockerfile: backend/Dockerfile.evolution
+    command: sh -c "git config --global --add safe.directory /app && celery -A backend.app.worker:celery_app worker -Q evolution --concurrency=1 --loglevel=INFO"
+    volumes:
+      - .:/app
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  scheduler:
+    <<: *backend
+    command: celery -A backend.app.worker:celery_app beat --loglevel=INFO
+
+  web:
+    build:
+      context: frontend
+    environment:
+      VITE_API_URL: http://localhost:8000
+    ports:
+      - "5173:80"
+    depends_on:
+      - api
+
+volumes:
+  postgres-data:

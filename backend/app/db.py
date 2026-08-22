@@ -1,0 +1,199 @@
+from __future__ import annotations
+
+from collections.abc import Generator
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+from uuid import UUID, uuid4
+
+from pgvector.sqlalchemy import Vector
+from sqlalchemy import JSON, Boolean, DateTime, Float, Integer, String, Text, create_engine
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
+from sqlalchemy.types import TypeDecorator
+
+from backend.app.config import get_settings
+from backend.app.domain import utc_now
+
+
+class GUID(TypeDecorator):
+    impl = String(36)
+    cache_ok = True
+
+    def process_bind_param(self, value: UUID | str | None, dialect: Any) -> str | None:
+        return str(value) if value is not None else None
+
+    def process_result_value(self, value: str | None, dialect: Any) -> UUID | None:
+        return UUID(value) if value is not None else None
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class AssetRow(Base):
+    __tablename__ = "assets"
+
+    id: Mapped[str] = mapped_column(String(160), primary_key=True)
+    asset_class: Mapped[str] = mapped_column(String(20), index=True)
+    market: Mapped[str] = mapped_column(String(20), index=True)
+    symbol: Mapped[str] = mapped_column(String(40), index=True)
+    name: Mapped[str] = mapped_column(String(200), index=True)
+    exchange_or_provider: Mapped[str] = mapped_column(String(80))
+    currency: Mapped[str] = mapped_column(String(10), default="USD")
+    aliases: Mapped[list[str]] = mapped_column(JSON, default=list)
+    products: Mapped[list[str]] = mapped_column(JSON, default=list)
+    competitors: Mapped[list[str]] = mapped_column(JSON, default=list)
+    lot_size: Mapped[int] = mapped_column(Integer, default=1)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class NewsRow(Base):
+    __tablename__ = "news_items"
+
+    id: Mapped[UUID] = mapped_column(GUID(), primary_key=True, default=uuid4)
+    source: Mapped[str] = mapped_column(String(120), index=True)
+    source_quality: Mapped[str] = mapped_column(String(30))
+    title: Mapped[str] = mapped_column(Text)
+    summary: Mapped[str] = mapped_column(Text, default="")
+    url: Mapped[str] = mapped_column(Text)
+    language: Mapped[str] = mapped_column(String(10), default="en")
+    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    as_of: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    content_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    symbols: Mapped[list[str]] = mapped_column(JSON, default=list)
+    raw_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class EventRow(Base):
+    __tablename__ = "news_events"
+
+    id: Mapped[UUID] = mapped_column(GUID(), primary_key=True, default=uuid4)
+    headline: Mapped[str] = mapped_column(Text)
+    event_type: Mapped[str] = mapped_column(String(40), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+    priority: Mapped[float] = mapped_column(Float, default=0.5, index=True)
+    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    as_of: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class ResearchRunRow(Base):
+    __tablename__ = "research_runs"
+
+    id: Mapped[UUID] = mapped_column(GUID(), primary_key=True, default=uuid4)
+    event_id: Mapped[UUID | None] = mapped_column(GUID(), nullable=True, index=True)
+    asset_id: Mapped[str] = mapped_column(String(160), index=True)
+    status: Mapped[str] = mapped_column(String(40), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class EvidenceRow(Base):
+    __tablename__ = "evidence"
+
+    id: Mapped[UUID] = mapped_column(GUID(), primary_key=True, default=uuid4)
+    run_id: Mapped[UUID] = mapped_column(GUID(), index=True)
+    claim: Mapped[str] = mapped_column(Text)
+    source_url: Mapped[str] = mapped_column(Text)
+    source_quality: Mapped[str] = mapped_column(String(30), index=True)
+    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    as_of: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+
+
+class DocumentChunkRow(Base):
+    """Searchable evidence projection; original documents remain at their source URL."""
+
+    __tablename__ = "document_chunks"
+
+    id: Mapped[UUID] = mapped_column(GUID(), primary_key=True, default=uuid4)
+    evidence_id: Mapped[UUID] = mapped_column(GUID(), unique=True, index=True)
+    run_id: Mapped[UUID] = mapped_column(GUID(), index=True)
+    asset_id: Mapped[str] = mapped_column(String(160), index=True)
+    text: Mapped[str] = mapped_column(Text)
+    terms: Mapped[list[str]] = mapped_column(JSON, default=list)
+    embedding: Mapped[list[float]] = mapped_column(Vector(384).with_variant(JSON, "sqlite"))
+    source_url: Mapped[str] = mapped_column(Text)
+    source_quality: Mapped[str] = mapped_column(String(30), index=True)
+    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    as_of: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class RecommendationRow(Base):
+    __tablename__ = "recommendations"
+
+    id: Mapped[UUID] = mapped_column(GUID(), primary_key=True, default=uuid4)
+    run_id: Mapped[UUID] = mapped_column(GUID(), unique=True, index=True)
+    asset_id: Mapped[str] = mapped_column(String(160), index=True)
+    score: Mapped[int] = mapped_column(Integer)
+    rating: Mapped[str] = mapped_column(String(40), index=True)
+    confidence: Mapped[float] = mapped_column(Float)
+    as_of: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+
+
+class PaperOrderRow(Base):
+    __tablename__ = "paper_orders"
+
+    id: Mapped[UUID] = mapped_column(GUID(), primary_key=True, default=uuid4)
+    recommendation_id: Mapped[UUID] = mapped_column(GUID(), index=True)
+    asset_id: Mapped[str] = mapped_column(String(160), index=True)
+    side: Mapped[str] = mapped_column(String(10))
+    quantity: Mapped[float] = mapped_column(Float)
+    price: Mapped[float] = mapped_column(Float)
+    currency: Mapped[str] = mapped_column(String(10))
+    fee: Mapped[float] = mapped_column(Float)
+    executed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+
+
+class OutcomeRow(Base):
+    __tablename__ = "outcomes"
+
+    id: Mapped[UUID] = mapped_column(GUID(), primary_key=True, default=uuid4)
+    recommendation_id: Mapped[UUID] = mapped_column(GUID(), index=True)
+    horizon_days: Mapped[int] = mapped_column(Integer, index=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+
+
+class EvolutionRow(Base):
+    __tablename__ = "evolution_candidates"
+
+    id: Mapped[UUID] = mapped_column(GUID(), primary_key=True, default=uuid4)
+    branch: Mapped[str] = mapped_column(String(200), unique=True)
+    status: Mapped[str] = mapped_column(String(30), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+def _make_engine():
+    settings = get_settings()
+    if settings.database_url.startswith("sqlite"):
+        Path("data").mkdir(exist_ok=True)
+        return create_engine(
+            settings.database_url,
+            connect_args={"check_same_thread": False},
+            pool_pre_ping=True,
+        )
+    return create_engine(settings.database_url, pool_pre_ping=True, pool_recycle=1800)
+
+
+engine = _make_engine()
+SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+
+
+def init_db() -> None:
+    Base.metadata.create_all(bind=engine)
+
+
+def get_db() -> Generator[Session, None, None]:
+    session = SessionLocal()
+    try:
+        yield session
+    finally:
+        session.close()

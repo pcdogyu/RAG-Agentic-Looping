@@ -1,0 +1,20 @@
+[
+  {
+    "title": "Apple reports quarterly revenue growth led by Services",
+    "expected_event_type": "earnings",
+    "expected_assets": ["equity:XNAS:AAPL"],
+    "as_of": "2025-01-31T00:00:00Z"
+  },
+  {
+    "title": "监管机构发布针对虚拟资产平台的新规",
+    "expected_event_type": "regulation",
+    "expected_assets": [],
+    "as_of": "2025-02-01T00:00:00Z"
+  },
+  {
+    "title": "Ethereum protocol upgrade date confirmed by core developers",
+    "expected_event_type": "product",
+    "expected_assets": ["crypto:coingecko:ethereum"],
+    "as_of": "2025-03-01T00:00:00Z"
+  }
+]
