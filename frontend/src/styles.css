@@ -35,16 +35,12 @@ h1 span { color: var(--mint); font-weight: 400; }
 .status.online i { background: var(--mint); box-shadow: 0 0 10px var(--mint); }
 .status.checking i { background: var(--muted); box-shadow: none; }
 .model-statuses { display: flex; align-items: center; gap: 6px; }
-.model-status { display: grid; grid-template-columns: 7px auto; gap: 1px 6px; align-items: center; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; background: rgba(12,25,22,.9); white-space: nowrap; }
-.model-status i { grid-row: 1 / 3; width: 6px; height: 6px; border-radius: 50%; background: var(--muted); }
-.model-status span { color: #a8bbb5; font-size: 10px; }
-.model-status strong { color: var(--muted); font: 500 9px "DM Mono", monospace; }
+.model-status { display: flex; gap: 6px; align-items: center; padding: 9px 10px; border: 1px solid var(--line); border-radius: 8px; background: rgba(12,25,22,.9); white-space: nowrap; }
+.model-status i { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); }
+.model-status span { color: #a8bbb5; font: 500 10px "DM Mono", monospace; }
 .model-status.available i { background: var(--mint); box-shadow: 0 0 8px var(--mint); }
-.model-status.available strong { color: var(--mint); }
 .model-status.offline i { background: var(--red); box-shadow: 0 0 8px var(--red); }
-.model-status.offline strong { color: var(--red); }
-.model-status.missing i { background: var(--amber); box-shadow: 0 0 8px rgba(246,201,107,.65); }
-.model-status.missing strong { color: var(--amber); }
+.model-status.missing i { background: var(--red); box-shadow: 0 0 8px var(--red); }
 .header-actions > button { border: 0; border-radius: 9px; padding: 11px 18px; color: #06100d; background: var(--mint); cursor: pointer; font-weight: 700; }
 .header-actions > button:disabled { opacity: .55; }
 .metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 12px; }

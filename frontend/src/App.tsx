@@ -73,11 +73,7 @@ export type HealthStatus = {
 
 export type ModelConnectionState = "checking" | "offline" | "available" | "missing";
 
-const ollamaModels = [
-  { label: "抽取 3B", name: "qwen2.5:3b" },
-  { label: "研究 7B", name: "qwen2.5:7b" },
-  { label: "演进 Coder", name: "qwen2.5-coder:7b" },
-] as const;
+const ollamaModels = ["qwen2.5:3b", "qwen2.5:7b", "qwen2.5-coder:7b"] as const;
 
 type AnalysisStep = {
   phase: string;
@@ -310,12 +306,15 @@ export default function App() {
         </div>
         <div className="header-actions">
           <div className="health-cluster">
-            <div className={`status ${health ? (health.ollama ? "online" : "offline") : "checking"}`}>
-              <i /> Ollama {health ? (health.ollama ? "在线" : "离线") : "检测中"}
+            <div
+              className={`status ${health ? (health.ollama ? "online" : "offline") : "checking"}`}
+              aria-label={`Ollama ${health ? (health.ollama ? "在线" : "离线") : "检测中"}`}
+            >
+              <i /> Ollama
             </div>
             <div className="model-statuses" aria-label="千问模型连接状态">
               {ollamaModels.map((model) => (
-                <ModelStatus key={model.name} health={health} label={model.label} model={model.name} />
+                <ModelStatus key={model} health={health} model={model} />
               ))}
             </div>
           </div>
@@ -535,19 +534,19 @@ const modelStateLabels: Record<ModelConnectionState, string> = {
 
 function ModelStatus({
   health,
-  label,
   model,
 }: {
   health: HealthStatus | null;
-  label: string;
   model: string;
 }) {
   const state = modelConnectionState(health, model);
   return (
-    <div className={`model-status ${state}`} title={`${model} · ${modelStateLabels[state]}`}>
+    <div
+      className={`model-status ${state}`}
+      aria-label={`${model} ${modelStateLabels[state]}`}
+    >
       <i />
-      <span>{label}</span>
-      <strong>{modelStateLabels[state]}</strong>
+      <span>{model}</span>
     </div>
   );
 }
