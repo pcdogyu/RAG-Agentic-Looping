@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { formatCountdown, modelConnectionState, scanButtonText } from "./App";
+import { analysisPendingText, formatCountdown, modelConnectionState, scanButtonText } from "./App";
 
 const baseStatus = {
   state: "idle",
@@ -60,5 +60,16 @@ describe("Ollama model availability", () => {
       { ollama: true, models: ["QWEN2.5-CODER:7B"] },
       "qwen2.5-coder:7b",
     )).toBe("available");
+  });
+});
+
+describe("analysis mapping states", () => {
+  it("explains active and failed 7B mapping without implying deep research started", () => {
+    expect(analysisPendingText("mapping_queued")).toContain("正在识别并验证");
+    expect(analysisPendingText("mapping_failed")).toContain("未生成或猜测证券代码");
+  });
+
+  it("keeps genuinely unmapped events explicit", () => {
+    expect(analysisPendingText("unmapped")).toBe("该新闻尚未映射到可研究标的。");
   });
 });

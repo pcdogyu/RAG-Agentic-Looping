@@ -232,6 +232,35 @@ class ResearchRun(BaseModel):
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+class EventReport(BaseModel):
+    summary: str
+    affected_markets: list[str] = Field(default_factory=list)
+    affected_sectors: list[str] = Field(default_factory=list)
+    scenarios: list[str] = Field(default_factory=list)
+    catalysts: list[str] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+    unresolved_questions: list[str] = Field(default_factory=list)
+    evidence_ids: list[UUID] = Field(default_factory=list)
+    confidence: float = Field(default=0.3, ge=0, le=1)
+    evidence_complete: bool = False
+
+
+class EventResearchRun(BaseModel):
+    id: UUID = Field(default_factory=uuid4)
+    event_id: UUID
+    status: RunStatus = RunStatus.QUEUED
+    as_of: datetime = Field(default_factory=utc_now)
+    verification_round: int = 0
+    missing_requirements: list[str] = Field(default_factory=list)
+    contradictions: list[str] = Field(default_factory=list)
+    evidence: list[Evidence] = Field(default_factory=list)
+    report: EventReport | None = None
+    error: str | None = None
+    analysis_steps: list[AnalysisStep] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
 class PaperOrder(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     recommendation_id: UUID

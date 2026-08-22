@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from typing import Any
@@ -7,16 +8,24 @@ from zoneinfo import ZoneInfo
 
 from dateutil.parser import parse as parse_datetime
 
-from backend.app.domain import AssetRef, Market, NewsItem, SourceQuality
+from backend.app.domain import AssetClass, AssetRef, Market, NewsItem, SourceQuality
+from backend.app.providers.cache import cache
 
 SHANGHAI_TIMEZONE = ZoneInfo("Asia/Shanghai")
 TIME_NORMALIZATION_MARKER = "Asia/Shanghai->UTC:v1"
+
+
+def _normalize_security_text(value: str) -> str:
+    return re.sub(r"[^a-z0-9\u3400-\u9fff]+", "", value.lower())
 
 
 class AkShareProvider:
     """Best-effort adapter; upstream public endpoints can change without notice."""
 
     name = "akshare"
+
+    def __init__(self) -> None:
+        self.last_errors: list[str] = []
 
     def discover_news(self, *, since: datetime, limit: int = 100) -> list[NewsItem]:
         try:
@@ -58,7 +67,91 @@ class AkShareProvider:
         return output[:limit]
 
     def resolve_assets(self, query: str) -> list[AssetRef]:
-        return []
+        normalized_query = _normalize_security_text(query)
+        if not normalized_query:
+            return []
+        return [
+            asset
+            for asset in self._listed_assets()
+            if self._matches(asset, normalized_query)
+        ]
+
+    @staticmethod
+    def _matches(asset: AssetRef, normalized_query: str) -> bool:
+        symbol = _normalize_security_text(asset.symbol)
+        name = _normalize_security_text(asset.name)
+        return normalized_query == symbol or (len(name) >= 2 and name in normalized_query)
+
+    def _listed_assets(self) -> list[AssetRef]:
+        key = cache.key("akshare-security-master", {"version": 1})
+
+        def loader() -> list[dict[str, Any]]:
+            try:
+                import akshare as ak
+            except Exception as exc:
+                self.last_errors.append(f"import: {type(exc).__name__}")
+                return []
+
+            records: list[dict[str, Any]] = []
+            try:
+                records.extend(self._a_share_records(ak.stock_info_a_code_name()))
+            except Exception as exc:
+                self.last_errors.append(f"a-share-master: {type(exc).__name__}")
+            try:
+                records.extend(self._hk_share_records(ak.stock_hk_spot_em()))
+            except Exception as exc:
+                self.last_errors.append(f"hk-share-master: {type(exc).__name__}")
+            return records
+
+        payload = cache.remember(key, 24 * 60 * 60, loader)
+        return [AssetRef.model_validate(item) for item in payload]
+
+    @staticmethod
+    def _a_share_records(frame: Any) -> list[dict[str, Any]]:
+        output: list[dict[str, Any]] = []
+        for row in frame.to_dict(orient="records"):
+            raw_code = str(row.get("code") or row.get("代码") or "").strip()
+            name = str(row.get("name") or row.get("名称") or "").strip()
+            if not raw_code or not name or not raw_code.isdigit():
+                continue
+            code = raw_code.zfill(6)
+            exchange = "XSHG" if code.startswith("6") else "XBEI" if code[0] in "489" else "XSHE"
+            output.append(
+                AssetRef(
+                    asset_id=f"equity:{exchange}:{code}",
+                    asset_class=AssetClass.EQUITY,
+                    market=Market.CN,
+                    symbol=code,
+                    name=name,
+                    exchange_or_provider=exchange,
+                    currency="CNY",
+                    lot_size=100,
+                ).model_dump(mode="json")
+            )
+        return output
+
+    @staticmethod
+    def _hk_share_records(frame: Any) -> list[dict[str, Any]]:
+        output: list[dict[str, Any]] = []
+        for row in frame.to_dict(orient="records"):
+            raw_code = str(row.get("代码") or row.get("code") or "").strip()
+            name = str(row.get("名称") or row.get("name") or "").strip()
+            if not raw_code or not name or not raw_code.isdigit():
+                continue
+            code = raw_code.zfill(5)
+            output.append(
+                AssetRef(
+                    asset_id=f"equity:XHKG:{code}",
+                    asset_class=AssetClass.EQUITY,
+                    market=Market.HK,
+                    symbol=code,
+                    name=name,
+                    exchange_or_provider="XHKG",
+                    currency="HKD",
+                    lot_size=100,
+                ).model_dump(mode="json")
+            )
+        return output
 
     def get_prices(self, asset: AssetRef, **kwargs: Any) -> list[dict[str, Any]]:
         try:

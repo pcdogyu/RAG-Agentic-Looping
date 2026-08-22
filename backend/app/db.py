@@ -90,6 +90,17 @@ class ResearchRunRow(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
+class EventResearchRunRow(Base):
+    __tablename__ = "event_research_runs"
+
+    id: Mapped[UUID] = mapped_column(GUID(), primary_key=True, default=uuid4)
+    event_id: Mapped[UUID] = mapped_column(GUID(), unique=True, index=True)
+    status: Mapped[str] = mapped_column(String(40), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
 class EvidenceRow(Base):
     __tablename__ = "evidence"
 

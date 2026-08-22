@@ -215,6 +215,22 @@ class EventService:
             SourceQuality.SOCIAL: 0.3,
         }[item.source_quality]
         priority = min(1.0, extracted.priority * quality_factor)
+        extraction_steps.append(
+            AnalysisStep(
+                phase="asset_mapping",
+                status="completed" if candidates else "unmapped",
+                executor="provider-registry",
+                summary=(
+                    f"确定性证券映射找到 {len(candidates)} 个候选。"
+                    if candidates
+                    else "确定性证券映射未找到可验证候选，将按配置进入 7B 二次发现。"
+                ),
+                metrics={
+                    "candidate_count": len(candidates),
+                    "provider_errors": self.registry.mapping_errors,
+                },
+            )
+        )
         return NewsEvent(
             news_item_ids=[item.id],
             headline=item.title,

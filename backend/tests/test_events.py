@@ -46,8 +46,10 @@ def test_extracts_event_and_maps_asset():
     assert [step.phase for step in event.analysis_steps] == [
         "news_collection",
         "event_extraction",
+        "asset_mapping",
     ]
-    assert event.analysis_steps[-1].model == settings.ollama_extract_model
+    assert event.analysis_steps[-2].model == settings.ollama_extract_model
+    assert event.analysis_steps[-1].metrics["candidate_count"] == 1
 
 
 def test_ingest_clusters_duplicate_reprints(db):

@@ -111,7 +111,8 @@ h1 span { color: var(--mint); font-weight: 400; }
 .trace-asset span, .trace-confidence span { color: var(--muted); font-size: 11px; }
 .trace-state { padding: 5px 8px; border-radius: 4px; color: var(--amber); background: rgba(246,201,107,.09); font-size: 10px; white-space: nowrap; }
 .trace-state.completed { color: var(--mint); background: rgba(99,242,186,.09); }
-.trace-state.failed { color: var(--red); background: rgba(255,122,122,.09); }
+.trace-state.failed, .trace-state.mapping_failed { color: var(--red); background: rgba(255,122,122,.09); }
+.trace-state.mapping_running, .trace-state.mapping_queued, .trace-state.mapping_retrying { color: var(--cyan); background: rgba(88,214,255,.09); }
 .trace-detail { padding: 2px 20px 22px 52px; }
 .trace-context { display: grid; grid-template-columns: 1.35fr 1fr; gap: 30px; padding: 20px 0; border-top: 1px solid var(--line); }
 .trace-context h3 { margin: 0 0 10px; color: var(--muted); font-size: 11px; font-weight: 500; text-transform: uppercase; letter-spacing: .08em; }
@@ -137,6 +138,8 @@ h1 span { color: var(--mint); font-weight: 400; }
 .trace-result span { color: var(--muted); font-size: 10px; }
 .trace-result strong { font: 500 17px "DM Mono", monospace; color: var(--mint); }
 .trace-result p { grid-column: 1 / -1; margin: 4px 0 0; color: #b3c8c0; font-size: 12px; line-height: 1.7; }
+.event-report-result { border-color: rgba(88,214,255,.24); background: linear-gradient(120deg, rgba(88,214,255,.065), rgba(16,29,38,.7)); }
+.event-report-result strong { color: var(--cyan); }
 .trace-pending { padding: 16px 18px; border: 1px dashed var(--line); border-radius: 8px; color: var(--muted); font-size: 12px; }
 
 @media (max-width: 1200px) {

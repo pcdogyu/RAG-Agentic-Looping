@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from backend.app.config import get_settings
 from backend.app.db import NewsRow, SessionLocal, engine, get_db, init_db
 from backend.app.domain import (
+    EventResearchRun,
     EvolutionCandidate,
     PaperOrder,
     PortfolioSnapshot,
@@ -33,9 +34,11 @@ from backend.app.services.research import ResearchService
 from backend.app.storage import (
     get_asset,
     get_event,
+    get_event_research_run,
     get_news,
     get_run,
     list_assets,
+    list_event_research_runs,
     list_events,
     list_evolutions,
     list_news,
@@ -67,6 +70,7 @@ async def lifespan(app: FastAPI):
         normalize_legacy_akshare_timestamps(db)
         for asset in registry.all_assets():
             upsert_asset(db, asset)
+        registry.add_assets(list_assets(db))
     yield
 
 
@@ -247,6 +251,21 @@ def research_run(run_id: UUID, db: Session = Depends(get_db)):
     return value
 
 
+@app.get("/api/v1/event-research-runs", response_model=list[EventResearchRun])
+def event_research_runs(
+    limit: int = Query(default=100, ge=1, le=500), db: Session = Depends(get_db)
+):
+    return list_event_research_runs(db, limit)
+
+
+@app.get("/api/v1/event-research-runs/{run_id}", response_model=EventResearchRun)
+def event_research_run(run_id: UUID, db: Session = Depends(get_db)):
+    value = get_event_research_run(db, run_id)
+    if not value:
+        raise HTTPException(404, "event research run not found")
+    return value
+
+
 @app.get("/api/v1/recommendations")
 def recommendations(limit: int = Query(default=100, ge=1, le=500), db: Session = Depends(get_db)):
     return list_recommendations(db, limit)
@@ -258,30 +277,34 @@ def _analysis_logs(db: Session, limit: int) -> list[dict]:
     entries: list[tuple[datetime, dict]] = []
     seen_event_ids: set[UUID] = set()
 
-    def make_entry(event, run=None) -> tuple[datetime, dict]:
+    def make_entry(event, run=None, event_run=None) -> tuple[datetime, dict]:
         news_items = [
             item
             for news_id in (event.news_item_ids if event else [])
             if (item := get_news(db, news_id)) is not None
         ]
-        steps = (
+        steps = event_run.analysis_steps if event_run else (
             run.analysis_steps
             if run and run.analysis_steps
             else (event.analysis_steps if event else [])
         )
         model_names = list(dict.fromkeys(step.model for step in steps if step.model))
         recommendation = run.recommendation if run else None
+        report = event_run.report if event_run else None
         asset = run.asset if run else (event.candidates[0].asset if event and event.candidates else None)
-        status = (
-            run.status.value
-            if run
-            else ("unmapped" if event and not event.candidates else "not_researched")
+        status = run.status.value if run else (
+            event_run.status.value if event_run else _event_mapping_status(event)
         )
-        updated_at = run.updated_at if run else event.observed_at
+        updated_at = run.updated_at if run else (
+            event_run.updated_at if event_run else max(
+                [event.observed_at, *[step.occurred_at for step in event.analysis_steps]]
+            )
+        )
         payload = {
-            "id": str(run.id if run else event.id),
+            "id": str(run.id if run else event_run.id if event_run else event.id),
             "event_id": str(event.id) if event else None,
             "run_id": str(run.id) if run else None,
+            "event_research_run_id": str(event_run.id) if event_run else None,
             "status": status,
             "updated_at": updated_at.isoformat(),
             "news": [
@@ -310,6 +333,7 @@ def _analysis_logs(db: Session, limit: int) -> list[dict]:
             "steps": [step.model_dump(mode="json") for step in steps],
             "result": (
                 {
+                    "kind": "asset_recommendation",
                     "rating": recommendation.rating.value,
                     "score": recommendation.score,
                     "confidence": recommendation.confidence,
@@ -317,16 +341,49 @@ def _analysis_logs(db: Session, limit: int) -> list[dict]:
                     "summary": recommendation.thesis.summary,
                 }
                 if recommendation
-                else None
+                else (
+                    {
+                        "kind": "event_report",
+                        "confidence": report.confidence,
+                        "evidence_complete": report.evidence_complete,
+                        "summary": report.summary,
+                        "affected_markets": report.affected_markets,
+                        "affected_sectors": report.affected_sectors,
+                        "scenarios": report.scenarios,
+                        "catalysts": report.catalysts,
+                        "risks": report.risks,
+                        "unresolved_questions": report.unresolved_questions,
+                    }
+                    if report
+                    else None
+                )
             ),
         }
         return updated_at, payload
+
+    def _event_mapping_status(event) -> str:
+        if not event:
+            return "not_researched"
+        for step in reversed(event.analysis_steps):
+            if step.phase == "asset_mapping" and step.status in {
+                "running",
+                "retrying",
+                "failed",
+            }:
+                return f"mapping_{step.status}"
+            if step.phase == "asset_mapping_queue" and step.status == "queued":
+                return "mapping_queued"
+        return "unmapped" if not event.candidates else "not_researched"
 
     for run in list_runs(db, max(limit * 3, 30)):
         event = get_event(db, run.event_id) if run.event_id else None
         if run.event_id:
             seen_event_ids.add(run.event_id)
         entries.append(make_entry(event, run))
+    for event_run in list_event_research_runs(db, max(limit * 3, 30)):
+        event = get_event(db, event_run.event_id)
+        seen_event_ids.add(event_run.event_id)
+        entries.append(make_entry(event, event_run=event_run))
     for event in list_recent_events(db, max(limit * 3, 30)):
         if event.id not in seen_event_ids:
             entries.append(make_entry(event))
@@ -418,6 +475,10 @@ async def event_stream() -> AsyncIterator[str]:
                     "runs": [item.model_dump(mode="json") for item in list_runs(db, 10)],
                     "recommendations": [
                         item.model_dump(mode="json") for item in list_recommendations(db, 10)
+                    ],
+                    "event_research_runs": [
+                        item.model_dump(mode="json")
+                        for item in list_event_research_runs(db, 10)
                     ],
                     "analysis_logs": _analysis_logs(db, 10),
                 },

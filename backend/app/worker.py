@@ -15,6 +15,7 @@ from backend.app.db import NewsRow, SessionLocal, init_db
 from backend.app.domain import (
     AnalysisStep,
     AssetRef,
+    EventResearchRun,
     NewsEvent,
     Rating,
     ResearchRun,
@@ -23,6 +24,8 @@ from backend.app.domain import (
     utc_now,
 )
 from backend.app.providers.registry import ProviderRegistry
+from backend.app.services.asset_mapping import AssetMappingService
+from backend.app.services.event_research import EventResearchService
 from backend.app.services.events import EventService
 from backend.app.services.evolution import EvolutionService
 from backend.app.services.notifications import notifier
@@ -32,10 +35,16 @@ from backend.app.services.research import ResearchService
 from backend.app.storage import (
     get_asset,
     get_event,
+    get_event_research_for_event,
+    get_event_research_run,
+    get_news,
     get_run,
+    get_run_for_event_asset,
     list_assets,
     list_evolutions,
     list_outcomes,
+    save_event,
+    save_event_research_run,
     save_run,
     upsert_asset,
 )
@@ -285,12 +294,111 @@ def enqueue_research(
     return str(task.id), run
 
 
+def enqueue_event_researches(
+    db, event: NewsEvent, limit: int
+) -> list[tuple[str, ResearchRun]]:
+    """Queue distinct event-assets in relevance order, up to the requested limit."""
+
+    queued: list[tuple[str, ResearchRun]] = []
+    for candidate in event.candidates[:limit]:
+        if get_run_for_event_asset(db, event.id, candidate.asset.asset_id):
+            continue
+        queued.append(enqueue_research(db, candidate.asset, event))
+    return queued
+
+
 def enqueue_event_research(db, event: NewsEvent) -> tuple[str, ResearchRun] | None:
     """Queue exactly the highest-relevance mapped asset for one unique event."""
 
-    if not event.candidates:
+    queued = enqueue_event_researches(db, event, 1)
+    return queued[0] if queued else None
+
+
+def _replace_event_step(event: NewsEvent, step: AnalysisStep) -> None:
+    for index in range(len(event.analysis_steps) - 1, -1, -1):
+        if event.analysis_steps[index].phase == step.phase:
+            event.analysis_steps[index] = step
+            return
+    event.analysis_steps.append(step)
+
+
+def enqueue_asset_mapping(db, event: NewsEvent) -> str | None:
+    """Queue one visible 7B mapping attempt for an otherwise unmapped event."""
+
+    if event.candidates or any(
+        step.phase == "asset_mapping_queue" and step.status in {"queued", "completed"}
+        for step in event.analysis_steps
+    ):
         return None
-    return enqueue_research(db, event.candidates[0].asset, event)
+    _replace_event_step(
+        event,
+        AnalysisStep(
+            phase="asset_mapping_queue",
+            status="queued",
+            executor="celery",
+            model=settings.ollama_research_model,
+            summary="确定性映射未找到标的，已创建 7B 二次标的发现任务。",
+        ),
+    )
+    save_event(db, event)
+    try:
+        task = resolve_event_assets.apply_async(args=[str(event.id)], queue="llm")
+    except Exception as exc:
+        _replace_event_step(
+            event,
+            AnalysisStep(
+                phase="asset_mapping_queue",
+                status="failed",
+                executor="celery",
+                model=settings.ollama_research_model,
+                summary=f"7B 标的发现任务入队失败（{type(exc).__name__}）。",
+            ),
+        )
+        save_event(db, event)
+        raise
+    return str(task.id)
+
+
+def enqueue_event_report(db, event: NewsEvent) -> tuple[str | None, EventResearchRun]:
+    """Persist and queue one neutral report for an event with no verified asset."""
+
+    existing = get_event_research_for_event(db, event.id)
+    if existing:
+        return None, existing
+    run = EventResearchRun(
+        event_id=event.id,
+        as_of=max(event.as_of, event.observed_at),
+        analysis_steps=[
+            *event.analysis_steps,
+            AnalysisStep(
+                phase="event_research_queue",
+                status="queued",
+                executor="celery",
+                model=settings.ollama_research_model,
+                summary="未找到经主数据验证的证券标的，已创建中性事件研报任务。",
+            ),
+        ],
+    )
+    save_event_research_run(db, run)
+    try:
+        task = research_event.apply_async(
+            args=[str(event.id), str(run.id)],
+            queue="llm",
+        )
+    except Exception as exc:
+        run.status = RunStatus.FAILED
+        run.error = f"{type(exc).__name__}: event research queue failed"
+        run.analysis_steps.append(
+            AnalysisStep(
+                phase="event_research_queue",
+                status="failed",
+                executor="celery",
+                summary=f"中性事件研报入队失败（{type(exc).__name__}）。",
+            )
+        )
+        save_event_research_run(db, run)
+        raise
+    return str(task.id), run
 
 
 @celery_app.task(name="market_loop.ensure_scan_loop")
@@ -376,6 +484,7 @@ def scan_news(self) -> dict:
             )
 
         with SessionLocal() as db:
+            registry.add_assets(list_assets(db))
             service = EventService(registry)
             events = service.ingest(db, items, progress=update_progress)
             for error in registry.last_errors:
@@ -387,21 +496,29 @@ def scan_news(self) -> dict:
                         f"候选标的：{', '.join(item.asset.symbol for item in event.candidates[:5]) or '待解析'}"
                     )
             queued = 0
+            mapping_queued = 0
             if settings.auto_research:
                 for event in events:
                     if event.candidates:
                         try:
-                            enqueue_event_research(db, event)
-                            queued += 1
+                            queued += int(enqueue_event_research(db, event) is not None)
                         except Exception as exc:
                             notifier.send(
                                 f"研究任务入队失败：{event.headline}\n错误：{type(exc).__name__}"
+                            )
+                    else:
+                        try:
+                            mapping_queued += int(enqueue_asset_mapping(db, event) is not None)
+                        except Exception as exc:
+                            notifier.send(
+                                f"标的发现任务入队失败：{event.headline}\n错误：{type(exc).__name__}"
                             )
         result = {
             "status": "completed",
             "discovered": len(items),
             "events": len(events),
             "research_queued": queued,
+            "asset_mapping_queued": mapping_queued,
         }
         _complete_scan(client, task_id, result)
         return result
@@ -435,6 +552,156 @@ def scan_news(self) -> dict:
             lock.release()
 
 
+@celery_app.task(bind=True, name="market_loop.resolve_event_assets", max_retries=2)
+def resolve_event_assets(self, event_id: str) -> dict:
+    init_db()
+    with SessionLocal() as db:
+        event = get_event(db, UUID(event_id))
+        if not event:
+            raise ValueError(f"unknown event: {event_id}")
+        registry = ProviderRegistry(assets=list_assets(db))
+        try:
+            mapping_result = None
+            if not event.candidates:
+                _replace_event_step(
+                    event,
+                    AnalysisStep(
+                        phase="asset_mapping",
+                        status="running",
+                        executor="ollama+provider-registry",
+                        model=settings.ollama_research_model,
+                        summary="7B 正在从原文提及中识别证券，并通过主数据验证代码。",
+                    ),
+                )
+                save_event(db, event)
+                news_items = [
+                    item
+                    for news_id in event.news_item_ids
+                    if (item := get_news(db, news_id)) is not None
+                ]
+                mapping_result = AssetMappingService(registry).map_event(event, news_items)
+                event.candidates = mapping_result.candidates
+                for candidate in event.candidates:
+                    upsert_asset(db, candidate.asset)
+                _replace_event_step(
+                    event,
+                    AnalysisStep(
+                        phase="asset_mapping",
+                        status="completed" if event.candidates else "unmapped",
+                        executor="ollama+provider-registry",
+                        model=settings.ollama_research_model,
+                        summary=(
+                            f"7B 提出 {mapping_result.proposed_count} 个候选，"
+                            f"主数据验证通过 {len(event.candidates)} 个、拒绝 "
+                            f"{mapping_result.rejected_count} 个。"
+                        ),
+                        metrics={
+                            "proposed_count": mapping_result.proposed_count,
+                            "verified_count": len(event.candidates),
+                            "rejected_count": mapping_result.rejected_count,
+                            "provider_errors": registry.mapping_errors,
+                            "no_asset_reason": mapping_result.no_asset_reason,
+                        },
+                    ),
+                )
+                _replace_event_step(
+                    event,
+                    AnalysisStep(
+                        phase="asset_mapping_queue",
+                        status="completed",
+                        executor="celery",
+                        model=settings.ollama_research_model,
+                        summary="7B 二次标的发现任务已完成。",
+                    ),
+                )
+                save_event(db, event)
+
+            if event.candidates:
+                queued = enqueue_event_researches(db, event, 3)
+                return {
+                    "status": "mapped",
+                    "event_id": event_id,
+                    "verified_assets": len(event.candidates),
+                    "research_queued": len(queued),
+                }
+
+            task_id, run = enqueue_event_report(db, event)
+            return {
+                "status": "event_research_queued",
+                "event_id": event_id,
+                "event_research_run_id": str(run.id),
+                "task_id": task_id,
+            }
+        except Exception as exc:
+            db.rollback()
+            event = get_event(db, UUID(event_id)) or event
+            retrying = self.request.retries < self.max_retries
+            _replace_event_step(
+                event,
+                AnalysisStep(
+                    phase="asset_mapping",
+                    status="retrying" if retrying else "failed",
+                    executor="ollama+provider-registry",
+                    model=settings.ollama_research_model,
+                    summary=(
+                        f"7B 标的发现{'暂时失败，等待重试' if retrying else '最终失败'}"
+                        f"（{type(exc).__name__}）。"
+                    ),
+                ),
+            )
+            save_event(db, event)
+            if retrying:
+                raise self.retry(
+                    exc=exc,
+                    countdown=min(60, 2 ** (self.request.retries + 1)),
+                ) from exc
+            raise
+
+
+@celery_app.task(bind=True, name="market_loop.research_event", max_retries=2)
+def research_event(self, event_id: str, run_id: str) -> dict:
+    init_db()
+    with SessionLocal() as db:
+        event = get_event(db, UUID(event_id))
+        run = get_event_research_run(db, UUID(run_id))
+        if not event or not run:
+            raise ValueError(f"unknown event research run: {run_id}")
+        if run.status in {RunStatus.COMPLETED, RunStatus.INSUFFICIENT_EVIDENCE}:
+            return run.model_dump(mode="json")
+        try:
+            result = EventResearchService(db).run(event, run)
+            notifier.send(
+                f"事件研究完成：{event.headline}\n"
+                f"证据{'完整' if result.report and result.report.evidence_complete else '不足'}"
+            )
+            return result.model_dump(mode="json")
+        except Exception as exc:
+            db.rollback()
+            run = get_event_research_run(db, UUID(run_id)) or run
+            retrying = self.request.retries < self.max_retries
+            run.status = RunStatus.QUEUED if retrying else RunStatus.FAILED
+            run.error = f"{type(exc).__name__}: {exc}"
+            run.analysis_steps.append(
+                AnalysisStep(
+                    phase="event_research_failed",
+                    status="retrying" if retrying else "failed",
+                    executor="event-research",
+                    model=settings.ollama_research_model,
+                    summary=(
+                        f"中性事件研报{'暂时失败，等待重试' if retrying else '最终失败'}"
+                        f"（{type(exc).__name__}）。"
+                    ),
+                )
+            )
+            save_event_research_run(db, run)
+            if retrying:
+                raise self.retry(
+                    exc=exc,
+                    countdown=min(60, 2 ** (self.request.retries + 1)),
+                ) from exc
+            raise
+
+
 @celery_app.task(
     name="market_loop.research_asset", autoretry_for=(Exception,), retry_backoff=True, max_retries=2
 )
@@ -444,6 +711,7 @@ def research_asset(
     init_db()
     registry = ProviderRegistry()
     with SessionLocal() as db:
+        registry.add_assets(list_assets(db))
         asset = get_asset(db, asset_id) or registry.get_asset(asset_id)
         if not asset:
             raise ValueError(f"unknown asset: {asset_id}")

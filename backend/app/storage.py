@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from backend.app.db import (
     AssetRow,
+    EventResearchRunRow,
     EventRow,
     EvidenceRow,
     EvolutionRow,
@@ -20,6 +21,7 @@ from backend.app.db import (
 )
 from backend.app.domain import (
     AssetRef,
+    EventResearchRun,
     Evidence,
     EvolutionCandidate,
     NewsEvent,
@@ -279,6 +281,65 @@ def list_runs(db: Session, limit: int = 100) -> list[ResearchRun]:
         select(ResearchRunRow).order_by(desc(ResearchRunRow.created_at)).limit(limit)
     ).all()
     return [ResearchRun.model_validate(row.payload) for row in rows]
+
+
+def get_run_for_event_asset(
+    db: Session, event_id: UUID, asset_id: str
+) -> ResearchRun | None:
+    row = db.scalar(
+        select(ResearchRunRow).where(
+            ResearchRunRow.event_id == event_id,
+            ResearchRunRow.asset_id == asset_id,
+        )
+    )
+    return ResearchRun.model_validate(row.payload) if row else None
+
+
+def save_event_research_run(db: Session, run: EventResearchRun) -> None:
+    run.updated_at = utc_now()
+    row = db.get(EventResearchRunRow, run.id) or EventResearchRunRow(
+        id=run.id,
+        event_id=run.event_id,
+        created_at=run.created_at,
+    )
+    row.event_id = run.event_id
+    row.status = run.status.value
+    row.payload = run.model_dump(mode="json")
+    row.updated_at = run.updated_at
+    db.add(row)
+    for evidence in run.evidence:
+        evidence_row = db.get(EvidenceRow, evidence.id) or EvidenceRow(id=evidence.id)
+        evidence_row.run_id = evidence.run_id
+        evidence_row.claim = evidence.claim
+        evidence_row.source_url = evidence.source_url
+        evidence_row.source_quality = evidence.source_quality.value
+        evidence_row.published_at = evidence.published_at
+        evidence_row.observed_at = evidence.observed_at
+        evidence_row.as_of = evidence.as_of
+        evidence_row.payload = evidence.model_dump(mode="json")
+        db.add(evidence_row)
+    db.commit()
+
+
+def get_event_research_run(db: Session, run_id: UUID) -> EventResearchRun | None:
+    row = db.get(EventResearchRunRow, run_id)
+    return EventResearchRun.model_validate(row.payload) if row else None
+
+
+def get_event_research_for_event(db: Session, event_id: UUID) -> EventResearchRun | None:
+    row = db.scalar(
+        select(EventResearchRunRow).where(EventResearchRunRow.event_id == event_id)
+    )
+    return EventResearchRun.model_validate(row.payload) if row else None
+
+
+def list_event_research_runs(db: Session, limit: int = 100) -> list[EventResearchRun]:
+    rows = db.scalars(
+        select(EventResearchRunRow)
+        .order_by(desc(EventResearchRunRow.created_at))
+        .limit(limit)
+    ).all()
+    return [EventResearchRun.model_validate(row.payload) for row in rows]
 
 
 def save_recommendation(db: Session, recommendation: Recommendation) -> None:

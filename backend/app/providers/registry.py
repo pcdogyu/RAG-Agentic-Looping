@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import datetime
 from typing import Any
 
@@ -69,7 +70,11 @@ SEED_ASSETS = [
 
 
 class ProviderRegistry:
-    def __init__(self, settings: Settings | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        assets: Iterable[AssetRef] | None = None,
+    ) -> None:
         self.settings = settings or get_settings()
         self.fmp = FmpProvider(self.settings)
         self.crypto = CryptoProvider(self.settings)
@@ -78,7 +83,12 @@ class ProviderRegistry:
         self.sec = SecProvider(self.settings)
         self.providers = [self.fmp, self.rss, self.akshare]
         self._assets = {asset.asset_id: asset for asset in SEED_ASSETS}
+        self.add_assets(assets or [])
         self.last_errors: list[str] = []
+        self.mapping_errors: list[str] = []
+
+    def add_assets(self, assets: Iterable[AssetRef]) -> None:
+        self._assets.update({asset.asset_id: asset for asset in assets})
 
     def refresh_crypto_universe(self) -> list[AssetRef]:
         assets = self.crypto.top_assets(20)
@@ -115,11 +125,21 @@ class ProviderRegistry:
         if exact:
             return exact
         output: dict[str, AssetRef] = {}
-        for provider in (self.fmp, self.crypto):
+        providers = [self.fmp, self.crypto]
+        if self.settings.akshare_asset_master_enabled:
+            providers.insert(0, self.akshare)
+        for provider in providers:
             try:
                 for asset in provider.resolve_assets(query):
                     output[asset.asset_id] = asset
-            except Exception:
+                for detail in getattr(provider, "last_errors", []):
+                    error = f"{provider.name}: {detail}"
+                    if error not in self.mapping_errors:
+                        self.mapping_errors.append(error)
+            except Exception as exc:
+                error = f"{provider.name}: {type(exc).__name__}"
+                if error not in self.mapping_errors:
+                    self.mapping_errors.append(error)
                 continue
         self._assets.update(output)
         return list(output.values())

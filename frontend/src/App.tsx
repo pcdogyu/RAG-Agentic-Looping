@@ -89,6 +89,7 @@ type AnalysisLog = {
   id: string;
   event_id: string | null;
   run_id: string | null;
+  event_research_run_id: string | null;
   status: string;
   updated_at: string;
   news: Array<{ id: string; title: string; source: string; url: string; published_at: string }>;
@@ -97,11 +98,23 @@ type AnalysisLog = {
   models: string[];
   steps: AnalysisStep[];
   result: {
+    kind: "asset_recommendation";
     rating: string;
     score: number;
     confidence: number;
     evidence_complete: boolean;
     summary: string;
+  } | {
+    kind: "event_report";
+    confidence: number;
+    evidence_complete: boolean;
+    summary: string;
+    affected_markets: string[];
+    affected_sectors: string[];
+    scenarios: string[];
+    catalysts: string[];
+    risks: string[];
+    unresolved_questions: string[];
   } | null;
 };
 
@@ -121,12 +134,18 @@ const labels: Record<string, string> = {
   failed: "失败",
   unmapped: "未映射标的",
   not_researched: "尚未深研",
+  mapping_queued: "标的映射排队中",
+  mapping_running: "标的映射中",
+  mapping_retrying: "标的映射重试中",
+  mapping_failed: "标的映射失败",
 };
 
 const phaseLabels: Record<string, string> = {
   news_collection: "新闻采集与归档",
   event_extraction: "事件模型提取",
   event_extraction_fallback: "规则回退提取",
+  asset_mapping: "证券主数据映射",
+  asset_mapping_queue: "7B 标的发现入队",
   research_queue: "研究任务入队",
   evidence_gathering: "证据收集与检索",
   report_drafting: "研究报告生成",
@@ -135,7 +154,24 @@ const phaseLabels: Record<string, string> = {
   cloud_verification: "高影响云复核",
   finalization: "评级与置信度定稿",
   research_failed: "研究任务失败",
+  event_research_queue: "中性事件研报入队",
+  event_evidence_gathering: "事件证据收集",
+  event_report_drafting: "中性事件研报生成",
+  event_report_verification: "事件证据与引用校验",
+  event_report_revision: "中性事件研报修订",
+  event_report_finalization: "中性事件研报定稿",
+  event_research_failed: "中性事件研报失败",
 };
+
+export function analysisPendingText(status: string) {
+  if (status.startsWith("mapping_")) {
+    return status === "mapping_failed"
+      ? "7B 标的发现失败，系统未生成或猜测证券代码。"
+      : "7B 正在识别并验证新闻中明确提及的证券标的。";
+  }
+  if (status === "unmapped") return "该新闻尚未映射到可研究标的。";
+  return "研究任务正在排队或处理中，结果会自动更新。";
+}
 
 function isScanning(state: string) {
   return state === "queued" || state === "running" || state === "retrying";
@@ -418,8 +454,8 @@ export default function App() {
                     <strong>{log.event?.headline || log.news[0]?.title || `${log.asset?.symbol || "未知标的"} 独立研究`}</strong>
                   </div>
                   <div className="trace-asset">
-                    <strong>{log.asset?.symbol || "—"}</strong>
-                    <span>{log.asset?.name || "未映射主标的"}</span>
+                    <strong>{log.asset?.symbol || (log.event_research_run_id ? "EVENT" : "—")}</strong>
+                    <span>{log.asset?.name || (log.event_research_run_id ? "中性事件研报" : "未映射主标的")}</span>
                   </div>
                   <div className="trace-confidence">
                     <strong>{log.result ? `${Math.round(log.result.confidence * 100)}%` : "—"}</strong>
@@ -469,7 +505,7 @@ export default function App() {
                       ))}
                     </div>
 
-                    {log.result ? (
+                    {log.result?.kind === "asset_recommendation" ? (
                       <div className="trace-result">
                         <div>
                           <span>最终结果</span>
@@ -480,9 +516,23 @@ export default function App() {
                         <div><span>证据</span><strong>{log.result.evidence_complete ? "完整" : "不足"}</strong></div>
                         <p>{log.result.summary}</p>
                       </div>
+                    ) : log.result?.kind === "event_report" ? (
+                      <div className="trace-result event-report-result">
+                        <div>
+                          <span>最终结果</span>
+                          <strong>中性事件研报</strong>
+                        </div>
+                        <div><span>置信度</span><strong>{Math.round(log.result.confidence * 100)}%</strong></div>
+                        <div><span>证据</span><strong>{log.result.evidence_complete ? "完整" : "不足"}</strong></div>
+                        <div>
+                          <span>影响范围</span>
+                          <strong>{[...log.result.affected_markets, ...log.result.affected_sectors].join(" · ") || "待确认"}</strong>
+                        </div>
+                        <p>{log.result.summary}</p>
+                      </div>
                     ) : (
                       <div className="trace-pending">
-                        {log.status === "unmapped" ? "该新闻尚未映射到可研究标的。" : "研究任务正在排队或处理中，结果会自动更新。"}
+                        {analysisPendingText(log.status)}
                       </div>
                     )}
                   </div>

@@ -7,7 +7,8 @@ from backend.app import worker
 from backend.app.domain import AnalysisStep, CandidateAsset, NewsEvent, NewsItem, SourceQuality
 from backend.app.main import _analysis_logs
 from backend.app.providers.registry import SEED_ASSETS
-from backend.app.storage import list_runs, save_event, save_news
+from backend.app.services.asset_mapping import AssetMappingResult
+from backend.app.storage import get_event, list_runs, save_event, save_news
 
 
 class FakeRedis:
@@ -150,3 +151,136 @@ def test_each_event_queues_only_its_primary_asset_and_unmapped_is_auditable(db, 
     assert unmapped_log["news"][0]["url"] == news.url
     assert "qwen2.5:3b" in unmapped_log["models"]
     assert "prompt" not in json.dumps(unmapped_log).lower()
+
+
+def test_7b_fallback_queues_at_most_three_distinct_assets_idempotently(db, monkeypatch):
+    queued_assets = []
+
+    def apply_async(*, args, **kwargs):
+        queued_assets.append(args[0])
+        return SimpleNamespace(id=f"research-{len(queued_assets)}")
+
+    monkeypatch.setattr(worker.research_asset, "apply_async", apply_async)
+    observed = datetime(2026, 8, 22, 12, 0, tzinfo=UTC)
+    candidates = [
+        CandidateAsset(
+            asset=asset,
+            relationship="entity",
+            relevance=0.95 - index * 0.05,
+            rationale="verified by master data",
+        )
+        for index, asset in enumerate(
+            [
+                *SEED_ASSETS,
+            ][:4]
+        )
+    ]
+    event = NewsEvent(
+        news_item_ids=[],
+        headline="Several explicitly named assets",
+        event_type="other",
+        direct_impact="The article names four tradable assets.",
+        source_quality=SourceQuality.PROFESSIONAL,
+        published_at=observed,
+        observed_at=observed,
+        as_of=observed,
+        candidates=candidates,
+    )
+
+    first = worker.enqueue_event_researches(db, event, 3)
+    repeated = worker.enqueue_event_researches(db, event, 3)
+
+    assert len(first) == 3
+    assert repeated == []
+    assert queued_assets == [item.asset.asset_id for item in candidates[:3]]
+    assert len(list_runs(db)) == 3
+
+
+def test_unmapped_event_queues_only_one_visible_7b_mapping_task(db, monkeypatch):
+    queued = []
+    monkeypatch.setattr(
+        worker.resolve_event_assets,
+        "apply_async",
+        lambda **kwargs: queued.append(kwargs) or SimpleNamespace(id="mapping-task"),
+    )
+    observed = datetime(2026, 8, 22, 12, 0, tzinfo=UTC)
+    event = NewsEvent(
+        news_item_ids=[],
+        headline="Unmapped macro event",
+        event_type="macro",
+        direct_impact="No security is named.",
+        source_quality=SourceQuality.PROFESSIONAL,
+        published_at=observed,
+        observed_at=observed,
+        as_of=observed,
+    )
+
+    first = worker.enqueue_asset_mapping(db, event)
+    repeated = worker.enqueue_asset_mapping(db, event)
+
+    assert first == "mapping-task"
+    assert repeated is None
+    assert len(queued) == 1
+    assert event.analysis_steps[-1].phase == "asset_mapping_queue"
+    assert event.analysis_steps[-1].status == "queued"
+
+
+def test_7b_mapping_task_persists_candidates_and_queues_top_three(db, monkeypatch):
+    observed = datetime(2026, 8, 22, 12, 0, tzinfo=UTC)
+    news = NewsItem(
+        source="Example",
+        source_quality=SourceQuality.PROFESSIONAL,
+        title="Four companies named in one filing",
+        summary="The source explicitly names four companies.",
+        url="https://example.com/four-companies",
+        published_at=observed,
+        observed_at=observed,
+        as_of=observed,
+        content_hash=sha256(b"four-companies").hexdigest(),
+    )
+    save_news(db, news)
+    candidates = [
+        CandidateAsset(
+            asset=asset,
+            relationship="entity",
+            relevance=0.95 - index * 0.05,
+            rationale="verified",
+        )
+        for index, asset in enumerate(SEED_ASSETS[:4])
+    ]
+    event = NewsEvent(
+        news_item_ids=[news.id],
+        headline=news.title,
+        event_type="other",
+        direct_impact=news.summary,
+        source_quality=news.source_quality,
+        published_at=observed,
+        observed_at=observed,
+        as_of=observed,
+    )
+    save_event(db, event)
+    monkeypatch.setattr(
+        worker.AssetMappingService,
+        "map_event",
+        lambda *args, **kwargs: AssetMappingResult(
+            candidates=candidates,
+            proposed_count=4,
+        ),
+    )
+    queued_assets = []
+    monkeypatch.setattr(
+        worker.research_asset,
+        "apply_async",
+        lambda *, args, **kwargs: queued_assets.append(args[0])
+        or SimpleNamespace(id=f"research-{len(queued_assets)}"),
+    )
+
+    result = worker.resolve_event_assets.run(str(event.id))
+
+    db.expire_all()
+    persisted = get_event(db, event.id)
+    assert result["verified_assets"] == 4
+    assert result["research_queued"] == 3
+    assert persisted is not None
+    assert len(persisted.candidates) == 4
+    assert queued_assets == [item.asset.asset_id for item in candidates[:3]]
