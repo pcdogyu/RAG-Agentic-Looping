@@ -3,10 +3,14 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from dateutil.parser import parse as parse_datetime
 
 from backend.app.domain import AssetRef, Market, NewsItem, SourceQuality
+
+SHANGHAI_TIMEZONE = ZoneInfo("Asia/Shanghai")
+TIME_NORMALIZATION_MARKER = "Asia/Shanghai->UTC:v1"
 
 
 class AkShareProvider:
@@ -29,7 +33,10 @@ class AkShareProvider:
             if not title or not url:
                 continue
             try:
-                published = parse_datetime(str(value)).replace(tzinfo=UTC)
+                parsed = parse_datetime(str(value))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=SHANGHAI_TIMEZONE)
+                published = parsed.astimezone(UTC)
             except Exception:
                 published = datetime.now(UTC)
             if published < since:
@@ -45,6 +52,7 @@ class AkShareProvider:
                     published_at=published,
                     as_of=published,
                     content_hash=sha256(f"{title}|{url}".encode()).hexdigest(),
+                    raw_metadata={"time_normalization": TIME_NORMALIZATION_MARKER},
                 )
             )
         return output[:limit]

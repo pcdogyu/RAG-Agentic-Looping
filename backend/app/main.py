@@ -43,6 +43,7 @@ from backend.app.storage import (
     list_recent_events,
     list_recommendations,
     list_runs,
+    normalize_legacy_akshare_timestamps,
     save_evolution,
     upsert_asset,
 )
@@ -63,6 +64,7 @@ registry = ProviderRegistry(settings)
 async def lifespan(app: FastAPI):
     init_db()
     with SessionLocal() as db:
+        normalize_legacy_akshare_timestamps(db)
         for asset in registry.all_assets():
             upsert_asset(db, asset)
     yield
@@ -412,7 +414,7 @@ async def event_stream() -> AsyncIterator[str]:
         with SessionLocal() as db:
             payload = json.dumps(
                 {
-                    "events": [item.model_dump(mode="json") for item in list_events(db, 10)],
+                    "events": [item.model_dump(mode="json") for item in list_events(db, 30)],
                     "runs": [item.model_dump(mode="json") for item in list_runs(db, 10)],
                     "recommendations": [
                         item.model_dump(mode="json") for item in list_recommendations(db, 10)

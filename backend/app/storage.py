@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import desc, select
@@ -181,9 +181,57 @@ def list_events(db: Session, limit: int = 100, as_of: datetime | None = None) ->
     if as_of:
         statement = statement.where(EventRow.observed_at <= as_of, EventRow.published_at <= as_of)
     rows = db.scalars(
-        statement.order_by(desc(EventRow.priority), desc(EventRow.published_at)).limit(limit)
+        statement.order_by(desc(EventRow.published_at), desc(EventRow.priority)).limit(limit)
     ).all()
     return [NewsEvent.model_validate(row.payload) for row in rows]
+
+
+def normalize_legacy_akshare_timestamps(db: Session) -> dict[str, int]:
+    """One-time correction for AkShare local timestamps previously tagged as UTC."""
+
+    marker = "Asia/Shanghai->UTC:v1"
+    correction = timedelta(hours=8)
+    corrected_news: dict[UUID, NewsRow] = {}
+    rows = db.scalars(select(NewsRow).where(NewsRow.source.like("%AkShare%"))).all()
+    for row in rows:
+        metadata = dict(row.raw_metadata or {})
+        if metadata.get("time_normalization") == marker:
+            continue
+        row.published_at = as_utc(row.published_at) - correction
+        row.as_of = as_utc(row.as_of) - correction
+        metadata["time_normalization"] = marker
+        row.raw_metadata = metadata
+        corrected_news[row.id] = row
+        db.add(row)
+
+    corrected_events = 0
+    if corrected_news:
+        for event_row in db.scalars(select(EventRow)).all():
+            payload = dict(event_row.payload or {})
+            news_ids = {
+                UUID(str(value))
+                for value in payload.get("news_item_ids", [])
+                if value
+            }
+            if not any(item_id in corrected_news for item_id in news_ids):
+                continue
+            related = [db.get(NewsRow, item_id) for item_id in news_ids]
+            related = [item for item in related if item is not None]
+            if not related:
+                continue
+            published_at = max(as_utc(item.published_at) for item in related)
+            as_of = max(as_utc(item.as_of) for item in related)
+            event_row.published_at = published_at
+            event_row.as_of = as_of
+            payload["published_at"] = published_at.isoformat()
+            payload["as_of"] = as_of.isoformat()
+            event_row.payload = payload
+            db.add(event_row)
+            corrected_events += 1
+
+    if corrected_news:
+        db.commit()
+    return {"news": len(corrected_news), "events": corrected_events}
 
 
 def list_recent_events(db: Session, limit: int = 100) -> list[NewsEvent]:
