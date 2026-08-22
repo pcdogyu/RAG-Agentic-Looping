@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta
+from time import sleep
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -52,6 +53,7 @@ from backend.app.storage import (
 settings = get_settings()
 SCAN_GATE_KEY = "market-loop:scan:active"
 SCAN_LOCK_KEY = "market-loop:scan:lock"
+SCAN_PAUSE_KEY = "market-loop:scan:pause"
 SCAN_STATUS_KEY = "market-loop:scan:status"
 SCAN_GATE_TTL_SECONDS = max(1800, settings.scan_interval_minutes * 180)
 celery_app = Celery("market-loop", broker=settings.redis_url, backend=settings.redis_url)
@@ -116,6 +118,7 @@ def _default_scan_status() -> dict[str, Any]:
         "state": "idle",
         "task_id": None,
         "phase": None,
+        "paused_from_phase": None,
         "current": 0,
         "total": 0,
         "started_at": None,
@@ -192,6 +195,7 @@ def _complete_scan(
         state="idle",
         task_id=task_id,
         phase="completed",
+        paused_from_phase=None,
         current=int(result.get("discovered", 0)),
         total=int(result.get("discovered", 0)),
         last_completed_at=completed_at.isoformat(),
@@ -202,6 +206,7 @@ def _complete_scan(
         last_error=None,
     )
     _clear_scan_gate(client, task_id)
+    _clear_scan_pause(client, task_id)
     return payload
 
 
@@ -211,6 +216,91 @@ def _clear_scan_gate(client: Redis, task_id: str) -> None:
         client.delete(SCAN_GATE_KEY)
 
 
+def _clear_scan_pause(client: Redis, task_id: str) -> None:
+    current = _decode(client.get(SCAN_PAUSE_KEY))
+    if current == task_id:
+        client.delete(SCAN_PAUSE_KEY)
+
+
+def request_scan_pause() -> dict[str, Any]:
+    """Request a cooperative pause at the next safe scan checkpoint."""
+
+    client = _redis_client()
+    task_id = _decode(client.get(SCAN_GATE_KEY))
+    if not task_id:
+        raise RuntimeError("no active scan")
+    status = _read_scan_status(client)
+    paused_from_phase = (
+        status.get("paused_from_phase")
+        if status.get("state") == "paused"
+        else status.get("phase")
+    )
+    client.set(SCAN_PAUSE_KEY, task_id, ex=SCAN_GATE_TTL_SECONDS)
+    return _update_scan_status(
+        client,
+        state="paused",
+        phase="paused",
+        paused_from_phase=paused_from_phase or "discovering",
+        task_id=task_id,
+        next_scan_at=None,
+    )
+
+
+def resume_scan() -> dict[str, Any]:
+    """Resume a cooperatively paused scan."""
+
+    client = _redis_client()
+    task_id = _decode(client.get(SCAN_GATE_KEY))
+    if not task_id:
+        raise RuntimeError("no active scan")
+    status = _read_scan_status(client)
+    _clear_scan_pause(client, task_id)
+    return _update_scan_status(
+        client,
+        state="running",
+        phase=status.get("paused_from_phase") or "discovering",
+        paused_from_phase=None,
+        task_id=task_id,
+        next_scan_at=None,
+    )
+
+
+def _wait_if_scan_paused(
+    client: Redis,
+    task_id: str,
+    *,
+    phase: str,
+    current: int,
+    total: int,
+) -> None:
+    """Block only between durable scan units, keeping the task lease alive."""
+
+    if _decode(client.get(SCAN_PAUSE_KEY)) != task_id:
+        return
+    _update_scan_status(
+        client,
+        state="paused",
+        phase="paused",
+        paused_from_phase=phase,
+        current=current,
+        total=total,
+        next_scan_at=None,
+    )
+    while _decode(client.get(SCAN_PAUSE_KEY)) == task_id:
+        client.expire(SCAN_GATE_KEY, SCAN_GATE_TTL_SECONDS)
+        client.expire(SCAN_PAUSE_KEY, SCAN_GATE_TTL_SECONDS)
+        sleep(0.25)
+    _update_scan_status(
+        client,
+        state="running",
+        phase=phase,
+        paused_from_phase=None,
+        current=current,
+        total=total,
+        next_scan_at=None,
+    )
+
+
 def enqueue_scan() -> tuple[str, str]:
     """Queue at most one manual/scheduled scan across API processes."""
 
@@ -218,6 +308,7 @@ def enqueue_scan() -> tuple[str, str]:
     existing = _decode(client.get(SCAN_GATE_KEY))
     if existing:
         return existing, "already_queued"
+    client.delete(SCAN_PAUSE_KEY)
     task_id = str(uuid4())
     claimed = client.set(SCAN_GATE_KEY, task_id, nx=True, ex=SCAN_GATE_TTL_SECONDS)
     if not claimed:
@@ -228,6 +319,7 @@ def enqueue_scan() -> tuple[str, str]:
         state="queued",
         task_id=task_id,
         phase="queued",
+        paused_from_phase=None,
         current=0,
         total=0,
         started_at=None,
@@ -454,6 +546,13 @@ def scan_news(self) -> dict:
             next_scan_at=None,
             last_error=None,
         )
+        _wait_if_scan_paused(
+            client,
+            task_id,
+            phase="discovering",
+            current=0,
+            total=0,
+        )
         init_db()
         registry = ProviderRegistry()
         since = utc_now() - timedelta(minutes=settings.scan_interval_minutes * 2)
@@ -469,6 +568,13 @@ def scan_news(self) -> dict:
             current=0,
             total=len(items),
         )
+        _wait_if_scan_paused(
+            client,
+            task_id,
+            phase="extracting",
+            current=0,
+            total=len(items),
+        )
 
         def update_progress(current: int, total: int) -> None:
             self.update_state(
@@ -478,6 +584,13 @@ def scan_news(self) -> dict:
             _update_scan_status(
                 client,
                 state="running",
+                phase="extracting",
+                current=current,
+                total=total,
+            )
+            _wait_if_scan_paused(
+                client,
+                task_id,
                 phase="extracting",
                 current=current,
                 total=total,
@@ -498,7 +611,14 @@ def scan_news(self) -> dict:
             queued = 0
             mapping_queued = 0
             if settings.auto_research:
-                for event in events:
+                for event_index, event in enumerate(events):
+                    _wait_if_scan_paused(
+                        client,
+                        task_id,
+                        phase="queuing",
+                        current=event_index,
+                        total=len(events),
+                    )
                     if event.candidates:
                         try:
                             queued += int(enqueue_event_research(db, event) is not None)
@@ -546,6 +666,7 @@ def scan_news(self) -> dict:
             last_error=f"{type(exc).__name__}",
         )
         _clear_scan_gate(client, task_id)
+        _clear_scan_pause(client, task_id)
         raise
     finally:
         if lock.owned():

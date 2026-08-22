@@ -10,6 +10,7 @@
   --line: rgba(169, 208, 195, 0.13);
   --muted: #718b82;
   --mint: #63f2ba;
+  --cyan: #58d6ff;
   --amber: #f6c96b;
   --red: #ff7a7a;
 }
@@ -42,6 +43,8 @@ h1 span { color: var(--mint); font-weight: 400; }
 .model-status.offline i { background: var(--red); box-shadow: 0 0 8px var(--red); }
 .model-status.missing i { background: var(--red); box-shadow: 0 0 8px var(--red); }
 .header-actions > button { border: 0; border-radius: 9px; padding: 11px 18px; color: #06100d; background: var(--mint); cursor: pointer; font-weight: 700; }
+.header-actions > button.paused { background: var(--amber); }
+.header-actions > button.scanning:hover { box-shadow: 0 0 0 2px rgba(99,242,186,.22); }
 .header-actions > button:disabled { opacity: .55; }
 .metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 12px; }
 .metric { display: grid; padding: 18px 20px; border: 1px solid var(--line); background: rgba(12,25,22,.9); border-radius: 12px; }

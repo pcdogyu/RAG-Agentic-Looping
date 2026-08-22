@@ -3,6 +3,8 @@ from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from types import SimpleNamespace
 
+import pytest
+
 from backend.app import worker
 from backend.app.domain import AnalysisStep, CandidateAsset, NewsEvent, NewsItem, SourceQuality
 from backend.app.main import _analysis_logs
@@ -82,6 +84,63 @@ def test_scan_loop_waits_until_due_and_bootstraps_without_state(monkeypatch):
     result = worker.ensure_scan_loop.run()
     assert result["status"] == "waiting"
     assert calls == []
+
+
+def test_active_scan_can_be_paused_and_resumed(monkeypatch):
+    redis = FakeRedis()
+    monkeypatch.setattr(worker, "_redis_client", lambda: redis)
+    redis.set(worker.SCAN_GATE_KEY, "scan-task")
+    worker._update_scan_status(
+        redis,
+        state="running",
+        task_id="scan-task",
+        phase="extracting",
+        current=2,
+        total=5,
+    )
+
+    paused = worker.request_scan_pause()
+
+    assert paused["state"] == "paused"
+    assert paused["phase"] == "paused"
+    assert paused["paused_from_phase"] == "extracting"
+    assert redis.get(worker.SCAN_PAUSE_KEY) == b"scan-task"
+
+    resumed = worker.resume_scan()
+
+    assert resumed["state"] == "running"
+    assert resumed["phase"] == "extracting"
+    assert resumed["paused_from_phase"] is None
+    assert redis.get(worker.SCAN_PAUSE_KEY) is None
+
+
+def test_pause_requires_an_active_scan(monkeypatch):
+    redis = FakeRedis()
+    monkeypatch.setattr(worker, "_redis_client", lambda: redis)
+
+    with pytest.raises(RuntimeError, match="no active scan"):
+        worker.request_scan_pause()
+
+
+def test_worker_resumes_from_same_safe_checkpoint(monkeypatch):
+    redis = FakeRedis()
+    redis.set(worker.SCAN_GATE_KEY, "scan-task")
+    redis.set(worker.SCAN_PAUSE_KEY, "scan-task")
+    monkeypatch.setattr(worker, "sleep", lambda _: redis.delete(worker.SCAN_PAUSE_KEY))
+
+    worker._wait_if_scan_paused(
+        redis,
+        "scan-task",
+        phase="extracting",
+        current=3,
+        total=8,
+    )
+
+    status = worker._read_scan_status(redis)
+    assert status["state"] == "running"
+    assert status["phase"] == "extracting"
+    assert status["current"] == 3
+    assert status["total"] == 8
 
 
 def test_each_event_queues_only_its_primary_asset_and_unmapped_is_auditable(db, monkeypatch):

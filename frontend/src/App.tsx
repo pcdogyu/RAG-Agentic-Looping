@@ -55,6 +55,7 @@ type ScanStatus = {
   state: string;
   task_id: string | null;
   phase: string | null;
+  paused_from_phase: string | null;
   current: number;
   total: number;
   started_at: string | null;
@@ -198,11 +199,19 @@ export function formatCountdown(totalSeconds: number) {
 
 export function scanButtonText(status: ScanStatus | null, serverNowMs: number) {
   if (!status) return "准备扫描…";
+  if (status.state === "paused") {
+    if (status.total > 0) return `继续扫描 · 已暂停 ${status.current}/${status.total}`;
+    return "继续扫描 · 已暂停";
+  }
   if (isScanning(status.state)) {
     if (status.phase === "extracting" && status.total > 0) {
-      return `扫描中 · 事件归纳 ${status.current}/${status.total}`;
+      return `暂停 · 事件归纳 ${status.current}/${status.total}`;
     }
-    return status.state === "retrying" ? "扫描中 · 正在重试" : "扫描中";
+    if (status.phase === "queuing" && status.total > 0) {
+      return `暂停 · 研究入队 ${status.current}/${status.total}`;
+    }
+    if (status.state === "retrying") return "暂停扫描 · 正在重试";
+    return status.state === "queued" ? "暂停扫描 · 排队中" : "暂停扫描 · 新闻发现";
   }
   if (status.state === "failed") return "扫描失败 · 点击重试";
   if (status.next_scan_at) {
@@ -234,6 +243,7 @@ export default function App() {
   const [clock, setClock] = useState(Date.now());
   const [expandedLog, setExpandedLog] = useState<string | null>(null);
   const [selected, setSelected] = useState<Recommendation | null>(null);
+  const [scanActionPending, setScanActionPending] = useState(false);
 
   const applyScanStatus = useCallback((status: ScanStatus) => {
     setScanStatus(status);
@@ -297,25 +307,60 @@ export default function App() {
   }, [expandedLog, snapshot.analysis_logs]);
 
   async function scan() {
-    if (scanStatus && isScanning(scanStatus.state)) return;
-    setScanStatus((current) => current ? { ...current, state: "queued", phase: "queued" } : current);
+    if (scanActionPending) return;
+    const action = scanStatus?.state === "paused"
+      ? "resume"
+      : scanStatus && isScanning(scanStatus.state)
+        ? "pause"
+        : "start";
+    setScanActionPending(true);
+    setScanStatus((current) => {
+      if (!current) return current;
+      if (action === "pause") {
+        return {
+          ...current,
+          state: "paused",
+          paused_from_phase: current.phase,
+          phase: "paused",
+        };
+      }
+      if (action === "resume") {
+        return {
+          ...current,
+          state: "running",
+          phase: current.paused_from_phase || "discovering",
+          paused_from_phase: null,
+        };
+      }
+      return { ...current, state: "queued", phase: "queued" };
+    });
     try {
-      const response = await fetch(`${API}/api/v1/scan`, {
+      const endpoint = action === "start" ? "/api/v1/scan" : `/api/v1/scan/${action}`;
+      const response = await fetch(`${API}${endpoint}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ background: true }),
+        body: action === "start" ? JSON.stringify({ background: true }) : undefined,
       });
-      if (!response.ok) throw new Error("scan request failed");
+      if (!response.ok) {
+        const latest = await fetch(`${API}/api/v1/scan/status`).then((item) => item.json());
+        applyScanStatus(latest);
+        return;
+      }
       const queued = await response.json() as { scan: ScanStatus };
       applyScanStatus(queued.scan);
     } catch {
-      setScanStatus((current) => current ? {
-        ...current, state: "failed", phase: "failed", last_error: "request failed",
-      } : current);
+      if (action === "start") {
+        setScanStatus((current) => current ? {
+          ...current, state: "failed", phase: "failed", last_error: "request failed",
+        } : current);
+      }
+    } finally {
+      setScanActionPending(false);
     }
   }
 
   const scanBusy = Boolean(scanStatus && isScanning(scanStatus.state));
+  const scanPaused = scanStatus?.state === "paused";
   const scanLabel = scanButtonText(scanStatus, clock + serverOffset);
 
   async function research(candidate: Candidate, eventId: string) {
@@ -356,11 +401,21 @@ export default function App() {
           </div>
           <button
             onClick={scan}
-            disabled={scanBusy}
+            disabled={scanActionPending}
+            className={scanPaused ? "paused" : scanBusy ? "scanning" : undefined}
+            aria-pressed={scanPaused}
             aria-live="polite"
-            title={!scanBusy && scanStatus?.next_scan_at ? "点击可提前扫描" : undefined}
+            title={
+              scanPaused
+                ? "点击继续当前扫描"
+                : scanBusy
+                  ? "点击暂停；当前新闻处理完成后生效"
+                  : scanStatus?.next_scan_at
+                    ? "点击可提前扫描"
+                    : undefined
+            }
           >
-            {scanLabel}
+            {scanActionPending ? "正在切换…" : scanLabel}
           </button>
         </div>
       </header>

@@ -6,6 +6,7 @@ const baseStatus = {
   state: "idle",
   task_id: null,
   phase: "completed",
+  paused_from_phase: null,
   current: 2,
   total: 2,
   started_at: "2026-08-22T00:00:00Z",
@@ -26,13 +27,26 @@ describe("scan status presentation", () => {
   });
 
   it("keeps every active state labeled as scanning", () => {
-    expect(scanButtonText({ ...baseStatus, state: "queued" }, Date.now())).toBe("扫描中");
+    expect(scanButtonText({ ...baseStatus, state: "queued" }, Date.now())).toBe(
+      "暂停扫描 · 排队中",
+    );
     expect(scanButtonText({
       ...baseStatus, state: "running", phase: "extracting", current: 4, total: 12,
-    }, Date.now())).toBe("扫描中 · 事件归纳 4/12");
+    }, Date.now())).toBe("暂停 · 事件归纳 4/12");
     expect(scanButtonText({ ...baseStatus, state: "retrying" }, Date.now())).toBe(
-      "扫描中 · 正在重试",
+      "暂停扫描 · 正在重试",
     );
+  });
+
+  it("offers resume with preserved progress while paused", () => {
+    expect(scanButtonText({
+      ...baseStatus,
+      state: "paused",
+      phase: "paused",
+      paused_from_phase: "extracting",
+      current: 4,
+      total: 12,
+    }, Date.now())).toBe("继续扫描 · 已暂停 4/12");
   });
 });
 

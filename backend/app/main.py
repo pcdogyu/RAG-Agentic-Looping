@@ -56,6 +56,8 @@ from backend.app.worker import (
     enqueue_scan,
     evolve_failures,
     get_scan_status,
+    request_scan_pause,
+    resume_scan,
 )
 from backend.app.worker import execute_evolution as execute_evolution_task
 
@@ -208,6 +210,24 @@ def start_scan(request: ScanRequest, db: Session = Depends(get_db)):
 @app.get("/api/v1/scan/status")
 def scan_status():
     return get_scan_status()
+
+
+@app.post("/api/v1/scan/pause")
+def pause_scan():
+    try:
+        request_scan_pause()
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"status": "paused", "scan": get_scan_status()}
+
+
+@app.post("/api/v1/scan/resume")
+def resume_paused_scan():
+    try:
+        resume_scan()
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"status": "running", "scan": get_scan_status()}
 
 
 @app.get("/api/v1/tasks/{task_id}")
