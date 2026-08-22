@@ -47,7 +47,9 @@ services:
   fmp-mcp:
     profiles: ["mcp"]
     build:
-      context: https://github.com/imbenrabi/Financial-Modeling-Prep-MCP-Server.git#17fbe04cfd0322c6e8a0794e99ae95d7b4908e25
+      context: ./infra/fmp-mcp
+      args:
+        FMP_MCP_COMMIT: 17fbe04cfd0322c6e8a0794e99ae95d7b4908e25
     environment:
       FMP_ACCESS_TOKEN: ${FMP_ACCESS_TOKEN:-}
       FMP_TOOL_SETS: search,company,quotes,statements,calendar,charts,news,crypto,sec-filings,earnings,dcf
