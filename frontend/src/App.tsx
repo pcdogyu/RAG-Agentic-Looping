@@ -66,6 +66,19 @@ type ScanStatus = {
   server_time: string;
 };
 
+export type HealthStatus = {
+  ollama: boolean;
+  models: string[];
+};
+
+export type ModelConnectionState = "checking" | "offline" | "available" | "missing";
+
+const ollamaModels = [
+  { label: "抽取 3B", name: "qwen2.5:3b" },
+  { label: "研究 7B", name: "qwen2.5:7b" },
+  { label: "演进 Coder", name: "qwen2.5-coder:7b" },
+] as const;
+
 type AnalysisStep = {
   phase: string;
   status: string;
@@ -132,6 +145,18 @@ function isScanning(state: string) {
   return state === "queued" || state === "running" || state === "retrying";
 }
 
+export function modelConnectionState(
+  health: HealthStatus | null,
+  modelName: string,
+): ModelConnectionState {
+  if (!health) return "checking";
+  if (!health.ollama) return "offline";
+  const expected = modelName.toLocaleLowerCase();
+  return health.models.some((name) => name.toLocaleLowerCase() === expected)
+    ? "available"
+    : "missing";
+}
+
 export function formatCountdown(totalSeconds: number) {
   const safe = Math.max(0, Math.ceil(totalSeconds));
   const minutes = Math.floor(safe / 60);
@@ -171,7 +196,7 @@ export default function App() {
     events: [], runs: [], recommendations: [], analysis_logs: [],
   });
   const [portfolio, setPortfolio] = useState<Portfolio | null>(null);
-  const [health, setHealth] = useState<Record<string, unknown>>({});
+  const [health, setHealth] = useState<HealthStatus | null>(null);
   const [scanStatus, setScanStatus] = useState<ScanStatus | null>(null);
   const [serverOffset, setServerOffset] = useState(0);
   const [clock, setClock] = useState(Date.now());
@@ -189,7 +214,7 @@ export default function App() {
       fetch(`${API}/api/v1/research-runs?limit=20`).then((r) => r.json()),
       fetch(`${API}/api/v1/recommendations?limit=20`).then((r) => r.json()),
       fetch(`${API}/api/v1/portfolio`).then((r) => r.json()),
-      fetch(`${API}/health`).then((r) => r.json()),
+      fetch(`${API}/health`).then((r) => r.json() as Promise<HealthStatus>),
       fetch(`${API}/api/v1/scan/status`).then((r) => r.json()),
       fetch(`${API}/api/v1/analysis-logs?limit=10`).then((r) => r.json()),
     ]);
@@ -214,6 +239,12 @@ export default function App() {
     const portfolioTimer = window.setInterval(() => {
       fetch(`${API}/api/v1/portfolio`).then((r) => r.json()).then(setPortfolio).catch(() => undefined);
     }, 15000);
+    const healthTimer = window.setInterval(() => {
+      fetch(`${API}/health`)
+        .then((r) => r.json() as Promise<HealthStatus>)
+        .then(setHealth)
+        .catch(() => setHealth(null));
+    }, 30000);
     const scanTimer = window.setInterval(() => {
       fetch(`${API}/api/v1/scan/status`).then((r) => r.json()).then(applyScanStatus).catch(() => undefined);
     }, 2000);
@@ -221,6 +252,7 @@ export default function App() {
     return () => {
       stream.close();
       window.clearInterval(portfolioTimer);
+      window.clearInterval(healthTimer);
       window.clearInterval(scanTimer);
       window.clearInterval(clockTimer);
     };
@@ -277,8 +309,15 @@ export default function App() {
           <p className="subhead">跨市场新闻发现、证据验证与模拟组合</p>
         </div>
         <div className="header-actions">
-          <div className={`status ${health.ollama ? "online" : "offline"}`}>
-            <i /> Ollama {health.ollama ? "在线" : "离线"}
+          <div className="health-cluster">
+            <div className={`status ${health ? (health.ollama ? "online" : "offline") : "checking"}`}>
+              <i /> Ollama {health ? (health.ollama ? "在线" : "离线") : "检测中"}
+            </div>
+            <div className="model-statuses" aria-label="千问模型连接状态">
+              {ollamaModels.map((model) => (
+                <ModelStatus key={model.name} health={health} label={model.label} model={model.name} />
+              ))}
+            </div>
           </div>
           <button
             onClick={scan}
@@ -325,6 +364,21 @@ export default function App() {
           </div>
         </div>
 
+        <div className="panel runs-panel">
+          <PanelTitle title="Agent 轨迹" meta="可恢复状态图" />
+          <div className="runs">
+            {snapshot.runs.length === 0 && <Empty text="还没有研究任务。" />}
+            {snapshot.runs.map((run) => (
+              <div className="run" key={run.id}>
+                <i className={run.status} />
+                <div><strong>{run.asset.symbol}</strong><span>{run.asset.name}</span></div>
+                <div><strong>{labels[run.status] || run.status}</strong><span>验证 {run.verification_round}/2</span></div>
+                <span className="muted">{time(run.updated_at)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
         <div className="panel recommendations-panel">
           <PanelTitle title="最新建议" meta="证据门控评级" />
           <div className="recommendations">
@@ -348,36 +402,6 @@ export default function App() {
               </button>
             ))}
           </div>
-        </div>
-
-        <div className="panel runs-panel">
-          <PanelTitle title="Agent 轨迹" meta="可恢复状态图" />
-          <div className="runs">
-            {snapshot.runs.length === 0 && <Empty text="还没有研究任务。" />}
-            {snapshot.runs.map((run) => (
-              <div className="run" key={run.id}>
-                <i className={run.status} />
-                <div><strong>{run.asset.symbol}</strong><span>{run.asset.name}</span></div>
-                <div><strong>{labels[run.status] || run.status}</strong><span>验证 {run.verification_round}/2</span></div>
-                <span className="muted">{time(run.updated_at)}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        <div className="panel portfolio-panel">
-          <PanelTitle title="模拟持仓" meta={`加密权重 ${Math.round((portfolio?.crypto_weight || 0) * 100)}%`} />
-          {(!portfolio || portfolio.positions.length === 0) && <Empty text="默认关闭自动模拟下单，可从已验证建议手动创建。" />}
-          {portfolio?.positions.map((position) => (
-            <div className="position" key={position.asset.symbol}>
-              <div><strong>{position.asset.symbol}</strong><span>{position.asset.name}</span></div>
-              <strong>{money(position.market_value_usd)}</strong>
-              <span className={position.unrealized_pnl_usd >= 0 ? "positive-text" : "negative-text"}>
-                {position.unrealized_pnl_usd >= 0 ? "+" : ""}{money(position.unrealized_pnl_usd)}
-              </span>
-              <span>{Math.round(position.weight * 1000) / 10}%</span>
-            </div>
-          ))}
         </div>
       </section>
 
@@ -500,4 +524,30 @@ function PanelTitle({ title, meta }: { title: string; meta: string }) {
 
 function Empty({ text }: { text: string }) {
   return <div className="empty"><i>◇</i><p>{text}</p></div>;
+}
+
+const modelStateLabels: Record<ModelConnectionState, string> = {
+  checking: "检测中",
+  offline: "离线",
+  available: "可用",
+  missing: "未安装",
+};
+
+function ModelStatus({
+  health,
+  label,
+  model,
+}: {
+  health: HealthStatus | null;
+  label: string;
+  model: string;
+}) {
+  const state = modelConnectionState(health, model);
+  return (
+    <div className={`model-status ${state}`} title={`${model} · ${modelStateLabels[state]}`}>
+      <i />
+      <span>{label}</span>
+      <strong>{modelStateLabels[state]}</strong>
+    </div>
+  );
 }

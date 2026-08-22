@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { formatCountdown, scanButtonText } from "./App";
+import { formatCountdown, modelConnectionState, scanButtonText } from "./App";
 
 const baseStatus = {
   state: "idle",
@@ -33,5 +33,32 @@ describe("scan status presentation", () => {
     expect(scanButtonText({ ...baseStatus, state: "retrying" }, Date.now())).toBe(
       "扫描中 · 正在重试",
     );
+  });
+});
+
+describe("Ollama model availability", () => {
+  it("reports checking before health data arrives", () => {
+    expect(modelConnectionState(null, "qwen2.5:3b")).toBe("checking");
+  });
+
+  it("reports every model offline when Ollama is unreachable", () => {
+    expect(modelConnectionState({ ollama: false, models: [] }, "qwen2.5:7b")).toBe("offline");
+  });
+
+  it("distinguishes installed and missing models", () => {
+    const health = {
+      ollama: true,
+      models: ["qwen2.5:3b", "qwen2.5:7b"],
+    };
+
+    expect(modelConnectionState(health, "qwen2.5:3b")).toBe("available");
+    expect(modelConnectionState(health, "qwen2.5-coder:7b")).toBe("missing");
+  });
+
+  it("matches Ollama model names case-insensitively", () => {
+    expect(modelConnectionState(
+      { ollama: true, models: ["QWEN2.5-CODER:7B"] },
+      "qwen2.5-coder:7b",
+    )).toBe("available");
   });
 });
