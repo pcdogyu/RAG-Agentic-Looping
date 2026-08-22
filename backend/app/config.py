@@ -30,7 +30,6 @@ class Settings(BaseSettings):
     fmp_base_url: str = "https://financialmodelingprep.com/stable"
     fmp_mcp_url: str = ""
     fmp_rate_limit_per_minute: int = Field(default=240, ge=1, le=300)
-    fmp_news_lookback_hours: int = Field(default=12, ge=1, le=168)
     coingecko_base_url: str = "https://api.coingecko.com/api/v3"
     defillama_base_url: str = "https://api.llama.fi"
     sec_identity: str = ""
