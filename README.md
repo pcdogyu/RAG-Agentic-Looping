@@ -152,7 +152,7 @@ RAG-Agentic-Looping/
 ### 1. 新闻发现与事件抽取
 
 1. Scheduler 默认每 10 分钟提交 `market_loop.scan_news`。
-2. FMP、RSS 和 AkShare Provider 拉取最近窗口内的新闻，按内容哈希去重。
+2. FMP 使用独立的 12 小时回看窗口；RSS 和 AkShare 使用扫描周期的双倍窗口（默认 20 分钟），结果统一按内容哈希去重。
 3. `qwen2.5:3b` 抽取事件类型、主体、影响方向、时间范围和搜索词。
 4. 系统结合证券主数据、别名、产品和 Provider 搜索结果生成候选资产。
 5. 重复点击扫描会复用同一个任务 ID；页面通过任务接口展示抽取进度。
@@ -391,6 +391,7 @@ curl http://localhost:8000/health
 | `FMP_ACCESS_TOKEN` | 使用 FMP 时必需，默认空 | FMP MCP 和 REST 请求凭据；不写入 URL、数据库或提示词 |
 | `FMP_MCP_URL` | `http://fmp-mcp:8080/mcp` | 容器内部 MCP 地址；不用 MCP 时清空 |
 | `FMP_RATE_LIMIT_PER_MINUTE` | `240` | FMP REST 客户端限流上限 |
+| `FMP_NEWS_LOOKBACK_HOURS` | `12` | FMP 新闻独立回看窗口，允许范围 1–168 小时 |
 | `SEC_IDENTITY` | 可选，默认空 | SEC EDGAR 联系身份 |
 | `RSS_FEED_URLS` | 可选，逗号分隔 | 有授权的专业新闻 Feed |
 | `OFFICIAL_RSS_FEED_URLS` | 可选，逗号分隔 | 交易所、监管机构或公司 IR 官方 Feed |
@@ -414,7 +415,7 @@ curl http://localhost:8000/health
 
 | 变量 | 默认值 | 说明 |
 |---|---:|---|
-| `SCAN_INTERVAL_MINUTES` | `20` | 新闻发现周期，允许范围 5–1440 分钟 |
+| `SCAN_INTERVAL_MINUTES` | `10` | 新闻发现周期，允许范围 5–1440 分钟 |
 | `SCAN_BATCH_SIZE` | `40` | 单次最多处理新闻数，允许范围 1–200 |
 | `AUTO_RESEARCH` | `true` | 为高优先级、高相关候选自动排队深研 |
 | `AUTO_PAPER_TRADE` | `false` | 是否依据已验证看多建议自动创建模拟订单 |

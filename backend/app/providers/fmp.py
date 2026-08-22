@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import threading
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from typing import Any
 from uuid import uuid4
@@ -199,6 +199,8 @@ class FmpProvider:
         return parsed.replace(tzinfo=parsed.tzinfo or UTC)
 
     def discover_news(self, *, since: datetime, limit: int = 100) -> list[NewsItem]:
+        fmp_boundary = utc_now() - timedelta(hours=self.settings.fmp_news_lookback_hours)
+        effective_since = min(since, fmp_boundary)
         feeds = [
             ("getStockNews", "news/stock-latest", "FMP Stock News", False),
             ("getCryptoNews", "news/crypto-latest", "FMP Crypto News", True),
@@ -219,7 +221,7 @@ class FmpProvider:
                 continue
             for item in payload:
                 published = self._time(item.get("publishedDate") or item.get("date"))
-                if published < since:
+                if published < effective_since:
                     continue
                 title = item.get("title") or ""
                 url = item.get("url") or item.get("link") or ""
