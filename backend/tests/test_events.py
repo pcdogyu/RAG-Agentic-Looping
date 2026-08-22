@@ -43,6 +43,11 @@ def test_extracts_event_and_maps_asset():
     assert event.candidates[0].asset.asset_id == "equity:XNAS:AAPL"
     assert event.candidates[0].impact_direction == 1
     assert event.priority == pytest.approx(0.64)
+    assert [step.phase for step in event.analysis_steps] == [
+        "news_collection",
+        "event_extraction",
+    ]
+    assert event.analysis_steps[-1].model == settings.ollama_extract_model
 
 
 def test_ingest_clusters_duplicate_reprints(db):

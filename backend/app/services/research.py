@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from backend.app.config import Settings, get_settings
 from backend.app.domain import (
+    AnalysisStep,
     AssetClass,
     AssetRef,
     Evidence,
@@ -30,7 +31,7 @@ from backend.app.domain import (
 from backend.app.llm import LlmGateway, gateway
 from backend.app.providers.registry import ProviderRegistry
 from backend.app.services.retrieval import RetrievalService
-from backend.app.storage import get_evidence, list_news, save_recommendation, save_run
+from backend.app.storage import get_evidence, get_run, list_news, save_recommendation, save_run
 
 _checkpoint_setup_lock = threading.Lock()
 _checkpoint_setup_done = False
@@ -141,10 +142,24 @@ class ResearchService:
         return graph.compile(checkpointer=self.checkpointer)
 
     def run(
-        self, asset: AssetRef, event: NewsEvent | None = None, as_of: datetime | None = None
+        self,
+        asset: AssetRef,
+        event: NewsEvent | None = None,
+        as_of: datetime | None = None,
+        queued_run: ResearchRun | None = None,
     ) -> ResearchRun:
-        run = ResearchRun(
-            event_id=event.id if event else None, asset=asset, as_of=as_of or utc_now()
+        run = queued_run or ResearchRun(
+            event_id=event.id if event else None,
+            asset=asset,
+            as_of=as_of or utc_now(),
+            analysis_steps=[
+                *(event.analysis_steps if event else []),
+                AnalysisStep(
+                    phase="research_queue",
+                    executor="celery",
+                    summary=f"已为 {asset.symbol} 创建研究任务。",
+                ),
+            ],
         )
         save_run(self.db, run)
         state: ResearchState = {
@@ -161,10 +176,19 @@ class ResearchService:
             )
             return ResearchRun.model_validate(final_state["run"])
         except Exception as exc:
-            failed = ResearchRun.model_validate(state["run"])
+            self.db.rollback()
+            failed = get_run(self.db, run.id) or ResearchRun.model_validate(state["run"])
             failed.status = RunStatus.FAILED
             failed.error = f"{type(exc).__name__}: {exc}"
             failed.updated_at = utc_now()
+            failed.analysis_steps.append(
+                AnalysisStep(
+                    phase="research_failed",
+                    status="failed",
+                    executor="research-graph",
+                    summary=f"研究任务在 {type(exc).__name__} 后停止，请查看服务日志。",
+                )
+            )
             save_run(self.db, failed)
             return failed
         finally:
@@ -185,6 +209,7 @@ class ResearchService:
         event = NewsEvent.model_validate(state["event"]) if state.get("event") else None
         query = f"{run.asset.name} {run.asset.symbol} {event.headline if event else ''}"
         retrieved_context: list[dict[str, Any]] = []
+        retrieval_error: str | None = None
         try:
             retrieval = RetrievalService(self.db, self.settings)
             retrieval.index(run.asset.asset_id, evidence)
@@ -208,9 +233,28 @@ class ResearchService:
                     run.evidence = evidence
                     save_run(self.db, run)
                     retrieval.index(run.asset.asset_id, evidence)
-        except Exception:
+        except Exception as exc:
             # Retrieval failure must not discard already collected structured evidence.
-            pass
+            retrieval_error = type(exc).__name__
+        independent_sources = {item.independent_group for item in evidence if item.independent_group}
+        run.analysis_steps.append(
+            AnalysisStep(
+                phase="evidence_gathering",
+                status="fallback" if retrieval_error else "completed",
+                executor="providers+retrieval",
+                summary=(
+                    f"已收集 {len(evidence)} 条证据，来自 {len(independent_sources)} 个独立来源。"
+                    + (f" 混合检索不可用（{retrieval_error}），保留结构化证据。" if retrieval_error else "")
+                ),
+                metrics={
+                    "evidence_count": len(evidence),
+                    "independent_sources": len(independent_sources),
+                    "retrieved_context_count": len(retrieved_context),
+                    "provider_groups": sorted(research_data.keys()),
+                },
+            )
+        )
+        save_run(self.db, run)
         return {
             "run": run.model_dump(mode="json"),
             "research_data": research_data,
@@ -355,6 +399,7 @@ class ResearchService:
             f"混合检索上下文：{json.dumps(state.get('retrieved_context', []), ensure_ascii=False)[:12000]}\n"
             "只能引用 evidence_ids 中存在的证据。证据不足时降低 confidence 和 score，不得编造。"
         )
+        draft_error: str | None = None
         try:
             draft = self.llm.generate_json(
                 model=self.settings.ollama_research_model,
@@ -362,9 +407,30 @@ class ResearchService:
                 prompt=prompt,
                 schema=DraftOutput,
             )
-        except Exception:
+        except Exception as exc:
+            draft_error = type(exc).__name__
             draft = self._fallback_draft(run, evidence).model_dump(mode="json")
-        return {"draft": draft}
+        draft_output = DraftOutput.model_validate(draft)
+        run.analysis_steps.append(
+            AnalysisStep(
+                phase="report_drafting",
+                status="fallback" if draft_error else "completed",
+                executor="ollama" if not draft_error else "rules",
+                model=self.settings.ollama_research_model if not draft_error else "research-fallback:v1",
+                summary=(
+                    f"已生成研究草稿，初始置信度 {draft_output.confidence:.0%}，引用 "
+                    f"{len(draft_output.evidence_ids)} 条证据。"
+                    + (f" 模型不可用（{draft_error}），当前为保守回退结果。" if draft_error else "")
+                ),
+                metrics={
+                    "confidence": draft_output.confidence,
+                    "score": draft_output.score,
+                    "citation_count": len(draft_output.evidence_ids),
+                },
+            )
+        )
+        save_run(self.db, run)
+        return {"run": run.model_dump(mode="json"), "draft": draft_output.model_dump(mode="json")}
 
     @staticmethod
     def _fallback_draft(run: ResearchRun, evidence: list[dict[str, Any]]) -> DraftOutput:
@@ -427,6 +493,25 @@ class ResearchService:
         run.verification_round = round_number
         run.missing_requirements = missing + unsupported
         run.contradictions = contradictions
+        run.analysis_steps.append(
+            AnalysisStep(
+                phase="verification",
+                status="completed" if complete else "incomplete",
+                executor="evidence-gate",
+                model="evidence-gate:v1",
+                summary=(
+                    f"第 {round_number} 轮校验{'通过' if complete else '未通过'}："
+                    f"缺失 {len(missing)} 项、矛盾 {len(contradictions)} 项、无效引用 {len(unsupported)} 项。"
+                ),
+                metrics={
+                    "round": round_number,
+                    "evidence_complete": complete,
+                    "missing_requirements": missing,
+                    "contradictions": contradictions,
+                    "unsupported_claims": unsupported,
+                },
+            )
+        )
         save_run(self.db, run)
         return {
             "run": run.model_dump(mode="json"),
@@ -445,6 +530,7 @@ class ResearchService:
         return "finalize"
 
     def _revise(self, state: ResearchState) -> dict[str, Any]:
+        run = ResearchRun.model_validate(state["run"])
         current = DraftOutput.model_validate(state["draft"])
         verification = VerificationOutput.model_validate(state["verification"])
         prompt = (
@@ -452,6 +538,7 @@ class ResearchService:
             f"可用证据：{json.dumps(state.get('evidence', []), ensure_ascii=False)[:24000]}\n"
             "修订报告。不能通过编造来补足缺失来源；无法补足时保持低置信度和中性分数。"
         )
+        revision_error: str | None = None
         try:
             revised = self.llm.generate_json(
                 model=self.settings.ollama_research_model,
@@ -459,11 +546,30 @@ class ResearchService:
                 prompt=prompt,
                 schema=DraftOutput,
             )
-            return {"draft": revised}
-        except Exception:
+            revised_output = DraftOutput.model_validate(revised)
+        except Exception as exc:
+            revision_error = type(exc).__name__
             current.confidence = min(current.confidence, 0.5)
             current.score = 0
-            return {"draft": current.model_dump(mode="json")}
+            revised_output = current
+        run.analysis_steps.append(
+            AnalysisStep(
+                phase="report_revision",
+                status="fallback" if revision_error else "completed",
+                executor="ollama" if not revision_error else "rules",
+                model=self.settings.ollama_research_model if not revision_error else "revision-fallback:v1",
+                summary=(
+                    f"已根据校验结果修订报告，置信度调整为 {revised_output.confidence:.0%}。"
+                    + (f" 模型不可用（{revision_error}），已强制采用中性保守结论。" if revision_error else "")
+                ),
+                metrics={"confidence": revised_output.confidence, "score": revised_output.score},
+            )
+        )
+        save_run(self.db, run)
+        return {
+            "run": run.model_dump(mode="json"),
+            "draft": revised_output.model_dump(mode="json"),
+        }
 
     def _finalize(self, state: ResearchState) -> dict[str, Any]:
         run = ResearchRun.model_validate(state["run"])
@@ -496,8 +602,31 @@ class ResearchService:
                     and cloud_result.confidence >= self.settings.minimum_directional_confidence
                     and not cloud_result.contradictions
                 )
-            except Exception:
+                run.analysis_steps.append(
+                    AnalysisStep(
+                        phase="cloud_verification",
+                        status="completed" if cloud_approved else "incomplete",
+                        executor="cloud-llm",
+                        model=self.settings.cloud_llm_model,
+                        summary=f"高影响结论云复核{'通过' if cloud_approved else '未通过'}。",
+                        metrics={
+                            "approved": cloud_approved,
+                            "confidence": cloud_result.confidence if cloud_result else 0,
+                            "contradictions": cloud_result.contradictions if cloud_result else [],
+                        },
+                    )
+                )
+            except Exception as exc:
                 cloud_approved = False
+                run.analysis_steps.append(
+                    AnalysisStep(
+                        phase="cloud_verification",
+                        status="failed",
+                        executor="cloud-llm",
+                        model=self.settings.cloud_llm_model,
+                        summary=f"高影响结论云复核不可用（{type(exc).__name__}），方向评级已被门控。",
+                    )
+                )
         directional_gate = complete and (not high_impact or cloud_approved)
         probabilities = [draft.bull_probability, draft.base_probability, draft.bear_probability]
         total = sum(probabilities)
@@ -541,6 +670,25 @@ class ResearchService:
         run.recommendation = recommendation
         run.status = RunStatus.COMPLETED if complete else RunStatus.INSUFFICIENT_EVIDENCE
         run.updated_at = utc_now()
+        run.analysis_steps.append(
+            AnalysisStep(
+                phase="finalization",
+                status="completed" if complete else "incomplete",
+                executor="rating-engine",
+                model="rating-gate:v1",
+                summary=(
+                    f"最终评级 {recommendation.rating.value}，方向分数 {score}，"
+                    f"置信度 {confidence:.0%}，证据{'完整' if complete else '不足'}。"
+                ),
+                metrics={
+                    "rating": recommendation.rating.value,
+                    "score": score,
+                    "confidence": confidence,
+                    "evidence_complete": complete,
+                    "cloud_approved": cloud_approved,
+                },
+            )
+        )
         save_recommendation(self.db, recommendation)
         save_run(self.db, run)
         self._write_report(run)

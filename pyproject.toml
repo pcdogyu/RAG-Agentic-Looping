@@ -6,7 +6,6 @@ build-backend = "hatchling.build"
 name = "market-loop-agent"
 version = "0.1.0"
 description = "Evidence-first, cross-market investment research loop"
-readme = "README.md"
 requires-python = ">=3.12,<3.14"
 dependencies = [
   "celery[redis]>=5.4,<6",

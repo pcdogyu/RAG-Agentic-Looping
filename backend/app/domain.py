@@ -122,6 +122,22 @@ class CandidateAsset(BaseModel):
     rationale: str
 
 
+class AnalysisStep(BaseModel):
+    """User-facing audit summary for one processing stage.
+
+    This deliberately stores structured outcomes, not prompts or hidden model
+    reasoning.
+    """
+
+    phase: str
+    status: str = "completed"
+    executor: str
+    model: str | None = None
+    summary: str
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    occurred_at: datetime = Field(default_factory=utc_now)
+
+
 class NewsEvent(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -139,6 +155,7 @@ class NewsEvent(BaseModel):
     candidates: list[CandidateAsset] = Field(default_factory=list)
     novelty: float = Field(default=0.5, ge=0, le=1)
     priority: float = Field(default=0.5, ge=0, le=1)
+    analysis_steps: list[AnalysisStep] = Field(default_factory=list)
 
 
 class Evidence(BaseModel):
@@ -210,6 +227,7 @@ class ResearchRun(BaseModel):
     evidence: list[Evidence] = Field(default_factory=list)
     recommendation: Recommendation | None = None
     error: str | None = None
+    analysis_steps: list[AnalysisStep] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 

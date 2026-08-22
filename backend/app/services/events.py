@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from backend.app.config import Settings, get_settings
 from backend.app.domain import (
+    AnalysisStep,
     CandidateAsset,
     EventType,
     NewsEvent,
@@ -141,6 +142,15 @@ class EventService:
             f"标题：{item.title}\n摘要：{item.summary[:3000]}\n"
             f"来源：{item.source}\n已标注代码：{item.symbols}"
         )
+        extraction_steps = [
+            AnalysisStep(
+                phase="news_collection",
+                executor="provider",
+                summary=f"已采集并归档来自 {item.source} 的新闻。",
+                metrics={"source": item.source, "source_quality": item.source_quality.value},
+                occurred_at=item.observed_at,
+            )
+        ]
         try:
             payload = self.llm.generate_json(
                 model=self.settings.ollama_extract_model,
@@ -150,8 +160,36 @@ class EventService:
                 temperature=0,
             )
             extracted = ExtractedEvent.model_validate(payload)
-        except Exception:
+            extraction_steps.append(
+                AnalysisStep(
+                    phase="event_extraction",
+                    executor="ollama",
+                    model=self.settings.ollama_extract_model,
+                    summary=f"已整理为 {extracted.event_type.value} 事件并生成候选映射查询。",
+                    metrics={"entities": len(extracted.entities)},
+                )
+            )
+        except Exception as exc:
+            extraction_steps.append(
+                AnalysisStep(
+                    phase="event_extraction",
+                    status="failed",
+                    executor="ollama",
+                    model=self.settings.ollama_extract_model,
+                    summary=f"事件提取模型不可用（{type(exc).__name__}），已切换规则回退。",
+                )
+            )
             extracted = self._fallback_extract(item)
+            extraction_steps.append(
+                AnalysisStep(
+                    phase="event_extraction_fallback",
+                    status="fallback",
+                    executor="rules",
+                    model="keyword-rules:v1",
+                    summary=f"规则引擎已整理为 {extracted.event_type.value} 事件。",
+                    metrics={"entities": len(extracted.entities)},
+                )
+            )
 
         queries = [item.title, *item.symbols, *extracted.entities, *extracted.search_queries]
         candidates: dict[str, CandidateAsset] = {}
@@ -191,6 +229,7 @@ class EventService:
             candidates=sorted(candidates.values(), key=lambda value: value.relevance, reverse=True),
             novelty=extracted.novelty,
             priority=priority,
+            analysis_steps=extraction_steps,
         )
 
     @staticmethod

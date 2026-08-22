@@ -115,6 +115,13 @@ def test_research_graph_produces_verified_recommendation(db, tmp_path):
     assert run.recommendation.evidence_complete is True
     assert run.recommendation.rating is Rating.BULLISH
     assert run.recommendation.thesis.evidence_ids
+    phases = [step.phase for step in run.analysis_steps]
+    assert "evidence_gathering" in phases
+    assert "report_drafting" in phases
+    assert "verification" in phases
+    assert phases[-1] == "finalization"
+    assert any(step.model == settings.ollama_research_model for step in run.analysis_steps)
+    assert not any("prompt" in step.metrics for step in run.analysis_steps)
     assert list(tmp_path.glob("AAPL_*.md"))
 
     strong_run = ResearchService(

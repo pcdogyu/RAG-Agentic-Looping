@@ -4,7 +4,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
 WORKDIR /app
-COPY pyproject.toml README.md ./
+COPY pyproject.toml ./
 
 # Keep the expensive market/embedding dependency layer stable when only app
 # source files change. Hatchling only needs a minimal package to resolve and

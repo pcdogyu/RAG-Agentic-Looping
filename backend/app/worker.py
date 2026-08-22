@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from datetime import timedelta
+import json
+from datetime import datetime, timedelta
+from typing import Any
 from uuid import UUID, uuid4
 
 from celery import Celery
@@ -10,7 +12,16 @@ from sqlalchemy import func, select
 
 from backend.app.config import get_settings
 from backend.app.db import NewsRow, SessionLocal, init_db
-from backend.app.domain import Rating, as_utc, utc_now
+from backend.app.domain import (
+    AnalysisStep,
+    AssetRef,
+    NewsEvent,
+    Rating,
+    ResearchRun,
+    RunStatus,
+    as_utc,
+    utc_now,
+)
 from backend.app.providers.registry import ProviderRegistry
 from backend.app.services.events import EventService
 from backend.app.services.evolution import EvolutionService
@@ -21,15 +32,18 @@ from backend.app.services.research import ResearchService
 from backend.app.storage import (
     get_asset,
     get_event,
+    get_run,
     list_assets,
     list_evolutions,
     list_outcomes,
+    save_run,
     upsert_asset,
 )
 
 settings = get_settings()
 SCAN_GATE_KEY = "market-loop:scan:active"
 SCAN_LOCK_KEY = "market-loop:scan:lock"
+SCAN_STATUS_KEY = "market-loop:scan:status"
 SCAN_GATE_TTL_SECONDS = max(1800, settings.scan_interval_minutes * 180)
 celery_app = Celery("market-loop", broker=settings.redis_url, backend=settings.redis_url)
 celery_app.conf.update(
@@ -42,9 +56,9 @@ celery_app.conf.update(
     task_acks_late=True,
     worker_prefetch_multiplier=1,
     beat_schedule={
-        "discover-news": {
-            "task": "market_loop.scan_news",
-            "schedule": settings.scan_interval_minutes * 60,
+        "ensure-news-scan-loop": {
+            "task": "market_loop.ensure_scan_loop",
+            "schedule": 5,
             "options": {"queue": "io"},
         },
         "refresh-crypto-universe": {
@@ -88,9 +102,103 @@ def _redis_client() -> Redis:
     return Redis.from_url(settings.redis_url, socket_connect_timeout=1)
 
 
+def _default_scan_status() -> dict[str, Any]:
+    return {
+        "state": "idle",
+        "task_id": None,
+        "phase": None,
+        "current": 0,
+        "total": 0,
+        "started_at": None,
+        "last_completed_at": None,
+        "next_scan_at": None,
+        "last_result": None,
+        "last_error": None,
+    }
+
+
+def _decode(value: bytes | str | None) -> str | None:
+    if value is None:
+        return None
+    return value.decode() if isinstance(value, bytes) else value
+
+
+def _read_scan_status(client: Redis) -> dict[str, Any]:
+    payload = _default_scan_status()
+    raw = _decode(client.get(SCAN_STATUS_KEY))
+    if raw:
+        try:
+            stored = json.loads(raw)
+            if isinstance(stored, dict):
+                payload.update(stored)
+        except (TypeError, json.JSONDecodeError):
+            pass
+    return payload
+
+
+def _update_scan_status(client: Redis, **updates: Any) -> dict[str, Any]:
+    payload = _read_scan_status(client)
+    payload.update(updates)
+    client.set(SCAN_STATUS_KEY, json.dumps(payload, ensure_ascii=False, default=str))
+    return payload
+
+
+def get_scan_status() -> dict[str, Any]:
+    """Return the shared scan lifecycle with a server clock for UI countdowns."""
+
+    now = utc_now()
+    try:
+        payload = _read_scan_status(_redis_client())
+    except Exception as exc:
+        payload = _default_scan_status()
+        payload.update(
+            state="failed",
+            last_error=f"scan state unavailable: {type(exc).__name__}",
+        )
+    return {
+        **payload,
+        "interval_seconds": settings.scan_interval_minutes * 60,
+        "server_time": now.isoformat(),
+    }
+
+
+def _parse_timestamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return as_utc(datetime.fromisoformat(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _complete_scan(
+    client: Redis,
+    task_id: str,
+    result: dict[str, Any],
+    completed_at: datetime | None = None,
+) -> dict[str, Any]:
+    completed_at = completed_at or utc_now()
+    payload = _update_scan_status(
+        client,
+        state="idle",
+        task_id=task_id,
+        phase="completed",
+        current=int(result.get("discovered", 0)),
+        total=int(result.get("discovered", 0)),
+        last_completed_at=completed_at.isoformat(),
+        next_scan_at=(
+            completed_at + timedelta(minutes=settings.scan_interval_minutes)
+        ).isoformat(),
+        last_result=result,
+        last_error=None,
+    )
+    _clear_scan_gate(client, task_id)
+    return payload
+
+
 def _clear_scan_gate(client: Redis, task_id: str) -> None:
-    current = client.get(SCAN_GATE_KEY)
-    if current and current.decode() == task_id:
+    current = _decode(client.get(SCAN_GATE_KEY))
+    if current == task_id:
         client.delete(SCAN_GATE_KEY)
 
 
@@ -98,20 +206,107 @@ def enqueue_scan() -> tuple[str, str]:
     """Queue at most one manual/scheduled scan across API processes."""
 
     client = _redis_client()
-    existing = client.get(SCAN_GATE_KEY)
+    existing = _decode(client.get(SCAN_GATE_KEY))
     if existing:
-        return existing.decode(), "already_queued"
+        return existing, "already_queued"
     task_id = str(uuid4())
     claimed = client.set(SCAN_GATE_KEY, task_id, nx=True, ex=SCAN_GATE_TTL_SECONDS)
     if not claimed:
-        existing = client.get(SCAN_GATE_KEY)
-        return (existing.decode() if existing else task_id), "already_queued"
+        existing = _decode(client.get(SCAN_GATE_KEY))
+        return (existing or task_id), "already_queued"
+    _update_scan_status(
+        client,
+        state="queued",
+        task_id=task_id,
+        phase="queued",
+        current=0,
+        total=0,
+        started_at=None,
+        next_scan_at=None,
+        last_error=None,
+    )
     try:
         scan_news.apply_async(queue="io", task_id=task_id)
-    except Exception:
+    except Exception as exc:
+        now = utc_now()
+        _update_scan_status(
+            client,
+            state="failed",
+            phase="queue_failed",
+            next_scan_at=(now + timedelta(minutes=settings.scan_interval_minutes)).isoformat(),
+            last_error=f"{type(exc).__name__}",
+        )
         _clear_scan_gate(client, task_id)
         raise
     return task_id, "queued"
+
+
+def enqueue_research(
+    db,
+    asset: AssetRef,
+    event: NewsEvent | None = None,
+    as_of: datetime | None = None,
+) -> tuple[str, ResearchRun]:
+    """Persist a visible queued run before handing work to the LLM worker."""
+
+    run = ResearchRun(
+        event_id=event.id if event else None,
+        asset=asset,
+        as_of=as_of or utc_now(),
+        analysis_steps=[
+            *(event.analysis_steps if event else []),
+            AnalysisStep(
+                phase="research_queue",
+                executor="celery",
+                summary=f"已为主标的 {asset.symbol} 创建深度研究任务。",
+            ),
+        ],
+    )
+    save_run(db, run)
+    try:
+        task = research_asset.apply_async(
+            args=[asset.asset_id, str(event.id) if event else None, str(run.id)],
+            queue="llm",
+        )
+    except Exception as exc:
+        run.status = RunStatus.FAILED
+        run.error = f"{type(exc).__name__}: research queue failed"
+        run.updated_at = utc_now()
+        run.analysis_steps.append(
+            AnalysisStep(
+                phase="research_queue",
+                status="failed",
+                executor="celery",
+                summary=f"研究任务入队失败（{type(exc).__name__}）。",
+            )
+        )
+        save_run(db, run)
+        raise
+    return str(task.id), run
+
+
+def enqueue_event_research(db, event: NewsEvent) -> tuple[str, ResearchRun] | None:
+    """Queue exactly the highest-relevance mapped asset for one unique event."""
+
+    if not event.candidates:
+        return None
+    return enqueue_research(db, event.candidates[0].asset, event)
+
+
+@celery_app.task(name="market_loop.ensure_scan_loop")
+def ensure_scan_loop() -> dict:
+    """Start immediately when uninitialized, then ten minutes after completion."""
+
+    client = _redis_client()
+    active = _decode(client.get(SCAN_GATE_KEY))
+    if active:
+        return {"status": "active", "task_id": active}
+    status = _read_scan_status(client)
+    next_scan_at = _parse_timestamp(status.get("next_scan_at"))
+    if next_scan_at and utc_now() < next_scan_at:
+        return {"status": "waiting", "next_scan_at": next_scan_at.isoformat()}
+    task_id, enqueue_status = enqueue_scan()
+    return {"status": enqueue_status, "task_id": task_id}
 
 
 @task_success.connect
@@ -124,14 +319,12 @@ def _task_failed(**kwargs) -> None:
     _record_task_result("failure")
 
 
-@celery_app.task(
-    bind=True,
-    name="market_loop.scan_news", autoretry_for=(Exception,), retry_backoff=True, max_retries=3
-)
+@celery_app.task(bind=True, name="market_loop.scan_news", max_retries=3)
 def scan_news(self) -> dict:
     task_id = str(self.request.id)
     client = _redis_client()
     client.set(SCAN_GATE_KEY, task_id, nx=True, ex=SCAN_GATE_TTL_SECONDS)
+    client.expire(SCAN_GATE_KEY, SCAN_GATE_TTL_SECONDS)
     lock = client.lock(
         SCAN_LOCK_KEY,
         timeout=SCAN_GATE_TTL_SECONDS,
@@ -141,6 +334,18 @@ def scan_news(self) -> dict:
         _clear_scan_gate(client, task_id)
         return {"status": "already_running", "discovered": 0, "events": 0}
     try:
+        started_at = utc_now()
+        _update_scan_status(
+            client,
+            state="running",
+            task_id=task_id,
+            phase="discovering",
+            current=0,
+            total=0,
+            started_at=started_at.isoformat(),
+            next_scan_at=None,
+            last_error=None,
+        )
         init_db()
         registry = ProviderRegistry()
         since = utc_now() - timedelta(minutes=settings.scan_interval_minutes * 2)
@@ -149,11 +354,25 @@ def scan_news(self) -> dict:
             state="PROGRESS",
             meta={"phase": "extracting", "current": 0, "total": len(items)},
         )
+        _update_scan_status(
+            client,
+            state="running",
+            phase="extracting",
+            current=0,
+            total=len(items),
+        )
 
         def update_progress(current: int, total: int) -> None:
             self.update_state(
                 state="PROGRESS",
                 meta={"phase": "extracting", "current": current, "total": total},
+            )
+            _update_scan_status(
+                client,
+                state="running",
+                phase="extracting",
+                current=current,
+                total=total,
             )
 
         with SessionLocal() as db:
@@ -170,28 +389,58 @@ def scan_news(self) -> dict:
             queued = 0
             if settings.auto_research:
                 for event in events:
-                    for candidate in event.candidates[:3]:
-                        if event.priority >= 0.4 and candidate.relevance >= 0.7:
-                            research_asset.apply_async(
-                                args=[candidate.asset.asset_id, str(event.id)], queue="llm"
-                            )
+                    if event.candidates:
+                        try:
+                            enqueue_event_research(db, event)
                             queued += 1
-        return {
+                        except Exception as exc:
+                            notifier.send(
+                                f"研究任务入队失败：{event.headline}\n错误：{type(exc).__name__}"
+                            )
+        result = {
             "status": "completed",
             "discovered": len(items),
             "events": len(events),
             "research_queued": queued,
         }
+        _complete_scan(client, task_id, result)
+        return result
+    except Exception as exc:
+        if self.request.retries < self.max_retries:
+            _update_scan_status(
+                client,
+                state="retrying",
+                task_id=task_id,
+                phase="retrying",
+                last_error=f"{type(exc).__name__}",
+            )
+            raise self.retry(
+                exc=exc, countdown=min(60, 2 ** (self.request.retries + 1))
+            ) from exc
+        failed_at = utc_now()
+        _update_scan_status(
+            client,
+            state="failed",
+            task_id=task_id,
+            phase="failed",
+            next_scan_at=(
+                failed_at + timedelta(minutes=settings.scan_interval_minutes)
+            ).isoformat(),
+            last_error=f"{type(exc).__name__}",
+        )
+        _clear_scan_gate(client, task_id)
+        raise
     finally:
         if lock.owned():
             lock.release()
-        _clear_scan_gate(client, task_id)
 
 
 @celery_app.task(
     name="market_loop.research_asset", autoretry_for=(Exception,), retry_backoff=True, max_retries=2
 )
-def research_asset(asset_id: str, event_id: str | None = None) -> dict:
+def research_asset(
+    asset_id: str, event_id: str | None = None, run_id: str | None = None
+) -> dict:
     init_db()
     registry = ProviderRegistry()
     with SessionLocal() as db:
@@ -199,10 +448,16 @@ def research_asset(asset_id: str, event_id: str | None = None) -> dict:
         if not asset:
             raise ValueError(f"unknown asset: {asset_id}")
         event = get_event(db, UUID(event_id)) if event_id else None
+        queued_run = get_run(db, UUID(run_id)) if run_id else None
     # PostgresSaver.setup() may run concurrent index DDL on first use. Close the
     # read transaction above first so that DDL cannot wait on its own task.
     with SessionLocal() as db:
-        run = ResearchService(registry, db).run(asset, event)
+        run = ResearchService(registry, db).run(
+            asset,
+            event,
+            as_of=queued_run.as_of if queued_run else None,
+            queued_run=queued_run,
+        )
         if run.recommendation:
             notifier.recommendation(run.recommendation)
             if settings.auto_paper_trade and run.recommendation.rating in {

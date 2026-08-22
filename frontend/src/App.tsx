@@ -51,10 +51,52 @@ type Portfolio = {
 };
 
 type Snapshot = { events: EventItem[]; runs: Run[]; recommendations: Recommendation[] };
-type TaskStatus = {
+type ScanStatus = {
   state: string;
-  progress?: { phase: string; current: number; total: number };
+  task_id: string | null;
+  phase: string | null;
+  current: number;
+  total: number;
+  started_at: string | null;
+  last_completed_at: string | null;
+  next_scan_at: string | null;
+  last_result: Record<string, unknown> | null;
+  last_error: string | null;
+  interval_seconds: number;
+  server_time: string;
 };
+
+type AnalysisStep = {
+  phase: string;
+  status: string;
+  executor: string;
+  model: string | null;
+  summary: string;
+  metrics: Record<string, unknown>;
+  occurred_at: string;
+};
+
+type AnalysisLog = {
+  id: string;
+  event_id: string | null;
+  run_id: string | null;
+  status: string;
+  updated_at: string;
+  news: Array<{ id: string; title: string; source: string; url: string; published_at: string }>;
+  event: { headline: string; event_type: string; direct_impact: string; priority: number } | null;
+  asset: { symbol: string; name: string; market: string } | null;
+  models: string[];
+  steps: AnalysisStep[];
+  result: {
+    rating: string;
+    score: number;
+    confidence: number;
+    evidence_complete: boolean;
+    summary: string;
+  } | null;
+};
+
+type DashboardSnapshot = Snapshot & { analysis_logs: AnalysisLog[] };
 
 const labels: Record<string, string> = {
   strongly_bullish: "强烈看多",
@@ -67,7 +109,52 @@ const labels: Record<string, string> = {
   running: "研究中",
   verifying: "验证中",
   queued: "排队中",
+  failed: "失败",
+  unmapped: "未映射标的",
+  not_researched: "尚未深研",
 };
+
+const phaseLabels: Record<string, string> = {
+  news_collection: "新闻采集与归档",
+  event_extraction: "事件模型提取",
+  event_extraction_fallback: "规则回退提取",
+  research_queue: "研究任务入队",
+  evidence_gathering: "证据收集与检索",
+  report_drafting: "研究报告生成",
+  verification: "证据与引用校验",
+  report_revision: "研究报告修订",
+  cloud_verification: "高影响云复核",
+  finalization: "评级与置信度定稿",
+  research_failed: "研究任务失败",
+};
+
+function isScanning(state: string) {
+  return state === "queued" || state === "running" || state === "retrying";
+}
+
+export function formatCountdown(totalSeconds: number) {
+  const safe = Math.max(0, Math.ceil(totalSeconds));
+  const minutes = Math.floor(safe / 60);
+  const seconds = safe % 60;
+  return `${String(minutes).padStart(2, "0")}分${String(seconds).padStart(2, "0")}秒`;
+}
+
+export function scanButtonText(status: ScanStatus | null, serverNowMs: number) {
+  if (!status) return "准备扫描…";
+  if (isScanning(status.state)) {
+    if (status.phase === "extracting" && status.total > 0) {
+      return `扫描中 · 事件归纳 ${status.current}/${status.total}`;
+    }
+    return status.state === "retrying" ? "扫描中 · 正在重试" : "扫描中";
+  }
+  if (status.state === "failed") return "扫描失败 · 点击重试";
+  if (status.next_scan_at) {
+    const remaining = (Date.parse(status.next_scan_at) - serverNowMs) / 1000;
+    if (remaining <= 0) return "即将开始扫描…";
+    return `距离下一次扫描 ${formatCountdown(remaining)}`;
+  }
+  return "立即扫描";
+}
 
 function money(value: number) {
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(value);
@@ -80,42 +167,74 @@ function time(value: string) {
 }
 
 export default function App() {
-  const [snapshot, setSnapshot] = useState<Snapshot>({ events: [], runs: [], recommendations: [] });
+  const [snapshot, setSnapshot] = useState<DashboardSnapshot>({
+    events: [], runs: [], recommendations: [], analysis_logs: [],
+  });
   const [portfolio, setPortfolio] = useState<Portfolio | null>(null);
   const [health, setHealth] = useState<Record<string, unknown>>({});
-  const [scanBusy, setScanBusy] = useState(false);
-  const [scanLabel, setScanLabel] = useState("立即扫描");
+  const [scanStatus, setScanStatus] = useState<ScanStatus | null>(null);
+  const [serverOffset, setServerOffset] = useState(0);
+  const [clock, setClock] = useState(Date.now());
+  const [expandedLog, setExpandedLog] = useState<string | null>(null);
   const [selected, setSelected] = useState<Recommendation | null>(null);
 
+  const applyScanStatus = useCallback((status: ScanStatus) => {
+    setScanStatus(status);
+    setServerOffset(Date.parse(status.server_time) - Date.now());
+  }, []);
+
   const refresh = useCallback(async () => {
-    const [events, runs, recommendations, portfolioData, healthData] = await Promise.all([
+    const [events, runs, recommendations, portfolioData, healthData, scanData, analysisLogs] = await Promise.all([
       fetch(`${API}/api/v1/events?limit=30`).then((r) => r.json()),
       fetch(`${API}/api/v1/research-runs?limit=20`).then((r) => r.json()),
       fetch(`${API}/api/v1/recommendations?limit=20`).then((r) => r.json()),
       fetch(`${API}/api/v1/portfolio`).then((r) => r.json()),
       fetch(`${API}/health`).then((r) => r.json()),
+      fetch(`${API}/api/v1/scan/status`).then((r) => r.json()),
+      fetch(`${API}/api/v1/analysis-logs?limit=10`).then((r) => r.json()),
     ]);
-    setSnapshot({ events, runs, recommendations });
+    setSnapshot({ events, runs, recommendations, analysis_logs: analysisLogs });
     setPortfolio(portfolioData);
     setHealth(healthData);
-  }, []);
+    applyScanStatus(scanData);
+  }, [applyScanStatus]);
 
   useEffect(() => {
     refresh().catch(() => undefined);
     const stream = new EventSource(`${API}/api/v1/stream`);
-    stream.addEventListener("snapshot", (event) => setSnapshot(JSON.parse((event as MessageEvent).data)));
-    const timer = window.setInterval(() => {
+    stream.addEventListener("snapshot", (event) => {
+      const incoming = JSON.parse((event as MessageEvent).data) as DashboardSnapshot;
+      setSnapshot((current) => ({
+        events: incoming.events,
+        runs: incoming.runs,
+        recommendations: incoming.recommendations,
+        analysis_logs: incoming.analysis_logs || current.analysis_logs,
+      }));
+    });
+    const portfolioTimer = window.setInterval(() => {
       fetch(`${API}/api/v1/portfolio`).then((r) => r.json()).then(setPortfolio).catch(() => undefined);
     }, 15000);
+    const scanTimer = window.setInterval(() => {
+      fetch(`${API}/api/v1/scan/status`).then((r) => r.json()).then(applyScanStatus).catch(() => undefined);
+    }, 2000);
+    const clockTimer = window.setInterval(() => setClock(Date.now()), 1000);
     return () => {
       stream.close();
-      window.clearInterval(timer);
+      window.clearInterval(portfolioTimer);
+      window.clearInterval(scanTimer);
+      window.clearInterval(clockTimer);
     };
-  }, [refresh]);
+  }, [applyScanStatus, refresh]);
+
+  useEffect(() => {
+    if (snapshot.analysis_logs.length && !snapshot.analysis_logs.some((item) => item.id === expandedLog)) {
+      setExpandedLog(snapshot.analysis_logs[0].id);
+    }
+  }, [expandedLog, snapshot.analysis_logs]);
 
   async function scan() {
-    setScanBusy(true);
-    setScanLabel("正在发现新闻…");
+    if (scanStatus && isScanning(scanStatus.state)) return;
+    setScanStatus((current) => current ? { ...current, state: "queued", phase: "queued" } : current);
     try {
       const response = await fetch(`${API}/api/v1/scan`, {
         method: "POST",
@@ -123,33 +242,17 @@ export default function App() {
         body: JSON.stringify({ background: true }),
       });
       if (!response.ok) throw new Error("scan request failed");
-      const queued = await response.json() as { task_id: string };
-      const deadline = Date.now() + 30 * 60 * 1000;
-      while (Date.now() < deadline) {
-        const taskResponse = await fetch(`${API}/api/v1/tasks/${queued.task_id}`);
-        if (!taskResponse.ok) throw new Error("task status failed");
-        const task = await taskResponse.json() as TaskStatus;
-        if (task.state === "PROGRESS" && task.progress) {
-          setScanLabel(`事件抽取 ${task.progress.current}/${task.progress.total}`);
-        } else if (task.state === "SUCCESS") {
-          setScanLabel("扫描完成");
-          await refresh();
-          return;
-        } else if (task.state === "FAILURE") {
-          throw new Error("scan task failed");
-        } else {
-          setScanLabel("扫描排队中…");
-        }
-        await new Promise((resolve) => window.setTimeout(resolve, 2000));
-      }
-      throw new Error("scan task timed out");
+      const queued = await response.json() as { scan: ScanStatus };
+      applyScanStatus(queued.scan);
     } catch {
-      setScanLabel("扫描失败，请重试");
-    } finally {
-      setScanBusy(false);
-      window.setTimeout(() => setScanLabel("立即扫描"), 4000);
+      setScanStatus((current) => current ? {
+        ...current, state: "failed", phase: "failed", last_error: "request failed",
+      } : current);
     }
   }
+
+  const scanBusy = Boolean(scanStatus && isScanning(scanStatus.state));
+  const scanLabel = scanButtonText(scanStatus, clock + serverOffset);
 
   async function research(candidate: Candidate, eventId: string) {
     await fetch(`${API}/api/v1/research`, {
@@ -177,7 +280,14 @@ export default function App() {
           <div className={`status ${health.ollama ? "online" : "offline"}`}>
             <i /> Ollama {health.ollama ? "在线" : "离线"}
           </div>
-          <button onClick={scan} disabled={scanBusy}>{scanLabel}</button>
+          <button
+            onClick={scan}
+            disabled={scanBusy}
+            aria-live="polite"
+            title={!scanBusy && scanStatus?.next_scan_at ? "点击可提前扫描" : undefined}
+          >
+            {scanLabel}
+          </button>
         </div>
       </header>
 
@@ -190,7 +300,7 @@ export default function App() {
 
       <section className="grid">
         <div className="panel events-panel">
-          <PanelTitle title="市场事件" meta="20 分钟增量循环" />
+          <PanelTitle title="市场事件" meta="10 分钟增量循环" />
           <div className="feed">
             {snapshot.events.length === 0 && <Empty text="尚无事件，配置数据源后启动扫描。" />}
             {snapshot.events.map((item) => (
@@ -268,6 +378,95 @@ export default function App() {
               <span>{Math.round(position.weight * 1000) / 10}%</span>
             </div>
           ))}
+        </div>
+      </section>
+
+      <section className="panel trace-panel">
+        <PanelTitle title="分析链路" meta="模型、证据与校验审计" />
+        <div className="trace-list">
+          {snapshot.analysis_logs.length === 0 && <Empty text="完成新闻扫描后，这里会显示可审计的分析过程。" />}
+          {snapshot.analysis_logs.map((log) => {
+            const open = expandedLog === log.id;
+            return (
+              <article className={`trace-card ${open ? "open" : ""}`} key={log.id}>
+                <button className="trace-summary" onClick={() => setExpandedLog(log.id)} aria-expanded={open}>
+                  <div>
+                    <span className="event-type">{log.event?.event_type || "RESEARCH"}</span>
+                    <strong>{log.event?.headline || log.news[0]?.title || `${log.asset?.symbol || "未知标的"} 独立研究`}</strong>
+                  </div>
+                  <div className="trace-asset">
+                    <strong>{log.asset?.symbol || "—"}</strong>
+                    <span>{log.asset?.name || "未映射主标的"}</span>
+                  </div>
+                  <div className="trace-confidence">
+                    <strong>{log.result ? `${Math.round(log.result.confidence * 100)}%` : "—"}</strong>
+                    <span>置信度</span>
+                  </div>
+                  <span className={`trace-state ${log.status}`}>{labels[log.status] || log.status}</span>
+                  <i>{open ? "−" : "+"}</i>
+                </button>
+
+                {open && (
+                  <div className="trace-detail">
+                    <div className="trace-context">
+                      <div>
+                        <h3>新闻来源</h3>
+                        {log.news.length === 0 && <p className="muted">此研究没有关联新闻事件。</p>}
+                        {log.news.map((item) => (
+                          <a href={item.url} target="_blank" rel="noreferrer" key={item.id}>
+                            <strong>{item.title}</strong>
+                            <span>{item.source} · {time(item.published_at)}</span>
+                          </a>
+                        ))}
+                      </div>
+                      <div>
+                        <h3>执行模型</h3>
+                        <div className="model-list">
+                          {log.models.length
+                            ? log.models.map((model) => <span key={model}>{model}</span>)
+                            : <span>确定性规则</span>}
+                        </div>
+                        {log.event?.direct_impact && <p>{log.event.direct_impact}</p>}
+                      </div>
+                    </div>
+
+                    <div className="trace-timeline">
+                      {log.steps.map((step, index) => (
+                        <div className={`trace-step ${step.status}`} key={`${step.phase}-${step.occurred_at}-${index}`}>
+                          <i />
+                          <div>
+                            <div className="trace-step-title">
+                              <strong>{phaseLabels[step.phase] || step.phase}</strong>
+                              <span>{step.model || step.executor}</span>
+                              <time>{time(step.occurred_at)}</time>
+                            </div>
+                            <p>{step.summary}</p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+
+                    {log.result ? (
+                      <div className="trace-result">
+                        <div>
+                          <span>最终结果</span>
+                          <strong>{labels[log.result.rating] || log.result.rating}</strong>
+                        </div>
+                        <div><span>方向分数</span><strong>{log.result.score > 0 ? "+" : ""}{log.result.score}</strong></div>
+                        <div><span>置信度</span><strong>{Math.round(log.result.confidence * 100)}%</strong></div>
+                        <div><span>证据</span><strong>{log.result.evidence_complete ? "完整" : "不足"}</strong></div>
+                        <p>{log.result.summary}</p>
+                      </div>
+                    ) : (
+                      <div className="trace-pending">
+                        {log.status === "unmapped" ? "该新闻尚未映射到可研究标的。" : "研究任务正在排队或处理中，结果会自动更新。"}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </article>
+            );
+          })}
         </div>
       </section>
 

@@ -109,6 +109,11 @@ def get_news_by_content_hash(db: Session, content_hash: str) -> NewsItem | None:
     return news_from_row(row) if row else None
 
 
+def get_news(db: Session, news_id: UUID) -> NewsItem | None:
+    row = db.get(NewsRow, news_id)
+    return news_from_row(row) if row else None
+
+
 def event_news_item_ids(db: Session) -> set[UUID]:
     """Return news IDs already attached to a durable event.
 
@@ -181,13 +186,21 @@ def list_events(db: Session, limit: int = 100, as_of: datetime | None = None) ->
     return [NewsEvent.model_validate(row.payload) for row in rows]
 
 
+def list_recent_events(db: Session, limit: int = 100) -> list[NewsEvent]:
+    rows = db.scalars(
+        select(EventRow).order_by(desc(EventRow.observed_at)).limit(limit)
+    ).all()
+    return [NewsEvent.model_validate(row.payload) for row in rows]
+
+
 def save_run(db: Session, run: ResearchRun) -> None:
+    run.updated_at = utc_now()
     row = db.get(ResearchRunRow, run.id) or ResearchRunRow(id=run.id, created_at=run.created_at)
     row.event_id = run.event_id
     row.asset_id = run.asset.asset_id
     row.status = run.status.value
     row.payload = run.model_dump(mode="json")
-    row.updated_at = utc_now()
+    row.updated_at = run.updated_at
     db.add(row)
     for evidence in run.evidence:
         evidence_row = db.get(EvidenceRow, evidence.id) or EvidenceRow(id=evidence.id)

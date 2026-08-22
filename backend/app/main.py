@@ -33,18 +33,26 @@ from backend.app.services.research import ResearchService
 from backend.app.storage import (
     get_asset,
     get_event,
+    get_news,
     get_run,
     list_assets,
     list_events,
     list_evolutions,
     list_news,
     list_outcomes,
+    list_recent_events,
     list_recommendations,
     list_runs,
     save_evolution,
     upsert_asset,
 )
-from backend.app.worker import celery_app, enqueue_scan, evolve_failures, research_asset
+from backend.app.worker import (
+    celery_app,
+    enqueue_research,
+    enqueue_scan,
+    evolve_failures,
+    get_scan_status,
+)
 from backend.app.worker import execute_evolution as execute_evolution_task
 
 settings = get_settings()
@@ -184,11 +192,16 @@ def events(
 def start_scan(request: ScanRequest, db: Session = Depends(get_db)):
     if request.background:
         task_id, status = enqueue_scan()
-        return {"task_id": task_id, "status": status}
+        return {"task_id": task_id, "status": status, "scan": get_scan_status()}
     since = utc_now() - timedelta(minutes=settings.scan_interval_minutes * 2)
     items = registry.discover_news(since=since, limit=settings.scan_batch_size)
     created = EventService(registry).ingest(db, items)
     return {"news": len(items), "events": len(created)}
+
+
+@app.get("/api/v1/scan/status")
+def scan_status():
+    return get_scan_status()
 
 
 @app.get("/api/v1/tasks/{task_id}")
@@ -210,11 +223,9 @@ def start_research(request: ResearchRequest, db: Session = Depends(get_db)):
     if not asset:
         raise HTTPException(404, "asset not found")
     if request.background:
-        task = research_asset.apply_async(
-            args=[request.asset_id, str(request.event_id) if request.event_id else None],
-            queue="llm",
-        )
-        return {"task_id": task.id, "status": "queued"}
+        event = get_event(db, request.event_id) if request.event_id else None
+        task_id, run = enqueue_research(db, asset, event, request.as_of)
+        return {"task_id": task_id, "run_id": str(run.id), "status": "queued"}
     event = get_event(db, request.event_id) if request.event_id else None
     # Release the read-only transaction before first-use checkpoint DDL.
     db.rollback()
@@ -237,6 +248,95 @@ def research_run(run_id: UUID, db: Session = Depends(get_db)):
 @app.get("/api/v1/recommendations")
 def recommendations(limit: int = Query(default=100, ge=1, le=500), db: Session = Depends(get_db)):
     return list_recommendations(db, limit)
+
+
+def _analysis_logs(db: Session, limit: int) -> list[dict]:
+    """Join event, source-news and research payloads into a UI audit view."""
+
+    entries: list[tuple[datetime, dict]] = []
+    seen_event_ids: set[UUID] = set()
+
+    def make_entry(event, run=None) -> tuple[datetime, dict]:
+        news_items = [
+            item
+            for news_id in (event.news_item_ids if event else [])
+            if (item := get_news(db, news_id)) is not None
+        ]
+        steps = (
+            run.analysis_steps
+            if run and run.analysis_steps
+            else (event.analysis_steps if event else [])
+        )
+        model_names = list(dict.fromkeys(step.model for step in steps if step.model))
+        recommendation = run.recommendation if run else None
+        asset = run.asset if run else (event.candidates[0].asset if event and event.candidates else None)
+        status = (
+            run.status.value
+            if run
+            else ("unmapped" if event and not event.candidates else "not_researched")
+        )
+        updated_at = run.updated_at if run else event.observed_at
+        payload = {
+            "id": str(run.id if run else event.id),
+            "event_id": str(event.id) if event else None,
+            "run_id": str(run.id) if run else None,
+            "status": status,
+            "updated_at": updated_at.isoformat(),
+            "news": [
+                {
+                    "id": str(item.id),
+                    "title": item.title,
+                    "source": item.source,
+                    "url": item.url,
+                    "published_at": item.published_at.isoformat(),
+                }
+                for item in news_items
+            ],
+            "event": (
+                {
+                    "id": str(event.id),
+                    "headline": event.headline,
+                    "event_type": event.event_type.value,
+                    "direct_impact": event.direct_impact,
+                    "priority": event.priority,
+                }
+                if event
+                else None
+            ),
+            "asset": asset.model_dump(mode="json") if asset else None,
+            "models": model_names,
+            "steps": [step.model_dump(mode="json") for step in steps],
+            "result": (
+                {
+                    "rating": recommendation.rating.value,
+                    "score": recommendation.score,
+                    "confidence": recommendation.confidence,
+                    "evidence_complete": recommendation.evidence_complete,
+                    "summary": recommendation.thesis.summary,
+                }
+                if recommendation
+                else None
+            ),
+        }
+        return updated_at, payload
+
+    for run in list_runs(db, max(limit * 3, 30)):
+        event = get_event(db, run.event_id) if run.event_id else None
+        if run.event_id:
+            seen_event_ids.add(run.event_id)
+        entries.append(make_entry(event, run))
+    for event in list_recent_events(db, max(limit * 3, 30)):
+        if event.id not in seen_event_ids:
+            entries.append(make_entry(event))
+    entries.sort(key=lambda item: item[0], reverse=True)
+    return [payload for _, payload in entries[:limit]]
+
+
+@app.get("/api/v1/analysis-logs")
+def analysis_logs(
+    limit: int = Query(default=10, ge=1, le=50), db: Session = Depends(get_db)
+):
+    return _analysis_logs(db, limit)
 
 
 @app.get("/api/v1/portfolio", response_model=PortfolioSnapshot)
@@ -317,6 +417,7 @@ async def event_stream() -> AsyncIterator[str]:
                     "recommendations": [
                         item.model_dump(mode="json") for item in list_recommendations(db, 10)
                     ],
+                    "analysis_logs": _analysis_logs(db, 10),
                 },
                 ensure_ascii=False,
             )
