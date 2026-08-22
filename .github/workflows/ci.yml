@@ -19,7 +19,7 @@ jobs:
           cache: pip
       - run: pip install -e ".[dev]"
       - run: ruff check .
-      - run: pytest --cov=backend.app --cov-report=term-missing
+      - run: python -m pytest --cov=backend.app --cov-report=term-missing
 
   frontend:
     runs-on: ubuntu-latest
