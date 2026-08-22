@@ -22,7 +22,7 @@ body { margin: 0; min-width: 320px; min-height: 100vh; background:
   background-size: auto, 40px 40px, 40px 40px, auto;
 }
 button { font: inherit; }
-main { max-width: 1580px; margin: 0 auto; padding: 34px 36px 60px; }
+main { width: 100%; margin: 0; padding: 34px 36px 60px; }
 header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 30px; }
 .eyebrow { margin: 0 0 10px; color: var(--mint); font: 500 11px "DM Mono", monospace; letter-spacing: .18em; }
 h1 { margin: 0; font-size: clamp(30px, 4vw, 50px); letter-spacing: -.055em; line-height: 1; }
