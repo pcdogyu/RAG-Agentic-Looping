@@ -27,7 +27,7 @@
 Market Loop Agent 面向 1–6 个月的中线研究，通过有限、可恢复、可验证的循环代替无限制的“自由思考”：
 
 ```text
-每 20 分钟发现新闻
+每 10 分钟发现新闻
   → 去重与事件抽取
   → 映射股票/加密标的
   → 收集财务、公告、历史新闻和链上指标
@@ -101,7 +101,7 @@ flowchart LR
 |---|---|---:|---|---|
 | `web` | React + Vite + Nginx | `5173` | 核心 | 展示事件、建议、研究轨迹、模拟组合和健康状态 |
 | `api` | FastAPI + SSE | `8000` | 核心 | REST 接口、任务提交、健康检查和实时快照流 |
-| `scheduler` | Celery Beat | 无 | 核心 | 每 20 分钟扫描新闻、每 6 小时刷新加密资产、每日评估结果 |
+| `scheduler` | Celery Beat | 无 | 核心 | 每 10 分钟扫描新闻、每 6 小时刷新加密资产、每日评估结果 |
 | `io-worker` | Celery，I/O 并发 4 | 无 | 核心 | 新闻发现、去重、事件抽取、资产映射和外部数据请求 |
 | `llm-worker` | Celery，LLM 并发 1 | 无 | 核心 | LangGraph 深研、证据验证、报告和建议生成 |
 | `postgres` | PostgreSQL 16 + pgvector | `5432` | 核心 | 结构化数据、全文/向量投影、证据、组合和 checkpoint |
@@ -151,7 +151,7 @@ RAG-Agentic-Looping/
 
 ### 1. 新闻发现与事件抽取
 
-1. Scheduler 默认每 20 分钟提交 `market_loop.scan_news`。
+1. Scheduler 默认每 10 分钟提交 `market_loop.scan_news`。
 2. FMP、RSS 和 AkShare Provider 拉取最近窗口内的新闻，按内容哈希去重。
 3. `qwen2.5:3b` 抽取事件类型、主体、影响方向、时间范围和搜索词。
 4. 系统结合证券主数据、别名、产品和 Provider 搜索结果生成候选资产。
