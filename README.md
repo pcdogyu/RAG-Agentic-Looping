@@ -57,6 +57,9 @@ CPU 嵌入模型会在第一次研究时下载。Ollama 请求设置 `keep_alive
 Invoke-RestMethod -Method Post http://localhost:8000/api/v1/scan `
   -ContentType application/json -Body '{"background":true}'
 
+# 用上一步返回的 task_id 查看扫描进度；重复触发会复用正在运行的任务
+Invoke-RestMethod http://localhost:8000/api/v1/tasks/<task_id>
+
 # 为 Apple 启动深研
 Invoke-RestMethod -Method Post http://localhost:8000/api/v1/research `
   -ContentType application/json `
@@ -111,6 +114,7 @@ docker compose --profile mcp --profile evolution up --build -d
 
 - `GET /api/v1/assets|news|events`
 - `POST /api/v1/scan`
+- `GET /api/v1/tasks/{task_id}`
 - `POST /api/v1/research`
 - `GET /api/v1/research-runs|recommendations`
 - `GET /api/v1/portfolio|outcomes|evolution`

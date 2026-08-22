@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from celery import Celery
 from celery.signals import task_failure, task_success
@@ -28,6 +28,9 @@ from backend.app.storage import (
 )
 
 settings = get_settings()
+SCAN_GATE_KEY = "market-loop:scan:active"
+SCAN_LOCK_KEY = "market-loop:scan:lock"
+SCAN_GATE_TTL_SECONDS = max(1800, settings.scan_interval_minutes * 180)
 celery_app = Celery("market-loop", broker=settings.redis_url, backend=settings.redis_url)
 celery_app.conf.update(
     task_serializer="json",
@@ -81,6 +84,36 @@ def _record_task_result(kind: str) -> None:
         pass
 
 
+def _redis_client() -> Redis:
+    return Redis.from_url(settings.redis_url, socket_connect_timeout=1)
+
+
+def _clear_scan_gate(client: Redis, task_id: str) -> None:
+    current = client.get(SCAN_GATE_KEY)
+    if current and current.decode() == task_id:
+        client.delete(SCAN_GATE_KEY)
+
+
+def enqueue_scan() -> tuple[str, str]:
+    """Queue at most one manual/scheduled scan across API processes."""
+
+    client = _redis_client()
+    existing = client.get(SCAN_GATE_KEY)
+    if existing:
+        return existing.decode(), "already_queued"
+    task_id = str(uuid4())
+    claimed = client.set(SCAN_GATE_KEY, task_id, nx=True, ex=SCAN_GATE_TTL_SECONDS)
+    if not claimed:
+        existing = client.get(SCAN_GATE_KEY)
+        return (existing.decode() if existing else task_id), "already_queued"
+    try:
+        scan_news.apply_async(queue="io", task_id=task_id)
+    except Exception:
+        _clear_scan_gate(client, task_id)
+        raise
+    return task_id, "queued"
+
+
 @task_success.connect
 def _task_succeeded(**kwargs) -> None:
     _record_task_result("success")
@@ -92,34 +125,67 @@ def _task_failed(**kwargs) -> None:
 
 
 @celery_app.task(
+    bind=True,
     name="market_loop.scan_news", autoretry_for=(Exception,), retry_backoff=True, max_retries=3
 )
-def scan_news() -> dict:
-    init_db()
-    registry = ProviderRegistry()
-    since = utc_now() - timedelta(minutes=settings.scan_interval_minutes * 2)
-    items = registry.discover_news(since=since, limit=200)
-    with SessionLocal() as db:
-        service = EventService(registry)
-        events = service.ingest(db, items)
-        for error in registry.last_errors:
-            notifier.send(f"数据源故障：{error}")
-        for event in events:
-            if event.priority >= 0.75:
-                notifier.send(
-                    f"高优先级事件：{event.headline}\n类型：{event.event_type.value}\n"
-                    f"候选标的：{', '.join(item.asset.symbol for item in event.candidates[:5]) or '待解析'}"
-                )
-        queued = 0
-        if settings.auto_research:
+def scan_news(self) -> dict:
+    task_id = str(self.request.id)
+    client = _redis_client()
+    client.set(SCAN_GATE_KEY, task_id, nx=True, ex=SCAN_GATE_TTL_SECONDS)
+    lock = client.lock(
+        SCAN_LOCK_KEY,
+        timeout=SCAN_GATE_TTL_SECONDS,
+        blocking_timeout=0,
+    )
+    if not lock.acquire(blocking=False):
+        _clear_scan_gate(client, task_id)
+        return {"status": "already_running", "discovered": 0, "events": 0}
+    try:
+        init_db()
+        registry = ProviderRegistry()
+        since = utc_now() - timedelta(minutes=settings.scan_interval_minutes * 2)
+        items = registry.discover_news(since=since, limit=settings.scan_batch_size)
+        self.update_state(
+            state="PROGRESS",
+            meta={"phase": "extracting", "current": 0, "total": len(items)},
+        )
+
+        def update_progress(current: int, total: int) -> None:
+            self.update_state(
+                state="PROGRESS",
+                meta={"phase": "extracting", "current": current, "total": total},
+            )
+
+        with SessionLocal() as db:
+            service = EventService(registry)
+            events = service.ingest(db, items, progress=update_progress)
+            for error in registry.last_errors:
+                notifier.send(f"数据源故障：{error}")
             for event in events:
-                for candidate in event.candidates[:3]:
-                    if event.priority >= 0.4 and candidate.relevance >= 0.7:
-                        research_asset.apply_async(
-                            args=[candidate.asset.asset_id, str(event.id)], queue="llm"
-                        )
-                        queued += 1
-    return {"discovered": len(items), "events": len(events), "research_queued": queued}
+                if event.priority >= 0.75:
+                    notifier.send(
+                        f"高优先级事件：{event.headline}\n类型：{event.event_type.value}\n"
+                        f"候选标的：{', '.join(item.asset.symbol for item in event.candidates[:5]) or '待解析'}"
+                    )
+            queued = 0
+            if settings.auto_research:
+                for event in events:
+                    for candidate in event.candidates[:3]:
+                        if event.priority >= 0.4 and candidate.relevance >= 0.7:
+                            research_asset.apply_async(
+                                args=[candidate.asset.asset_id, str(event.id)], queue="llm"
+                            )
+                            queued += 1
+        return {
+            "status": "completed",
+            "discovered": len(items),
+            "events": len(events),
+            "research_queued": queued,
+        }
+    finally:
+        if lock.owned():
+            lock.release()
+        _clear_scan_gate(client, task_id)
 
 
 @celery_app.task(
@@ -133,6 +199,9 @@ def research_asset(asset_id: str, event_id: str | None = None) -> dict:
         if not asset:
             raise ValueError(f"unknown asset: {asset_id}")
         event = get_event(db, UUID(event_id)) if event_id else None
+    # PostgresSaver.setup() may run concurrent index DDL on first use. Close the
+    # read transaction above first so that DDL cannot wait on its own task.
+    with SessionLocal() as db:
         run = ResearchService(registry, db).run(asset, event)
         if run.recommendation:
             notifier.recommendation(run.recommendation)

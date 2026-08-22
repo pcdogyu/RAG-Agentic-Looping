@@ -51,6 +51,10 @@ type Portfolio = {
 };
 
 type Snapshot = { events: EventItem[]; runs: Run[]; recommendations: Recommendation[] };
+type TaskStatus = {
+  state: string;
+  progress?: { phase: string; current: number; total: number };
+};
 
 const labels: Record<string, string> = {
   strongly_bullish: "强烈看多",
@@ -79,7 +83,8 @@ export default function App() {
   const [snapshot, setSnapshot] = useState<Snapshot>({ events: [], runs: [], recommendations: [] });
   const [portfolio, setPortfolio] = useState<Portfolio | null>(null);
   const [health, setHealth] = useState<Record<string, unknown>>({});
-  const [busy, setBusy] = useState(false);
+  const [scanBusy, setScanBusy] = useState(false);
+  const [scanLabel, setScanLabel] = useState("立即扫描");
   const [selected, setSelected] = useState<Recommendation | null>(null);
 
   const refresh = useCallback(async () => {
@@ -109,29 +114,49 @@ export default function App() {
   }, [refresh]);
 
   async function scan() {
-    setBusy(true);
+    setScanBusy(true);
+    setScanLabel("正在发现新闻…");
     try {
-      await fetch(`${API}/api/v1/scan`, {
+      const response = await fetch(`${API}/api/v1/scan`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ background: true }),
       });
+      if (!response.ok) throw new Error("scan request failed");
+      const queued = await response.json() as { task_id: string };
+      const deadline = Date.now() + 30 * 60 * 1000;
+      while (Date.now() < deadline) {
+        const taskResponse = await fetch(`${API}/api/v1/tasks/${queued.task_id}`);
+        if (!taskResponse.ok) throw new Error("task status failed");
+        const task = await taskResponse.json() as TaskStatus;
+        if (task.state === "PROGRESS" && task.progress) {
+          setScanLabel(`事件抽取 ${task.progress.current}/${task.progress.total}`);
+        } else if (task.state === "SUCCESS") {
+          setScanLabel("扫描完成");
+          await refresh();
+          return;
+        } else if (task.state === "FAILURE") {
+          throw new Error("scan task failed");
+        } else {
+          setScanLabel("扫描排队中…");
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 2000));
+      }
+      throw new Error("scan task timed out");
+    } catch {
+      setScanLabel("扫描失败，请重试");
     } finally {
-      window.setTimeout(() => setBusy(false), 1000);
+      setScanBusy(false);
+      window.setTimeout(() => setScanLabel("立即扫描"), 4000);
     }
   }
 
   async function research(candidate: Candidate, eventId: string) {
-    setBusy(true);
-    try {
-      await fetch(`${API}/api/v1/research`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ asset_id: candidate.asset.asset_id, event_id: eventId, background: true }),
-      });
-    } finally {
-      window.setTimeout(() => setBusy(false), 1000);
-    }
+    await fetch(`${API}/api/v1/research`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ asset_id: candidate.asset.asset_id, event_id: eventId, background: true }),
+    });
   }
 
   const confidenceAverage = useMemo(() => {
@@ -152,7 +177,7 @@ export default function App() {
           <div className={`status ${health.ollama ? "online" : "offline"}`}>
             <i /> Ollama {health.ollama ? "在线" : "离线"}
           </div>
-          <button onClick={scan} disabled={busy}>{busy ? "任务已提交" : "立即扫描"}</button>
+          <button onClick={scan} disabled={scanBusy}>{scanLabel}</button>
         </div>
       </header>
 

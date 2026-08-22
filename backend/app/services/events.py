@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from difflib import SequenceMatcher
 
 from pydantic import BaseModel, Field
@@ -16,7 +17,13 @@ from backend.app.domain import (
 )
 from backend.app.llm import LlmGateway, gateway
 from backend.app.providers.registry import ProviderRegistry
-from backend.app.storage import save_event, save_news, upsert_asset
+from backend.app.storage import (
+    event_news_item_ids,
+    get_news_by_content_hash,
+    save_event,
+    save_news,
+    upsert_asset,
+)
 
 
 class ExtractedEvent(BaseModel):
@@ -52,10 +59,27 @@ class EventService:
         self.settings = settings or get_settings()
         self.llm = llm or gateway
 
-    def ingest(self, db: Session, items: list[NewsItem]) -> list[NewsEvent]:
+    def ingest(
+        self,
+        db: Session,
+        items: list[NewsItem],
+        progress: Callable[[int, int], None] | None = None,
+    ) -> list[NewsEvent]:
         events: list[NewsEvent] = []
-        for item in items:
+        processed_ids = event_news_item_ids(db)
+        total = len(items)
+        for index, discovered_item in enumerate(items, start=1):
+            item = discovered_item
             if not save_news(db, item):
+                stored_item = get_news_by_content_hash(db, item.content_hash)
+                if not stored_item or stored_item.id in processed_ids:
+                    if progress:
+                        progress(index, total)
+                    continue
+                item = stored_item
+            if item.id in processed_ids:
+                if progress:
+                    progress(index, total)
                 continue
             event = self.extract(item)
             for candidate in event.candidates:
@@ -79,10 +103,13 @@ class EventService:
                     existing.source_quality
                 ):
                     existing.source_quality = event.source_quality
+                save_event(db, existing)
             else:
                 events.append(event)
-        for event in events:
-            save_event(db, event)
+                save_event(db, event)
+            processed_ids.add(item.id)
+            if progress:
+                progress(index, total)
         return events
 
     @staticmethod

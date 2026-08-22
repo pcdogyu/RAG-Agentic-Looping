@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import atexit
 import json
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal, TypedDict
@@ -31,6 +31,9 @@ from backend.app.llm import LlmGateway, gateway
 from backend.app.providers.registry import ProviderRegistry
 from backend.app.services.retrieval import RetrievalService
 from backend.app.storage import get_evidence, list_news, save_recommendation, save_run
+
+_checkpoint_setup_lock = threading.Lock()
+_checkpoint_setup_done = False
 
 
 class DraftOutput(BaseModel):
@@ -95,6 +98,7 @@ class ResearchService:
         self.graph = self._build_graph()
 
     def _make_checkpointer(self):
+        global _checkpoint_setup_done
         if not self.settings.database_url.startswith("postgresql"):
             return InMemorySaver()
         try:
@@ -103,10 +107,13 @@ class ResearchService:
             uri = self.settings.database_url.replace("postgresql+psycopg://", "postgresql://")
             self._checkpointer_context = PostgresSaver.from_conn_string(uri)
             saver = self._checkpointer_context.__enter__()
-            saver.setup()
-            atexit.register(self._close_checkpointer)
+            with _checkpoint_setup_lock:
+                if not _checkpoint_setup_done:
+                    saver.setup()
+                    _checkpoint_setup_done = True
             return saver
         except Exception:
+            self._close_checkpointer()
             return InMemorySaver()
 
     def _close_checkpointer(self) -> None:
@@ -160,6 +167,8 @@ class ResearchService:
             failed.updated_at = utc_now()
             save_run(self.db, failed)
             return failed
+        finally:
+            self._close_checkpointer()
 
     def _gather(self, state: ResearchState) -> dict[str, Any]:
         run = ResearchRun.model_validate(state["run"])

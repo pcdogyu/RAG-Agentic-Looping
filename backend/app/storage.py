@@ -104,6 +104,29 @@ def save_news(db: Session, item: NewsItem) -> bool:
         return False
 
 
+def get_news_by_content_hash(db: Session, content_hash: str) -> NewsItem | None:
+    row = db.scalar(select(NewsRow).where(NewsRow.content_hash == content_hash))
+    return news_from_row(row) if row else None
+
+
+def event_news_item_ids(db: Session) -> set[UUID]:
+    """Return news IDs already attached to a durable event.
+
+    A news row is committed before LLM extraction so a failed worker never loses
+    the source item. This projection lets the next scan resume those orphaned
+    rows without reprocessing items whose event was already saved.
+    """
+
+    processed: set[UUID] = set()
+    for payload in db.scalars(select(EventRow.payload)).all():
+        for value in (payload or {}).get("news_item_ids", []):
+            try:
+                processed.add(UUID(str(value)))
+            except (TypeError, ValueError):
+                continue
+    return processed
+
+
 def news_from_row(row: NewsRow) -> NewsItem:
     return NewsItem(
         id=row.id,
@@ -131,18 +154,15 @@ def list_news(db: Session, limit: int = 100, as_of: datetime | None = None) -> l
 
 
 def save_event(db: Session, event: NewsEvent) -> None:
-    db.add(
-        EventRow(
-            id=event.id,
-            headline=event.headline,
-            event_type=event.event_type.value,
-            payload=event.model_dump(mode="json"),
-            priority=event.priority,
-            published_at=event.published_at,
-            observed_at=event.observed_at,
-            as_of=event.as_of,
-        )
-    )
+    row = db.get(EventRow, event.id) or EventRow(id=event.id)
+    row.headline = event.headline
+    row.event_type = event.event_type.value
+    row.payload = event.model_dump(mode="json")
+    row.priority = event.priority
+    row.published_at = event.published_at
+    row.observed_at = event.observed_at
+    row.as_of = event.as_of
+    db.add(row)
     db.commit()
 
 

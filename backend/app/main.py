@@ -44,7 +44,7 @@ from backend.app.storage import (
     save_evolution,
     upsert_asset,
 )
-from backend.app.worker import evolve_failures, research_asset, scan_news
+from backend.app.worker import celery_app, enqueue_scan, evolve_failures, research_asset
 from backend.app.worker import execute_evolution as execute_evolution_task
 
 settings = get_settings()
@@ -183,12 +183,25 @@ def events(
 @app.post("/api/v1/scan")
 def start_scan(request: ScanRequest, db: Session = Depends(get_db)):
     if request.background:
-        task = scan_news.apply_async(queue="io")
-        return {"task_id": task.id, "status": "queued"}
+        task_id, status = enqueue_scan()
+        return {"task_id": task_id, "status": status}
     since = utc_now() - timedelta(minutes=settings.scan_interval_minutes * 2)
-    items = registry.discover_news(since=since, limit=200)
+    items = registry.discover_news(since=since, limit=settings.scan_batch_size)
     created = EventService(registry).ingest(db, items)
     return {"news": len(items), "events": len(created)}
+
+
+@app.get("/api/v1/tasks/{task_id}")
+def task_status(task_id: str):
+    task = celery_app.AsyncResult(task_id)
+    payload: dict = {"task_id": task_id, "state": task.state}
+    if task.state == "PROGRESS" and isinstance(task.info, dict):
+        payload["progress"] = task.info
+    elif task.successful():
+        payload["result"] = task.result
+    elif task.failed():
+        payload["error"] = type(task.result).__name__
+    return payload
 
 
 @app.post("/api/v1/research", response_model=ResearchRun | dict)
@@ -203,6 +216,8 @@ def start_research(request: ResearchRequest, db: Session = Depends(get_db)):
         )
         return {"task_id": task.id, "status": "queued"}
     event = get_event(db, request.event_id) if request.event_id else None
+    # Release the read-only transaction before first-use checkpoint DDL.
+    db.rollback()
     return ResearchService(registry, db).run(asset, event, request.as_of)
 
 

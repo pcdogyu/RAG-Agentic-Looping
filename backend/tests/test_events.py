@@ -1,5 +1,6 @@
 from datetime import UTC, datetime
 from hashlib import sha256
+from uuid import uuid4
 
 import pytest
 
@@ -7,6 +8,7 @@ from backend.app.config import Settings
 from backend.app.domain import NewsItem, SourceQuality
 from backend.app.providers.registry import ProviderRegistry
 from backend.app.services.events import EventService, ExtractedEvent
+from backend.app.storage import list_events, save_news
 
 
 class FakeLlm:
@@ -71,3 +73,31 @@ def test_ingest_clusters_duplicate_reprints(db):
 
     assert len(events) == 1
     assert len(events[0].news_item_ids) == 2
+    assert len(list_events(db)) == 1
+    assert len(list_events(db)[0].news_item_ids) == 2
+
+
+def test_ingest_resumes_news_saved_before_event_extraction(db):
+    settings = Settings(fmp_access_token="", fmp_mcp_url="")
+    registry = ProviderRegistry(settings)
+    published = datetime(2025, 1, 31, tzinfo=UTC)
+    stored = NewsItem(
+        source="Wire A",
+        source_quality=SourceQuality.PROFESSIONAL,
+        title="Apple reports Services revenue growth",
+        summary="Services revenue grew.",
+        url="https://a.example/apple",
+        published_at=published,
+        observed_at=published,
+        as_of=published,
+        content_hash=sha256(b"orphaned-news").hexdigest(),
+        symbols=["AAPL"],
+    )
+    assert save_news(db, stored)
+
+    rediscovered = stored.model_copy(update={"id": uuid4()})
+    events = EventService(registry, settings, FakeLlm()).ingest(db, [rediscovered])
+
+    assert len(events) == 1
+    assert events[0].news_item_ids == [stored.id]
+    assert len(list_events(db)) == 1

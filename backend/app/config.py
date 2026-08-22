@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     cloud_llm_model: str = ""
 
     scan_interval_minutes: int = Field(default=20, ge=5, le=1440)
+    scan_batch_size: int = Field(default=40, ge=1, le=200)
     auto_research: bool = True
     auto_paper_trade: bool = False
     evolution_enabled: bool = False
