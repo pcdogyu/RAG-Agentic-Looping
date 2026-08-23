@@ -73,8 +73,79 @@ export type HealthStatus = {
 };
 
 export type ModelConnectionState = "checking" | "offline" | "available" | "missing";
+export type Theme = "dark" | "light";
+
+export type TrackedConnection = {
+  failures: number;
+  state: ModelConnectionState;
+};
+
+export type HealthTrackingState = {
+  ollama: TrackedConnection;
+  models: Record<string, TrackedConnection>;
+};
 
 const ollamaModels = ["qwen2.5:3b", "qwen2.5:7b", "qwen2.5-coder:7b"] as const;
+const healthFailureThreshold = 3;
+const themeStorageKey = "market-loop-theme";
+
+export function normalizeTheme(value: string | null): Theme {
+  return value === "light" ? "light" : "dark";
+}
+
+export function createInitialHealthTracking(): HealthTrackingState {
+  return {
+    ollama: { failures: 0, state: "checking" },
+    models: Object.fromEntries(
+      ollamaModels.map((model) => [model, { failures: 0, state: "checking" }]),
+    ),
+  };
+}
+
+function advanceConnection(
+  current: TrackedConnection,
+  available: boolean,
+  failureState: Extract<ModelConnectionState, "offline" | "missing">,
+): TrackedConnection {
+  if (available) return { failures: 0, state: "available" };
+  const failures = current.failures + 1;
+  return {
+    failures,
+    state: failures >= healthFailureThreshold ? failureState : "checking",
+  };
+}
+
+export function updateHealthTracking(
+  current: HealthTrackingState,
+  health: HealthStatus | null,
+): HealthTrackingState {
+  const ollamaAvailable = health?.ollama === true;
+  const installedModels = new Set(
+    ollamaAvailable ? health.models.map((name) => name.toLocaleLowerCase()) : [],
+  );
+  return {
+    ollama: advanceConnection(current.ollama, ollamaAvailable, "offline"),
+    models: Object.fromEntries(ollamaModels.map((model) => {
+      const available = ollamaAvailable && installedModels.has(model.toLocaleLowerCase());
+      return [
+        model,
+        advanceConnection(
+          current.models[model],
+          available,
+          ollamaAvailable ? "missing" : "offline",
+        ),
+      ];
+    })),
+  };
+}
+
+function isHealthStatus(value: unknown): value is HealthStatus {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<HealthStatus>;
+  return typeof candidate.ollama === "boolean"
+    && Array.isArray(candidate.models)
+    && candidate.models.every((model) => typeof model === "string");
+}
 
 type AnalysisStep = {
   phase: string;
@@ -178,18 +249,6 @@ function isScanning(state: string) {
   return state === "queued" || state === "running" || state === "retrying";
 }
 
-export function modelConnectionState(
-  health: HealthStatus | null,
-  modelName: string,
-): ModelConnectionState {
-  if (!health) return "checking";
-  if (!health.ollama) return "offline";
-  const expected = modelName.toLocaleLowerCase();
-  return health.models.some((name) => name.toLocaleLowerCase() === expected)
-    ? "available"
-    : "missing";
-}
-
 export function formatCountdown(totalSeconds: number) {
   const safe = Math.max(0, Math.ceil(totalSeconds));
   const minutes = Math.floor(safe / 60);
@@ -237,7 +296,15 @@ export default function App() {
     events: [], runs: [], recommendations: [], analysis_logs: [],
   });
   const [portfolio, setPortfolio] = useState<Portfolio | null>(null);
-  const [health, setHealth] = useState<HealthStatus | null>(null);
+  const [healthTracking, setHealthTracking] = useState(createInitialHealthTracking);
+  const [theme, setTheme] = useState<Theme>(() => {
+    if (typeof window === "undefined") return "dark";
+    try {
+      return normalizeTheme(window.localStorage.getItem(themeStorageKey));
+    } catch {
+      return "dark";
+    }
+  });
   const [scanStatus, setScanStatus] = useState<ScanStatus | null>(null);
   const [serverOffset, setServerOffset] = useState(0);
   const [clock, setClock] = useState(Date.now());
@@ -250,24 +317,40 @@ export default function App() {
     setServerOffset(Date.parse(status.server_time) - Date.now());
   }, []);
 
+  const pollHealth = useCallback(async (signal?: AbortSignal) => {
+    let healthData: HealthStatus | null = null;
+    try {
+      const response = await fetch(`${API}/health`, { signal });
+      if (!response.ok) throw new Error(`Health request failed with ${response.status}`);
+      const payload: unknown = await response.json();
+      if (!isHealthStatus(payload)) throw new Error("Health response is invalid");
+      healthData = payload;
+    } catch {
+      if (signal?.aborted) return;
+      healthData = null;
+    }
+    if (signal?.aborted) return;
+    setHealthTracking((current) => updateHealthTracking(current, healthData));
+  }, []);
+
   const refresh = useCallback(async () => {
-    const [events, runs, recommendations, portfolioData, healthData, scanData, analysisLogs] = await Promise.all([
+    const [events, runs, recommendations, portfolioData, scanData, analysisLogs] = await Promise.all([
       fetch(`${API}/api/v1/events?limit=30`).then((r) => r.json()),
       fetch(`${API}/api/v1/research-runs?limit=20`).then((r) => r.json()),
       fetch(`${API}/api/v1/recommendations?limit=20`).then((r) => r.json()),
       fetch(`${API}/api/v1/portfolio`).then((r) => r.json()),
-      fetch(`${API}/health`).then((r) => r.json() as Promise<HealthStatus>),
       fetch(`${API}/api/v1/scan/status`).then((r) => r.json()),
       fetch(`${API}/api/v1/analysis-logs?limit=10`).then((r) => r.json()),
     ]);
     setSnapshot({ events, runs, recommendations, analysis_logs: analysisLogs });
     setPortfolio(portfolioData);
-    setHealth(healthData);
     applyScanStatus(scanData);
   }, [applyScanStatus]);
 
   useEffect(() => {
+    const healthController = new AbortController();
     refresh().catch(() => undefined);
+    pollHealth(healthController.signal);
     const stream = new EventSource(`${API}/api/v1/stream`);
     stream.addEventListener("snapshot", (event) => {
       const incoming = JSON.parse((event as MessageEvent).data) as DashboardSnapshot;
@@ -282,23 +365,35 @@ export default function App() {
       fetch(`${API}/api/v1/portfolio`).then((r) => r.json()).then(setPortfolio).catch(() => undefined);
     }, 15000);
     const healthTimer = window.setInterval(() => {
-      fetch(`${API}/health`)
-        .then((r) => r.json() as Promise<HealthStatus>)
-        .then(setHealth)
-        .catch(() => setHealth(null));
-    }, 30000);
+      pollHealth(healthController.signal);
+    }, 60000);
     const scanTimer = window.setInterval(() => {
       fetch(`${API}/api/v1/scan/status`).then((r) => r.json()).then(applyScanStatus).catch(() => undefined);
     }, 2000);
     const clockTimer = window.setInterval(() => setClock(Date.now()), 1000);
     return () => {
+      healthController.abort();
       stream.close();
       window.clearInterval(portfolioTimer);
       window.clearInterval(healthTimer);
       window.clearInterval(scanTimer);
       window.clearInterval(clockTimer);
     };
-  }, [applyScanStatus, refresh]);
+  }, [applyScanStatus, pollHealth, refresh]);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    document.documentElement.style.colorScheme = theme;
+    document.querySelector('meta[name="theme-color"]')?.setAttribute(
+      "content",
+      theme === "light" ? "#f2f7f5" : "#07110f",
+    );
+    try {
+      window.localStorage.setItem(themeStorageKey, theme);
+    } catch {
+      // The selected theme still applies when storage is unavailable.
+    }
+  }, [theme]);
 
   useEffect(() => {
     if (snapshot.analysis_logs.length && !snapshot.analysis_logs.some((item) => item.id === expandedLog)) {
@@ -388,18 +483,37 @@ export default function App() {
         <div className="header-actions">
           <div className="health-cluster">
             <div
-              className={`status ${health ? (health.ollama ? "online" : "offline") : "checking"}`}
-              aria-label={`Ollama ${health ? (health.ollama ? "在线" : "离线") : "检测中"}`}
+              className={`status ${healthTracking.ollama.state === "available" ? "online" : healthTracking.ollama.state}`}
+              aria-label={`Ollama ${ollamaStateLabels[healthTracking.ollama.state]}`}
             >
               <i /> Ollama
             </div>
             <div className="model-statuses" aria-label="千问模型连接状态">
               {ollamaModels.map((model) => (
-                <ModelStatus key={model} health={health} model={model} />
+                <ModelStatus key={model} state={healthTracking.models[model].state} model={model} />
               ))}
             </div>
           </div>
+          <div className="theme-switcher" role="group" aria-label="主题切换">
+            <button
+              type="button"
+              className={theme === "dark" ? "active" : undefined}
+              aria-pressed={theme === "dark"}
+              onClick={() => setTheme("dark")}
+            >
+              深色
+            </button>
+            <button
+              type="button"
+              className={theme === "light" ? "active" : undefined}
+              aria-pressed={theme === "light"}
+              onClick={() => setTheme("light")}
+            >
+              浅色
+            </button>
+          </div>
           <button
+            type="button"
             onClick={scan}
             disabled={scanActionPending}
             className={scanPaused ? "paused" : scanBusy ? "scanning" : undefined}
@@ -637,14 +751,18 @@ const modelStateLabels: Record<ModelConnectionState, string> = {
   missing: "未安装",
 };
 
+const ollamaStateLabels: Record<ModelConnectionState, string> = {
+  ...modelStateLabels,
+  available: "在线",
+};
+
 function ModelStatus({
-  health,
+  state,
   model,
 }: {
-  health: HealthStatus | null;
+  state: ModelConnectionState;
   model: string;
 }) {
-  const state = modelConnectionState(health, model);
   return (
     <div
       className={`model-status ${state}`}

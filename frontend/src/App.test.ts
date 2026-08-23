@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { analysisPendingText, formatCountdown, modelConnectionState, scanButtonText } from "./App";
+import {
+  analysisPendingText,
+  createInitialHealthTracking,
+  formatCountdown,
+  normalizeTheme,
+  scanButtonText,
+  updateHealthTracking,
+} from "./App";
 
 const baseStatus = {
   state: "idle",
@@ -51,29 +58,70 @@ describe("scan status presentation", () => {
 });
 
 describe("Ollama model availability", () => {
-  it("reports checking before health data arrives", () => {
-    expect(modelConnectionState(null, "qwen2.5:3b")).toBe("checking");
+  it("starts in checking and turns red on the third unreachable poll", () => {
+    let tracking = createInitialHealthTracking();
+    expect(tracking.ollama.state).toBe("checking");
+
+    tracking = updateHealthTracking(tracking, null);
+    expect(tracking.ollama).toEqual({ failures: 1, state: "checking" });
+    expect(tracking.models["qwen2.5:3b"].state).toBe("checking");
+
+    tracking = updateHealthTracking(tracking, { ollama: false, models: [] });
+    expect(tracking.ollama).toEqual({ failures: 2, state: "checking" });
+
+    tracking = updateHealthTracking(tracking, null);
+    expect(tracking.ollama).toEqual({ failures: 3, state: "offline" });
+    expect(tracking.models["qwen2.5:3b"].state).toBe("offline");
   });
 
-  it("reports every model offline when Ollama is unreachable", () => {
-    expect(modelConnectionState({ ollama: false, models: [] }, "qwen2.5:7b")).toBe("offline");
+  it("recovers every available connection immediately after three failures", () => {
+    let tracking = createInitialHealthTracking();
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      tracking = updateHealthTracking(tracking, null);
+    }
+
+    tracking = updateHealthTracking(tracking, {
+      ollama: true,
+      models: ["qwen2.5:3b", "qwen2.5:7b", "qwen2.5-coder:7b"],
+    });
+
+    expect(tracking.ollama).toEqual({ failures: 0, state: "available" });
+    expect(tracking.models["qwen2.5:7b"]).toEqual({ failures: 0, state: "available" });
   });
 
-  it("distinguishes installed and missing models", () => {
+  it("tracks missing models independently from Ollama and installed models", () => {
     const health = {
       ollama: true,
       models: ["qwen2.5:3b", "qwen2.5:7b"],
     };
+    let tracking = createInitialHealthTracking();
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      tracking = updateHealthTracking(tracking, health);
+    }
 
-    expect(modelConnectionState(health, "qwen2.5:3b")).toBe("available");
-    expect(modelConnectionState(health, "qwen2.5-coder:7b")).toBe("missing");
+    expect(tracking.ollama.state).toBe("available");
+    expect(tracking.models["qwen2.5:3b"].state).toBe("available");
+    expect(tracking.models["qwen2.5-coder:7b"]).toEqual({ failures: 3, state: "missing" });
   });
 
   it("matches Ollama model names case-insensitively", () => {
-    expect(modelConnectionState(
+    const tracking = updateHealthTracking(
+      createInitialHealthTracking(),
       { ollama: true, models: ["QWEN2.5-CODER:7B"] },
-      "qwen2.5-coder:7b",
-    )).toBe("available");
+    );
+    expect(tracking.models["qwen2.5-coder:7b"].state).toBe("available");
+  });
+});
+
+describe("theme selection", () => {
+  it("defaults missing or invalid stored values to dark", () => {
+    expect(normalizeTheme(null)).toBe("dark");
+    expect(normalizeTheme("system")).toBe("dark");
+  });
+
+  it("restores either persisted theme", () => {
+    expect(normalizeTheme("dark")).toBe("dark");
+    expect(normalizeTheme("light")).toBe("light");
   });
 });
 
