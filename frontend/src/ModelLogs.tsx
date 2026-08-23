@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+import BuildFooter from "./BuildFooter";
+
 export type ModelLogSummary = {
   id: string;
   logical_call_id: string;
@@ -340,6 +342,7 @@ export default function ModelLogsPage({ apiBase, onBack }: { apiBase: string; on
         </div>
         {nextCursor && <button type="button" className="load-more" onClick={loadMore} disabled={loadingMore}>{loadingMore ? "正在加载…" : "加载更多"}</button>}
       </section>
+      <BuildFooter />
     </main>
   );
 }

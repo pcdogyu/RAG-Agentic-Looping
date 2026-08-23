@@ -156,6 +156,9 @@ h1 span { color: var(--mint); font-weight: 400; }
 .modal-score strong { font: 500 42px "DM Mono", monospace; color: var(--mint); }
 
 .trace-panel { width: 100%; margin-top: 12px; }
+.build-footer { display: flex; justify-content: center; flex-wrap: wrap; gap: 7px; margin-top: 24px; padding: 18px 10px 0; border-top: 1px solid var(--line); color: var(--muted); font: 400 10px/1.6 "DM Mono", monospace; letter-spacing: .02em; overflow-wrap: anywhere; }
+.build-footer a { color: var(--secondary); text-decoration: none; }
+.build-footer a:hover { color: var(--mint); }
 .trace-list { display: grid; }
 .trace-card { border-bottom: 1px solid var(--line); }
 .trace-card:last-child { border-bottom: 0; }

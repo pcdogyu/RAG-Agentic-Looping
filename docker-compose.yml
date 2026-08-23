@@ -89,6 +89,10 @@ services:
   web:
     build:
       context: frontend
+      args:
+        VITE_BUILD_COMMIT_ID: ${VITE_BUILD_COMMIT_ID:-unknown}
+        VITE_BUILD_COMMIT_TIME: ${VITE_BUILD_COMMIT_TIME:-unknown}
+        VITE_BUILD_BRANCH: ${VITE_BUILD_BRANCH:-unknown}
     environment:
       VITE_API_URL: http://localhost:8000
     ports:

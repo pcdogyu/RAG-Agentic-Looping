@@ -10,6 +10,7 @@ import {
   scanButtonText,
   updateHealthTracking,
 } from "./App";
+import BuildFooter, { buildInfo } from "./BuildFooter";
 import ModelLogsPage, {
   buildModelLogQuery,
   fidelityLabel,
@@ -129,6 +130,17 @@ describe("theme selection", () => {
   it("restores either persisted theme", () => {
     expect(normalizeTheme("dark")).toBe("dark");
     expect(normalizeTheme("light")).toBe("light");
+  });
+});
+
+describe("build footer", () => {
+  it("renders the author and Git build coordinates", () => {
+    const markup = renderToStaticMarkup(createElement(BuildFooter));
+    expect(markup).toContain("Code by");
+    expect(markup).toContain("mailto:Yuhao@jiansutech.co");
+    expect(markup).toContain(buildInfo.commitTime);
+    expect(markup).toContain(buildInfo.branch);
+    expect(markup).toContain(buildInfo.commitId.slice(0, 12));
   });
 });
 

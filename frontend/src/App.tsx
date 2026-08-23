@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+import BuildFooter from "./BuildFooter";
 import ModelLogsPage, { isModelLogsHash } from "./ModelLogs";
 
 const API = import.meta.env.VITE_API_URL || "http://localhost:8000";
@@ -758,6 +759,7 @@ export default function App() {
           </article>
         </div>
       )}
+      <BuildFooter />
     </main>
   );
 }
