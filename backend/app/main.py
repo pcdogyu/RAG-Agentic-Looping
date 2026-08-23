@@ -96,6 +96,7 @@ class ResearchRequest(BaseModel):
     asset_id: str
     event_id: UUID | None = None
     as_of: datetime | None = None
+    historical_replay: bool = False
     background: bool = True
 
 
@@ -251,12 +252,23 @@ def start_research(request: ResearchRequest, db: Session = Depends(get_db)):
         raise HTTPException(404, "asset not found")
     if request.background:
         event = get_event(db, request.event_id) if request.event_id else None
-        task_id, run = enqueue_research(db, asset, event, request.as_of)
+        task_id, run = enqueue_research(
+            db,
+            asset,
+            event,
+            request.as_of,
+            historical_replay=request.historical_replay,
+        )
         return {"task_id": task_id, "run_id": str(run.id), "status": "queued"}
     event = get_event(db, request.event_id) if request.event_id else None
     # Release the read-only transaction before first-use checkpoint DDL.
     db.rollback()
-    return ResearchService(registry, db).run(asset, event, request.as_of)
+    return ResearchService(registry, db).run(
+        asset,
+        event,
+        request.as_of,
+        historical_replay=request.historical_replay,
+    )
 
 
 @app.get("/api/v1/research-runs")

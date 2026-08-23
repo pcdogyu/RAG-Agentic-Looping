@@ -195,6 +195,7 @@ def test_each_event_queues_only_its_primary_asset_and_unmapped_is_auditable(db, 
     queued = worker.enqueue_event_research(db, event)
     assert queued is not None
     assert list_runs(db)[0].asset.asset_id == SEED_ASSETS[0].asset_id
+    assert list_runs(db)[0].historical_replay is False
 
     unmapped = event.model_copy(
         update={"id": None, "headline": "Unmapped event", "candidates": []}

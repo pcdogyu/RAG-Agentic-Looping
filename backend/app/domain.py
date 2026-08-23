@@ -221,6 +221,7 @@ class ResearchRun(BaseModel):
     asset: AssetRef
     status: RunStatus = RunStatus.QUEUED
     as_of: datetime = Field(default_factory=utc_now)
+    historical_replay: bool = False
     verification_round: int = 0
     missing_requirements: list[str] = Field(default_factory=list)
     contradictions: list[str] = Field(default_factory=list)

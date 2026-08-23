@@ -17,7 +17,11 @@ from backend.app.storage import save_news
 
 
 class FakeRegistry:
+    def __init__(self):
+        self.research_calls = 0
+
     def get_research_data(self, asset):
+        self.research_calls += 1
         return {
             "fundamentals": {
                 "income": [
@@ -110,7 +114,11 @@ def test_research_graph_produces_verified_recommendation(db, tmp_path):
         fmp_access_token="",
         fmp_mcp_url="",
     )
-    run = ResearchService(FakeRegistry(), db, settings, FakeResearchLlm()).run(asset, event, as_of)
+    registry = FakeRegistry()
+    run = ResearchService(registry, db, settings, FakeResearchLlm()).run(asset, event, as_of)
+    assert registry.research_calls == 1
+    assert any(item.source_name == "FMP standardized financials" for item in run.evidence)
+    assert run.historical_replay is False
     assert run.recommendation is not None
     assert run.recommendation.evidence_complete is True
     assert run.recommendation.rating is Rating.BULLISH
@@ -131,3 +139,25 @@ def test_research_graph_produces_verified_recommendation(db, tmp_path):
     assert strong_run.recommendation.evidence_complete is True
     assert strong_run.recommendation.rating is Rating.WATCH
     assert strong_run.verification_round == 2
+
+
+def test_explicit_historical_replay_skips_live_providers(db, tmp_path):
+    as_of = datetime(2025, 1, 31, tzinfo=UTC)
+    registry = FakeRegistry()
+    settings = Settings(
+        database_url="sqlite:///./data/test_agent.db",
+        reports_dir=tmp_path,
+        fmp_access_token="",
+        fmp_mcp_url="",
+    )
+
+    run = ResearchService(registry, db, settings, FakeResearchLlm()).run(
+        SEED_ASSETS[0],
+        as_of=as_of,
+        historical_replay=True,
+    )
+
+    assert registry.research_calls == 0
+    assert run.historical_replay is True
+    assert run.evidence == []
+    assert run.status.value == "insufficient_evidence"

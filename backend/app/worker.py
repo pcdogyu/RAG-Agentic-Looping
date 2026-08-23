@@ -361,6 +361,7 @@ def enqueue_research(
     asset: AssetRef,
     event: NewsEvent | None = None,
     as_of: datetime | None = None,
+    historical_replay: bool = False,
 ) -> tuple[str, ResearchRun]:
     """Persist a visible queued run before handing work to the LLM worker."""
 
@@ -368,6 +369,7 @@ def enqueue_research(
         event_id=event.id if event else None,
         asset=asset,
         as_of=as_of or utc_now(),
+        historical_replay=historical_replay,
         analysis_steps=[
             *(event.analysis_steps if event else []),
             AnalysisStep(
@@ -859,6 +861,7 @@ def research_asset(
             asset,
             event,
             as_of=queued_run.as_of if queued_run else None,
+            historical_replay=queued_run.historical_replay if queued_run else False,
             queued_run=queued_run,
         )
         if run.recommendation:

@@ -146,12 +146,14 @@ class ResearchService:
         asset: AssetRef,
         event: NewsEvent | None = None,
         as_of: datetime | None = None,
+        historical_replay: bool | None = None,
         queued_run: ResearchRun | None = None,
     ) -> ResearchRun:
         run = queued_run or ResearchRun(
             event_id=event.id if event else None,
             asset=asset,
             as_of=as_of or utc_now(),
+            historical_replay=bool(historical_replay),
             analysis_steps=[
                 *(event.analysis_steps if event else []),
                 AnalysisStep(
@@ -161,12 +163,14 @@ class ResearchService:
                 ),
             ],
         )
+        if historical_replay is not None:
+            run.historical_replay = historical_replay
         save_run(self.db, run)
         state: ResearchState = {
             "run": run.model_dump(mode="json"),
             "event": event.model_dump(mode="json") if event else None,
             "verification_round": 0,
-            "historical_replay": as_of is not None,
+            "historical_replay": run.historical_replay,
         }
         try:
             final_state = self.graph.invoke(
