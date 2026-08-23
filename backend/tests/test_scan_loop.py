@@ -6,11 +6,19 @@ from types import SimpleNamespace
 import pytest
 
 from backend.app import worker
-from backend.app.domain import AnalysisStep, CandidateAsset, NewsEvent, NewsItem, SourceQuality
+from backend.app.domain import (
+    AnalysisStep,
+    CandidateAsset,
+    Evidence,
+    NewsEvent,
+    NewsItem,
+    RunStatus,
+    SourceQuality,
+)
 from backend.app.main import _analysis_logs
 from backend.app.providers.registry import SEED_ASSETS
 from backend.app.services.asset_mapping import AssetMappingResult
-from backend.app.storage import get_event, list_runs, save_event, save_news
+from backend.app.storage import get_event, list_runs, save_event, save_news, save_run
 
 
 class FakeRedis:
@@ -254,6 +262,83 @@ def test_7b_fallback_queues_at_most_three_distinct_assets_idempotently(db, monke
     assert repeated == []
     assert queued_assets == [item.asset.asset_id for item in candidates[:3]]
     assert len(list_runs(db)) == 3
+
+
+def test_insufficient_run_requeues_when_persistent_cluster_gets_new_evidence(db, monkeypatch):
+    queued_tasks = []
+    monkeypatch.setattr(
+        worker.research_asset,
+        "apply_async",
+        lambda **kwargs: queued_tasks.append(kwargs) or SimpleNamespace(id="research-task"),
+    )
+    observed = datetime(2026, 8, 22, 12, 0, tzinfo=UTC)
+    first_news = NewsItem(
+        source="Wire A",
+        source_quality=SourceQuality.PROFESSIONAL,
+        title="Apple reports Services revenue growth",
+        url="https://a.example/apple",
+        published_at=observed,
+        observed_at=observed,
+        as_of=observed,
+        content_hash=sha256(b"requeue-a").hexdigest(),
+    )
+    second_news = first_news.model_copy(
+        update={
+            "id": None,
+            "source": "Wire B",
+            "url": "https://b.example/apple",
+            "content_hash": sha256(b"requeue-b").hexdigest(),
+        }
+    )
+    second_news = NewsItem(**second_news.model_dump(exclude={"id"}))
+    save_news(db, first_news)
+    save_news(db, second_news)
+    event = NewsEvent(
+        news_item_ids=[first_news.id],
+        headline=first_news.title,
+        event_type="earnings",
+        entities=["Apple"],
+        direct_impact="Services revenue grew.",
+        source_quality=SourceQuality.PROFESSIONAL,
+        published_at=observed,
+        observed_at=observed,
+        as_of=observed,
+        candidates=[
+            CandidateAsset(
+                asset=SEED_ASSETS[0],
+                relationship="direct",
+                relevance=1,
+                rationale="AAPL is explicit",
+            )
+        ],
+    )
+    first_task = worker.enqueue_event_research(db, event)
+    assert first_task is not None
+    first_run = list_runs(db)[0]
+    first_run.status = RunStatus.INSUFFICIENT_EVIDENCE
+    first_run.evidence = [
+        Evidence(
+            run_id=first_run.id,
+            claim=first_news.title,
+            source_name=first_news.source,
+            source_url=first_news.url,
+            source_quality=first_news.source_quality,
+            published_at=observed,
+            observed_at=observed,
+            as_of=observed,
+            excerpt=first_news.title,
+            independent_group="origin:a.example",
+        )
+    ]
+    save_run(db, first_run)
+    event.news_item_ids.append(second_news.id)
+    save_event(db, event)
+
+    second_task = worker.enqueue_event_research(db, event)
+
+    assert second_task is not None
+    assert len(queued_tasks) == 2
+    assert len(list_runs(db)) == 2
 
 
 def test_unmapped_event_queues_only_one_visible_7b_mapping_task(db, monkeypatch):

@@ -33,6 +33,7 @@ from backend.app.domain import (
     as_utc,
     utc_now,
 )
+from backend.app.services.source_lineage import enrich_news_lineage
 
 
 def upsert_asset(db: Session, asset: AssetRef) -> AssetRef:
@@ -81,6 +82,7 @@ def get_asset(db: Session, asset_id: str) -> AssetRef | None:
 
 
 def save_news(db: Session, item: NewsItem) -> bool:
+    item = enrich_news_lineage(item)
     payload = item.model_dump(mode="json")
     row = NewsRow(
         id=item.id,
@@ -290,7 +292,7 @@ def get_run_for_event_asset(
         select(ResearchRunRow).where(
             ResearchRunRow.event_id == event_id,
             ResearchRunRow.asset_id == asset_id,
-        )
+        ).order_by(desc(ResearchRunRow.created_at))
     )
     return ResearchRun.model_validate(row.payload) if row else None
 

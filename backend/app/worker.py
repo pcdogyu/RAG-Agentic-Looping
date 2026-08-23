@@ -34,6 +34,7 @@ from backend.app.services.notifications import notifier
 from backend.app.services.outcomes import OutcomeService
 from backend.app.services.portfolio import PortfolioService
 from backend.app.services.research import ResearchService
+from backend.app.services.source_lineage import canonicalize_url
 from backend.app.storage import (
     get_asset,
     get_event,
@@ -409,8 +410,22 @@ def enqueue_event_researches(
 
     queued: list[tuple[str, ResearchRun]] = []
     for candidate in event.candidates[:limit]:
-        if get_run_for_event_asset(db, event.id, candidate.asset.asset_id):
-            continue
+        existing = get_run_for_event_asset(db, event.id, candidate.asset.asset_id)
+        if existing:
+            event_urls = {
+                canonicalize_url(item.url)
+                for news_id in event.news_item_ids
+                if (item := get_news(db, news_id)) is not None
+            }
+            researched_urls = {
+                canonicalize_url(item.source_url) for item in existing.evidence
+            }
+            has_new_cluster_evidence = bool(event_urls - researched_urls)
+            if (
+                existing.status is not RunStatus.INSUFFICIENT_EVIDENCE
+                or not has_new_cluster_evidence
+            ):
+                continue
         queued.append(enqueue_research(db, candidate.asset, event))
     return queued
 

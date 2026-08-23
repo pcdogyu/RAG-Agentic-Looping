@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
+from datetime import timedelta
 from difflib import SequenceMatcher
 
 from pydantic import BaseModel, Field
@@ -15,12 +16,15 @@ from backend.app.domain import (
     NewsEvent,
     NewsItem,
     SourceQuality,
+    as_utc,
 )
 from backend.app.llm import LlmGateway, gateway
 from backend.app.providers.registry import ProviderRegistry
+from backend.app.services.source_lineage import enrich_news_lineage, normalize_text, source_group
 from backend.app.storage import (
     event_news_item_ids,
     get_news_by_content_hash,
+    list_events,
     save_event,
     save_news,
     upsert_asset,
@@ -66,11 +70,12 @@ class EventService:
         items: list[NewsItem],
         progress: Callable[[int, int], None] | None = None,
     ) -> list[NewsEvent]:
-        events: list[NewsEvent] = []
+        cluster_pool = list_events(db, limit=500)
+        touched: dict[str, NewsEvent] = {}
         processed_ids = event_news_item_ids(db)
         total = len(items)
         for index, discovered_item in enumerate(items, start=1):
-            item = discovered_item
+            item = enrich_news_lineage(discovered_item)
             if not save_news(db, item):
                 stored_item = get_news_by_content_hash(db, item.content_hash)
                 if not stored_item or stored_item.id in processed_ids:
@@ -86,10 +91,14 @@ class EventService:
             for candidate in event.candidates:
                 upsert_asset(db, candidate.asset)
             existing = next(
-                (candidate for candidate in events if self._same_story(candidate, event)), None
+                (candidate for candidate in cluster_pool if self._same_story(candidate, event)),
+                None,
             )
             if existing:
-                existing.news_item_ids.extend(event.news_item_ids)
+                existing.news_item_ids = list(
+                    dict.fromkeys([*existing.news_item_ids, *event.news_item_ids])
+                )
+                existing.entities = list(dict.fromkeys([*existing.entities, *event.entities]))
                 merged = {item.asset.asset_id: item for item in existing.candidates}
                 for candidate in event.candidates:
                     previous = merged.get(candidate.asset.asset_id)
@@ -100,30 +109,71 @@ class EventService:
                 )
                 existing.priority = max(existing.priority, event.priority)
                 existing.novelty = min(existing.novelty, event.novelty)
+                existing.published_at = min(
+                    as_utc(existing.published_at), as_utc(event.published_at)
+                )
+                existing.observed_at = min(
+                    as_utc(existing.observed_at), as_utc(event.observed_at)
+                )
+                existing.as_of = max(as_utc(existing.as_of), as_utc(event.as_of))
                 if self._quality_rank(event.source_quality) > self._quality_rank(
                     existing.source_quality
                 ):
                     existing.source_quality = event.source_quality
+                self._record_cluster_step(existing, item)
                 save_event(db, existing)
+                touched[str(existing.id)] = existing
             else:
-                events.append(event)
+                self._record_cluster_step(event, item)
+                cluster_pool.append(event)
+                touched[str(event.id)] = event
                 save_event(db, event)
             processed_ids.add(item.id)
             if progress:
                 progress(index, total)
-        return events
+        return list(touched.values())
 
-    @staticmethod
-    def _same_story(left: NewsEvent, right: NewsEvent) -> bool:
+    def _same_story(self, left: NewsEvent, right: NewsEvent) -> bool:
         if left.event_type is not right.event_type:
             return False
-        def normalize(value: str) -> str:
-            return re.sub(r"[^a-z0-9\u3400-\u9fff]+", "", value.lower())
+        if abs(as_utc(left.published_at) - as_utc(right.published_at)) > timedelta(
+            hours=self.settings.event_cluster_window_hours
+        ):
+            return False
 
-        similarity = SequenceMatcher(None, normalize(left.headline), normalize(right.headline)).ratio()
+        similarity = SequenceMatcher(
+            None, normalize_text(left.headline), normalize_text(right.headline)
+        ).ratio()
         left_assets = {candidate.asset.asset_id for candidate in left.candidates}
         right_assets = {candidate.asset.asset_id for candidate in right.candidates}
-        return similarity >= 0.78 or (bool(left_assets & right_assets) and similarity >= 0.58)
+        left_entities = {normalize_text(item) for item in left.entities if normalize_text(item)}
+        right_entities = {normalize_text(item) for item in right.entities if normalize_text(item)}
+        return similarity >= 0.78 or (
+            bool(left_assets & right_assets)
+            and bool(left_entities & right_entities)
+            and similarity >= 0.58
+        )
+
+    @staticmethod
+    def _record_cluster_step(event: NewsEvent, item: NewsItem) -> None:
+        step = AnalysisStep(
+            phase="story_clustering",
+            executor="persistent-event-cluster:v1",
+            summary=(
+                f"事件簇 {event.id} 已持久化，当前包含 {len(event.news_item_ids)} 篇新闻，"
+                f"最新来源血缘为 {source_group(item)}。"
+            ),
+            metrics={
+                "cluster_id": str(event.id),
+                "member_count": len(event.news_item_ids),
+                "latest_source_group": source_group(item),
+            },
+        )
+        for index in range(len(event.analysis_steps) - 1, -1, -1):
+            if event.analysis_steps[index].phase == step.phase:
+                event.analysis_steps[index] = step
+                return
+        event.analysis_steps.append(step)
 
     @staticmethod
     def _quality_rank(quality: SourceQuality) -> int:

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Literal, TypedDict
 from uuid import UUID, uuid4
@@ -19,6 +21,7 @@ from backend.app.domain import (
     AssetRef,
     Evidence,
     NewsEvent,
+    NewsItem,
     Recommendation,
     ResearchRun,
     RunStatus,
@@ -31,10 +34,28 @@ from backend.app.domain import (
 from backend.app.llm import LlmGateway, gateway
 from backend.app.providers.registry import ProviderRegistry
 from backend.app.services.retrieval import RetrievalService
-from backend.app.storage import get_evidence, get_run, list_news, save_recommendation, save_run
+from backend.app.services.source_lineage import (
+    canonicalize_url,
+    enrich_news_lineage,
+    independent_evidence_groups,
+    normalize_text,
+    source_group,
+)
+from backend.app.storage import (
+    get_evidence,
+    get_news,
+    get_news_by_content_hash,
+    get_run,
+    list_news,
+    save_event,
+    save_news,
+    save_recommendation,
+    save_run,
+)
 
 _checkpoint_setup_lock = threading.Lock()
 _checkpoint_setup_done = False
+SOURCE_GATE = "one official source or two independent sources"
 
 
 class DraftOutput(BaseModel):
@@ -79,6 +100,7 @@ class ResearchState(TypedDict, total=False):
     draft: dict[str, Any]
     verification: dict[str, Any]
     verification_round: int
+    acquisition_attempts: int
     historical_replay: bool
 
 
@@ -127,6 +149,7 @@ class ResearchService:
         graph.add_node("gather", self._gather)
         graph.add_node("draft", self._draft)
         graph.add_node("verify", self._verify)
+        graph.add_node("acquire_evidence", self._acquire_evidence)
         graph.add_node("revise", self._revise)
         graph.add_node("finalize", self._finalize)
         graph.add_edge(START, "gather")
@@ -135,8 +158,13 @@ class ResearchService:
         graph.add_conditional_edges(
             "verify",
             self._route_after_verification,
-            {"revise": "revise", "finalize": "finalize"},
+            {
+                "acquire_evidence": "acquire_evidence",
+                "revise": "revise",
+                "finalize": "finalize",
+            },
         )
+        graph.add_edge("acquire_evidence", "revise")
         graph.add_edge("revise", "verify")
         graph.add_edge("finalize", END)
         return graph.compile(checkpointer=self.checkpointer)
@@ -170,6 +198,7 @@ class ResearchService:
             "run": run.model_dump(mode="json"),
             "event": event.model_dump(mode="json") if event else None,
             "verification_round": 0,
+            "acquisition_attempts": 0,
             "historical_replay": run.historical_replay,
         }
         try:
@@ -275,25 +304,14 @@ class ResearchService:
         evidence: list[Evidence] = []
         event = NewsEvent.model_validate(event_payload) if event_payload else None
         if event:
-            news_by_id = {item.id: item for item in list_news(self.db, limit=500, as_of=run.as_of)}
             for item_id in event.news_item_ids:
-                item = news_by_id.get(item_id)
-                if not item:
+                item = get_news(self.db, item_id)
+                if not item or any(
+                    value > run.as_of
+                    for value in (item.published_at, item.observed_at, item.as_of)
+                ):
                     continue
-                evidence.append(
-                    Evidence(
-                        run_id=run.id,
-                        claim=item.title,
-                        source_name=item.source,
-                        source_url=item.url,
-                        source_quality=item.source_quality,
-                        published_at=item.published_at,
-                        observed_at=item.observed_at,
-                        as_of=item.as_of,
-                        excerpt=item.summary[:1000],
-                        independent_group=item.raw_metadata.get("site") or item.source,
-                    )
-                )
+                evidence.append(self._news_evidence(run, item))
 
         if run.asset.asset_class is AssetClass.EQUITY:
             fundamentals = data.get("fundamentals", {})
@@ -388,6 +406,21 @@ class ResearchService:
                 )
         return evidence
 
+    @staticmethod
+    def _news_evidence(run: ResearchRun, item: NewsItem) -> Evidence:
+        return Evidence(
+            run_id=run.id,
+            claim=item.title,
+            source_name=item.source,
+            source_url=item.url,
+            source_quality=item.source_quality,
+            published_at=item.published_at,
+            observed_at=item.observed_at,
+            as_of=item.as_of,
+            excerpt=(item.summary or item.title)[:1000],
+            independent_group=source_group(item),
+        )
+
     def _draft(self, state: ResearchState) -> dict[str, Any]:
         run = ResearchRun.model_validate(state["run"])
         evidence = state.get("evidence", [])
@@ -479,14 +512,20 @@ class ResearchService:
         unknown = cited_ids - available_ids
         if unknown:
             unsupported.append(f"unknown evidence ids: {sorted(unknown)}")
-        if any(item.published_at > run.as_of or item.observed_at > run.as_of for item in evidence):
+        if any(
+            item.published_at > run.as_of
+            or item.observed_at > run.as_of
+            or item.as_of > run.as_of
+            for item in evidence
+        ):
             contradictions.append("point-in-time boundary violation")
 
-        official = any(item.source_quality is SourceQuality.OFFICIAL for item in evidence)
-        independent_groups = {item.independent_group for item in evidence if item.independent_group}
+        cited_evidence = [item for item in evidence if str(item.id) in cited_ids]
+        official = any(item.source_quality is SourceQuality.OFFICIAL for item in cited_evidence)
+        independent_groups = independent_evidence_groups(cited_evidence)
         corroborated = official or len(independent_groups) >= 2
         if not corroborated:
-            missing.append("one official source or two independent sources")
+            missing.append(SOURCE_GATE)
 
         complete = not missing and not unsupported and not contradictions
         verification = VerificationOutput(
@@ -526,15 +565,232 @@ class ResearchService:
             "verification_round": round_number,
         }
 
-    def _route_after_verification(self, state: ResearchState) -> Literal["revise", "finalize"]:
+    def _route_after_verification(
+        self, state: ResearchState
+    ) -> Literal["acquire_evidence", "revise", "finalize"]:
         verification = VerificationOutput.model_validate(state["verification"])
         draft = DraftOutput.model_validate(state["draft"])
+        can_retry = state["verification_round"] < self.settings.max_verification_rounds
+        if (
+            not state.get("historical_replay")
+            and SOURCE_GATE in verification.missing_requirements
+            and state.get("acquisition_attempts", 0) < 1
+            and can_retry
+        ):
+            return "acquire_evidence"
         if (
             (not verification.evidence_complete or abs(draft.score) >= 60)
-            and state["verification_round"] < self.settings.max_verification_rounds
+            and can_retry
         ):
             return "revise"
         return "finalize"
+
+    def _acquire_evidence(self, state: ResearchState) -> dict[str, Any]:
+        run = ResearchRun.model_validate(state["run"])
+        event = NewsEvent.model_validate(state["event"]) if state.get("event") else None
+        verification = VerificationOutput.model_validate(state["verification"])
+        evidence = [Evidence.model_validate(item) for item in state.get("evidence", [])]
+        attempts = state.get("acquisition_attempts", 0) + 1
+        queries = self._targeted_queries(run.asset, event)
+        seen_facts = {(canonicalize_url(item.source_url), item.claim) for item in evidence}
+        structured_error: str | None = None
+        structured_added = 0
+        try:
+            targeted_data = self.registry.get_research_data(run.asset)
+            for item in self._build_evidence(run, None, targeted_data):
+                fact = (canonicalize_url(item.source_url), item.claim)
+                if fact in seen_facts:
+                    continue
+                evidence.append(item)
+                seen_facts.add(fact)
+                structured_added += 1
+        except Exception as exc:
+            structured_error = type(exc).__name__
+
+        candidate_by_url: dict[str, NewsItem] = {}
+        for item in list_news(self.db, limit=1000, as_of=run.as_of):
+            enriched = enrich_news_lineage(item)
+            if self._is_targeted_candidate(enriched, run.asset, event):
+                candidate_by_url[canonicalize_url(enriched.url)] = enriched
+
+        provider_error: str | None = None
+        remote_count = 0
+        try:
+            since = min(as_utc(run.as_of), utc_now()) - timedelta(
+                hours=self.settings.event_cluster_window_hours
+            )
+            remote_items = self.registry.discover_news(
+                since=since,
+                limit=self.settings.targeted_evidence_limit,
+            )
+            remote_count = len(remote_items)
+            for item in remote_items:
+                enriched = enrich_news_lineage(item)
+                if self._is_targeted_candidate(enriched, run.asset, event):
+                    candidate_by_url[canonicalize_url(enriched.url)] = enriched
+        except Exception as exc:
+            provider_error = type(exc).__name__
+
+        seen_urls = {canonicalize_url(item.source_url) for item in evidence}
+        accepted: list[NewsItem] = []
+        now = utc_now()
+        for candidate in sorted(
+            candidate_by_url.values(), key=lambda item: item.published_at, reverse=True
+        ):
+            if candidate.published_at > now:
+                continue
+            canonical_url = canonicalize_url(candidate.url)
+            if canonical_url in seen_urls:
+                continue
+            save_news(self.db, candidate)
+            stored = get_news_by_content_hash(self.db, candidate.content_hash) or candidate
+            boundary = max(
+                as_utc(run.as_of),
+                as_utc(stored.published_at),
+                as_utc(stored.observed_at),
+                as_utc(stored.as_of),
+            )
+            run.as_of = boundary
+            evidence.append(self._news_evidence(run, stored))
+            seen_urls.add(canonical_url)
+            accepted.append(stored)
+            if event and stored.id not in event.news_item_ids:
+                event.news_item_ids.append(stored.id)
+            if len(accepted) >= 8:
+                break
+
+        if event and accepted:
+            event.as_of = run.as_of
+            event.priority = max(event.priority, 0.5)
+            quality_rank = {
+                SourceQuality.SOCIAL: 0,
+                SourceQuality.AGGREGATOR: 1,
+                SourceQuality.PROFESSIONAL: 2,
+                SourceQuality.PRIMARY: 3,
+                SourceQuality.OFFICIAL: 4,
+            }
+            best_quality = max(
+                (item.source_quality for item in accepted), key=quality_rank.__getitem__
+            )
+            if quality_rank[best_quality] > quality_rank[event.source_quality]:
+                event.source_quality = best_quality
+            source_groups = independent_evidence_groups(evidence)
+            step = AnalysisStep(
+                phase="story_clustering",
+                executor="targeted-evidence:v1",
+                summary=(
+                    f"定向补证向持久事件簇 {event.id} 新增 {len(accepted)} 篇新闻，"
+                    f"当前证据覆盖 {len(source_groups)} 个独立来源血缘。"
+                ),
+                metrics={
+                    "cluster_id": str(event.id),
+                    "member_count": len(event.news_item_ids),
+                    "accepted_news": len(accepted),
+                    "independent_sources": len(source_groups),
+                },
+            )
+            for index in range(len(event.analysis_steps) - 1, -1, -1):
+                if event.analysis_steps[index].phase == step.phase:
+                    event.analysis_steps[index] = step
+                    break
+            else:
+                event.analysis_steps.append(step)
+            save_event(self.db, event)
+
+        retrieval_error: str | None = None
+        retrieved_context = state.get("retrieved_context", [])
+        try:
+            retrieval = RetrievalService(self.db, self.settings)
+            retrieval.index(run.asset.asset_id, evidence)
+            retrieved_context = retrieval.search(
+                self._retrieval_query(run.asset, event),
+                asset_id=run.asset.asset_id,
+                as_of=run.as_of,
+            )
+        except Exception as exc:
+            retrieval_error = type(exc).__name__
+
+        run.evidence = evidence
+        independent_sources = independent_evidence_groups(evidence)
+        added_count = structured_added + len(accepted)
+        run.analysis_steps.append(
+            AnalysisStep(
+                phase="targeted_evidence_acquisition",
+                status="completed" if added_count else "no_results",
+                executor="local-index+news-providers",
+                summary=(
+                    f"根据验证缺口执行第 {attempts} 轮定向补证，新增 {added_count} 条证据，"
+                    f"当前覆盖 {len(independent_sources)} 个独立来源血缘。"
+                ),
+                metrics={
+                    "attempt": attempts,
+                    "missing_requirements": verification.missing_requirements,
+                    "queries": queries,
+                    "remote_candidates": remote_count,
+                    "accepted_evidence": added_count,
+                    "accepted_structured_evidence": structured_added,
+                    "accepted_news_evidence": len(accepted),
+                    "independent_sources": len(independent_sources),
+                    "structured_provider_error": structured_error,
+                    "provider_error": provider_error,
+                    "provider_errors": getattr(self.registry, "last_errors", []),
+                    "retrieval_error": retrieval_error,
+                },
+            )
+        )
+        save_run(self.db, run)
+        return {
+            "run": run.model_dump(mode="json"),
+            "event": event.model_dump(mode="json") if event else None,
+            "evidence": [item.model_dump(mode="json") for item in evidence],
+            "retrieved_context": retrieved_context,
+            "acquisition_attempts": attempts,
+        }
+
+    @staticmethod
+    def _targeted_queries(asset: AssetRef, event: NewsEvent | None) -> list[str]:
+        context = [asset.symbol, asset.name, *asset.aliases]
+        if event:
+            context.extend([event.headline, *event.entities])
+        queries = [" ".join(item for item in context if item)]
+        if asset.asset_class is AssetClass.EQUITY:
+            queries.append(f"{asset.symbol} official filing investor relations")
+        else:
+            queries.append(f"{asset.symbol} official protocol security disclosure")
+        return queries
+
+    @staticmethod
+    def _retrieval_query(asset: AssetRef, event: NewsEvent | None) -> str:
+        return f"{asset.name} {asset.symbol} {event.headline if event else ''}".strip()
+
+    @staticmethod
+    def _is_targeted_candidate(
+        item: NewsItem, asset: AssetRef, event: NewsEvent | None
+    ) -> bool:
+        text = normalize_text(f"{item.title} {item.summary}")
+        explicit_symbol = asset.symbol.casefold() in {value.casefold() for value in item.symbols}
+        asset_terms = [asset.symbol, asset.name, *asset.aliases]
+        asset_match = explicit_symbol or any(
+            normalized and normalized in text
+            for normalized in (normalize_text(value) for value in asset_terms)
+        )
+        if not asset_match:
+            return False
+        if not event:
+            return True
+        title_similarity = SequenceMatcher(
+            None, normalize_text(item.title), normalize_text(event.headline)
+        ).ratio()
+        event_tokens = {
+            token.casefold()
+            for token in re.findall(r"[a-zA-Z0-9]{3,}|[\u3400-\u9fff]{2,}", event.headline)
+        }
+        item_tokens = {
+            token.casefold()
+            for token in re.findall(r"[a-zA-Z0-9]{3,}|[\u3400-\u9fff]{2,}", item.title)
+        }
+        overlap = len(event_tokens & item_tokens) / max(1, len(event_tokens))
+        return title_similarity >= 0.35 or overlap >= 0.3
 
     def _revise(self, state: ResearchState) -> dict[str, Any]:
         run = ResearchRun.model_validate(state["run"])

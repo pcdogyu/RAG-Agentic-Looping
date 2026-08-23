@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -18,6 +17,7 @@ from backend.app.domain import (
     SourceQuality,
 )
 from backend.app.llm import LlmGateway, gateway
+from backend.app.services.source_lineage import independent_evidence_groups, source_group
 from backend.app.storage import get_news, save_event_research_run
 
 
@@ -154,7 +154,6 @@ class EventResearchService:
             item = get_news(self.db, news_id)
             if not item:
                 continue
-            host = urlparse(item.url).hostname or item.source
             evidence.append(
                 Evidence(
                     run_id=run.id,
@@ -166,7 +165,7 @@ class EventResearchService:
                     observed_at=item.observed_at,
                     as_of=item.as_of,
                     excerpt=(item.summary or item.title)[:1000],
-                    independent_group=host.lower(),
+                    independent_group=source_group(item),
                 )
             )
         return evidence
@@ -245,8 +244,11 @@ class EventResearchService:
             for item in run.evidence
         ):
             contradictions.append("point-in-time boundary violation")
-        official = any(item.source_quality is SourceQuality.OFFICIAL for item in run.evidence)
-        independent = {item.independent_group for item in run.evidence if item.independent_group}
+        cited_evidence = [item for item in run.evidence if str(item.id) in cited_ids]
+        official = any(
+            item.source_quality is SourceQuality.OFFICIAL for item in cited_evidence
+        )
+        independent = independent_evidence_groups(cited_evidence)
         if not official and len(independent) < 2:
             missing.append("one official source or two independent sources")
         return not missing and not contradictions, missing, contradictions

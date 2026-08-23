@@ -13,7 +13,7 @@ from backend.app.domain import (
 )
 from backend.app.providers.registry import SEED_ASSETS
 from backend.app.services.research import DraftOutput, ResearchService
-from backend.app.storage import save_news
+from backend.app.storage import get_event, save_event, save_news
 
 
 class FakeRegistry:
@@ -71,6 +71,21 @@ class FakeStrongResearchLlm(FakeResearchLlm):
         payload["score"] = 80
         payload["confidence"] = 0.85
         return payload
+
+
+class TargetedRegistry:
+    def __init__(self, corroborating_news):
+        self.corroborating_news = corroborating_news
+        self.research_calls = 0
+        self.discovery_calls = 0
+
+    def get_research_data(self, asset):
+        self.research_calls += 1
+        return {"fundamentals": {}, "filings": []}
+
+    def discover_news(self, **kwargs):
+        self.discovery_calls += 1
+        return [self.corroborating_news]
 
 
 def test_research_graph_produces_verified_recommendation(db, tmp_path):
@@ -161,3 +176,75 @@ def test_explicit_historical_replay_skips_live_providers(db, tmp_path):
     assert run.historical_replay is True
     assert run.evidence == []
     assert run.status.value == "insufficient_evidence"
+
+
+def test_verification_gap_triggers_targeted_acquisition_and_reverification(db, tmp_path):
+    as_of = datetime(2025, 1, 31, 12, 0, tzinfo=UTC)
+    initial = NewsItem(
+        source="Aggregator A",
+        source_quality=SourceQuality.AGGREGATOR,
+        title="Apple reports Services revenue growth",
+        summary="Apple Services revenue increased.",
+        url="https://a.example/apple-services",
+        published_at=as_of,
+        observed_at=as_of,
+        as_of=as_of,
+        content_hash=sha256(b"targeted-initial").hexdigest(),
+        symbols=["AAPL"],
+    )
+    corroborating = NewsItem(
+        source="Professional Wire B",
+        source_quality=SourceQuality.PROFESSIONAL,
+        title="Apple reports growth in Services revenue",
+        summary="Apple confirmed higher Services revenue.",
+        url="https://b.example/apple-services",
+        published_at=as_of,
+        observed_at=as_of,
+        as_of=as_of,
+        content_hash=sha256(b"targeted-corroborating").hexdigest(),
+        symbols=["AAPL"],
+    )
+    save_news(db, initial)
+    asset = SEED_ASSETS[0]
+    event = NewsEvent(
+        news_item_ids=[initial.id],
+        headline=initial.title,
+        event_type=EventType.EARNINGS,
+        entities=["Apple"],
+        direct_impact=initial.summary,
+        source_quality=initial.source_quality,
+        published_at=as_of,
+        observed_at=as_of,
+        as_of=as_of,
+        candidates=[
+            CandidateAsset(
+                asset=asset,
+                relationship="direct",
+                relevance=1,
+                rationale="AAPL is explicit",
+            )
+        ],
+    )
+    save_event(db, event)
+    registry = TargetedRegistry(corroborating)
+    settings = Settings(
+        database_url="sqlite:///./data/test_agent.db",
+        reports_dir=tmp_path,
+        fmp_access_token="",
+        fmp_mcp_url="",
+    )
+
+    run = ResearchService(registry, db, settings, FakeResearchLlm()).run(
+        asset, event, as_of
+    )
+
+    assert registry.discovery_calls == 1
+    assert run.status.value == "completed"
+    assert run.verification_round == 2
+    assert len({item.independent_group for item in run.evidence}) == 2
+    phases = [step.phase for step in run.analysis_steps]
+    assert phases.count("verification") == 2
+    assert phases.index("targeted_evidence_acquisition") < phases.index("report_revision")
+    persisted_event = get_event(db, event.id)
+    assert persisted_event is not None
+    assert len(persisted_event.news_item_ids) == 2

@@ -30,6 +30,13 @@ class EventResearchLlm:
         ).model_dump(mode="json")
 
 
+class AllEvidenceEventResearchLlm(EventResearchLlm):
+    def generate_json(self, *, prompt, **kwargs):
+        payload = super().generate_json(prompt=prompt, **kwargs)
+        payload["evidence_ids"] = re.findall(r'"id":\s*"([0-9a-f-]{36})"', prompt)
+        return payload
+
+
 def test_event_report_is_neutral_and_marks_single_source_evidence_incomplete(db, tmp_path):
     observed = datetime(2026, 8, 22, 12, 0, tzinfo=UTC)
     news = NewsItem(
@@ -76,3 +83,48 @@ def test_event_report_is_neutral_and_marks_single_source_evidence_incomplete(db,
     assert log["result"]["kind"] == "event_report"
     assert "rating" not in log["result"]
     assert log["asset"] is None
+
+
+def test_syndicated_reprints_count_as_one_independent_source(db, tmp_path):
+    observed = datetime(2026, 8, 22, 12, 0, tzinfo=UTC)
+    news_items = [
+        NewsItem(
+            source=source,
+            source_quality=SourceQuality.PROFESSIONAL,
+            title=title,
+            summary="Reuters reported the same supply-chain event.",
+            url=url,
+            published_at=observed,
+            observed_at=observed,
+            as_of=observed,
+            content_hash=sha256(url.encode()).hexdigest(),
+            raw_metadata={"original_source": "Reuters"},
+        )
+        for source, title, url in (
+            ("Publisher A", "Supply-chain disruption reported", "https://a.example/story"),
+            ("Publisher B", "New supply-chain disruption report", "https://b.example/story"),
+        )
+    ]
+    for item in news_items:
+        save_news(db, item)
+    event = NewsEvent(
+        news_item_ids=[item.id for item in news_items],
+        headline="Supply-chain disruption reported",
+        event_type="supply_chain",
+        direct_impact="Shipping may be affected.",
+        source_quality=SourceQuality.PROFESSIONAL,
+        published_at=observed,
+        observed_at=observed,
+        as_of=observed,
+    )
+    save_event(db, event)
+    run = EventResearchRun(event_id=event.id, as_of=observed)
+    settings = Settings(fmp_access_token="", fmp_mcp_url="", reports_dir=tmp_path)
+
+    result = EventResearchService(
+        db, settings, AllEvidenceEventResearchLlm()
+    ).run(event, run)
+
+    assert len({item.independent_group for item in result.evidence}) == 1
+    assert result.status.value == "insufficient_evidence"
+    assert result.missing_requirements == ["one official source or two independent sources"]

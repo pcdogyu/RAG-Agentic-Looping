@@ -8,7 +8,8 @@ from backend.app.config import Settings
 from backend.app.domain import NewsItem, SourceQuality
 from backend.app.providers.registry import ProviderRegistry
 from backend.app.services.events import EventService, ExtractedEvent
-from backend.app.storage import list_events, save_news
+from backend.app.services.source_lineage import LINEAGE_KEY
+from backend.app.storage import get_news, list_events, save_news
 
 
 class FakeLlm:
@@ -82,6 +83,76 @@ def test_ingest_clusters_duplicate_reprints(db):
     assert len(events[0].news_item_ids) == 2
     assert len(list_events(db)) == 1
     assert len(list_events(db)[0].news_item_ids) == 2
+
+
+def test_ingest_merges_matching_story_across_scan_batches(db):
+    settings = Settings(fmp_access_token="", fmp_mcp_url="")
+    registry = ProviderRegistry(settings)
+    published = datetime(2025, 1, 31, tzinfo=UTC)
+    first = NewsItem(
+        source="Wire A",
+        source_quality=SourceQuality.PROFESSIONAL,
+        title="Apple reports Services revenue growth",
+        summary="Services revenue grew.",
+        url="https://a.example/apple?utm_source=feed",
+        published_at=published,
+        observed_at=published,
+        as_of=published,
+        content_hash=sha256(b"cross-scan-a").hexdigest(),
+        symbols=["AAPL"],
+    )
+    second = NewsItem(
+        source="Wire B",
+        source_quality=SourceQuality.PROFESSIONAL,
+        title="Apple reports growth in Services revenue",
+        summary="Apple Services revenue grew.",
+        url="https://b.example/apple",
+        published_at=published,
+        observed_at=published,
+        as_of=published,
+        content_hash=sha256(b"cross-scan-b").hexdigest(),
+        symbols=["AAPL"],
+    )
+
+    first_batch = EventService(registry, settings, FakeLlm()).ingest(db, [first])
+    second_batch = EventService(registry, settings, FakeLlm()).ingest(db, [second])
+
+    assert first_batch[0].id == second_batch[0].id
+    assert len(list_events(db)) == 1
+    assert len(list_events(db)[0].news_item_ids) == 2
+    stored = get_news(db, first.id)
+    assert stored is not None
+    assert stored.raw_metadata[LINEAGE_KEY]["canonical_url"] == "https://a.example/apple"
+    assert stored.raw_metadata[LINEAGE_KEY]["publisher_domain"] == "a.example"
+
+
+def test_persistent_clustering_keeps_unrelated_asset_stories_separate(db):
+    settings = Settings(fmp_access_token="", fmp_mcp_url="")
+    registry = ProviderRegistry(settings)
+    published = datetime(2025, 1, 31, tzinfo=UTC)
+    items = [
+        NewsItem(
+            source="Wire",
+            source_quality=SourceQuality.PROFESSIONAL,
+            title=title,
+            summary=title,
+            url=url,
+            published_at=published,
+            observed_at=published,
+            as_of=published,
+            content_hash=sha256(url.encode()).hexdigest(),
+            symbols=["AAPL"],
+        )
+        for title, url in (
+            ("Apple reports Services revenue growth", "https://a.example/earnings"),
+            ("Apple opens a new retail store in Shanghai", "https://b.example/retail"),
+        )
+    ]
+
+    EventService(registry, settings, FakeLlm()).ingest(db, [items[0]])
+    EventService(registry, settings, FakeLlm()).ingest(db, [items[1]])
+
+    assert len(list_events(db)) == 2
 
 
 def test_ingest_resumes_news_saved_before_event_extraction(db):
