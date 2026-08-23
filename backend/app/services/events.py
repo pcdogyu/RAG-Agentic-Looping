@@ -158,6 +158,9 @@ class EventService:
                 prompt=prompt,
                 schema=ExtractedEvent,
                 temperature=0,
+                operation="event_extraction",
+                entity_type="news_item",
+                entity_id=item.id,
             )
             extracted = ExtractedEvent.model_validate(payload)
             extraction_steps.append(

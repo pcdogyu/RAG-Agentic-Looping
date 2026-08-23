@@ -406,6 +406,9 @@ class ResearchService:
                 system="你是证据优先的投资研究员。区分事实、推断和未知，不给实盘指令。",
                 prompt=prompt,
                 schema=DraftOutput,
+                operation="report_drafting",
+                entity_type="research_run",
+                entity_id=run.id,
             )
         except Exception as exc:
             draft_error = type(exc).__name__
@@ -545,6 +548,9 @@ class ResearchService:
                 system="你是投资研究报告修订器，只能使用给定证据。",
                 prompt=prompt,
                 schema=DraftOutput,
+                operation="report_revision",
+                entity_type="research_run",
+                entity_id=run.id,
             )
             revised_output = DraftOutput.model_validate(revised)
         except Exception as exc:

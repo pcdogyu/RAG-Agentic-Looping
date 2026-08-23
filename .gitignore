@@ -11,6 +11,7 @@ htmlcov/
 .venv/
 node_modules/
 frontend/dist/
+*.tsbuildinfo
 data/
 reports/
 evals/candidate.json

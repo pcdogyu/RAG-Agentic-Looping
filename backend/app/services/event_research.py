@@ -186,6 +186,9 @@ class EventResearchService:
             system="你是证据优先的宏观和行业事件研究员，不提供实盘指令。",
             prompt=prompt,
             schema=EventReportDraft,
+            operation="event_report_drafting",
+            entity_type="event_research_run",
+            entity_id=run.id,
         )
         return EventReportDraft.model_validate(payload)
 
@@ -208,6 +211,9 @@ class EventResearchService:
             system="你是中性事件研报修订器，只能使用给定证据。",
             prompt=prompt,
             schema=EventReportDraft,
+            operation="event_report_revision",
+            entity_type="event_research_run",
+            entity_id=run.id,
         )
         return EventReportDraft.model_validate(payload)
 

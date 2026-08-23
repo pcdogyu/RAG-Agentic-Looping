@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 
 import {
   analysisPendingText,
@@ -8,6 +10,11 @@ import {
   scanButtonText,
   updateHealthTracking,
 } from "./App";
+import ModelLogsPage, {
+  buildModelLogQuery,
+  fidelityLabel,
+  isModelLogsHash,
+} from "./ModelLogs";
 
 const baseStatus = {
   state: "idle",
@@ -133,5 +140,40 @@ describe("analysis mapping states", () => {
 
   it("keeps genuinely unmapped events explicit", () => {
     expect(analysisPendingText("unmapped")).toBe("该新闻尚未映射到可研究标的。");
+  });
+});
+
+describe("model log navigation and filters", () => {
+  it("recognizes only the dedicated model log hash", () => {
+    expect(isModelLogsHash("#/model-logs")).toBe(true);
+    expect(isModelLogsHash("#model-logs")).toBe(false);
+    expect(isModelLogsHash("")).toBe(false);
+  });
+
+  it("builds stable API filters with an ISO time boundary", () => {
+    const query = buildModelLogQuery({
+      range: "7d",
+      model: "qwen2.5:7b",
+      provider: "ollama",
+      operation: "report_drafting",
+      status: "completed",
+      language: "zh",
+      fidelity: "exact",
+    }, Date.parse("2026-08-23T00:00:00Z"));
+    expect(query.get("start")).toBe("2026-08-16T00:00:00.000Z");
+    expect(query.get("model")).toBe("qwen2.5:7b");
+    expect(query.get("fidelity")).toBe("exact");
+  });
+
+  it("labels reconstructed history and renders the full-screen shell", () => {
+    expect(fidelityLabel("reconstructed")).toBe("历史重建");
+    const markup = renderToStaticMarkup(createElement(ModelLogsPage, {
+      apiBase: "http://localhost:8000",
+      onBack: () => undefined,
+    }));
+    expect(markup).toContain("模型日志");
+    expect(markup).toContain("返回主看板");
+    expect(markup).toContain("模型日志筛选");
+    expect(markup).toContain("正在读取模型日志");
   });
 });

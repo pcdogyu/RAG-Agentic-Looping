@@ -78,6 +78,9 @@ class AssetMappingService:
             prompt=prompt,
             schema=AssetMappingOutput,
             temperature=0,
+            operation="asset_mapping",
+            entity_type="news_event",
+            entity_id=event.id,
         )
         output = AssetMappingOutput.model_validate(payload)
         candidates: dict[str, CandidateAsset] = {}

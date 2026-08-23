@@ -5,13 +5,15 @@ import re
 from collections import Counter
 from hashlib import blake2b
 from typing import Protocol
+from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.app.config import Settings, get_settings
 from backend.app.db import DocumentChunkRow
-from backend.app.domain import Evidence, as_utc
+from backend.app.domain import Evidence, as_utc, utc_now
+from backend.app.model_audit import persist_model_audit
 
 TOKEN_PATTERN = re.compile(r"[a-z0-9][a-z0-9._-]*|[\u3400-\u9fff]", re.IGNORECASE)
 
@@ -29,6 +31,8 @@ class CpuEmbeddingBackend:
         self._model_failed = False
 
     def embed(self, texts: list[str]) -> list[list[float]]:
+        started_at = utc_now()
+        backend_name = self.settings.embedding_model
         if not self._model_failed and self._model is None:
             try:
                 from fastembed import TextEmbedding
@@ -38,11 +42,48 @@ class CpuEmbeddingBackend:
                 self._model_failed = True
         if self._model is not None:
             try:
-                return [self._fit(vector.tolist()) for vector in self._model.embed(texts)]
+                vectors = [self._fit(vector.tolist()) for vector in self._model.embed(texts)]
+                self._audit_embedding(texts, vectors, started_at, backend_name, "fastembed")
+                return vectors
             except Exception:
                 self._model_failed = True
                 self._model = None
-        return [self._hashed_embedding(text) for text in texts]
+        vectors = [self._hashed_embedding(text) for text in texts]
+        self._audit_embedding(texts, vectors, started_at, "hash-embedding:v1", "fallback")
+        return vectors
+
+    def _audit_embedding(
+        self,
+        texts: list[str],
+        vectors: list[list[float]],
+        started_at,
+        model: str,
+        backend: str,
+    ) -> None:
+        metadata = {
+            "batch_size": len(texts),
+            "input_characters": sum(len(text) for text in texts),
+            "dimensions": len(vectors[0]) if vectors else self.settings.embedding_dimensions,
+            "backend": backend,
+            "notice": "嵌入正文和向量未写入审计日志",
+        }
+        persist_model_audit(
+            logical_call_id=uuid4(),
+            provider="local-cpu",
+            model=model,
+            operation="embedding",
+            attempt=1,
+            status="completed",
+            started_at=started_at,
+            completed_at=utc_now(),
+            messages=[{"role": "metadata", "content": str(metadata)}],
+            schema_payload={},
+            raw_response=str({"dimensions": metadata["dimensions"], "vectors": len(vectors)}),
+            parsed_response={"dimensions": metadata["dimensions"], "vectors": len(vectors)},
+            metrics=metadata,
+            fidelity="metadata_only",
+            settings=self.settings,
+        )
 
     def _fit(self, vector: list[float]) -> list[float]:
         size = self.settings.embedding_dimensions

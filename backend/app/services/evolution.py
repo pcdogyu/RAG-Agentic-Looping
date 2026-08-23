@@ -60,6 +60,7 @@ class EvolutionService:
             prompt=f"失败案例：{json.dumps(failures, ensure_ascii=False)[:20000]}",
             schema=EvolutionProposal,
             temperature=0,
+            operation="evolution_proposal",
         )
         proposal = EvolutionProposal.model_validate(payload)
         slug = re.sub(r"[^a-z0-9]+", "-", proposal.target_metric.lower()).strip("-")[:40]

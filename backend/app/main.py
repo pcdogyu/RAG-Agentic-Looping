@@ -16,7 +16,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from backend.app.config import get_settings
-from backend.app.db import NewsRow, SessionLocal, engine, get_db, init_db
+from backend.app.db import ModelCallAuditRow, NewsRow, SessionLocal, engine, get_db, init_db
 from backend.app.domain import (
     EventResearchRun,
     EvolutionCandidate,
@@ -25,6 +25,7 @@ from backend.app.domain import (
     ResearchRun,
     utc_now,
 )
+from backend.app.model_audit import audit_detail, list_model_audits, model_usage
 from backend.app.providers.registry import ProviderRegistry
 from backend.app.services.events import EventService
 from backend.app.services.evolution import EvolutionError, EvolutionService
@@ -416,6 +417,71 @@ def analysis_logs(
     limit: int = Query(default=10, ge=1, le=50), db: Session = Depends(get_db)
 ):
     return _analysis_logs(db, limit)
+
+
+@app.get("/api/v1/model-usage")
+def model_usage_summary(
+    start: datetime | None = None,
+    end: datetime | None = None,
+    model: str | None = None,
+    provider: str | None = None,
+    operation: str | None = None,
+    status: str | None = None,
+    language: str | None = None,
+    fidelity: str | None = None,
+    db: Session = Depends(get_db),
+):
+    return model_usage(
+        db,
+        start=start,
+        end=end,
+        model=model,
+        provider=provider,
+        operation=operation,
+        status=status,
+        language=language,
+        fidelity=fidelity,
+    )
+
+
+@app.get("/api/v1/model-logs")
+def model_logs(
+    limit: int = Query(default=50, ge=1, le=100),
+    cursor: str | None = None,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    model: str | None = None,
+    provider: str | None = None,
+    operation: str | None = None,
+    status: str | None = None,
+    language: str | None = None,
+    fidelity: str | None = None,
+    db: Session = Depends(get_db),
+):
+    try:
+        return list_model_audits(
+            db,
+            limit=limit,
+            cursor=cursor,
+            start=start,
+            end=end,
+            model=model,
+            provider=provider,
+            operation=operation,
+            status=status,
+            language=language,
+            fidelity=fidelity,
+        )
+    except (ValueError, UnicodeError) as exc:
+        raise HTTPException(400, "invalid model log cursor") from exc
+
+
+@app.get("/api/v1/model-logs/{audit_id}")
+def model_log(audit_id: UUID, db: Session = Depends(get_db)):
+    row = db.get(ModelCallAuditRow, audit_id)
+    if not row:
+        raise HTTPException(404, "model log not found")
+    return audit_detail(row)
 
 
 @app.get("/api/v1/portfolio", response_model=PortfolioSnapshot)

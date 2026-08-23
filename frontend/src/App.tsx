@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+import ModelLogsPage, { isModelLogsHash } from "./ModelLogs";
+
 const API = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
 type Candidate = {
@@ -311,6 +313,9 @@ export default function App() {
   const [expandedLog, setExpandedLog] = useState<string | null>(null);
   const [selected, setSelected] = useState<Recommendation | null>(null);
   const [scanActionPending, setScanActionPending] = useState(false);
+  const [showModelLogs, setShowModelLogs] = useState(() => (
+    typeof window !== "undefined" && isModelLogsHash(window.location.hash)
+  ));
 
   const applyScanStatus = useCallback((status: ScanStatus) => {
     setScanStatus(status);
@@ -380,6 +385,12 @@ export default function App() {
       window.clearInterval(clockTimer);
     };
   }, [applyScanStatus, pollHealth, refresh]);
+
+  useEffect(() => {
+    const handleHashChange = () => setShowModelLogs(isModelLogsHash(window.location.hash));
+    window.addEventListener("hashchange", handleHashChange);
+    return () => window.removeEventListener("hashchange", handleHashChange);
+  }, []);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -472,6 +483,18 @@ export default function App() {
       snapshot.recommendations.length;
   }, [snapshot.recommendations]);
 
+  if (showModelLogs) {
+    return (
+      <ModelLogsPage
+        apiBase={API}
+        onBack={() => {
+          window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+          setShowModelLogs(false);
+        }}
+      />
+    );
+  }
+
   return (
     <main>
       <header>
@@ -494,6 +517,13 @@ export default function App() {
               ))}
             </div>
           </div>
+          <button
+            type="button"
+            className="model-log-nav"
+            onClick={() => { window.location.hash = "/model-logs"; }}
+          >
+            模型日志
+          </button>
           <div className="theme-switcher" role="group" aria-label="主题切换">
             <button
               type="button"

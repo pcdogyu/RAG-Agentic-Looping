@@ -24,6 +24,7 @@ from backend.app.domain import (
     as_utc,
     utc_now,
 )
+from backend.app.model_audit import cleanup_model_audits
 from backend.app.providers.registry import ProviderRegistry
 from backend.app.services.asset_mapping import AssetMappingService
 from backend.app.services.event_research import EventResearchService
@@ -82,6 +83,11 @@ celery_app.conf.update(
             "schedule": 24 * 60 * 60,
             "options": {"queue": "io"},
         },
+        "cleanup-model-audits": {
+            "task": "market_loop.cleanup_model_audits",
+            "schedule": 24 * 60 * 60,
+            "options": {"queue": "io"},
+        },
         "evolve-from-failures": {
             "task": "market_loop.evolve_from_outcomes",
             "schedule": 7 * 24 * 60 * 60,
@@ -97,6 +103,14 @@ celery_app.conf.update(
 if not settings.evolution_enabled:
     celery_app.conf.beat_schedule.pop("evolve-from-failures", None)
     celery_app.conf.beat_schedule.pop("system-monitor", None)
+
+
+@celery_app.task(name="market_loop.cleanup_model_audits")
+def cleanup_model_audit_records() -> dict[str, int]:
+    init_db()
+    with SessionLocal() as db:
+        deleted = cleanup_model_audits(db, settings.model_audit_retention_days)
+    return {"deleted": deleted, "retention_days": settings.model_audit_retention_days}
 
 
 def _record_task_result(kind: str) -> None:
