@@ -82,10 +82,7 @@ class LlmGateway:
             {"role": "system", "content": system},
             {
                 "role": "user",
-                "content": (
-                    f"{prompt}\n\n只返回符合此 JSON Schema 的 JSON："
-                    f"{json.dumps(schema_hint, ensure_ascii=False)}"
-                ),
+                "content": f"{prompt}\n\n只返回符合请求中 format JSON Schema 的 JSON。",
             },
         ]
         logical_call_id = uuid4()

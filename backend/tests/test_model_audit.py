@@ -82,6 +82,8 @@ def test_gateway_records_exact_redacted_input_output(monkeypatch):
     assert request["keep_alive"] == "5m"
     assert request["options"]["num_thread"] == 8
     assert request["options"]["num_predict"] == 768
+    assert request["format"] == AuditOutput.model_json_schema()
+    assert '"properties"' not in request["messages"][-1]["content"]
     with SessionLocal() as db:
         row = db.scalar(select(ModelCallAuditRow))
     assert row is not None
