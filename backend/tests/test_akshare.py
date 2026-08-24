@@ -72,3 +72,48 @@ def test_akshare_builds_and_resolves_cn_hk_security_master(monkeypatch):
     assert cn[0].currency == "CNY"
     assert hk[0].asset_id == "equity:XHKG:00700"
     assert hk[0].currency == "HKD"
+
+
+def test_akshare_does_not_cache_an_empty_security_master(monkeypatch):
+    class FakeCache:
+        def __init__(self):
+            self.value = []
+            self.set_calls = []
+
+        def key(self, namespace, value):
+            return f"{namespace}:{value['version']}"
+
+        def get(self, key):
+            return self.value
+
+        def set(self, key, value, ttl_seconds):
+            self.value = value
+            self.set_calls.append((key, ttl_seconds))
+
+    calls = 0
+
+    def a_share_master():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("temporary upstream failure")
+        return SecurityFrame([{"code": "600499", "name": "科达制造"}])
+
+    fake_cache = FakeCache()
+    monkeypatch.setattr("backend.app.providers.akshare_provider.cache", fake_cache)
+    monkeypatch.setitem(
+        sys.modules,
+        "akshare",
+        SimpleNamespace(
+            stock_info_a_code_name=a_share_master,
+            stock_hk_spot_em=lambda: SecurityFrame([]),
+        ),
+    )
+    provider = AkShareProvider()
+
+    assert provider._listed_assets() == []
+    assert fake_cache.set_calls == []
+
+    assets = provider._listed_assets()
+    assert [(item.symbol, item.name) for item in assets] == [("600499", "科达制造")]
+    assert fake_cache.set_calls == [("akshare-security-master:1", 24 * 60 * 60)]

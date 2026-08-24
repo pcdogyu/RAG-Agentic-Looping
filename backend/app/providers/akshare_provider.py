@@ -103,7 +103,11 @@ class AkShareProvider:
                 self.last_errors.append(f"hk-share-master: {type(exc).__name__}")
             return records
 
-        payload = cache.remember(key, 24 * 60 * 60, loader)
+        payload = cache.get(key)
+        if not payload:
+            payload = loader()
+            if payload:
+                cache.set(key, payload, 24 * 60 * 60)
         return [AssetRef.model_validate(item) for item in payload]
 
     @staticmethod
