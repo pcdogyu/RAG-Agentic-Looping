@@ -11,12 +11,24 @@ x-backend: &backend
   extra_hosts:
     - "host.docker.internal:host-gateway"
   depends_on:
+    reports-init:
+      condition: service_completed_successfully
     postgres:
       condition: service_healthy
     redis:
       condition: service_healthy
 
 services:
+  reports-init:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    user: "0:0"
+    command: ["sh", "-c", "chown -R 10001:10001 /app/reports"]
+    volumes:
+      - ./reports:/app/reports
+    restart: "no"
+
   postgres:
     image: pgvector/pgvector:pg16
     environment:
