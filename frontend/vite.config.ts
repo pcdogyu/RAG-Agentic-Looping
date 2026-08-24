@@ -22,10 +22,23 @@ const branch = process.env.VITE_BUILD_BRANCH
   || process.env.GITHUB_HEAD_REF
   || process.env.GITHUB_REF_NAME
   || gitValue(["branch", "--show-current"], "detached");
+const apiProxyTarget = process.env.VITE_API_PROXY_TARGET || "http://localhost:8000";
 
 export default defineConfig({
   plugins: [react()],
-  server: { port: 5173 },
+  server: {
+    port: 5173,
+    proxy: {
+      "/health": {
+        target: apiProxyTarget,
+        changeOrigin: true,
+      },
+      "/api": {
+        target: apiProxyTarget,
+        changeOrigin: true,
+      },
+    },
+  },
   define: {
     __BUILD_COMMIT_ID__: JSON.stringify(commitId),
     __BUILD_COMMIT_TIME__: JSON.stringify(commitTime),
