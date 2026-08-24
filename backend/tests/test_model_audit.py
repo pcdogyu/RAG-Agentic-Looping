@@ -41,14 +41,19 @@ class FakeResponse:
 class FakeClient:
     def __init__(self, payload):
         self.payload = payload
+        self.last_request = None
 
     def post(self, *args, **kwargs):
+        self.last_request = {"args": args, "kwargs": kwargs}
         return FakeResponse(self.payload)
 
 
 def test_gateway_records_exact_redacted_input_output(monkeypatch):
     settings = Settings(
         ollama_base_url="http://ollama.invalid",
+        ollama_num_threads=8,
+        ollama_max_output_tokens=768,
+        ollama_keep_alive="5m",
         cloud_llm_api_key="cloud-secret-value",
     )
     gateway = LlmGateway(settings)
@@ -73,6 +78,10 @@ def test_gateway_records_exact_redacted_input_output(monkeypatch):
     )
 
     assert result == {"answer": "完成"}
+    request = gateway.client.last_request["kwargs"]["json"]
+    assert request["keep_alive"] == "5m"
+    assert request["options"]["num_thread"] == 8
+    assert request["options"]["num_predict"] == 768
     with SessionLocal() as db:
         row = db.scalar(select(ModelCallAuditRow))
     assert row is not None

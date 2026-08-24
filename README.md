@@ -213,7 +213,9 @@ stateDiagram-v2
 ### 推理与显存策略
 
 - Ollama 运行在宿主机，容器通过 `host.docker.internal:11434` 调用。
-- 每个请求设置 `keep_alive=0`，完成后卸载当前模型，再切换下一个模型。
+- 每个请求通过 `OLLAMA_KEEP_ALIVE` 控制模型驻留；默认 `0` 会在完成后卸载，CPU 部署可设为 `5m` 减少重复加载。
+- `OLLAMA_NUM_THREADS` 默认 `0` 由 Ollama 自动选择；虚拟化或多 NUMA 主机应按实测设置，避免线程过多反而拖慢推理。
+- `OLLAMA_MAX_OUTPUT_TOKENS` 限制单次结构化输出，避免异常生成长期占用推理槽。
 - Redis 锁 `market-loop:gpu` 将 API 和所有 Worker 的 Ollama 调用限制为全局单并发。
 - `llm-worker` 并发固定为 1；`io-worker` 可并发处理网络 I/O，但事件抽取仍受同一 GPU 锁约束。
 - CPU 推理可以运行，但完整扫描与 7B 深研会明显变慢，不作为性能目标。
@@ -413,6 +415,9 @@ curl http://localhost:8000/health
 | `OLLAMA_EXTRACT_MODEL` | `qwen2.5:3b` | 新闻事件抽取模型 |
 | `OLLAMA_RESEARCH_MODEL` | `qwen2.5:7b` | 深研和验证模型 |
 | `OLLAMA_CODE_MODEL` | `qwen2.5-coder:7b` | 自动演进模型 |
+| `OLLAMA_NUM_THREADS` | `0` | 单次推理线程数；`0` 表示由 Ollama 自动选择 |
+| `OLLAMA_MAX_OUTPUT_TOKENS` | `1024` | 单次结构化输出 token 上限 |
+| `OLLAMA_KEEP_ALIVE` | `0` | 请求完成后的模型驻留时长，例如 CPU 部署可设为 `5m` |
 | `EMBEDDING_MODEL` | `intfloat/multilingual-e5-small` | CPU 嵌入模型 |
 | `EMBEDDING_DIMENSIONS` | `384` | pgvector 投影维度，修改后需同步数据库设计 |
 

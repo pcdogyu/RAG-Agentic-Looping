@@ -96,6 +96,13 @@ class LlmGateway:
             parsed: dict[str, Any] | list[Any] | None = None
             response_data: dict[str, Any] = {}
             try:
+                options: dict[str, int | float] = {
+                    "temperature": temperature,
+                    "num_ctx": 8192,
+                    "num_predict": self.settings.ollama_max_output_tokens,
+                }
+                if self.settings.ollama_num_threads:
+                    options["num_thread"] = self.settings.ollama_num_threads
                 with self.gpu.acquire(self.settings.ollama_timeout_seconds + 30):
                     response = self.client.post(
                         f"{self.settings.ollama_base_url.rstrip('/')}/api/chat",
@@ -104,8 +111,8 @@ class LlmGateway:
                             "messages": messages,
                             "format": schema_hint,
                             "stream": False,
-                            "keep_alive": 0,
-                            "options": {"temperature": temperature, "num_ctx": 8192},
+                            "keep_alive": self.settings.ollama_keep_alive,
+                            "options": options,
                         },
                     )
                     response.raise_for_status()

@@ -170,6 +170,14 @@ def _update_scan_status(client: Redis, **updates: Any) -> dict[str, Any]:
     return payload
 
 
+def _renew_scan_gate(client: Redis, task_id: str) -> bool:
+    """Keep a live long-running scan from being duplicated after its lease expires."""
+
+    if _decode(client.get(SCAN_GATE_KEY)) != task_id:
+        return False
+    return bool(client.expire(SCAN_GATE_KEY, SCAN_GATE_TTL_SECONDS))
+
+
 def get_scan_status() -> dict[str, Any]:
     """Return the shared scan lifecycle with a server clock for UI countdowns."""
 
@@ -290,6 +298,7 @@ def _wait_if_scan_paused(
 ) -> None:
     """Block only between durable scan units, keeping the task lease alive."""
 
+    _renew_scan_gate(client, task_id)
     if _decode(client.get(SCAN_PAUSE_KEY)) != task_id:
         return
     _update_scan_status(
@@ -302,7 +311,7 @@ def _wait_if_scan_paused(
         next_scan_at=None,
     )
     while _decode(client.get(SCAN_PAUSE_KEY)) == task_id:
-        client.expire(SCAN_GATE_KEY, SCAN_GATE_TTL_SECONDS)
+        _renew_scan_gate(client, task_id)
         client.expire(SCAN_PAUSE_KEY, SCAN_GATE_TTL_SECONDS)
         sleep(0.25)
     _update_scan_status(
@@ -588,6 +597,7 @@ def scan_news(self) -> dict:
         registry = ProviderRegistry()
         since = utc_now() - timedelta(minutes=settings.scan_interval_minutes * 2)
         items = registry.discover_news(since=since, limit=settings.scan_batch_size)
+        _renew_scan_gate(client, task_id)
         self.update_state(
             state="PROGRESS",
             meta={"phase": "extracting", "current": 0, "total": len(items)},
@@ -608,6 +618,7 @@ def scan_news(self) -> dict:
         )
 
         def update_progress(current: int, total: int) -> None:
+            _renew_scan_gate(client, task_id)
             self.update_state(
                 state="PROGRESS",
                 meta={"phase": "extracting", "current": current, "total": total},

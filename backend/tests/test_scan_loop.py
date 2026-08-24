@@ -24,6 +24,7 @@ from backend.app.storage import get_event, list_runs, save_event, save_news, sav
 class FakeRedis:
     def __init__(self):
         self.data = {}
+        self.expirations = []
 
     def get(self, key):
         return self.data.get(key)
@@ -38,7 +39,18 @@ class FakeRedis:
         self.data.pop(key, None)
 
     def expire(self, key, seconds):
+        self.expirations.append((key, seconds))
         return key in self.data
+
+
+def test_scan_gate_lease_is_renewed_only_by_its_owner():
+    redis = FakeRedis()
+    redis.set(worker.SCAN_GATE_KEY, "scan-task")
+
+    assert worker._renew_scan_gate(redis, "scan-task") is True
+    assert redis.expirations == [(worker.SCAN_GATE_KEY, worker.SCAN_GATE_TTL_SECONDS)]
+    assert worker._renew_scan_gate(redis, "other-task") is False
+    assert len(redis.expirations) == 1
 
 
 def test_scan_queue_is_idempotent_and_completion_anchors_countdown(monkeypatch):

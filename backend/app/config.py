@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     ollama_research_model: str = "qwen2.5:7b"
     ollama_code_model: str = "qwen2.5-coder:7b"
     ollama_timeout_seconds: int = 240
+    ollama_num_threads: int = Field(default=0, ge=0, le=256)
+    ollama_max_output_tokens: int = Field(default=1024, ge=64, le=8192)
+    ollama_keep_alive: str = "0"
     model_audit_enabled: bool = True
     model_audit_retention_days: int = Field(default=90, ge=1, le=3650)
     embedding_model: str = "intfloat/multilingual-e5-small"
