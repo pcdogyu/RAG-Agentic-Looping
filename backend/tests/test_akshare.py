@@ -1,9 +1,14 @@
+import socket
 import sys
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
 from backend.app.domain import AssetRef
-from backend.app.providers.akshare_provider import TIME_NORMALIZATION_MARKER, AkShareProvider
+from backend.app.providers.akshare_provider import (
+    TIME_NORMALIZATION_MARKER,
+    AkShareProvider,
+    _request_address_family,
+)
 
 
 class FakeFrame:
@@ -20,6 +25,15 @@ class FakeFrame:
                 "来源": "东方财富/AkShare",
             }
         ]
+
+
+def test_akshare_ipv4_context_restores_urllib3_address_family():
+    from urllib3.util import connection
+
+    original = connection.allowed_gai_family
+    with _request_address_family(True):
+        assert connection.allowed_gai_family() == socket.AF_INET
+    assert connection.allowed_gai_family is original
 
 
 def test_akshare_naive_timestamp_is_interpreted_as_shanghai_time(monkeypatch):

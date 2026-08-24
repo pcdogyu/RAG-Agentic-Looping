@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import re
+import socket
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from typing import Any
@@ -13,6 +17,23 @@ from backend.app.providers.cache import cache
 
 SHANGHAI_TIMEZONE = ZoneInfo("Asia/Shanghai")
 TIME_NORMALIZATION_MARKER = "Asia/Shanghai->UTC:v1"
+_ADDRESS_FAMILY_LOCK = threading.Lock()
+
+
+@contextmanager
+def _request_address_family(ipv4_only: bool) -> Iterator[None]:
+    if not ipv4_only:
+        yield
+        return
+    from urllib3.util import connection
+
+    with _ADDRESS_FAMILY_LOCK:
+        original = connection.allowed_gai_family
+        connection.allowed_gai_family = lambda: socket.AF_INET
+        try:
+            yield
+        finally:
+            connection.allowed_gai_family = original
 
 
 def _normalize_security_text(value: str) -> str:
@@ -24,14 +45,18 @@ class AkShareProvider:
 
     name = "akshare"
 
-    def __init__(self) -> None:
+    def __init__(self, settings=None) -> None:
+        from backend.app.config import get_settings
+
+        self.settings = settings or get_settings()
         self.last_errors: list[str] = []
 
     def discover_news(self, *, since: datetime, limit: int = 100) -> list[NewsItem]:
         try:
             import akshare as ak
 
-            frame = ak.stock_info_global_em()
+            with _request_address_family(self.settings.akshare_ipv4_only):
+                frame = ak.stock_info_global_em()
         except Exception:
             return []
         output: list[NewsItem] = []
@@ -93,14 +118,15 @@ class AkShareProvider:
                 return []
 
             records: list[dict[str, Any]] = []
-            try:
-                records.extend(self._a_share_records(ak.stock_info_a_code_name()))
-            except Exception as exc:
-                self.last_errors.append(f"a-share-master: {type(exc).__name__}")
-            try:
-                records.extend(self._hk_share_records(ak.stock_hk_spot_em()))
-            except Exception as exc:
-                self.last_errors.append(f"hk-share-master: {type(exc).__name__}")
+            with _request_address_family(self.settings.akshare_ipv4_only):
+                try:
+                    records.extend(self._a_share_records(ak.stock_info_a_code_name()))
+                except Exception as exc:
+                    self.last_errors.append(f"a-share-master: {type(exc).__name__}")
+                try:
+                    records.extend(self._hk_share_records(ak.stock_hk_spot_em()))
+                except Exception as exc:
+                    self.last_errors.append(f"hk-share-master: {type(exc).__name__}")
             return records
 
         payload = cache.get(key)
@@ -161,10 +187,15 @@ class AkShareProvider:
         try:
             import akshare as ak
 
-            if asset.market.value == "CN":
-                frame = ak.stock_zh_a_hist(symbol=asset.symbol, period="daily", adjust="qfq")
-            else:
-                frame = ak.stock_hk_hist(symbol=asset.symbol, period="daily", adjust="qfq")
+            with _request_address_family(self.settings.akshare_ipv4_only):
+                if asset.market.value == "CN":
+                    frame = ak.stock_zh_a_hist(
+                        symbol=asset.symbol, period="daily", adjust="qfq"
+                    )
+                else:
+                    frame = ak.stock_hk_hist(
+                        symbol=asset.symbol, period="daily", adjust="qfq"
+                    )
             return frame.to_dict(orient="records")
         except Exception:
             return []
@@ -180,14 +211,15 @@ class AkShareProvider:
 
             end = datetime.now(UTC).date()
             start = end - timedelta(days=5 * 366)
-            frame = ak.stock_zh_a_disclosure_report_cninfo(
-                symbol=asset.symbol,
-                market="沪深京" if asset.market is Market.CN else "港股",
-                keyword="",
-                category="",
-                start_date=start.strftime("%Y%m%d"),
-                end_date=end.strftime("%Y%m%d"),
-            )
+            with _request_address_family(self.settings.akshare_ipv4_only):
+                frame = ak.stock_zh_a_disclosure_report_cninfo(
+                    symbol=asset.symbol,
+                    market="沪深京" if asset.market is Market.CN else "港股",
+                    keyword="",
+                    category="",
+                    start_date=start.strftime("%Y%m%d"),
+                    end_date=end.strftime("%Y%m%d"),
+                )
         except Exception:
             return []
         output: list[dict[str, Any]] = []

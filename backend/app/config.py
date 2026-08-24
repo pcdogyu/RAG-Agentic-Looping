@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     rss_feed_urls: str = ""
     official_rss_feed_urls: str = ""
     akshare_asset_master_enabled: bool = True
+    akshare_ipv4_only: bool = False
 
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""

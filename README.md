@@ -402,6 +402,7 @@ curl http://localhost:8000/health
 | `SEC_IDENTITY` | 可选，默认空 | SEC EDGAR 联系身份 |
 | `RSS_FEED_URLS` | 可选，逗号分隔 | 有授权的专业新闻 Feed |
 | `OFFICIAL_RSS_FEED_URLS` | 可选，逗号分隔 | 交易所、监管机构或公司 IR 官方 Feed |
+| `AKSHARE_IPV4_ONLY` | `false` | 无 IPv6 出口的服务器可设为 `true`，避免交易所接口误走 IPv6 |
 | `TELEGRAM_BOT_TOKEN` | 可选，默认空 | Telegram 通知 Token |
 | `TELEGRAM_CHAT_ID` | 可选，默认空 | Telegram 目标会话 |
 
