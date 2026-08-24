@@ -9,6 +9,7 @@ from backend.app.domain import (
     NewsEvent,
     NewsItem,
     Rating,
+    ResearchRun,
     SourceQuality,
 )
 from backend.app.providers.registry import SEED_ASSETS
@@ -71,6 +72,15 @@ class FakeStrongResearchLlm(FakeResearchLlm):
         payload["score"] = 80
         payload["confidence"] = 0.85
         return payload
+
+
+class CapturingResearchLlm(FakeResearchLlm):
+    def __init__(self):
+        self.prompts = []
+
+    def generate_json(self, *, prompt, **kwargs):
+        self.prompts.append(prompt)
+        return super().generate_json(prompt=prompt, **kwargs)
 
 
 class TargetedRegistry:
@@ -154,6 +164,32 @@ def test_research_graph_produces_verified_recommendation(db, tmp_path):
     assert strong_run.recommendation.evidence_complete is True
     assert strong_run.recommendation.rating is Rating.WATCH
     assert strong_run.verification_round == 2
+
+
+def test_research_draft_respects_cpu_prompt_budgets(db, tmp_path):
+    settings = Settings(
+        database_url="sqlite:///./data/test_agent.db",
+        reports_dir=tmp_path,
+        fmp_access_token="",
+        fmp_mcp_url="",
+        research_prompt_evidence_chars=2000,
+        research_prompt_context_chars=1000,
+    )
+    llm = CapturingResearchLlm()
+    service = ResearchService(FakeRegistry(), db, settings, llm)
+    run = ResearchRun(asset=SEED_ASSETS[0])
+
+    service._draft(
+        {
+            "run": run.model_dump(mode="json"),
+            "evidence": [{"payload": "x" * 10000}],
+            "retrieved_context": [{"text": "y" * 10000}],
+        }
+    )
+
+    assert len(llm.prompts) == 1
+    assert llm.prompts[0].count("x") <= settings.research_prompt_evidence_chars
+    assert llm.prompts[0].count("y") <= settings.research_prompt_context_chars
 
 
 def test_explicit_historical_replay_skips_live_providers(db, tmp_path):

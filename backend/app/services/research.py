@@ -432,8 +432,10 @@ class ResearchService:
         prompt = (
             f"研究对象：{run.asset.model_dump_json()}\n研究截止：{run.as_of.isoformat()}\n"
             f"报告模板：{asset_template}\n"
-            f"证据：{json.dumps(evidence, ensure_ascii=False)[:24000]}\n"
-            f"混合检索上下文：{json.dumps(state.get('retrieved_context', []), ensure_ascii=False)[:12000]}\n"
+            "证据："
+            f"{json.dumps(evidence, ensure_ascii=False)[: self.settings.research_prompt_evidence_chars]}\n"
+            "混合检索上下文："
+            f"{json.dumps(state.get('retrieved_context', []), ensure_ascii=False)[: self.settings.research_prompt_context_chars]}\n"
             "只能引用 evidence_ids 中存在的证据。证据不足时降低 confidence 和 score，不得编造。"
         )
         draft_error: str | None = None
@@ -798,7 +800,8 @@ class ResearchService:
         verification = VerificationOutput.model_validate(state["verification"])
         prompt = (
             f"当前报告：{current.model_dump_json()}\n验证结果：{verification.model_dump_json()}\n"
-            f"可用证据：{json.dumps(state.get('evidence', []), ensure_ascii=False)[:24000]}\n"
+            "可用证据："
+            f"{json.dumps(state.get('evidence', []), ensure_ascii=False)[: self.settings.research_prompt_evidence_chars]}\n"
             "修订报告。不能通过编造来补足缺失来源；无法补足时保持低置信度和中性分数。"
         )
         revision_error: str | None = None
@@ -856,7 +859,8 @@ class ResearchService:
                     (
                         f"复核高影响研究结论：{draft.model_dump_json()}\n"
                         f"验证结果：{verification.model_dump_json()}\n"
-                        f"证据：{json.dumps(state.get('evidence', []), ensure_ascii=False)[:24000]}\n"
+                        "证据："
+                        f"{json.dumps(state.get('evidence', []), ensure_ascii=False)[: self.settings.research_prompt_evidence_chars]}\n"
                         "只判断给定证据是否支持该方向与置信度，不补充外部事实。"
                     ),
                     CloudVerification,
