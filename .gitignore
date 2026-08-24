@@ -18,3 +18,4 @@ evals/candidate.json
 evolution-worktrees/
 *.db
 *.sqlite*
+pem/
