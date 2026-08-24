@@ -90,11 +90,12 @@ describe("Ollama model availability", () => {
 
     tracking = updateHealthTracking(tracking, {
       ollama: true,
-      models: ["qwen2.5:3b", "qwen2.5:7b", "qwen2.5-coder:7b"],
+      models: ["qwen2.5:3b", "qwen2.5:7b", "qwen2.5:14b", "qwen2.5-coder:7b"],
     });
 
     expect(tracking.ollama).toEqual({ failures: 0, state: "available" });
     expect(tracking.models["qwen2.5:7b"]).toEqual({ failures: 0, state: "available" });
+    expect(tracking.models["qwen2.5:14b"]).toEqual({ failures: 0, state: "available" });
   });
 
   it("tracks missing models independently from Ollama and installed models", () => {
@@ -109,15 +110,16 @@ describe("Ollama model availability", () => {
 
     expect(tracking.ollama.state).toBe("available");
     expect(tracking.models["qwen2.5:3b"].state).toBe("available");
+    expect(tracking.models["qwen2.5:14b"]).toEqual({ failures: 3, state: "missing" });
     expect(tracking.models["qwen2.5-coder:7b"]).toEqual({ failures: 3, state: "missing" });
   });
 
   it("matches Ollama model names case-insensitively", () => {
     const tracking = updateHealthTracking(
       createInitialHealthTracking(),
-      { ollama: true, models: ["QWEN2.5-CODER:7B"] },
+      { ollama: true, models: ["QWEN2.5:14B"] },
     );
-    expect(tracking.models["qwen2.5-coder:7b"].state).toBe("available");
+    expect(tracking.models["qwen2.5:14b"].state).toBe("available");
   });
 });
 

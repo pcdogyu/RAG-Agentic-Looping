@@ -88,7 +88,7 @@ export type HealthTrackingState = {
   models: Record<string, TrackedConnection>;
 };
 
-const ollamaModels = ["qwen2.5:3b", "qwen2.5:7b", "qwen2.5-coder:7b"] as const;
+const ollamaModels = ["qwen2.5:3b", "qwen2.5:7b", "qwen2.5:14b", "qwen2.5-coder:7b"] as const;
 const healthFailureThreshold = 3;
 const themeStorageKey = "market-loop-theme";
 

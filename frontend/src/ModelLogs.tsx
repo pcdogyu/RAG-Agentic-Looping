@@ -64,7 +64,7 @@ const initialFilters: Filters = {
   fidelity: "",
 };
 
-const knownModels = ["qwen2.5:3b", "qwen2.5:7b", "qwen2.5-coder:7b"];
+const knownModels = ["qwen2.5:3b", "qwen2.5:7b", "qwen2.5:14b", "qwen2.5-coder:7b"];
 const knownOperations = [
   "event_extraction",
   "asset_mapping",
