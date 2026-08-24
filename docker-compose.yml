@@ -94,7 +94,7 @@ services:
         VITE_BUILD_COMMIT_TIME: ${VITE_BUILD_COMMIT_TIME:-unknown}
         VITE_BUILD_BRANCH: ${VITE_BUILD_BRANCH:-unknown}
     ports:
-      - "5173:80"
+      - "80:80"
     depends_on:
       - api
 

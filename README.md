@@ -55,7 +55,7 @@ Market Loop Agent 面向 1–6 个月的中线研究，通过有限、可恢复�
 
 ```mermaid
 flowchart LR
-    USER[用户] --> WEB[React Web<br/>localhost:5173]
+    USER[用户] --> WEB[React Web<br/>localhost:80]
     WEB -->|REST / SSE| API[FastAPI<br/>localhost:8000]
 
     SCHED[Celery Beat<br/>定时调度] --> REDIS[(Redis<br/>队列、缓存、锁)]
@@ -100,7 +100,7 @@ flowchart LR
 
 | 服务 | 技术/并发 | 对外端口 | Profile | 职责 |
 |---|---|---:|---|---|
-| `web` | React + Vite + Nginx | `5173` | 核心 | 展示事件、建议、研究轨迹、模拟组合和健康状态 |
+| `web` | React + Vite + Nginx | `80` | 核心 | 展示事件、建议、研究轨迹、模拟组合和健康状态 |
 | `api` | FastAPI + SSE | `8000` | 核心 | REST 接口、任务提交、健康检查和实时快照流 |
 | `scheduler` | Celery Beat | 无 | 核心 | 每 10 分钟扫描新闻、每 6 小时刷新加密资产、每日评估结果 |
 | `io-worker` | Celery，I/O 并发 4 | 无 | 核心 | 新闻发现、去重、事件抽取、资产映射和外部数据请求 |
@@ -352,7 +352,7 @@ ollama = true
 
 打开：
 
-- Web 看板：<http://localhost:5173>
+- Web 看板：<http://localhost>
 - API 文档：<http://localhost:8000/docs>
 - 健康检查：<http://localhost:8000/health>
 - FMP MCP 健康检查：<http://localhost:8081/healthz>
