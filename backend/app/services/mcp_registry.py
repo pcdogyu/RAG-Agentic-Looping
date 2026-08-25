@@ -153,6 +153,26 @@ def validate_mappings(mappings: dict[str, dict[str, Any]], tools: list[dict[str,
 
 def seed_integrations(db: Session, settings: Settings | None = None) -> None:
     cfg = settings or get_settings()
+    fmp_mappings = {
+        "quote": {
+            "tool_name": "getQuote",
+            "input_bindings": {"symbol": "symbol"},
+            "defaults": {},
+            "output_adapter": "raw_records_v1",
+        },
+        "fundamentals": {
+            "tool_name": "getIncomeStatement",
+            "input_bindings": {"symbol": "symbol"},
+            "defaults": {"limit": 5, "period": "FY"},
+            "output_adapter": "raw_records_v1",
+        },
+        "filings": {
+            "tool_name": "getFilingsBySymbol",
+            "input_bindings": {"symbol": "symbol", "from_date": "from_date", "to": "to"},
+            "defaults": {"limit": 20, "page": 0},
+            "output_adapter": "filings_v1",
+        },
+    }
     if not db.scalar(select(McpSourceRow).where(McpSourceRow.name == "SearXNG")):
         db.add(
             McpSourceRow(
@@ -188,11 +208,15 @@ def seed_integrations(db: Session, settings: Settings | None = None) -> None:
                 priority=100,
                 enabled=cfg.fmp_enabled,
                 managed=True,
+                tool_mappings=fmp_mappings,
             )
         )
-    elif fmp_source.managed and fmp_source.url == "http://fmp-mcp:8000/mcp":
-        fmp_source.url = fmp_url
-        fmp_source.updated_at = datetime.now().astimezone()
+    elif fmp_source.managed:
+        if fmp_source.url == "http://fmp-mcp:8000/mcp":
+            fmp_source.url = fmp_url
+            fmp_source.updated_at = datetime.now().astimezone()
+        if not fmp_source.tool_mappings:
+            fmp_source.tool_mappings = fmp_mappings
     if not db.get(IntegrationSettingRow, "weknora"):
         db.add(IntegrationSettingRow(key="weknora", payload={"url": cfg.weknora_default_url}))
     db.commit()

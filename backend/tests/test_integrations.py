@@ -91,6 +91,7 @@ def test_managed_sources_seed_and_cannot_be_deleted():
         fmp = next(item for item in items if item["name"] == "FMP")
         assert "web_search" in searxng["tool_mappings"]
         assert fmp["url"] == "http://fmp-mcp:8080/mcp"
+        assert set(fmp["tool_mappings"]) == {"quote", "fundamentals", "filings"}
         response = client.delete(f"/api/v1/admin/mcp-sources/{searxng['id']}", headers=ADMIN)
     assert response.status_code == 409
 

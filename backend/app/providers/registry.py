@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
@@ -183,10 +183,13 @@ class ProviderRegistry:
             return {"crypto_metrics": metrics}
         fundamentals: dict[str, Any] = {}
         filings: list[dict[str, Any]] = []
+        today = datetime.now().date()
         canonical_args = {
             "asset_id": asset.asset_id,
             "symbol": asset.symbol,
             "market": asset.market.value,
+            "from_date": (today - timedelta(days=730)).isoformat(),
+            "to": today.isoformat(),
         }
         try:
             mcp_fundamentals, errors = call_enabled_purpose_sync("fundamentals", canonical_args)
