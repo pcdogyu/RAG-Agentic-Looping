@@ -6,7 +6,7 @@ from typing import Any
 
 from sqlalchemy import select
 
-from backend.app.config import Settings, get_settings
+from backend.app.config import Settings
 from backend.app.db import McpSourceRow, SessionLocal
 from backend.app.domain import AssetClass, AssetRef, Market, NewsItem
 from backend.app.providers.akshare_provider import AkShareProvider
@@ -14,6 +14,7 @@ from backend.app.providers.crypto import CryptoProvider
 from backend.app.providers.fmp import FmpProvider
 from backend.app.providers.rss import RssProvider
 from backend.app.providers.sec import SecProvider
+from backend.app.services.fact_sources import get_effective_settings
 from backend.app.services.mcp_registry import call_enabled_purpose_sync
 
 SEED_ASSETS = [
@@ -79,11 +80,11 @@ class ProviderRegistry:
         settings: Settings | None = None,
         assets: Iterable[AssetRef] | None = None,
     ) -> None:
-        self.settings = settings or get_settings()
+        self.settings = settings or get_effective_settings()
         self.fmp = FmpProvider(self.settings)
         self.crypto = CryptoProvider(self.settings)
         self.rss = RssProvider(self.settings)
-        self.akshare = AkShareProvider()
+        self.akshare = AkShareProvider(self.settings)
         self.sec = SecProvider(self.settings)
         self.providers = [self.fmp, self.rss, self.akshare]
         self._assets = {asset.asset_id: asset for asset in SEED_ASSETS}

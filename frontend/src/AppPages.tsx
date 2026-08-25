@@ -174,92 +174,263 @@ type McpSource = {
   managed: boolean; auth_type: string; auth_header_name: string | null; secret_configured: boolean;
   discovered_tools: Array<{ name: string; description: string; input_schema: unknown; output_schema: unknown }>;
   tool_mappings: Record<string, unknown>; last_status: string; last_error: string | null;
+  group_id: string;
 };
 
-type SourceDraft = { name: string; url: string; description: string; priority: number; enabled: boolean; auth_type: string; auth_header_name: string; secret: string; clear_secret: boolean; tool_mappings: string };
-const blankSource: SourceDraft = { name: "", url: "", description: "", priority: 50, enabled: true, auth_type: "none", auth_header_name: "X-API-Key", secret: "", clear_secret: false, tool_mappings: "{}" };
+type SourceDraft = {
+  name: string; url: string; description: string; priority: number; enabled: boolean;
+  auth_type: string; auth_header_name: string; secret: string; clear_secret: boolean;
+  tool_mappings: string; group_id: string;
+};
 
-export const factDataSources = [
-  { id: "fmp", badge: "US", name: "FMP MCP / REST", description: "美股行情、财务报表、估值指标、公司基础数据", tone: "amber" },
-  { id: "sec", badge: "OFFICIAL", name: "SEC EDGAR", description: "10-K / 10-Q / 8-K / Form 4 等官方监管文件", tone: "cyan" },
-  { id: "cn-news", badge: "CN / NEWS", name: "AkShare / RSS", description: "A股市场数据、公告/新闻抓取与补充事件来源", tone: "amber" },
-  { id: "crypto", badge: "CRYPTO", name: "CoinGecko / DeFiLlama / CCXT", description: "Crypto 价格、市值、链上 / DeFi 指标与交易所数据", tone: "cyan" },
+export type FactSourceGroup = {
+  id: string; badge: string; name: string; description: string; tone: string;
+  status: string; configured_count: number; mcp_count: number; config_source: string;
+  config: Record<string, unknown>; mcp_sources: McpSource[];
+};
+
+export type GroupDraft = Record<string, string | number | boolean>;
+
+const blankSource: SourceDraft = {
+  name: "", url: "", description: "", priority: 50, enabled: true,
+  auth_type: "none", auth_header_name: "X-API-Key", secret: "", clear_secret: false,
+  tool_mappings: "{}", group_id: "other",
+};
+
+export const factSourceGroupDefinitions = [
+  { id: "fmp", badge: "US", name: "FMP 美股数据", description: "美股行情、财务报表、估值指标与公司基础数据", tone: "amber" },
+  { id: "sec", badge: "OFFICIAL", name: "SEC 官方文件", description: "SEC EDGAR 监管文件与公司申报记录", tone: "cyan" },
+  { id: "cn_news", badge: "CN / NEWS", name: "A股与新闻", description: "AkShare 主数据、市场新闻、公告与 RSS 事实来源", tone: "amber" },
+  { id: "crypto", badge: "CRYPTO", name: "数字资产", description: "CoinGecko、DeFiLlama 与 CCXT Kraken 交叉验证", tone: "cyan" },
+  { id: "search", badge: "WEB / SEARCH", name: "网络搜索与交叉验证", description: "跨市场网页搜索、独立来源验证与实时补充证据", tone: "mint" },
 ] as const;
 
-type FmpFactStatus = "checking" | "mcp" | "rest" | "unconfigured";
+export const factSourceGroupOptions = [
+  ...factSourceGroupDefinitions.map(({ id, name }) => ({ id, name })),
+  { id: "other", name: "其他数据源" },
+];
 
-export function FactDataSources({ fmpStatus = "checking" }: { fmpStatus?: FmpFactStatus }) {
-  const fmpLabel = fmpStatus === "mcp" ? "MCP / REST 已启用" : fmpStatus === "rest" ? "REST 已配置" : fmpStatus === "unconfigured" ? "待配置" : "检测中";
-  return <section className="fact-sources" aria-labelledby="fact-sources-title">
-    <h3 id="fact-sources-title"><span />事实数据源</h3>
-    <div className="fact-source-list">{factDataSources.map((source) => <article className={`fact-source-card ${source.tone}`} key={source.id}>
-      <span className="fact-source-badge">{source.badge}</span>
-      <strong>{source.name}</strong>
-      <p>{source.description}</p>
-      <small className={source.id === "fmp" && fmpStatus === "unconfigured" ? "pending" : ""}>{source.id === "fmp" ? fmpLabel : "内置启用"}</small>
-    </article>)}</div>
-  </section>;
+const initialFactGroups: FactSourceGroup[] = factSourceGroupDefinitions.map((item) => ({
+  ...item,
+  status: "checking",
+  configured_count: 0,
+  mcp_count: 0,
+  config_source: "environment",
+  config: {},
+  mcp_sources: [],
+}));
+
+function groupDraft(group: FactSourceGroup): GroupDraft {
+  const config = group.config;
+  if (group.id === "fmp") return {
+    base_url: String(config.base_url || ""),
+    access_token: "",
+    clear_access_token: false,
+    rate_limit_per_minute: Number(config.rate_limit_per_minute || 240),
+    news_lookback_hours: Number(config.news_lookback_hours || 12),
+  };
+  if (group.id === "sec") return { identity: String(config.identity || "") };
+  if (group.id === "cn_news") return {
+    akshare_asset_master_enabled: Boolean(config.akshare_asset_master_enabled),
+    akshare_ipv4_only: Boolean(config.akshare_ipv4_only),
+    rss_feed_urls: Array.isArray(config.rss_feed_urls) ? config.rss_feed_urls.join("\n") : "",
+    official_rss_feed_urls: Array.isArray(config.official_rss_feed_urls) ? config.official_rss_feed_urls.join("\n") : "",
+  };
+  if (group.id === "crypto") return {
+    coingecko_base_url: String(config.coingecko_base_url || ""),
+    defillama_base_url: String(config.defillama_base_url || ""),
+  };
+  if (group.id === "search") return { timeout_seconds: Number(config.timeout_seconds || 20) };
+  return {};
 }
 
 function sourceDraft(source?: McpSource): SourceDraft {
-  return source ? { name: source.name, url: source.url, description: source.description, priority: source.priority, enabled: source.enabled, auth_type: source.auth_type, auth_header_name: source.auth_header_name || "X-API-Key", secret: "", clear_secret: false, tool_mappings: JSON.stringify(source.tool_mappings, null, 2) } : { ...blankSource };
+  return source ? {
+    name: source.name, url: source.url, description: source.description, priority: source.priority,
+    enabled: source.enabled, auth_type: source.auth_type,
+    auth_header_name: source.auth_header_name || "X-API-Key", secret: "", clear_secret: false,
+    tool_mappings: JSON.stringify(source.tool_mappings, null, 2), group_id: source.group_id,
+  } : { ...blankSource };
+}
+
+function splitUrls(value: string | number | boolean | undefined) {
+  return String(value || "").split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean);
+}
+
+function groupSavePayload(groupId: string, draft: GroupDraft) {
+  if (groupId === "fmp") return {
+    base_url: draft.base_url,
+    access_token: draft.access_token || null,
+    clear_access_token: Boolean(draft.clear_access_token),
+    rate_limit_per_minute: Number(draft.rate_limit_per_minute),
+    news_lookback_hours: Number(draft.news_lookback_hours),
+  };
+  if (groupId === "sec") return { identity: draft.identity || "" };
+  if (groupId === "cn_news") return {
+    akshare_asset_master_enabled: Boolean(draft.akshare_asset_master_enabled),
+    akshare_ipv4_only: Boolean(draft.akshare_ipv4_only),
+    rss_feed_urls: splitUrls(draft.rss_feed_urls),
+    official_rss_feed_urls: splitUrls(draft.official_rss_feed_urls),
+  };
+  if (groupId === "crypto") return {
+    coingecko_base_url: draft.coingecko_base_url,
+    defillama_base_url: draft.defillama_base_url,
+  };
+  return { timeout_seconds: Number(draft.timeout_seconds) };
+}
+
+export function firstUnhealthyGroup(groups: Array<Pick<FactSourceGroup, "id" | "status">>) {
+  return groups.find((group) => group.status !== "healthy")?.id || null;
+}
+
+export function NativeConfigEditor({ group, draft, onDraft }: {
+  group: FactSourceGroup; draft: GroupDraft;
+  onDraft: (value: GroupDraft) => void;
+}) {
+  if (group.id === "fmp") return <div className="native-config-fields">
+    <label>FMP REST 地址<input type="url" value={String(draft.base_url || "")} onChange={(e) => onDraft({ ...draft, base_url: e.target.value })} /></label>
+    <label>新 REST Token<input type="password" value={String(draft.access_token || "")} placeholder={group.config.access_token_configured ? "已配置，留空则保留" : "尚未配置"} onChange={(e) => onDraft({ ...draft, access_token: e.target.value })} /></label>
+    <label>每分钟请求上限<input type="number" min="1" max="300" value={Number(draft.rate_limit_per_minute)} onChange={(e) => onDraft({ ...draft, rate_limit_per_minute: Number(e.target.value) })} /></label>
+    <label>新闻回看小时<input type="number" min="1" max="168" value={Number(draft.news_lookback_hours)} onChange={(e) => onDraft({ ...draft, news_lookback_hours: Number(e.target.value) })} /></label>
+    <label className="inline-check danger-check"><input type="checkbox" checked={Boolean(draft.clear_access_token)} onChange={(e) => onDraft({ ...draft, clear_access_token: e.target.checked })} />清除 REST Token</label>
+    <p className="config-note">REST Token：{group.config.access_token_configured ? `已配置（${group.config.access_token_source}）` : "未配置"}。独立 FMP MCP 的上游 Token 由服务器环境管理，修改后需要部署更新。</p>
+  </div>;
+  if (group.id === "sec") return <div className="native-config-fields single">
+    <label>SEC Identity<input value={String(draft.identity || "")} placeholder="机构/姓名 contact@example.com" onChange={(e) => onDraft({ ...draft, identity: e.target.value })} /></label>
+  </div>;
+  if (group.id === "cn_news") return <div className="native-config-fields">
+    <label className="inline-check"><input type="checkbox" checked={Boolean(draft.akshare_asset_master_enabled)} onChange={(e) => onDraft({ ...draft, akshare_asset_master_enabled: e.target.checked })} />启用 AkShare 主数据</label>
+    <label className="inline-check"><input type="checkbox" checked={Boolean(draft.akshare_ipv4_only)} onChange={(e) => onDraft({ ...draft, akshare_ipv4_only: e.target.checked })} />AkShare 仅使用 IPv4</label>
+    <label>RSS 地址（每行一个）<textarea value={String(draft.rss_feed_urls || "")} onChange={(e) => onDraft({ ...draft, rss_feed_urls: e.target.value })} /></label>
+    <label>官方 RSS 地址（每行一个）<textarea value={String(draft.official_rss_feed_urls || "")} onChange={(e) => onDraft({ ...draft, official_rss_feed_urls: e.target.value })} /></label>
+  </div>;
+  if (group.id === "crypto") return <div className="native-config-fields">
+    <label>CoinGecko 地址<input type="url" value={String(draft.coingecko_base_url || "")} onChange={(e) => onDraft({ ...draft, coingecko_base_url: e.target.value })} /></label>
+    <label>DeFiLlama 地址<input type="url" value={String(draft.defillama_base_url || "")} onChange={(e) => onDraft({ ...draft, defillama_base_url: e.target.value })} /></label>
+    <label>CCXT 交叉验证<input value="Kraken · 固定只读" readOnly /></label>
+  </div>;
+  if (group.id === "search") return <div className="native-config-fields single">
+    <label>搜索与 MCP 超时（秒）<input type="number" min="2" max="120" value={Number(draft.timeout_seconds)} onChange={(e) => onDraft({ ...draft, timeout_seconds: Number(e.target.value) })} /></label>
+  </div>;
+  return <p className="config-note">此组没有内置配置，仅管理自定义 MCP 来源。</p>;
 }
 
 export function SourcesPage({ apiBase }: { apiBase: string }) {
-  const [items, setItems] = useState<McpSource[]>([]);
-  const [fmpStatus, setFmpStatus] = useState<FmpFactStatus>("checking");
+  const [groups, setGroups] = useState<FactSourceGroup[]>(initialFactGroups);
+  const [drafts, setDrafts] = useState<Record<string, GroupDraft>>({});
+  const [expanded, setExpanded] = useState<string[]>([]);
   const [editing, setEditing] = useState<string | "new" | null>(null);
   const [draft, setDraft] = useState<SourceDraft>(sourceDraft());
   const [message, setMessage] = useState("");
+  const [groupMessages, setGroupMessages] = useState<Record<string, string>>({});
   const headers = { "Content-Type": "application/json" };
   async function load() {
-    const response = await fetch(`${apiBase}/api/v1/admin/mcp-sources`, { headers });
-    if (response.ok) { setItems(await response.json() as McpSource[]); setMessage(""); return; }
-    setMessage("无法读取 MCP 来源配置。");
+    const response = await fetch(`${apiBase}/api/v1/admin/fact-source-groups`, { headers });
+    if (!response.ok) { setMessage("无法读取事实数据源配置。"); return; }
+    const payload = await response.json() as FactSourceGroup[];
+    setGroups(payload);
+    setDrafts(Object.fromEntries(payload.map((group) => [group.id, groupDraft(group)])));
+    setExpanded((current) => {
+      if (current.length) return current;
+      const firstGroup = firstUnhealthyGroup(payload);
+      return firstGroup ? [firstGroup] : [];
+    });
+    setMessage("");
   }
-  useEffect(() => {
-    fetch(`${apiBase}/health`).then((response) => response.json()).then((health: { fmp_configured?: boolean; fmp_mcp_configured?: boolean }) => {
-      setFmpStatus(health.fmp_mcp_configured ? "mcp" : health.fmp_configured ? "rest" : "unconfigured");
-    }).catch(() => setFmpStatus("unconfigured"));
-  }, [apiBase]);
   useEffect(() => { load(); }, [apiBase]); // eslint-disable-line react-hooks/exhaustive-deps
+  function setGroupMessage(groupId: string, value: string) { setGroupMessages((current) => ({ ...current, [groupId]: value })); }
+  function toggleGroup(groupId: string) { setExpanded((current) => current.includes(groupId) ? current.filter((item) => item !== groupId) : [...current, groupId]); }
   async function action(id: string, kind: "test" | "discover") {
-    setMessage("正在连接 MCP 来源…");
+    const owner = groups.find((group) => group.mcp_sources.some((item) => item.id === id));
+    if (owner) setGroupMessage(owner.id, "正在连接 MCP 来源…");
     const response = await fetch(`${apiBase}/api/v1/admin/mcp-sources/${id}/${kind}`, { method: "POST", headers });
-    const body = await response.json(); setMessage(response.ok ? `${kind === "test" ? "连接测试" : "工具发现"}完成。` : body.detail || "操作失败"); await load();
+    const body = await response.json();
+    if (owner) setGroupMessage(owner.id, response.ok ? `${kind === "test" ? "连接测试" : "工具发现"}完成。` : body.detail || "操作失败");
+    await load();
   }
   async function toggle(item: McpSource) {
-    await fetch(`${apiBase}/api/v1/admin/mcp-sources/${item.id}/enabled`, { method: "PATCH", headers, body: JSON.stringify({ enabled: !item.enabled }) }); await load();
+    const response = await fetch(`${apiBase}/api/v1/admin/mcp-sources/${item.id}/enabled`, { method: "PATCH", headers, body: JSON.stringify({ enabled: !item.enabled }) });
+    setGroupMessage(item.group_id, response.ok ? `来源已${item.enabled ? "关闭" : "启用"}。` : "更新来源状态失败。");
+    if (response.ok) await load();
   }
   async function save(event: FormEvent) {
     event.preventDefault();
+    if (draft.clear_secret && !window.confirm("确认清除该 MCP 来源的现有凭据？清除后需要重新配置才能恢复认证。")) return;
     try {
       const payload = { ...draft, tool_mappings: JSON.parse(draft.tool_mappings), secret: draft.secret || null };
       const url = editing === "new" ? `${apiBase}/api/v1/admin/mcp-sources` : `${apiBase}/api/v1/admin/mcp-sources/${editing}`;
       const response = await fetch(url, { method: editing === "new" ? "POST" : "PUT", headers, body: JSON.stringify(payload) });
       const body = await response.json();
       if (!response.ok) throw new Error(body.detail || "保存失败");
-      setEditing(null); setMessage("来源配置已保存并热生效。"); await load();
-    } catch (reason) { setMessage(reason instanceof Error ? reason.message : "保存失败"); }
+      setEditing(null);
+      setExpanded((current) => current.includes(draft.group_id) ? current : [...current, draft.group_id]);
+      setGroupMessage(draft.group_id, "来源配置已保存并热生效。");
+      await load();
+    } catch (reason) { setGroupMessage(draft.group_id, reason instanceof Error ? reason.message : "保存失败"); }
   }
   async function remove(item: McpSource) {
     if (item.managed || !window.confirm(`删除数据源 ${item.name}？`)) return;
-    await fetch(`${apiBase}/api/v1/admin/mcp-sources/${item.id}`, { method: "DELETE", headers }); await load();
+    const response = await fetch(`${apiBase}/api/v1/admin/mcp-sources/${item.id}`, { method: "DELETE", headers });
+    setGroupMessage(item.group_id, response.ok ? "来源已删除。" : "删除来源失败。");
+    if (response.ok) await load();
+  }
+  async function saveGroup(group: FactSourceGroup) {
+    if (group.id === "fmp" && drafts[group.id]?.clear_access_token
+      && !window.confirm("确认清除 FMP REST Token？清除后新的 FMP REST 请求将停止使用该凭据。")) return;
+    const response = await fetch(`${apiBase}/api/v1/admin/fact-source-groups/${group.id}`, { method: "PUT", headers, body: JSON.stringify(groupSavePayload(group.id, drafts[group.id] || {})) });
+    const body = await response.json();
+    setGroupMessage(group.id, response.ok ? "配置已保存，新任务将使用最新配置。" : body.detail || "保存失败");
+    if (response.ok) await load();
+  }
+  async function testGroup(group: FactSourceGroup) {
+    setGroupMessage(group.id, "正在测试组内配置与来源…");
+    const response = await fetch(`${apiBase}/api/v1/admin/fact-source-groups/${group.id}/test`, { method: "POST", headers });
+    const body = await response.json();
+    setGroupMessage(group.id, response.ok && body.ok ? "组内配置与来源连接正常。" : body.detail || body.native?.detail || "部分配置或来源测试失败。");
+    await load();
+  }
+  async function resetGroup(group: FactSourceGroup) {
+    if (!window.confirm(`恢复 ${group.name} 的环境默认配置？数据库覆盖将被删除。`)) return;
+    const response = await fetch(`${apiBase}/api/v1/admin/fact-source-groups/${group.id}`, { method: "DELETE", headers });
+    setGroupMessage(group.id, response.ok ? "已恢复环境默认配置。" : "恢复默认失败。");
+    if (response.ok) await load();
   }
   return <section className="app-page sources-page">
-    <PageHeading eyebrow="RESEARCH DATA FABRIC" title="数据源" copy="统一查看研究使用的事实来源，并管理可热更新的远程 Streamable HTTP MCP。" />
-    <FactDataSources fmpStatus={fmpStatus} />
-    <div className="managed-sources-heading"><span>OPEN MCP REGISTRY</span><h3>可管理 MCP 来源</h3><p>默认开放启停、连接测试、工具发现及受控用途映射设置。</p></div>
+    <PageHeading eyebrow="RESEARCH DATA FABRIC" title="数据源" copy="按事实领域统一查看内置配置、运行状态和所属 MCP；保存后从下一项任务开始生效。" />
     {message && <div className="page-message">{message}</div>}
     <div className="page-toolbar"><button type="button" onClick={() => { setEditing("new"); setDraft(sourceDraft()); }}>新增 MCP 来源</button><button type="button" onClick={load}>刷新</button></div>
-    <div className="source-list">{items.map((item) => <article className="source-card" key={item.id}>
-        <div className="source-card-main"><div><span className={`health-dot ${item.last_status}`} /> <strong>{item.name}</strong>{item.managed && <small>内置</small>}<p>{item.description || item.url}</p><code>{item.url}</code></div><div><span>优先级 {item.priority}</span><span>{item.discovered_tools.length} 个工具</span><span>{item.secret_configured ? "凭据已配置" : "无凭据"}</span></div></div>
-        {item.last_error && <p className="page-error">{item.last_error}</p>}
-        <div className="card-actions"><button type="button" onClick={() => toggle(item)}>{item.enabled ? "关闭" : "启用"}</button><button type="button" onClick={() => action(item.id, "test")}>连接测试</button><button type="button" onClick={() => action(item.id, "discover")}>工具发现</button><button type="button" onClick={() => { setEditing(item.id); setDraft(sourceDraft(item)); }}>编辑</button>{!item.managed && <button type="button" className="danger" onClick={() => remove(item)}>删除</button>}</div>
-        {item.discovered_tools.length > 0 && <details><summary>已发现工具与 Schema</summary>{item.discovered_tools.map((tool) => <pre key={tool.name}>{tool.name}\n{tool.description}\n{JSON.stringify(tool.input_schema, null, 2)}</pre>)}</details>}
-      </article>)}</div>
+    <div className="fact-source-groups">{groups.map((group) => {
+      const open = expanded.includes(group.id);
+      const groupDraftValue = drafts[group.id] || groupDraft(group);
+      return <article className={`fact-source-group ${group.tone} ${open ? "open" : ""}`} key={group.id}>
+        <button type="button" className="fact-group-summary" aria-expanded={open} onClick={() => toggleGroup(group.id)}>
+          <span className="fact-source-badge">{group.badge}</span>
+          <span className="fact-group-title"><strong>{group.name}</strong><small>{group.description}</small></span>
+          <span className="fact-group-counts"><small>{group.configured_count} 项配置</small><small>{group.mcp_count} 个 MCP</small></span>
+          <span className={`group-status ${group.status}`}><i />{{ healthy: "正常", failed: "异常", pending: "待配置", checking: "检测中" }[group.status] || group.status}</span>
+          <i className="group-chevron">{open ? "−" : "+"}</i>
+        </button>
+        {open && <div className="fact-group-detail">
+          {groupMessages[group.id] && <div className={groupMessages[group.id].includes("失败") || groupMessages[group.id].includes("异常") ? "page-error" : "page-message"}>{groupMessages[group.id]}</div>}
+          <section className="native-config-panel">
+            <div className="group-section-heading"><div><span>NATIVE CONFIG</span><h4>内置配置</h4></div><small>{group.config_source === "database" ? "数据库覆盖" : "环境配置"}</small></div>
+            <NativeConfigEditor group={group} draft={groupDraftValue} onDraft={(value) => setDrafts((current) => ({ ...current, [group.id]: value }))} />
+            {group.id !== "other" && <div className="card-actions"><button type="button" onClick={() => testGroup(group)}>测试配置</button><button type="button" onClick={() => saveGroup(group)}>保存</button><button type="button" className="danger" onClick={() => resetGroup(group)}>恢复环境默认</button></div>}
+          </section>
+          <section className="group-mcp-panel">
+            <div className="group-section-heading"><div><span>STREAMABLE HTTP</span><h4>MCP 来源</h4></div><small>{group.mcp_count} 个来源</small></div>
+            <div className="source-list">{group.mcp_sources.map((item) => <article className="source-card" key={item.id}>
+              <div className="source-card-main"><div><span className={`health-dot ${item.last_status}`} /> <strong>{item.name}</strong>{item.managed && <small>内置</small>}<p>{item.description || item.url}</p><code>{item.url}</code></div><div><span>优先级 {item.priority}</span><span>{item.discovered_tools.length} 个工具</span><span>{item.secret_configured ? "凭据已配置" : "无凭据"}</span></div></div>
+              {item.last_error && <p className="page-error">{item.last_error}</p>}
+              <div className="card-actions"><button type="button" onClick={() => toggle(item)}>{item.enabled ? "关闭" : "启用"}</button><button type="button" onClick={() => action(item.id, "test")}>连接测试</button><button type="button" onClick={() => action(item.id, "discover")}>工具发现</button><button type="button" onClick={() => { setEditing(item.id); setDraft(sourceDraft(item)); }}>编辑</button>{!item.managed && <button type="button" className="danger" onClick={() => remove(item)}>删除</button>}</div>
+              {item.discovered_tools.length > 0 && <details><summary>已发现工具与 Schema</summary>{item.discovered_tools.map((tool) => <pre key={tool.name}>{tool.name}\n{tool.description}\n{JSON.stringify(tool.input_schema, null, 2)}</pre>)}</details>}
+            </article>)}{group.mcp_sources.length === 0 && <div className="group-empty">此组尚无 MCP 来源，可使用“新增 MCP 来源”添加。</div>}</div>
+          </section>
+        </div>}
+      </article>;
+    })}</div>
     {editing && <div className="modal-backdrop" onClick={() => setEditing(null)}><form className="modal source-editor" onSubmit={save} onClick={(e) => e.stopPropagation()}><button type="button" className="close" onClick={() => setEditing(null)}>×</button><h2>{editing === "new" ? "新增数据源" : "编辑数据源"}</h2>
-      <label>名称<input required value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} /></label><label>Streamable HTTP URL<input required type="url" value={draft.url} onChange={(e) => setDraft({ ...draft, url: e.target.value })} /></label><label>描述<textarea value={draft.description} onChange={(e) => setDraft({ ...draft, description: e.target.value })} /></label><label>优先级<input type="number" min="0" max="1000" value={draft.priority} onChange={(e) => setDraft({ ...draft, priority: Number(e.target.value) })} /></label><label>认证<select value={draft.auth_type} onChange={(e) => setDraft({ ...draft, auth_type: e.target.value })}><option value="none">无</option><option value="bearer">Bearer</option><option value="api_key_header">API Key Header</option></select></label>{draft.auth_type === "api_key_header" && <label>Header 名称<input value={draft.auth_header_name} onChange={(e) => setDraft({ ...draft, auth_header_name: e.target.value })} /></label>}{draft.auth_type !== "none" && <><label>新凭据<input type="password" value={draft.secret} placeholder="留空则保留现有凭据" onChange={(e) => setDraft({ ...draft, secret: e.target.value })} /></label><label className="inline-check"><input type="checkbox" checked={draft.clear_secret} onChange={(e) => setDraft({ ...draft, clear_secret: e.target.checked })} />清除现有凭据</label></>}<label>用途映射 JSON<textarea className="json-editor" value={draft.tool_mappings} onChange={(e) => setDraft({ ...draft, tool_mappings: e.target.value })} /></label><button type="submit">保存配置</button>
+      <label>所属事实组<select required value={draft.group_id} disabled={editing !== "new" && groups.some((group) => group.mcp_sources.some((item) => item.id === editing && item.managed))} onChange={(e) => setDraft({ ...draft, group_id: e.target.value })}>{factSourceGroupOptions.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}</select></label><label>名称<input required value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} /></label><label>Streamable HTTP URL<input required type="url" value={draft.url} onChange={(e) => setDraft({ ...draft, url: e.target.value })} /></label><label>描述<textarea value={draft.description} onChange={(e) => setDraft({ ...draft, description: e.target.value })} /></label><label>优先级<input type="number" min="0" max="1000" value={draft.priority} onChange={(e) => setDraft({ ...draft, priority: Number(e.target.value) })} /></label><label>认证<select value={draft.auth_type} onChange={(e) => setDraft({ ...draft, auth_type: e.target.value })}><option value="none">无</option><option value="bearer">Bearer</option><option value="api_key_header">API Key Header</option></select></label>{draft.auth_type === "api_key_header" && <label>Header 名称<input value={draft.auth_header_name} onChange={(e) => setDraft({ ...draft, auth_header_name: e.target.value })} /></label>}{draft.auth_type !== "none" && <><label>新凭据<input type="password" value={draft.secret} placeholder="留空则保留现有凭据" onChange={(e) => setDraft({ ...draft, secret: e.target.value })} /></label><label className="inline-check"><input type="checkbox" checked={draft.clear_secret} onChange={(e) => setDraft({ ...draft, clear_secret: e.target.checked })} />清除现有凭据</label></>}<label>用途映射 JSON<textarea className="json-editor" value={draft.tool_mappings} onChange={(e) => setDraft({ ...draft, tool_mappings: e.target.value })} /></label><button type="submit">保存配置</button>
     </form></div>}
   </section>;
 }

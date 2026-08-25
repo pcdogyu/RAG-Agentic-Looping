@@ -11,7 +11,7 @@ import {
   updateHealthTracking,
 } from "./App";
 import BuildFooter, { buildInfo } from "./BuildFooter";
-import { FactDataSources, routeFromHash, TopNavigation } from "./AppPages";
+import { factSourceGroupDefinitions, routeFromHash, TopNavigation } from "./AppPages";
 import ModelLogsPage, {
   buildModelLogQuery,
   fidelityLabel,
@@ -238,12 +238,12 @@ describe("shared hash navigation", () => {
 });
 
 describe("fact data sources", () => {
-  it("renders the four research provider groups and live FMP state", () => {
-    const markup = renderToStaticMarkup(createElement(FactDataSources, { fmpStatus: "mcp" }));
-    expect(markup).toContain("FMP MCP / REST");
-    expect(markup).toContain("SEC EDGAR");
-    expect(markup).toContain("AkShare / RSS");
-    expect(markup).toContain("CoinGecko / DeFiLlama / CCXT");
-    expect(markup).toContain("MCP / REST 已启用");
+  it("defines the five fixed fact-source groups in display order", () => {
+    expect(factSourceGroupDefinitions.map((group) => group.id)).toEqual([
+      "fmp", "sec", "cn_news", "crypto", "search",
+    ]);
+    expect(factSourceGroupDefinitions.map((group) => group.name)).toEqual([
+      "FMP 美股数据", "SEC 官方文件", "A股与新闻", "数字资产", "网络搜索与交叉验证",
+    ]);
   });
 });

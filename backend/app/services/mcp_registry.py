@@ -9,7 +9,6 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import UUID
 
 import httpx2
-from cryptography.fernet import Fernet, InvalidToken
 from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
 from pydantic import BaseModel, Field, HttpUrl, field_validator
@@ -18,6 +17,12 @@ from sqlalchemy.orm import Session
 
 from backend.app.config import Settings, get_settings
 from backend.app.db import IntegrationSettingRow, McpSourceRow, SessionLocal
+from backend.app.services.fact_sources import (
+    FACT_SOURCE_GROUP_IDS,
+    ensure_builtin_source_group,
+    get_effective_settings,
+)
+from backend.app.services.secret_store import decrypt_secret
 
 MCP_PURPOSES = {
     "web_search",
@@ -47,12 +52,20 @@ class SourceInput(BaseModel):
     secret: str | None = None
     clear_secret: bool = False
     tool_mappings: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    group_id: str = "other"
 
     @field_validator("auth_type")
     @classmethod
     def validate_auth_type(cls, value: str) -> str:
         if value not in {"none", "bearer", "api_key_header"}:
             raise ValueError("auth_type must be none, bearer, or api_key_header")
+        return value
+
+    @field_validator("group_id")
+    @classmethod
+    def validate_group_id(cls, value: str) -> str:
+        if value not in FACT_SOURCE_GROUP_IDS:
+            raise ValueError("unsupported fact source group")
         return value
 
 
@@ -81,27 +94,7 @@ def require_admin_token(provided: str | None, settings: Settings | None = None) 
         raise PermissionError("invalid administrator token")
 
 
-def _fernet(settings: Settings) -> Fernet:
-    if not settings.mcp_secret_key:
-        raise RuntimeError("MCP_SECRET_KEY is not configured")
-    try:
-        return Fernet(settings.mcp_secret_key.encode())
-    except (ValueError, TypeError) as exc:
-        raise RuntimeError("MCP_SECRET_KEY is not a valid Fernet key") from exc
-
-
-def encrypt_secret(secret: str, settings: Settings | None = None) -> str:
-    return _fernet(settings or get_settings()).encrypt(secret.encode()).decode()
-
-
-def decrypt_secret(ciphertext: str, settings: Settings | None = None) -> str:
-    try:
-        return _fernet(settings or get_settings()).decrypt(ciphertext.encode()).decode()
-    except InvalidToken as exc:
-        raise RuntimeError("stored MCP credential cannot be decrypted") from exc
-
-
-def source_public(row: McpSourceRow) -> dict[str, Any]:
+def source_public(row: McpSourceRow, group_id: str = "other") -> dict[str, Any]:
     return {
         "id": str(row.id),
         "name": row.name,
@@ -120,6 +113,7 @@ def source_public(row: McpSourceRow) -> dict[str, Any]:
         "last_checked_at": row.last_checked_at,
         "created_at": row.created_at,
         "updated_at": row.updated_at,
+        "group_id": group_id,
     }
 
 
@@ -152,7 +146,7 @@ def validate_mappings(mappings: dict[str, dict[str, Any]], tools: list[dict[str,
 
 
 def seed_integrations(db: Session, settings: Settings | None = None) -> None:
-    cfg = settings or get_settings()
+    cfg = settings or get_effective_settings()
     fmp_mappings = {
         "quote": {
             "tool_name": "getQuote",
@@ -173,44 +167,43 @@ def seed_integrations(db: Session, settings: Settings | None = None) -> None:
             "output_adapter": "filings_v1",
         },
     }
-    if not db.scalar(select(McpSourceRow).where(McpSourceRow.name == "SearXNG")):
-        db.add(
-            McpSourceRow(
-                name="SearXNG",
-                url=cfg.searxng_mcp_url,
-                description="内置联网验证搜索服务",
-                priority=50,
-                enabled=True,
-                managed=True,
-                tool_mappings={
-                    "web_search": {
-                        "tool_name": "web_search",
-                        "input_bindings": {
-                            "query": "query",
-                            "limit": "limit",
-                            "language": "language",
-                            "time_range": "time_range",
-                        },
-                        "defaults": {},
-                        "output_adapter": "search_results_v1",
-                    }
-                },
-            )
+    searxng_source = db.scalar(select(McpSourceRow).where(McpSourceRow.name == "SearXNG"))
+    if not searxng_source:
+        searxng_source = McpSourceRow(
+            name="SearXNG",
+            url=cfg.searxng_mcp_url,
+            description="内置联网验证搜索服务",
+            priority=50,
+            enabled=True,
+            managed=True,
+            tool_mappings={
+                "web_search": {
+                    "tool_name": "web_search",
+                    "input_bindings": {
+                        "query": "query",
+                        "limit": "limit",
+                        "language": "language",
+                        "time_range": "time_range",
+                    },
+                    "defaults": {},
+                    "output_adapter": "search_results_v1",
+                }
+            },
         )
+        db.add(searxng_source)
     fmp_url = cfg.fmp_mcp_url or "http://fmp-mcp:8080/mcp"
     fmp_source = db.scalar(select(McpSourceRow).where(McpSourceRow.name == "FMP"))
     if not fmp_source:
-        db.add(
-            McpSourceRow(
-                name="FMP",
-                url=fmp_url,
-                description="内置受管的 Financial Modeling Prep 来源",
-                priority=100,
-                enabled=cfg.fmp_enabled,
-                managed=True,
-                tool_mappings=fmp_mappings,
-            )
+        fmp_source = McpSourceRow(
+            name="FMP",
+            url=fmp_url,
+            description="内置受管的 Financial Modeling Prep 来源",
+            priority=100,
+            enabled=cfg.fmp_enabled,
+            managed=True,
+            tool_mappings=fmp_mappings,
         )
+        db.add(fmp_source)
     elif fmp_source.managed:
         if fmp_source.url == "http://fmp-mcp:8000/mcp":
             fmp_source.url = fmp_url
@@ -219,6 +212,9 @@ def seed_integrations(db: Session, settings: Settings | None = None) -> None:
             fmp_source.tool_mappings = fmp_mappings
     if not db.get(IntegrationSettingRow, "weknora"):
         db.add(IntegrationSettingRow(key="weknora", payload={"url": cfg.weknora_default_url}))
+    db.flush()
+    ensure_builtin_source_group(db, searxng_source.id, searxng_source.name)
+    ensure_builtin_source_group(db, fmp_source.id, fmp_source.name)
     db.commit()
 
 
@@ -234,7 +230,7 @@ def _headers(row: McpSourceRow, settings: Settings) -> dict[str, str]:
 async def discover_source(
     row: McpSourceRow, settings: Settings | None = None
 ) -> list[dict[str, Any]]:
-    cfg = settings or get_settings()
+    cfg = settings or get_effective_settings()
     async with httpx2.AsyncClient(
         headers=_headers(row, cfg),
         timeout=httpx2.Timeout(cfg.web_search_timeout_seconds),
@@ -278,7 +274,7 @@ async def call_source_tool(
     canonical_args: dict[str, Any],
     settings: Settings | None = None,
 ) -> Any:
-    cfg = settings or get_settings()
+    cfg = settings or get_effective_settings()
     mapping = (row.tool_mappings or {}).get(purpose)
     if not mapping:
         raise ValueError(f"source has no {purpose} mapping")

@@ -30,6 +30,7 @@ from backend.app.model_audit import audit_detail, list_model_audits, model_usage
 from backend.app.providers.registry import ProviderRegistry
 from backend.app.services.events import EventService
 from backend.app.services.evolution import EvolutionError, EvolutionService
+from backend.app.services.fact_sources import get_effective_settings
 from backend.app.services.mcp_registry import seed_integrations
 from backend.app.services.notifications import notifier
 from backend.app.services.portfolio import PortfolioError, PortfolioService
@@ -65,7 +66,13 @@ from backend.app.worker import (
 from backend.app.worker import execute_evolution as execute_evolution_task
 
 settings = get_settings()
-registry = ProviderRegistry(settings)
+
+
+def _provider_registry(db: Session | None = None) -> ProviderRegistry:
+    active = ProviderRegistry()
+    if db is not None:
+        active.add_assets(list_assets(db))
+    return active
 
 
 @asynccontextmanager
@@ -74,9 +81,9 @@ async def lifespan(app: FastAPI):
     with SessionLocal() as db:
         normalize_legacy_akshare_timestamps(db)
         seed_integrations(db, settings)
-        for asset in registry.all_assets():
+        startup_registry = _provider_registry(db)
+        for asset in startup_registry.all_assets():
             upsert_asset(db, asset)
-        registry.add_assets(list_assets(db))
     yield
 
 
@@ -121,6 +128,7 @@ class EvolutionRequest(BaseModel):
 
 @app.get("/health")
 def health() -> dict:
+    provider_settings = get_effective_settings()
     database = False
     try:
         with engine.connect() as connection:
@@ -170,7 +178,7 @@ def health() -> dict:
         "task_failure_rate": task_failure_rate,
         "ollama": ollama,
         "models": models,
-        "fmp_configured": settings.fmp_enabled,
+        "fmp_configured": provider_settings.fmp_enabled,
         "fmp_mcp_configured": bool(settings.fmp_mcp_url),
         "latest_news_at": latest_news,
         "news_age_seconds": news_age_seconds,
@@ -209,9 +217,10 @@ def start_scan(request: ScanRequest, db: Session = Depends(get_db)):
     if request.background:
         task_id, status = enqueue_scan()
         return {"task_id": task_id, "status": status, "scan": get_scan_status()}
+    active_registry = _provider_registry(db)
     since = utc_now() - timedelta(minutes=settings.scan_interval_minutes * 2)
-    items = registry.discover_news(since=since, limit=settings.scan_batch_size)
-    created = EventService(registry).ingest(db, items)
+    items = active_registry.discover_news(since=since, limit=settings.scan_batch_size)
+    created = EventService(active_registry).ingest(db, items)
     return {"news": len(items), "events": len(created)}
 
 
@@ -253,7 +262,8 @@ def task_status(task_id: str):
 
 @app.post("/api/v1/research", response_model=ResearchRun | dict)
 def start_research(request: ResearchRequest, db: Session = Depends(get_db)):
-    asset = get_asset(db, request.asset_id) or registry.get_asset(request.asset_id)
+    active_registry = _provider_registry(db)
+    asset = get_asset(db, request.asset_id) or active_registry.get_asset(request.asset_id)
     if not asset:
         raise HTTPException(404, "asset not found")
     if request.background:
@@ -269,7 +279,7 @@ def start_research(request: ResearchRequest, db: Session = Depends(get_db)):
     event = get_event(db, request.event_id) if request.event_id else None
     # Release the read-only transaction before first-use checkpoint DDL.
     db.rollback()
-    return ResearchService(registry, db).run(
+    return ResearchService(active_registry, db).run(
         asset,
         event,
         request.as_of,
@@ -516,7 +526,7 @@ def model_log(audit_id: UUID, db: Session = Depends(get_db)):
 
 @app.get("/api/v1/portfolio", response_model=PortfolioSnapshot)
 def portfolio(db: Session = Depends(get_db)):
-    return PortfolioService(registry).snapshot(db)
+    return PortfolioService(_provider_registry(db)).snapshot(db)
 
 
 @app.post("/api/v1/paper-orders", response_model=PaperOrder)
@@ -528,7 +538,7 @@ def paper_order(request: PaperOrderRequest, db: Session = Depends(get_db)):
     if not recommendation:
         raise HTTPException(404, "recommendation not found")
     try:
-        order = PortfolioService(registry).create_from_recommendation(
+        order = PortfolioService(_provider_registry(db)).create_from_recommendation(
             db, recommendation, request.price, request.target_weight
         )
         notifier.send(

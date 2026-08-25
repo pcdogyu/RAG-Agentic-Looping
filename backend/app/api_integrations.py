@@ -7,7 +7,7 @@ from uuid import UUID
 
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
-from pydantic import BaseModel, HttpUrl
+from pydantic import BaseModel, HttpUrl, ValidationError
 from sqlalchemy import and_, desc, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -20,16 +20,29 @@ from backend.app.db import (
     get_db,
 )
 from backend.app.domain import Recommendation, utc_now
+from backend.app.services.fact_sources import (
+    BUILTIN_SOURCE_GROUPS,
+    FACT_SOURCE_GROUPS,
+    OTHER_GROUP,
+    delete_source_group,
+    get_effective_settings,
+    native_group_config,
+    probe_native_group,
+    reset_native_group_config,
+    save_native_group_config,
+    set_source_group,
+    source_group_id,
+)
 from backend.app.services.mcp_registry import (
     SearchRequest,
     SourceInput,
     discover_source,
-    encrypt_secret,
     require_admin_token,
     search_enabled_sources,
     source_public,
     validate_mappings,
 )
+from backend.app.services.secret_store import encrypt_secret
 from backend.app.storage import get_event, get_news, get_run
 
 router = APIRouter()
@@ -75,10 +88,14 @@ def _apply_source(row: McpSourceRow, payload: SourceInput, *, creating: bool = F
     row.updated_at = utc_now()
 
 
+def _source_payload(row: McpSourceRow, db: Session) -> dict[str, Any]:
+    return source_public(row, source_group_id(db, row.id, row.name))
+
+
 @router.get("/api/v1/admin/mcp-sources")
 def list_mcp_sources(db: Db) -> list[dict[str, Any]]:
     rows = db.scalars(select(McpSourceRow).order_by(desc(McpSourceRow.priority))).all()
-    return [source_public(row) for row in rows]
+    return [_source_payload(row, db) for row in rows]
 
 
 @router.post("/api/v1/admin/mcp-sources", status_code=201)
@@ -87,6 +104,8 @@ def create_mcp_source(payload: SourceInput, db: Db) -> dict[str, Any]:
     try:
         _apply_source(row, payload, creating=True)
         db.add(row)
+        db.flush()
+        set_source_group(db, row.id, payload.group_id)
         db.commit()
         db.refresh(row)
     except (ValueError, RuntimeError) as exc:
@@ -95,7 +114,7 @@ def create_mcp_source(payload: SourceInput, db: Db) -> dict[str, Any]:
     except IntegrityError as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail="source name already exists") from exc
-    return source_public(row)
+    return _source_payload(row, db)
 
 
 @router.put("/api/v1/admin/mcp-sources/{source_id}")
@@ -103,8 +122,16 @@ def update_mcp_source(source_id: UUID, payload: SourceInput, db: Db) -> dict[str
     row = db.get(McpSourceRow, source_id)
     if not row:
         raise HTTPException(status_code=404, detail="MCP source not found")
+    if (
+        row.managed
+        and "group_id" in payload.model_fields_set
+        and payload.group_id != BUILTIN_SOURCE_GROUPS.get(row.name)
+    ):
+        raise HTTPException(status_code=409, detail="managed source group cannot be changed")
     try:
         _apply_source(row, payload)
+        if "group_id" in payload.model_fields_set:
+            set_source_group(db, row.id, payload.group_id)
         db.commit()
         db.refresh(row)
     except (ValueError, RuntimeError) as exc:
@@ -113,7 +140,7 @@ def update_mcp_source(source_id: UUID, payload: SourceInput, db: Db) -> dict[str
     except IntegrityError as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail="source name already exists") from exc
-    return source_public(row)
+    return _source_payload(row, db)
 
 
 @router.delete("/api/v1/admin/mcp-sources/{source_id}")
@@ -123,6 +150,7 @@ def delete_mcp_source(source_id: UUID, db: Db) -> dict[str, bool]:
         raise HTTPException(status_code=404, detail="MCP source not found")
     if row.managed:
         raise HTTPException(status_code=409, detail="managed source cannot be deleted")
+    delete_source_group(db, row.id)
     db.delete(row)
     db.commit()
     return {"deleted": True}
@@ -137,7 +165,7 @@ def set_mcp_source_enabled(source_id: UUID, payload: EnabledInput, db: Db) -> di
     row.updated_at = utc_now()
     db.commit()
     db.refresh(row)
-    return source_public(row)
+    return _source_payload(row, db)
 
 
 async def _probe(row: McpSourceRow, db: Session, *, discover: bool) -> dict[str, Any]:
@@ -158,7 +186,109 @@ async def _probe(row: McpSourceRow, db: Session, *, discover: bool) -> dict[str,
     row.updated_at = utc_now()
     db.commit()
     db.refresh(row)
-    return {"source": source_public(row), "tools": tools}
+    return {"source": _source_payload(row, db), "tools": tools}
+
+
+def _configured_count(config: dict[str, Any]) -> int:
+    ignored = {"access_token_source", "mcp_upstream_token_management", "ccxt_exchange"}
+    return sum(
+        bool(value) for key, value in config.items() if key not in ignored
+    )
+
+
+def _group_status(group_id: str, config: dict[str, Any], sources: list[dict[str, Any]]) -> str:
+    enabled = [item for item in sources if item["enabled"]]
+    if any(item["last_status"] == "failed" or item["last_error"] for item in enabled):
+        return "failed"
+    native_ready = {
+        "fmp": bool(config.get("access_token_configured")),
+        "sec": bool(config.get("identity")),
+        "cn_news": bool(
+            config.get("akshare_asset_master_enabled")
+            or config.get("rss_feed_urls")
+            or config.get("official_rss_feed_urls")
+        ),
+        "crypto": bool(config.get("coingecko_base_url") and config.get("defillama_base_url")),
+        "search": bool(config.get("timeout_seconds")),
+        "other": True,
+    }[group_id]
+    if not native_ready or any(item["last_status"] != "healthy" for item in enabled):
+        return "pending"
+    return "healthy" if group_id != "other" or enabled else "pending"
+
+
+def _fact_source_groups(db: Session) -> list[dict[str, Any]]:
+    rows = db.scalars(select(McpSourceRow).order_by(desc(McpSourceRow.priority))).all()
+    grouped: dict[str, list[dict[str, Any]]] = {item["id"]: [] for item in FACT_SOURCE_GROUPS}
+    grouped["other"] = []
+    for row in rows:
+        payload = _source_payload(row, db)
+        grouped[payload["group_id"]].append(payload)
+    output: list[dict[str, Any]] = []
+    for metadata in (*FACT_SOURCE_GROUPS, OTHER_GROUP):
+        group_id = metadata["id"]
+        if group_id == "other" and not grouped[group_id]:
+            continue
+        native = native_group_config(db, group_id)
+        config = native["config"]
+        sources = grouped[group_id]
+        output.append(
+            {
+                **metadata,
+                **native,
+                "status": _group_status(group_id, config, sources),
+                "configured_count": _configured_count(config),
+                "mcp_count": len(sources),
+                "mcp_sources": sources,
+            }
+        )
+    return output
+
+
+@router.get("/api/v1/admin/fact-source-groups")
+def list_fact_source_groups(db: Db) -> list[dict[str, Any]]:
+    return _fact_source_groups(db)
+
+
+@router.put("/api/v1/admin/fact-source-groups/{group_id}")
+def update_fact_source_group(
+    group_id: str, payload: dict[str, Any], db: Db
+) -> dict[str, Any]:
+    try:
+        save_native_group_config(db, group_id, payload)
+    except (ValidationError, ValueError, RuntimeError) as exc:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return next(item for item in _fact_source_groups(db) if item["id"] == group_id)
+
+
+@router.delete("/api/v1/admin/fact-source-groups/{group_id}")
+def reset_fact_source_group(group_id: str, db: Db) -> dict[str, Any]:
+    try:
+        reset_native_group_config(db, group_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return next(item for item in _fact_source_groups(db) if item["id"] == group_id)
+
+
+@router.post("/api/v1/admin/fact-source-groups/{group_id}/test")
+async def test_fact_source_group(group_id: str, db: Db) -> dict[str, Any]:
+    try:
+        settings = get_effective_settings(db=db)
+        native = await probe_native_group(group_id, settings)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    mcp_results: list[dict[str, Any]] = []
+    rows = db.scalars(select(McpSourceRow).where(McpSourceRow.enabled.is_(True))).all()
+    for row in rows:
+        if source_group_id(db, row.id, row.name) != group_id:
+            continue
+        result = await _probe(row, db, discover=False)
+        mcp_results.append(
+            {"id": str(row.id), "name": row.name, "status": result["source"]["last_status"]}
+        )
+    ok = bool(native.get("ok")) and all(item["status"] == "healthy" for item in mcp_results)
+    return {"ok": ok, "native": native, "mcp_sources": mcp_results}
 
 
 @router.post("/api/v1/admin/mcp-sources/{source_id}/discover")

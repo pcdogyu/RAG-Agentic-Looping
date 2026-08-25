@@ -5,7 +5,8 @@ from datetime import timedelta
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.app.db import McpSourceRow
+from backend.app.config import Settings
+from backend.app.db import IntegrationSettingRow, McpSourceRow
 from backend.app.domain import (
     AssetClass,
     AssetRef,
@@ -16,13 +17,17 @@ from backend.app.domain import (
     utc_now,
 )
 from backend.app.main import app
+from backend.app.providers.registry import ProviderRegistry
+from backend.app.services.fact_sources import (
+    get_effective_settings,
+    save_native_group_config,
+)
 from backend.app.services.mcp_registry import (
-    decrypt_secret,
-    encrypt_secret,
     normalize_search_results,
     require_admin_token,
     validate_mappings,
 )
+from backend.app.services.secret_store import decrypt_secret, encrypt_secret
 from backend.app.storage import save_recommendation, save_run
 
 ADMIN = {"X-Admin-Token": "test-admin-token"}
@@ -51,12 +56,14 @@ def test_mcp_crud_masks_preserves_and_clears_credentials(db):
         "auth_type": "bearer",
         "secret": "source-token",
         "tool_mappings": {},
+        "group_id": "search",
     }
     with TestClient(app) as client:
         created = client.post("/api/v1/admin/mcp-sources", json=payload)
         assert created.status_code == 201
         body = created.json()
         assert body["secret_configured"] is True
+        assert body["group_id"] == "search"
         assert "secret" not in body and "encrypted_secret" not in body
 
         source_id = body["id"]
@@ -89,10 +96,151 @@ def test_managed_sources_seed_and_cannot_be_deleted():
         searxng = next(item for item in items if item["name"] == "SearXNG")
         fmp = next(item for item in items if item["name"] == "FMP")
         assert "web_search" in searxng["tool_mappings"]
+        assert searxng["group_id"] == "search"
         assert fmp["url"] == "http://fmp-mcp:8080/mcp"
+        assert fmp["group_id"] == "fmp"
         assert set(fmp["tool_mappings"]) == {"quote", "fundamentals", "filings"}
+        changed_group = client.put(
+            f"/api/v1/admin/mcp-sources/{fmp['id']}",
+            json={
+                "name": fmp["name"],
+                "url": fmp["url"],
+                "description": fmp["description"],
+                "priority": fmp["priority"],
+                "enabled": fmp["enabled"],
+                "auth_type": fmp["auth_type"],
+                "tool_mappings": fmp["tool_mappings"],
+                "group_id": "search",
+            },
+        )
         response = client.delete(f"/api/v1/admin/mcp-sources/{searxng['id']}")
+    assert changed_group.status_code == 409
     assert response.status_code == 409
+
+
+def test_fact_source_groups_nest_managed_sources_and_hide_other_when_empty():
+    with TestClient(app) as client:
+        groups = client.get("/api/v1/admin/fact-source-groups")
+    assert groups.status_code == 200
+    payload = groups.json()
+    assert [item["id"] for item in payload] == ["fmp", "sec", "cn_news", "crypto", "search"]
+    fmp = next(item for item in payload if item["id"] == "fmp")
+    search = next(item for item in payload if item["id"] == "search")
+    assert [item["name"] for item in fmp["mcp_sources"]] == ["FMP"]
+    assert [item["name"] for item in search["mcp_sources"]] == ["SearXNG"]
+    assert "access_token" not in fmp["config"]
+
+
+def test_custom_mcp_group_is_persisted_and_other_is_a_safe_fallback(db):
+    payload = {
+        "name": "CN verifier",
+        "url": "https://mcp.example.test/mcp",
+        "description": "test",
+        "priority": 70,
+        "enabled": True,
+        "auth_type": "none",
+        "tool_mappings": {},
+        "group_id": "cn_news",
+    }
+    with TestClient(app) as client:
+        created = client.post("/api/v1/admin/mcp-sources", json=payload)
+        assert created.json()["group_id"] == "cn_news"
+        source_id = created.json()["id"]
+        membership = db.get(IntegrationSettingRow, f"mcp-source-group:{source_id}")
+        assert membership.payload == {"group_id": "cn_news"}
+        db.delete(membership)
+        db.commit()
+        listed = client.get("/api/v1/admin/mcp-sources").json()
+    assert next(item for item in listed if item["id"] == source_id)["group_id"] == "other"
+
+
+def test_fmp_config_encrypts_masks_preserves_clears_and_resets(db):
+    payload = {
+        "base_url": "https://fmp.example.test/stable",
+        "access_token": "rest-secret",
+        "clear_access_token": False,
+        "rate_limit_per_minute": 120,
+        "news_lookback_hours": 24,
+    }
+    with TestClient(app) as client:
+        saved = client.put("/api/v1/admin/fact-source-groups/fmp", json=payload)
+        assert saved.status_code == 200
+        assert "rest-secret" not in saved.text
+        assert saved.json()["config"]["access_token_configured"] is True
+        assert saved.json()["config"]["access_token_source"] == "database"
+
+        db.expire_all()
+        stored = db.get(IntegrationSettingRow, "fact-source:fmp").payload
+        assert "rest-secret" not in str(stored)
+        assert get_effective_settings(db=db).fmp_access_token == "rest-secret"
+
+        payload["access_token"] = None
+        preserved = client.put("/api/v1/admin/fact-source-groups/fmp", json=payload)
+        assert preserved.json()["config"]["access_token_configured"] is True
+
+        payload["clear_access_token"] = True
+        cleared = client.put("/api/v1/admin/fact-source-groups/fmp", json=payload)
+        assert cleared.json()["config"]["access_token_configured"] is False
+        db.expire_all()
+        assert get_effective_settings(db=db).fmp_access_token == ""
+
+        reset = client.delete("/api/v1/admin/fact-source-groups/fmp")
+        assert reset.status_code == 200
+        assert reset.json()["config_source"] == "environment"
+
+
+def test_missing_encryption_key_rejects_only_secret_updates(db):
+    payload = {
+        "base_url": "https://fmp.example.test/stable",
+        "access_token": "secret",
+        "clear_access_token": False,
+        "rate_limit_per_minute": 120,
+        "news_lookback_hours": 24,
+    }
+    with pytest.raises(RuntimeError, match="MCP_SECRET_KEY"):
+        save_native_group_config(db, "fmp", payload, Settings(mcp_secret_key=""))
+
+
+def test_provider_registry_reads_database_config_for_the_next_task(db):
+    before = ProviderRegistry(Settings(coingecko_base_url="https://old.example.test"))
+    save_native_group_config(
+        db,
+        "crypto",
+        {
+            "coingecko_base_url": "https://new.example.test/api/v3",
+            "defillama_base_url": "https://llama.example.test",
+        },
+    )
+    after = ProviderRegistry()
+    assert before.settings.coingecko_base_url == "https://old.example.test"
+    assert after.settings.coingecko_base_url == "https://new.example.test/api/v3"
+
+
+def test_fact_source_config_validation_reset_and_probe(monkeypatch):
+    async def healthy_probe(_group_id, _settings):
+        return {"ok": True, "status": "healthy"}
+
+    monkeypatch.setattr("backend.app.api_integrations.probe_native_group", healthy_probe)
+    with TestClient(app) as client:
+        invalid_group = client.put("/api/v1/admin/fact-source-groups/unknown", json={})
+        invalid_value = client.put(
+            "/api/v1/admin/fact-source-groups/search", json={"timeout_seconds": 1}
+        )
+        invalid_field = client.put(
+            "/api/v1/admin/fact-source-groups/search",
+            json={"timeout_seconds": 20, "unexpected": True},
+        )
+        saved = client.put(
+            "/api/v1/admin/fact-source-groups/sec", json={"identity": "Research research@example.com"}
+        )
+        tested = client.post("/api/v1/admin/fact-source-groups/sec/test")
+        reset = client.delete("/api/v1/admin/fact-source-groups/sec")
+    assert invalid_group.status_code == 422
+    assert invalid_value.status_code == 422
+    assert invalid_field.status_code == 422
+    assert saved.json()["config"]["identity"] == "Research research@example.com"
+    assert tested.json()["ok"] is True
+    assert reset.json()["config_source"] == "environment"
 
 
 def test_probe_unwraps_exception_group(monkeypatch, db):

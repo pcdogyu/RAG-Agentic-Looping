@@ -2,7 +2,13 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import { SearchPage, SourcesPage } from "./AppPages";
+import {
+  factSourceGroupOptions,
+  firstUnhealthyGroup,
+  NativeConfigEditor,
+  SearchPage,
+  SourcesPage,
+} from "./AppPages";
 
 describe("open source and search settings", () => {
   it("shows MCP management controls without an administrator unlock", () => {
@@ -11,6 +17,51 @@ describe("open source and search settings", () => {
     expect(markup).toContain("新增 MCP 来源");
     expect(markup).toContain("刷新");
     expect(markup).not.toContain("管理员令牌");
+  });
+
+  it("renders five fixed collapsed groups and keeps Other conditional", () => {
+    const markup = renderToStaticMarkup(createElement(SourcesPage, { apiBase: "" }));
+
+    for (const name of ["FMP 美股数据", "SEC 官方文件", "A股与新闻", "数字资产", "网络搜索与交叉验证"]) {
+      expect(markup).toContain(name);
+    }
+    expect((markup.match(/aria-expanded="false"/g) || []).length).toBe(5);
+    expect(markup).not.toContain(">其他数据源<");
+  });
+
+  it("auto-expands only the first unhealthy group after loading", () => {
+    expect(firstUnhealthyGroup([
+      { id: "fmp", status: "healthy" },
+      { id: "sec", status: "pending" },
+      { id: "crypto", status: "failed" },
+    ])).toBe("sec");
+    expect(firstUnhealthyGroup([{ id: "fmp", status: "healthy" }])).toBeNull();
+  });
+
+  it("never renders an FMP token returned accidentally by an API", () => {
+    const plaintext = "rest-plaintext-must-not-render";
+    const markup = renderToStaticMarkup(createElement(NativeConfigEditor, {
+      group: {
+        id: "fmp", badge: "US", name: "FMP 美股数据", description: "", tone: "amber",
+        status: "healthy", configured_count: 1, mcp_count: 1, config_source: "database",
+        config: { access_token_configured: true, access_token_source: "database", access_token: plaintext },
+        mcp_sources: [],
+      },
+      draft: {
+        base_url: "https://financialmodelingprep.com/stable", access_token: "",
+        clear_access_token: false, rate_limit_per_minute: 240, news_lookback_hours: 12,
+      },
+      onDraft: () => undefined,
+    }));
+
+    expect(markup).not.toContain(plaintext);
+    expect(markup).toContain("已配置（database）");
+  });
+
+  it("offers every fact group when assigning a new MCP source", () => {
+    expect(factSourceGroupOptions.map((group) => group.id)).toEqual([
+      "fmp", "sec", "cn_news", "crypto", "search", "other",
+    ]);
   });
 
   it("shows the search form without an administrator unlock", () => {
