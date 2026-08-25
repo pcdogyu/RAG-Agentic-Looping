@@ -115,6 +115,54 @@ type ConclusionDetail = {
   evidence: Array<{ id: string; claim: string; source_name: string; source_url: string; excerpt: string }>;
 };
 
+type ConclusionReference = { label: string; url: string; source: string };
+
+function canonicalReferenceUrl(value: string): string {
+  try {
+    const url = new URL(value);
+    url.hash = "";
+    url.hostname = url.hostname.toLocaleLowerCase().replace(/^www\./, "");
+    for (const key of [...url.searchParams.keys()]) {
+      const normalized = key.toLocaleLowerCase();
+      if (normalized.startsWith("utm_") || ["fbclid", "gclid", "ref", "referrer", "source"].includes(normalized)) {
+        url.searchParams.delete(key);
+      }
+    }
+    url.searchParams.sort();
+    url.pathname = url.pathname === "/" ? "/" : url.pathname.replace(/\/+$/, "");
+    return url.toString();
+  } catch {
+    return value.trim();
+  }
+}
+
+function normalizedReferenceText(value: string): string {
+  return value.normalize("NFKC").toLocaleLowerCase().replace(/[^a-z0-9\u3400-\u9fff]+/g, "");
+}
+
+export function conclusionReferences(
+  detail: Pick<ConclusionDetail, "news" | "evidence">,
+): ConclusionReference[] {
+  const candidates: ConclusionReference[] = [
+    ...detail.news.map((item) => ({ label: item.title, url: item.url, source: item.source })),
+    ...detail.evidence.map((item) => ({
+      label: item.claim,
+      url: item.source_url,
+      source: item.source_name,
+    })),
+  ];
+  const seenUrls = new Set<string>();
+  const seenLabels = new Set<string>();
+  return candidates.filter((item) => {
+    const urlKey = canonicalReferenceUrl(item.url);
+    const labelKey = `${normalizedReferenceText(item.label)}|${normalizedReferenceText(item.source)}`;
+    if ((urlKey && seenUrls.has(urlKey)) || (labelKey && seenLabels.has(labelKey))) return false;
+    if (urlKey) seenUrls.add(urlKey);
+    if (labelKey) seenLabels.add(labelKey);
+    return true;
+  });
+}
+
 const ratingLabels: Record<string, string> = {
   strongly_bullish: "强烈看多", bullish: "看多", watch: "中性", bearish: "看空", strongly_bearish: "强烈看空",
 };
@@ -172,7 +220,7 @@ export function ConclusionsPage({ apiBase }: { apiBase: string }) {
         <h3>风险</h3><ul>{selected.recommendation.thesis.risks.map((item) => <li key={item}>{item}</li>)}</ul>
         <h3>失效条件</h3><ul>{selected.recommendation.thesis.invalidation_conditions.map((item) => <li key={item}>{item}</li>)}</ul>
         {selected.event && <><h3>关联事件</h3><p>{selected.event.headline}</p></>}
-        <h3>新闻与证据</h3><div className="evidence-links">{[...selected.news.map((item) => ({ label: item.title, url: item.url, source: item.source })), ...selected.evidence.map((item) => ({ label: item.claim, url: item.source_url, source: item.source_name }))].map((item, index) => <a key={`${item.url}-${index}`} href={item.url} target="_blank" rel="noreferrer"><strong>{item.label}</strong><span>{item.source}</span></a>)}</div>
+        <h3>新闻与证据</h3><div className="evidence-links">{conclusionReferences(selected).map((item) => <a key={`${item.url}-${item.label}`} href={item.url} target="_blank" rel="noreferrer"><strong>{item.label}</strong><span>{item.source}</span></a>)}</div>
       </article></div>}
     </section>
   );

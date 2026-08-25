@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import {
+  conclusionReferences,
   factSourceGroupOptions,
   firstUnhealthyGroup,
   isSearchSource,
@@ -15,6 +16,39 @@ import {
 } from "./AppPages";
 
 describe("open source and search settings", () => {
+  it("deduplicates a news item repeated as evidence", () => {
+    const references = conclusionReferences({
+      news: [{
+        id: "news-1",
+        title: "洪通燃气：上半年归母净利润9895.63万元 同比增长35.77%",
+        url: "https://www.example.com/story?id=1&utm_source=feed",
+        source: "东方财富/AkShare",
+      }],
+      evidence: [
+        {
+          id: "evidence-1",
+          claim: "洪通燃气：上半年归母净利润9895.63万元 同比增长35.77%",
+          source_url: "https://example.com/story?utm_medium=search&id=1",
+          source_name: "东方财富/AkShare",
+          excerpt: "same item",
+        },
+        {
+          id: "evidence-2",
+          claim: "独立公告",
+          source_url: "https://example.com/filing/2",
+          source_name: "巨潮资讯/CNInfo",
+          excerpt: "filing",
+        },
+      ],
+    });
+
+    expect(references).toHaveLength(2);
+    expect(references.map((item) => item.label)).toEqual([
+      "洪通燃气：上半年归母净利润9895.63万元 同比增长35.77%",
+      "独立公告",
+    ]);
+  });
+
   it("shows MCP management controls without an administrator unlock", () => {
     const markup = renderToStaticMarkup(createElement(SourcesPage, { apiBase: "" }));
 
