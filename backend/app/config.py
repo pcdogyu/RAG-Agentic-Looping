@@ -20,12 +20,12 @@ class Settings(BaseSettings):
 
     ollama_base_url: str = "http://localhost:11434"
     ollama_extract_model: str = "qwen2.5:3b"
-    ollama_research_model: str = "qwen2.5:7b"
+    ollama_research_model: str = "qwen2.5:14b"
     ollama_code_model: str = "qwen2.5-coder:7b"
     ollama_timeout_seconds: int = 240
     ollama_num_threads: int = Field(default=0, ge=0, le=256)
     ollama_max_output_tokens: int = Field(default=1024, ge=64, le=8192)
-    ollama_keep_alive: str = "0"
+    ollama_keep_alive: str = "-1"
     research_prompt_evidence_chars: int = Field(default=12000, ge=2000, le=24000)
     research_prompt_context_chars: int = Field(default=4000, ge=1000, le=12000)
     model_audit_enabled: bool = True
