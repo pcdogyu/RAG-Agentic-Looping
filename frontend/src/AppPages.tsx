@@ -179,6 +179,28 @@ type McpSource = {
 type SourceDraft = { name: string; url: string; description: string; priority: number; enabled: boolean; auth_type: string; auth_header_name: string; secret: string; clear_secret: boolean; tool_mappings: string };
 const blankSource: SourceDraft = { name: "", url: "", description: "", priority: 50, enabled: true, auth_type: "none", auth_header_name: "X-API-Key", secret: "", clear_secret: false, tool_mappings: "{}" };
 
+export const factDataSources = [
+  { id: "fmp", badge: "US", name: "FMP MCP / REST", description: "美股行情、财务报表、估值指标、公司基础数据", tone: "amber" },
+  { id: "sec", badge: "OFFICIAL", name: "SEC EDGAR", description: "10-K / 10-Q / 8-K / Form 4 等官方监管文件", tone: "cyan" },
+  { id: "cn-news", badge: "CN / NEWS", name: "AkShare / RSS", description: "A股市场数据、公告/新闻抓取与补充事件来源", tone: "amber" },
+  { id: "crypto", badge: "CRYPTO", name: "CoinGecko / DeFiLlama / CCXT", description: "Crypto 价格、市值、链上 / DeFi 指标与交易所数据", tone: "cyan" },
+] as const;
+
+type FmpFactStatus = "checking" | "mcp" | "rest" | "unconfigured";
+
+export function FactDataSources({ fmpStatus = "checking" }: { fmpStatus?: FmpFactStatus }) {
+  const fmpLabel = fmpStatus === "mcp" ? "MCP / REST 已启用" : fmpStatus === "rest" ? "REST 已配置" : fmpStatus === "unconfigured" ? "待配置" : "检测中";
+  return <section className="fact-sources" aria-labelledby="fact-sources-title">
+    <h3 id="fact-sources-title"><span />事实数据源</h3>
+    <div className="fact-source-list">{factDataSources.map((source) => <article className={`fact-source-card ${source.tone}`} key={source.id}>
+      <span className="fact-source-badge">{source.badge}</span>
+      <strong>{source.name}</strong>
+      <p>{source.description}</p>
+      <small className={source.id === "fmp" && fmpStatus === "unconfigured" ? "pending" : ""}>{source.id === "fmp" ? fmpLabel : "内置启用"}</small>
+    </article>)}</div>
+  </section>;
+}
+
 function sourceDraft(source?: McpSource): SourceDraft {
   return source ? { name: source.name, url: source.url, description: source.description, priority: source.priority, enabled: source.enabled, auth_type: source.auth_type, auth_header_name: source.auth_header_name || "X-API-Key", secret: "", clear_secret: false, tool_mappings: JSON.stringify(source.tool_mappings, null, 2) } : { ...blankSource };
 }
@@ -186,6 +208,7 @@ function sourceDraft(source?: McpSource): SourceDraft {
 export function SourcesPage({ apiBase }: { apiBase: string }) {
   const [token, setToken] = useState(readToken);
   const [items, setItems] = useState<McpSource[]>([]);
+  const [fmpStatus, setFmpStatus] = useState<FmpFactStatus>("checking");
   const [editing, setEditing] = useState<string | "new" | null>(null);
   const [draft, setDraft] = useState<SourceDraft>(sourceDraft());
   const [message, setMessage] = useState("");
@@ -196,6 +219,11 @@ export function SourcesPage({ apiBase }: { apiBase: string }) {
     if (response.status === 401) { setMessage("管理员令牌无效。"); return; }
     if (response.ok) { setItems(await response.json() as McpSource[]); setMessage(""); }
   }
+  useEffect(() => {
+    fetch(`${apiBase}/health`).then((response) => response.json()).then((health: { fmp_configured?: boolean; fmp_mcp_configured?: boolean }) => {
+      setFmpStatus(health.fmp_mcp_configured ? "mcp" : health.fmp_configured ? "rest" : "unconfigured");
+    }).catch(() => setFmpStatus("unconfigured"));
+  }, [apiBase]);
   useEffect(() => { load(); }, [token]); // eslint-disable-line react-hooks/exhaustive-deps
   async function action(id: string, kind: "test" | "discover") {
     setMessage("正在连接 MCP 来源…");
@@ -221,7 +249,9 @@ export function SourcesPage({ apiBase }: { apiBase: string }) {
     await fetch(`${apiBase}/api/v1/admin/mcp-sources/${item.id}`, { method: "DELETE", headers }); await load();
   }
   return <section className="app-page sources-page">
-    <PageHeading eyebrow="CONTROLLED MCP REGISTRY" title="数据源" copy="配置远程 Streamable HTTP MCP，发现工具并将工具映射到受控用途。" />
+    <PageHeading eyebrow="RESEARCH DATA FABRIC" title="数据源" copy="统一查看研究使用的事实来源，并管理可热更新的远程 Streamable HTTP MCP。" />
+    <FactDataSources fmpStatus={fmpStatus} />
+    <div className="managed-sources-heading"><span>CONTROLLED MCP REGISTRY</span><h3>可管理 MCP 来源</h3><p>管理员可启停来源、测试连接、发现工具并维护受控用途映射。</p></div>
     <AdminUnlock token={token} onToken={setToken} />
     {message && <div className="page-message">{message}</div>}
     {token && <>

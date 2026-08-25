@@ -11,7 +11,7 @@ import {
   updateHealthTracking,
 } from "./App";
 import BuildFooter, { buildInfo } from "./BuildFooter";
-import { routeFromHash, TopNavigation } from "./AppPages";
+import { FactDataSources, routeFromHash, TopNavigation } from "./AppPages";
 import ModelLogsPage, {
   buildModelLogQuery,
   fidelityLabel,
@@ -211,5 +211,16 @@ describe("shared hash navigation", () => {
     expect(markup).toContain('href="#/sources" aria-current="page"');
     expect(markup).toContain("搜索引擎");
     expect(markup).toContain("WeKnora");
+  });
+});
+
+describe("fact data sources", () => {
+  it("renders the four research provider groups and live FMP state", () => {
+    const markup = renderToStaticMarkup(createElement(FactDataSources, { fmpStatus: "mcp" }));
+    expect(markup).toContain("FMP MCP / REST");
+    expect(markup).toContain("SEC EDGAR");
+    expect(markup).toContain("AkShare / RSS");
+    expect(markup).toContain("CoinGecko / DeFiLlama / CCXT");
+    expect(markup).toContain("MCP / REST 已启用");
   });
 });
