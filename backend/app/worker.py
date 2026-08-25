@@ -57,7 +57,11 @@ SCAN_GATE_KEY = "market-loop:scan:active"
 SCAN_LOCK_KEY = "market-loop:scan:lock"
 SCAN_PAUSE_KEY = "market-loop:scan:pause"
 SCAN_STATUS_KEY = "market-loop:scan:status"
-SCAN_GATE_TTL_SECONDS = max(1800, settings.scan_interval_minutes * 180)
+SCAN_VISIBILITY_TIMEOUT_SECONDS = max(
+    12 * 60 * 60,
+    settings.scan_interval_minutes * 180,
+)
+SCAN_GATE_TTL_SECONDS = SCAN_VISIBILITY_TIMEOUT_SECONDS
 celery_app = Celery("market-loop", broker=settings.redis_url, backend=settings.redis_url)
 celery_app.conf.update(
     task_serializer="json",
@@ -68,6 +72,13 @@ celery_app.conf.update(
     task_track_started=True,
     task_acks_late=True,
     worker_prefetch_multiplier=1,
+    broker_transport_options={
+        "visibility_timeout": SCAN_VISIBILITY_TIMEOUT_SECONDS,
+    },
+    result_backend_transport_options={
+        "visibility_timeout": SCAN_VISIBILITY_TIMEOUT_SECONDS,
+    },
+    visibility_timeout=SCAN_VISIBILITY_TIMEOUT_SECONDS,
     beat_schedule={
         "ensure-news-scan-loop": {
             "task": "market_loop.ensure_scan_loop",
@@ -101,6 +112,12 @@ celery_app.conf.update(
         },
     },
 )
+
+
+class ScanLeaseLost(RuntimeError):
+    """The task is stale and must stop without changing the active scan state."""
+
+
 if not settings.evolution_enabled:
     celery_app.conf.beat_schedule.pop("evolve-from-failures", None)
     celery_app.conf.beat_schedule.pop("system-monitor", None)
@@ -178,6 +195,26 @@ def _renew_scan_gate(client: Redis, task_id: str) -> bool:
     return bool(client.expire(SCAN_GATE_KEY, SCAN_GATE_TTL_SECONDS))
 
 
+def _claim_scan_gate(client: Redis, task_id: str) -> bool:
+    """Claim an empty gate or renew a redelivered task's own existing gate."""
+
+    current = _decode(client.get(SCAN_GATE_KEY))
+    if current == task_id:
+        return _renew_scan_gate(client, task_id)
+    if current:
+        return False
+    if client.set(SCAN_GATE_KEY, task_id, nx=True, ex=SCAN_GATE_TTL_SECONDS):
+        return True
+    return _decode(client.get(SCAN_GATE_KEY)) == task_id and _renew_scan_gate(
+        client, task_id
+    )
+
+
+def _require_scan_gate(client: Redis, task_id: str) -> None:
+    if not _renew_scan_gate(client, task_id):
+        raise ScanLeaseLost(f"scan lease no longer belongs to {task_id}")
+
+
 def get_scan_status() -> dict[str, Any]:
     """Return the shared scan lifecycle with a server clock for UI countdowns."""
 
@@ -212,6 +249,8 @@ def _complete_scan(
     result: dict[str, Any],
     completed_at: datetime | None = None,
 ) -> dict[str, Any]:
+    if _decode(client.get(SCAN_GATE_KEY)) != task_id:
+        return _read_scan_status(client)
     completed_at = completed_at or utc_now()
     payload = _update_scan_status(
         client,
@@ -298,7 +337,7 @@ def _wait_if_scan_paused(
 ) -> None:
     """Block only between durable scan units, keeping the task lease alive."""
 
-    _renew_scan_gate(client, task_id)
+    _require_scan_gate(client, task_id)
     if _decode(client.get(SCAN_PAUSE_KEY)) != task_id:
         return
     _update_scan_status(
@@ -311,7 +350,7 @@ def _wait_if_scan_paused(
         next_scan_at=None,
     )
     while _decode(client.get(SCAN_PAUSE_KEY)) == task_id:
-        _renew_scan_gate(client, task_id)
+        _require_scan_gate(client, task_id)
         client.expire(SCAN_PAUSE_KEY, SCAN_GATE_TTL_SECONDS)
         sleep(0.25)
     _update_scan_status(
@@ -563,15 +602,14 @@ def _task_failed(**kwargs) -> None:
 def scan_news(self) -> dict:
     task_id = str(self.request.id)
     client = _redis_client()
-    client.set(SCAN_GATE_KEY, task_id, nx=True, ex=SCAN_GATE_TTL_SECONDS)
-    client.expire(SCAN_GATE_KEY, SCAN_GATE_TTL_SECONDS)
+    if not _claim_scan_gate(client, task_id):
+        return {"status": "already_running", "discovered": 0, "events": 0}
     lock = client.lock(
         SCAN_LOCK_KEY,
         timeout=SCAN_GATE_TTL_SECONDS,
         blocking_timeout=0,
     )
     if not lock.acquire(blocking=False):
-        _clear_scan_gate(client, task_id)
         return {"status": "already_running", "discovered": 0, "events": 0}
     try:
         started_at = utc_now()
@@ -597,7 +635,7 @@ def scan_news(self) -> dict:
         registry = ProviderRegistry()
         since = utc_now() - timedelta(minutes=settings.scan_interval_minutes * 2)
         items = registry.discover_news(since=since, limit=settings.scan_batch_size)
-        _renew_scan_gate(client, task_id)
+        _require_scan_gate(client, task_id)
         self.update_state(
             state="PROGRESS",
             meta={"phase": "extracting", "current": 0, "total": len(items)},
@@ -618,7 +656,7 @@ def scan_news(self) -> dict:
         )
 
         def update_progress(current: int, total: int) -> None:
-            _renew_scan_gate(client, task_id)
+            _require_scan_gate(client, task_id)
             self.update_state(
                 state="PROGRESS",
                 meta={"phase": "extracting", "current": current, "total": total},
@@ -684,6 +722,8 @@ def scan_news(self) -> dict:
         }
         _complete_scan(client, task_id, result)
         return result
+    except ScanLeaseLost:
+        return {"status": "superseded", "discovered": 0, "events": 0}
     except Exception as exc:
         if self.request.retries < self.max_retries:
             _update_scan_status(

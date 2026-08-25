@@ -53,6 +53,65 @@ def test_scan_gate_lease_is_renewed_only_by_its_owner():
     assert len(redis.expirations) == 1
 
 
+def test_scan_visibility_and_gate_cover_long_running_tasks():
+    expected = worker.SCAN_VISIBILITY_TIMEOUT_SECONDS
+
+    assert expected == 12 * 60 * 60
+    assert worker.SCAN_GATE_TTL_SECONDS >= expected
+    assert worker.celery_app.conf.broker_transport_options["visibility_timeout"] == expected
+    assert (
+        worker.celery_app.conf.result_backend_transport_options["visibility_timeout"]
+        == expected
+    )
+    assert worker.celery_app.conf.visibility_timeout == expected
+
+
+def test_scan_gate_claim_never_replaces_another_task():
+    redis = FakeRedis()
+    redis.set(worker.SCAN_GATE_KEY, "active-task")
+
+    assert worker._claim_scan_gate(redis, "active-task") is True
+    assert worker._claim_scan_gate(redis, "stale-task") is False
+    assert redis.get(worker.SCAN_GATE_KEY) == b"active-task"
+
+
+def test_stale_scan_cannot_overwrite_or_clear_current_status():
+    redis = FakeRedis()
+    redis.set(worker.SCAN_GATE_KEY, "current-task")
+    worker._update_scan_status(
+        redis,
+        state="running",
+        task_id="current-task",
+        phase="extracting",
+        current=3,
+        total=8,
+    )
+
+    result = worker._complete_scan(
+        redis,
+        "stale-task",
+        {"status": "completed", "discovered": 8, "events": 8},
+    )
+
+    assert result["state"] == "running"
+    assert result["task_id"] == "current-task"
+    assert redis.get(worker.SCAN_GATE_KEY) == b"current-task"
+
+
+def test_stale_scan_stops_at_the_next_safe_checkpoint():
+    redis = FakeRedis()
+    redis.set(worker.SCAN_GATE_KEY, "current-task")
+
+    with pytest.raises(worker.ScanLeaseLost):
+        worker._wait_if_scan_paused(
+            redis,
+            "stale-task",
+            phase="extracting",
+            current=2,
+            total=8,
+        )
+
+
 def test_scan_queue_is_idempotent_and_completion_anchors_countdown(monkeypatch):
     redis = FakeRedis()
     queued_ids = []
