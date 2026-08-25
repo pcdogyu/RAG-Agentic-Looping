@@ -36,6 +36,7 @@ from backend.app.services.mcp_registry import seed_integrations
 from backend.app.services.notifications import notifier
 from backend.app.services.portfolio import PortfolioError, PortfolioService
 from backend.app.services.research import ResearchService
+from backend.app.services.research_queue import ResearchQueueResponse, build_research_queue
 from backend.app.services.source_filter import filter_news_items
 from backend.app.storage import (
     get_asset,
@@ -43,6 +44,7 @@ from backend.app.storage import (
     get_event_research_run,
     get_news,
     get_run,
+    list_active_runs,
     list_assets,
     list_event_research_runs,
     list_events,
@@ -302,6 +304,13 @@ def start_research(request: ResearchRequest, db: Session = Depends(get_db)):
 @app.get("/api/v1/research-runs")
 def research_runs(limit: int = Query(default=100, ge=1, le=500), db: Session = Depends(get_db)):
     return list_runs(db, limit)
+
+
+@app.get("/api/v1/research-queue", response_model=ResearchQueueResponse)
+def research_queue(
+    limit: int = Query(default=500, ge=1, le=1000), db: Session = Depends(get_db)
+):
+    return build_research_queue(list_active_runs(db), limit)
 
 
 @app.get("/api/v1/research-runs/{run_id}")

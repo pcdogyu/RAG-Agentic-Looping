@@ -285,6 +285,15 @@ def list_runs(db: Session, limit: int = 100) -> list[ResearchRun]:
     return [ResearchRun.model_validate(row.payload) for row in rows]
 
 
+def list_active_runs(db: Session) -> list[ResearchRun]:
+    rows = db.scalars(
+        select(ResearchRunRow)
+        .where(ResearchRunRow.status.in_(("queued", "running", "verifying")))
+        .order_by(ResearchRunRow.created_at)
+    ).all()
+    return [ResearchRun.model_validate(row.payload) for row in rows]
+
+
 def list_failed_runs(db: Session, limit: int = 100) -> list[ResearchRun]:
     rows = db.scalars(
         select(ResearchRunRow)

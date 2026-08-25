@@ -14,6 +14,9 @@ import BuildFooter, { buildInfo } from "./BuildFooter";
 import {
   factSourceGroupDefinitions,
   navigationGroups,
+  queueDesktopColumns,
+  QueueGrid,
+  queueRefreshIntervalMs,
   routeFromHash,
   TopNavigation,
 } from "./AppPages";
@@ -222,11 +225,12 @@ describe("model log navigation and filters", () => {
 });
 
 describe("shared hash navigation", () => {
-  it("recognizes all seven routes and falls back to home", () => {
+  it("recognizes all eight routes and falls back to home", () => {
     expect(routeFromHash("#/home")).toBe("home");
     expect(routeFromHash("#/source-filter")).toBe("source-filter");
     expect(routeFromHash("#/conclusions")).toBe("conclusions");
     expect(routeFromHash("#/sources")).toBe("sources");
+    expect(routeFromHash("#/queue")).toBe("queue");
     expect(routeFromHash("#/model-logs")).toBe("model-logs");
     expect(routeFromHash("#/search")).toBe("search");
     expect(routeFromHash("#/weknora")).toBe("weknora");
@@ -236,18 +240,66 @@ describe("shared hash navigation", () => {
 
   it("renders grouped menu links in order and exposes the current page accessibly", () => {
     expect(navigationGroups.left.map((item) => item.route)).toEqual([
-      "home", "source-filter", "sources", "conclusions",
+      "home", "source-filter", "sources", "queue", "conclusions",
     ]);
     expect(navigationGroups.right.map((item) => item.route)).toEqual([
       "model-logs", "search", "weknora",
     ]);
     const markup = renderToStaticMarkup(createElement(TopNavigation, { current: "source-filter" }));
-    expect((markup.match(/<a /g) || []).length).toBe(7);
+    const queueMarkup = renderToStaticMarkup(createElement(TopNavigation, { current: "queue" }));
+    expect((markup.match(/<a /g) || []).length).toBe(8);
     expect(markup).toContain('href="#/source-filter" aria-current="page"');
+    expect(queueMarkup).toContain('href="#/queue" aria-current="page"');
     expect(markup.indexOf("数据源过滤")).toBeLessThan(markup.indexOf(">数据源<"));
+    expect(markup.indexOf(">数据源<")).toBeLessThan(markup.indexOf(">队列<"));
+    expect(markup.indexOf(">队列<")).toBeLessThan(markup.indexOf("结论"));
     expect(markup.indexOf("结论")).toBeLessThan(markup.indexOf("模型日志"));
     expect(markup).toContain("搜索引擎");
     expect(markup).toContain("WeKnora");
+  });
+});
+
+describe("research queue page", () => {
+  it("renders square asset cards with status and merged task count", () => {
+    const markup = renderToStaticMarkup(createElement(QueueGrid, { items: [{
+      asset_id: "cn:600519",
+      symbol: "600519",
+      name: "贵州茅台",
+      market: "CN",
+      asset_class: "equity",
+      status: "verifying",
+      task_count: 3,
+      queued_at: "2026-08-25T01:00:00Z",
+      updated_at: "2026-08-25T01:05:00Z",
+    }] }));
+    expect(markup).toContain('class="queue-grid"');
+    expect(markup).toContain('class="queue-card verifying"');
+    expect(markup).toContain("600519");
+    expect(markup).toContain("贵州茅台");
+    expect(markup).toContain("验证中");
+    expect(markup).toContain("3 个任务");
+  });
+
+  it("uses a five-second refresh and a ten-column desktop grid", () => {
+    expect(queueRefreshIntervalMs).toBe(5000);
+    expect(queueDesktopColumns).toBe(10);
+    const markup = renderToStaticMarkup(createElement(QueueGrid, { items: [{
+      asset_id: "us:test",
+      symbol: "TEST",
+      name: "Test Asset",
+      market: "US",
+      asset_class: "equity",
+      status: "queued",
+      task_count: 1,
+      queued_at: "2026-08-25T01:00:00Z",
+      updated_at: "2026-08-25T01:00:00Z",
+    }] }));
+    expect(markup).toContain('data-columns="10"');
+  });
+
+  it("renders an explicit empty state", () => {
+    const markup = renderToStaticMarkup(createElement(QueueGrid, { items: [] }));
+    expect(markup).toContain("当前没有排队或处理中的标的");
   });
 });
 

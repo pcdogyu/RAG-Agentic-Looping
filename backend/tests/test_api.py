@@ -1,3 +1,4 @@
+from datetime import timedelta
 from hashlib import sha256
 
 from fastapi.testclient import TestClient
@@ -151,6 +152,92 @@ def test_non_failed_research_cannot_be_requeued(db):
         response = client.post(f"/api/v1/research-runs/{run.id}/retry")
 
     assert response.status_code == 409
+
+
+def test_research_queue_aggregates_active_runs_and_applies_status_priority(db):
+    now = utc_now()
+    shared_asset = SEED_ASSETS[1]
+    running_asset = SEED_ASSETS[0].model_copy(
+        update={"asset_id": "test:running", "symbol": "RUN", "name": "Running"}
+    )
+    waiting_asset = SEED_ASSETS[0].model_copy(
+        update={"asset_id": "test:waiting", "symbol": "WAIT", "name": "Waiting"}
+    )
+    runs = [
+        ResearchRun(
+            asset=shared_asset,
+            status=RunStatus.QUEUED,
+            created_at=now - timedelta(minutes=20),
+        ),
+        ResearchRun(
+            asset=shared_asset,
+            status=RunStatus.VERIFYING,
+            created_at=now - timedelta(minutes=10),
+        ),
+        ResearchRun(
+            asset=running_asset,
+            status=RunStatus.RUNNING,
+            created_at=now - timedelta(minutes=15),
+        ),
+        ResearchRun(
+            asset=waiting_asset,
+            status=RunStatus.QUEUED,
+            created_at=now - timedelta(minutes=30),
+        ),
+        ResearchRun(asset=SEED_ASSETS[2], status=RunStatus.COMPLETED),
+    ]
+    for run in runs:
+        save_run(db, run)
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/research-queue?limit=2")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total_assets"] == 3
+    assert payload["total_runs"] == 4
+    assert payload["counts"] == {"queued": 2, "running": 1, "verifying": 1}
+    assert payload["truncated"] is True
+    assert [item["status"] for item in payload["items"]] == ["verifying", "running"]
+    assert payload["items"][0]["asset_id"] == shared_asset.asset_id
+    assert payload["items"][0]["task_count"] == 2
+
+
+def test_research_queue_orders_waiting_assets_oldest_first_and_can_be_empty(db):
+    now = utc_now()
+    newer = SEED_ASSETS[0].model_copy(
+        update={"asset_id": "test:newer", "symbol": "NEW", "name": "Newer"}
+    )
+    older = SEED_ASSETS[0].model_copy(
+        update={"asset_id": "test:older", "symbol": "OLD", "name": "Older"}
+    )
+
+    with TestClient(app) as client:
+        empty = client.get("/api/v1/research-queue")
+    assert empty.json()["items"] == []
+    assert empty.json()["total_assets"] == 0
+
+    save_run(
+        db,
+        ResearchRun(
+            asset=newer,
+            status=RunStatus.QUEUED,
+            created_at=now - timedelta(minutes=5),
+        ),
+    )
+    save_run(
+        db,
+        ResearchRun(
+            asset=older,
+            status=RunStatus.QUEUED,
+            created_at=now - timedelta(minutes=10),
+        ),
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/research-queue")
+
+    assert [item["symbol"] for item in response.json()["items"]] == ["OLD", "NEW"]
 
 
 def test_failed_event_research_can_be_requeued(db, monkeypatch):

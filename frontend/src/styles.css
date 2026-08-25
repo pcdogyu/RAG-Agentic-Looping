@@ -225,6 +225,28 @@ h1 span { color: var(--mint); font-weight: 400; }
 .page-error { border-color: rgba(255,122,122,.32); color: var(--red); }
 .page-empty { padding: 50px 20px; text-align: center; }
 .page-toolbar, .card-actions, .weknora-toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.queue-toolbar { display: flex; align-items: stretch; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
+.queue-toolbar > button { min-width: 110px; padding: 9px 15px; border: 1px solid var(--line); border-radius: 8px; color: var(--text); background: var(--model-surface); cursor: pointer; }
+.queue-toolbar > button:hover { border-color: var(--mint); color: var(--mint); }
+.queue-toolbar > button:disabled { opacity: .55; cursor: default; }
+.queue-metrics { display: flex; flex: 1; gap: 8px; }
+.queue-metrics > span { display: flex; align-items: center; gap: 8px; min-width: 110px; padding: 10px 13px; border: 1px solid var(--line); border-radius: 8px; color: var(--muted); background: var(--model-surface); font-size: 11px; }
+.queue-metrics strong { color: var(--mint); font: 500 18px "DM Mono", monospace; }
+.queue-grid { display: grid; grid-template-columns: repeat(10, minmax(0, 1fr)); gap: 10px; }
+.queue-card { display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto auto; gap: 7px; min-width: 0; aspect-ratio: 1; padding: 12px; overflow: hidden; border: 1px solid var(--line); border-radius: 9px; background: var(--panel); }
+.queue-card.running { border-color: rgba(88,214,255,.4); }
+.queue-card.verifying { border-color: rgba(99,242,186,.42); }
+.queue-card-market, .queue-card time { overflow: hidden; color: var(--muted); font: 400 8px "DM Mono", monospace; text-overflow: ellipsis; white-space: nowrap; }
+.queue-card > strong { overflow: hidden; color: var(--text); font: 500 clamp(14px, 1.25vw, 19px) "DM Mono", monospace; text-overflow: ellipsis; white-space: nowrap; }
+.queue-card > p { display: -webkit-box; margin: 0; overflow: hidden; color: var(--secondary); font-size: 11px; line-height: 1.45; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.queue-card > div { display: flex; align-items: center; justify-content: space-between; gap: 5px; }
+.queue-card-status { display: flex; align-items: center; gap: 5px; color: var(--amber); font-size: 9px; white-space: nowrap; }
+.queue-card-status i { width: 6px; height: 6px; border-radius: 50%; background: var(--amber); box-shadow: 0 0 7px var(--amber); }
+.queue-card.running .queue-card-status { color: var(--cyan); }
+.queue-card.running .queue-card-status i { background: var(--cyan); box-shadow: 0 0 7px var(--cyan); }
+.queue-card.verifying .queue-card-status { color: var(--mint); }
+.queue-card.verifying .queue-card-status i { background: var(--mint); box-shadow: 0 0 7px var(--mint); }
+.queue-card small { color: var(--muted); font-size: 8px; white-space: nowrap; }
 .filter-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 12px; }
 .filter-metrics > div { display: grid; gap: 5px; padding: 17px 19px; border: 1px solid var(--line); border-radius: 11px; background: var(--model-surface); }
 .filter-metrics span, .filter-metrics small { color: var(--muted); font-size: 11px; }
@@ -413,6 +435,7 @@ h1 span { color: var(--mint); font-weight: 400; }
   .header-actions { align-items: flex-end; flex-direction: column; }
   .model-log-summary { grid-template-columns: minmax(150px, 1.2fr) minmax(130px, 1fr) 100px minmax(150px, 1fr) 70px 18px; }
   .model-log-summary .fidelity { display: none; }
+  .queue-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); }
 }
 
 @media (max-width: 900px) {
@@ -432,6 +455,10 @@ h1 span { color: var(--mint); font-weight: 400; }
   .fact-group-counts { display: none; }
   .fact-group-detail { grid-template-columns: 1fr; }
   .filter-metrics { grid-template-columns: repeat(2, 1fr); }
+  .queue-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .queue-toolbar { align-items: stretch; flex-direction: column; }
+  .queue-metrics { flex-wrap: wrap; }
+  .queue-metrics > span { flex: 1 1 calc(50% - 8px); }
 }
 
 @media (max-width: 560px) {
@@ -478,4 +505,6 @@ h1 span { color: var(--mint); font-weight: 400; }
   .filter-metrics, .keyword-panels { grid-template-columns: 1fr; }
   .filter-log-list article { grid-template-columns: 1fr; }
   .filter-log-list article > div:last-child { justify-items: start; }
+  .queue-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .queue-toolbar > button { width: 100%; }
 }

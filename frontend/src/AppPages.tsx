@@ -1,14 +1,15 @@
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useCallback, useEffect, useState } from "react";
 
 import ModelLogsPage from "./ModelLogs";
 
-export type AppRoute = "home" | "source-filter" | "sources" | "conclusions" | "model-logs" | "search" | "weknora";
+export type AppRoute = "home" | "source-filter" | "sources" | "queue" | "conclusions" | "model-logs" | "search" | "weknora";
 
 export const navigationGroups: Record<"left" | "right", Array<{ route: AppRoute; label: string }>> = {
   left: [
     { route: "home", label: "首页" },
     { route: "source-filter", label: "数据源过滤" },
     { route: "sources", label: "数据源" },
+    { route: "queue", label: "队列" },
     { route: "conclusions", label: "结论" },
   ],
   right: [
@@ -81,6 +82,109 @@ function AdminUnlock({ token, onToken }: { token: string; onToken: (value: strin
 
 function PageHeading({ eyebrow, title, copy }: { eyebrow: string; title: string; copy: string }) {
   return <div className="page-heading"><p className="eyebrow">{eyebrow}</p><h2>{title}</h2><p>{copy}</p></div>;
+}
+
+export const queueRefreshIntervalMs = 5000;
+export const queueDesktopColumns = 10;
+
+export type ResearchQueueItem = {
+  asset_id: string;
+  symbol: string;
+  name: string;
+  market: string;
+  asset_class: string;
+  status: "queued" | "running" | "verifying";
+  task_count: number;
+  queued_at: string;
+  updated_at: string;
+};
+
+type ResearchQueueResponse = {
+  generated_at: string;
+  total_assets: number;
+  total_runs: number;
+  counts: { queued: number; running: number; verifying: number };
+  truncated: boolean;
+  items: ResearchQueueItem[];
+};
+
+const queueStatusLabels: Record<ResearchQueueItem["status"], string> = {
+  queued: "排队中",
+  running: "研究中",
+  verifying: "验证中",
+};
+
+export function QueueGrid({ items }: { items: ResearchQueueItem[] }) {
+  if (!items.length) return <div className="page-empty">当前没有排队或处理中的标的。</div>;
+  return <div className="queue-grid" data-columns={queueDesktopColumns}>{items.map((item) => (
+    <article
+      className={`queue-card ${item.status}`}
+      key={item.asset_id}
+      title={`${item.symbol} · ${item.name} · ${queueStatusLabels[item.status]}`}
+    >
+      <span className="queue-card-market">{item.market} · {item.asset_class}</span>
+      <strong>{item.symbol}</strong>
+      <p>{item.name}</p>
+      <div>
+        <span className="queue-card-status"><i />{queueStatusLabels[item.status]}</span>
+        {item.task_count > 1 && <small>{item.task_count} 个任务</small>}
+      </div>
+      <time dateTime={item.queued_at}>{new Date(item.queued_at).toLocaleString("zh-CN")}</time>
+    </article>
+  ))}</div>;
+}
+
+export function QueuePage({ apiBase }: { apiBase: string }) {
+  const [queue, setQueue] = useState<ResearchQueueResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  const loadQueue = useCallback(async (signal?: AbortSignal, showLoading = false) => {
+    if (showLoading) setLoading(true);
+    try {
+      const response = await fetch(`${apiBase}/api/v1/research-queue?limit=500`, { signal });
+      if (!response.ok) throw new Error(`队列请求失败（HTTP ${response.status}）`);
+      setQueue(await response.json() as ResearchQueueResponse);
+      setError("");
+    } catch (reason) {
+      if (signal?.aborted) return;
+      setError(reason instanceof Error ? reason.message : "队列请求失败");
+    } finally {
+      if (!signal?.aborted) setLoading(false);
+    }
+  }, [apiBase]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void loadQueue(controller.signal, true);
+    const timer = window.setInterval(
+      () => void loadQueue(controller.signal),
+      queueRefreshIntervalMs,
+    );
+    return () => {
+      controller.abort();
+      window.clearInterval(timer);
+    };
+  }, [loadQueue]);
+
+  return <section className="app-page queue-page">
+    <PageHeading eyebrow="ACTIVE RESEARCH PIPELINE" title="队列" copy="查看正在排队、研究和验证中的股票或标的；页面每 5 秒自动更新。" />
+    <div className="queue-toolbar">
+      <div className="queue-metrics" aria-live="polite">
+        <span>标的<strong>{queue?.total_assets ?? 0}</strong></span>
+        <span>排队任务<strong>{queue?.counts.queued ?? 0}</strong></span>
+        <span>研究中<strong>{queue?.counts.running ?? 0}</strong></span>
+        <span>验证中<strong>{queue?.counts.verifying ?? 0}</strong></span>
+      </div>
+      <button type="button" disabled={loading} onClick={() => void loadQueue(undefined, true)}>
+        {loading ? "刷新中…" : "立即刷新"}
+      </button>
+    </div>
+    {error && <div className="page-error">{error}</div>}
+    {queue?.truncated && <div className="page-message">队列过长，当前显示前 500 个标的。</div>}
+    {!queue && loading && <div className="page-message">正在读取研究队列…</div>}
+    {queue && <QueueGrid items={queue.items} />}
+  </section>;
 }
 
 type Recommendation = {
@@ -711,6 +815,7 @@ export function RoutedPage({ route, apiBase }: { route: Exclude<AppRoute, "home"
   if (route === "source-filter") return <SourceFilterPage apiBase={apiBase} />;
   if (route === "conclusions") return <ConclusionsPage apiBase={apiBase} />;
   if (route === "sources") return <SourcesPage apiBase={apiBase} />;
+  if (route === "queue") return <QueuePage apiBase={apiBase} />;
   if (route === "search") return <SearchPage apiBase={apiBase} />;
   return <WeknoraPage apiBase={apiBase} />;
 }
