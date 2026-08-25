@@ -24,6 +24,7 @@ from backend.app.domain import (
     PaperOrder,
     PortfolioSnapshot,
     ResearchRun,
+    RunStatus,
     utc_now,
 )
 from backend.app.model_audit import audit_detail, list_model_audits, model_usage
@@ -46,10 +47,13 @@ from backend.app.storage import (
     list_event_research_runs,
     list_events,
     list_evolutions,
+    list_failed_event_research_runs,
+    list_failed_runs,
     list_news,
     list_outcomes,
     list_recent_events,
     list_recommendations,
+    list_retries_for_run,
     list_runs,
     normalize_legacy_akshare_timestamps,
     save_evolution,
@@ -57,6 +61,7 @@ from backend.app.storage import (
 )
 from backend.app.worker import (
     celery_app,
+    enqueue_event_research_retry,
     enqueue_research,
     enqueue_scan,
     evolve_failures,
@@ -305,6 +310,115 @@ def research_run(run_id: UUID, db: Session = Depends(get_db)):
     if not value:
         raise HTTPException(404, "run not found")
     return value
+
+
+@app.get("/api/v1/failed-research-runs")
+def failed_research_runs(
+    limit: int = Query(default=50, ge=1, le=200), db: Session = Depends(get_db)
+):
+    items: list[dict] = []
+    for run in list_failed_runs(db, min(limit * 4, 800)):
+        if run.retry_of_run_id is not None:
+            continue
+        retries = list_retries_for_run(db, run.id)
+        latest_retry = retries[0] if retries else None
+        event = get_event(db, run.event_id) if run.event_id else None
+        items.append(
+            {
+                "kind": "asset",
+                "id": str(run.id),
+                "status": run.status.value,
+                "asset": run.asset.model_dump(mode="json"),
+                "event": (
+                    {"id": str(event.id), "headline": event.headline} if event else None
+                ),
+                "error": run.error,
+                "updated_at": run.updated_at.isoformat(),
+                "retry_count": len(retries),
+                "latest_retry": (
+                    {
+                        "id": str(latest_retry.id),
+                        "status": latest_retry.status.value,
+                        "updated_at": latest_retry.updated_at.isoformat(),
+                    }
+                    if latest_retry
+                    else None
+                ),
+            }
+        )
+    for run in list_failed_event_research_runs(db, limit):
+        event = get_event(db, run.event_id)
+        items.append(
+            {
+                "kind": "event",
+                "id": str(run.id),
+                "status": run.status.value,
+                "asset": None,
+                "event": (
+                    {"id": str(event.id), "headline": event.headline} if event else None
+                ),
+                "error": run.error,
+                "updated_at": run.updated_at.isoformat(),
+                "retry_count": run.retry_count,
+                "latest_retry": None,
+            }
+        )
+    items.sort(key=lambda item: item["updated_at"], reverse=True)
+    return items[:limit]
+
+
+@app.post("/api/v1/research-runs/{run_id}/retry", status_code=202)
+def retry_research_run(run_id: UUID, db: Session = Depends(get_db)):
+    original = get_run(db, run_id)
+    if not original:
+        raise HTTPException(404, "run not found")
+    if original.status is not RunStatus.FAILED:
+        raise HTTPException(409, "only failed research runs can be retried")
+    if original.retry_of_run_id is not None:
+        raise HTTPException(409, "retry the original failed research run")
+    retries = list_retries_for_run(db, original.id)
+    active_statuses = {RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.VERIFYING}
+    if any(item.status in active_statuses for item in retries):
+        raise HTTPException(409, "a retry is already queued or running")
+    event = get_event(db, original.event_id) if original.event_id else None
+    if original.event_id and event is None:
+        raise HTTPException(409, "source event no longer exists")
+    retry_attempt = max([item.retry_attempt for item in retries] or [0]) + 1
+    task_id, run = enqueue_research(
+        db,
+        original.asset,
+        event,
+        as_of=utc_now(),
+        historical_replay=False,
+        retry_of_run_id=original.id,
+        retry_attempt=retry_attempt,
+    )
+    return {
+        "task_id": task_id,
+        "run_id": str(run.id),
+        "retry_of_run_id": str(original.id),
+        "retry_attempt": retry_attempt,
+        "status": "queued",
+    }
+
+
+@app.post("/api/v1/event-research-runs/{run_id}/retry", status_code=202)
+def retry_event_research_run(run_id: UUID, db: Session = Depends(get_db)):
+    run = get_event_research_run(db, run_id)
+    if not run:
+        raise HTTPException(404, "event research run not found")
+    if run.status is not RunStatus.FAILED:
+        raise HTTPException(409, "only failed event research runs can be retried")
+    event = get_event(db, run.event_id)
+    if not event:
+        raise HTTPException(409, "source event no longer exists")
+    task_id, run = enqueue_event_research_retry(db, event, run)
+    return {
+        "task_id": task_id,
+        "run_id": str(run.id),
+        "retry_count": run.retry_count,
+        "status": "queued",
+    }
 
 
 @app.get("/api/v1/event-research-runs", response_model=list[EventResearchRun])

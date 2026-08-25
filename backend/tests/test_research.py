@@ -193,6 +193,66 @@ def test_research_draft_respects_cpu_prompt_budgets(db, tmp_path):
     assert llm.prompts[0].count("y") <= settings.research_prompt_context_chars
 
 
+def test_a_share_structured_data_becomes_business_financial_and_valuation_evidence(
+    db, tmp_path
+):
+    asset = SEED_ASSETS[1]
+    run = ResearchRun(asset=asset, as_of=datetime(2026, 8, 25, tzinfo=UTC))
+    settings = Settings(
+        database_url="sqlite:///./data/test_agent.db",
+        reports_dir=tmp_path,
+        fmp_access_token="",
+        fmp_mcp_url="",
+    )
+    service = ResearchService(FakeRegistry(), db, settings, FakeResearchLlm())
+
+    evidence = service._a_share_fundamental_evidence(
+        run,
+        {
+            "business_profile": {
+                "主营业务": "白酒生产和销售",
+                "产品名称": "贵州茅台酒",
+            },
+            "business_composition": [
+                {
+                    "报告日期": "2025-12-31",
+                    "分类类型": "按产品分类",
+                    "主营构成": "茅台酒",
+                    "主营收入": 1000,
+                }
+            ],
+            "financial_indicators": [
+                {
+                    "REPORT_DATE": "2025-12-31",
+                    "REPORT_DATE_NAME": "2025年报",
+                    "TOTALOPERATEREVE": 1000,
+                    "PARENTNETPROFIT": 500,
+                    "ROEJQ": 30,
+                }
+            ],
+            "valuation": [
+                {
+                    "数据日期": "2026-08-24",
+                    "PE(TTM)": 22.5,
+                    "市净率": 7.1,
+                    "市销率": 10.2,
+                }
+            ],
+            "company_info": {"行业": "白酒"},
+        },
+    )
+
+    assert {item.source_name for item in evidence} == {
+        "同花顺主营介绍/AkShare",
+        "东方财富主营构成/AkShare",
+        "东方财富财务指标/AkShare",
+        "东方财富个股估值/AkShare",
+    }
+    assert any("营业收入=1000" in item.claim for item in evidence)
+    assert any("PE(TTM)=22.5" in item.claim for item in evidence)
+    assert all(item.run_id == run.id for item in evidence)
+
+
 def test_explicit_historical_replay_skips_live_providers(db, tmp_path, monkeypatch):
     as_of = datetime(2025, 1, 31, tzinfo=UTC)
     registry = FakeRegistry()

@@ -412,6 +412,8 @@ def enqueue_research(
     event: NewsEvent | None = None,
     as_of: datetime | None = None,
     historical_replay: bool = False,
+    retry_of_run_id: UUID | None = None,
+    retry_attempt: int = 0,
 ) -> tuple[str, ResearchRun]:
     """Persist a visible queued run before handing work to the LLM worker."""
 
@@ -420,12 +422,23 @@ def enqueue_research(
         asset=asset,
         as_of=as_of or utc_now(),
         historical_replay=historical_replay,
+        retry_of_run_id=retry_of_run_id,
+        retry_attempt=retry_attempt,
         analysis_steps=[
             *(event.analysis_steps if event else []),
             AnalysisStep(
-                phase="research_queue",
+                phase="research_retry_queue" if retry_of_run_id else "research_queue",
                 executor="celery",
-                summary=f"已为主标的 {asset.symbol} 创建深度研究任务。",
+                summary=(
+                    f"已为历史失败任务创建第 {retry_attempt} 次重新执行。"
+                    if retry_of_run_id
+                    else f"已为主标的 {asset.symbol} 创建深度研究任务。"
+                ),
+                metrics=(
+                    {"retry_of_run_id": str(retry_of_run_id), "retry_attempt": retry_attempt}
+                    if retry_of_run_id
+                    else {}
+                ),
             ),
         ],
     )
@@ -566,6 +579,52 @@ def enqueue_event_report(db, event: NewsEvent) -> tuple[str | None, EventResearc
                 status="failed",
                 executor="celery",
                 summary=f"中性事件研报入队失败（{type(exc).__name__}）。",
+            )
+        )
+        save_event_research_run(db, run)
+        raise
+    return str(task.id), run
+
+
+def enqueue_event_research_retry(
+    db, event: NewsEvent, run: EventResearchRun
+) -> tuple[str, EventResearchRun]:
+    """Reset the event's unique durable report row and queue a fresh manual attempt."""
+
+    run.status = RunStatus.QUEUED
+    run.as_of = utc_now()
+    run.verification_round = 0
+    run.retry_count += 1
+    run.missing_requirements = []
+    run.contradictions = []
+    run.evidence = []
+    run.report = None
+    run.error = None
+    run.analysis_steps.append(
+        AnalysisStep(
+            phase="event_research_retry_queue",
+            status="queued",
+            executor="celery",
+            model=settings.ollama_research_model,
+            summary=f"已为历史失败事件研报创建第 {run.retry_count} 次重新执行。",
+            metrics={"retry_count": run.retry_count},
+        )
+    )
+    save_event_research_run(db, run)
+    try:
+        task = research_event.apply_async(
+            args=[str(event.id), str(run.id)],
+            queue="llm",
+        )
+    except Exception as exc:
+        run.status = RunStatus.FAILED
+        run.error = f"{type(exc).__name__}: event research retry queue failed"
+        run.analysis_steps.append(
+            AnalysisStep(
+                phase="event_research_retry_queue",
+                status="failed",
+                executor="celery",
+                summary=f"事件研报重新执行入队失败（{type(exc).__name__}）。",
             )
         )
         save_event_research_run(db, run)

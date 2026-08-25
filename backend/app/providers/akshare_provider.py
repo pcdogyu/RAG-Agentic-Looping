@@ -7,6 +7,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
+from math import isfinite
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -38,6 +39,37 @@ def _request_address_family(ipv4_only: bool) -> Iterator[None]:
 
 def _normalize_security_text(value: str) -> str:
     return re.sub(r"[^a-z0-9\u3400-\u9fff]+", "", value.lower())
+
+
+def _json_scalar(value: Any) -> Any:
+    """Convert pandas/numpy values into cache and checkpoint-safe primitives."""
+
+    if value is None:
+        return None
+    if hasattr(value, "item"):
+        try:
+            value = value.item()
+        except (TypeError, ValueError):
+            pass
+    if isinstance(value, float) and not isfinite(value):
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if hasattr(value, "isoformat"):
+        try:
+            return value.isoformat()
+        except (TypeError, ValueError):
+            pass
+    if isinstance(value, str):
+        return value.strip()
+    return value
+
+
+def _frame_records(frame: Any) -> list[dict[str, Any]]:
+    return [
+        {str(key): _json_scalar(value) for key, value in row.items()}
+        for row in frame.to_dict(orient="records")
+    ]
 
 
 class AkShareProvider:
@@ -201,7 +233,92 @@ class AkShareProvider:
             return []
 
     def get_fundamentals(self, asset: AssetRef) -> dict[str, Any]:
-        return {}
+        if asset.market is not Market.CN:
+            return {}
+        try:
+            import akshare as ak
+        except Exception as exc:
+            self.last_errors.append(f"fundamentals-import: {type(exc).__name__}")
+            return {}
+
+        suffix = {"XSHG": "SH", "XSHE": "SZ", "XBEI": "BJ"}.get(
+            asset.exchange_or_provider,
+            "SH" if asset.symbol.startswith("6") else "BJ" if asset.symbol[0] in "489" else "SZ",
+        )
+        datasets: dict[str, Any] = {"provider": "akshare"}
+
+        def load_records(
+            name: str,
+            loader,
+            *,
+            ttl_seconds: int,
+            keep: str = "head",
+            limit: int,
+        ) -> list[dict[str, Any]]:
+            key = cache.key(name, {"symbol": asset.symbol, "version": 1})
+            cached = cache.get(key)
+            if cached is not None:
+                return cached
+            try:
+                with _request_address_family(self.settings.akshare_ipv4_only):
+                    records = _frame_records(loader())
+            except Exception as exc:
+                self.last_errors.append(f"{name}: {type(exc).__name__}")
+                return []
+            selected = records[:limit] if keep == "head" else records[-limit:]
+            if selected:
+                cache.set(key, selected, ttl_seconds)
+            return selected
+
+        business = load_records(
+            "akshare-business-profile",
+            lambda: ak.stock_zyjs_ths(symbol=asset.symbol),
+            ttl_seconds=24 * 60 * 60,
+            limit=1,
+        )
+        composition = load_records(
+            "akshare-business-composition",
+            lambda: ak.stock_zygc_em(symbol=f"{suffix}{asset.symbol}"),
+            ttl_seconds=24 * 60 * 60,
+            limit=24,
+        )
+        financials = load_records(
+            "akshare-financial-indicators",
+            lambda: ak.stock_financial_analysis_indicator_em(
+                symbol=f"{asset.symbol}.{suffix}", indicator="按报告期"
+            ),
+            ttl_seconds=6 * 60 * 60,
+            limit=8,
+        )
+        valuation = load_records(
+            "akshare-valuation",
+            lambda: ak.stock_value_em(symbol=asset.symbol),
+            ttl_seconds=60 * 60,
+            keep="tail",
+            limit=30,
+        )
+        company_info_rows = load_records(
+            "akshare-company-info",
+            lambda: ak.stock_individual_info_em(symbol=asset.symbol),
+            ttl_seconds=60 * 60,
+            limit=30,
+        )
+        company_info = {
+            str(row.get("item")): row.get("value")
+            for row in company_info_rows
+            if row.get("item")
+        }
+        if business:
+            datasets["business_profile"] = business[0]
+        if composition:
+            datasets["business_composition"] = composition
+        if financials:
+            datasets["financial_indicators"] = financials
+        if valuation:
+            datasets["valuation"] = valuation
+        if company_info:
+            datasets["company_info"] = company_info
+        return datasets
 
     def get_filings(self, asset: AssetRef) -> list[dict[str, Any]]:
         if asset.market not in {Market.CN, Market.HK}:

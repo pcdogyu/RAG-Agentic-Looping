@@ -3,7 +3,7 @@ import sys
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
-from backend.app.domain import AssetRef
+from backend.app.domain import AssetClass, AssetRef, Market
 from backend.app.providers.akshare_provider import (
     TIME_NORMALIZATION_MARKER,
     AkShareProvider,
@@ -131,3 +131,64 @@ def test_akshare_does_not_cache_an_empty_security_master(monkeypatch):
     assets = provider._listed_assets()
     assert [(item.symbol, item.name) for item in assets] == [("600499", "科达制造")]
     assert fake_cache.set_calls == [("akshare-security-master:1", 24 * 60 * 60)]
+
+
+def test_akshare_collects_a_share_business_financial_and_valuation_data(monkeypatch):
+    calls = []
+
+    def frame(name, rows):
+        calls.append(name)
+        return SecurityFrame(rows)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "akshare",
+        SimpleNamespace(
+            stock_zyjs_ths=lambda symbol: frame(
+                f"business:{symbol}",
+                [{"股票代码": symbol, "主营业务": "算力设备", "产品名称": "服务器"}],
+            ),
+            stock_zygc_em=lambda symbol: frame(
+                f"composition:{symbol}",
+                [{"报告日期": "2025-12-31", "分类类型": "按产品分类", "主营构成": "服务器"}],
+            ),
+            stock_financial_analysis_indicator_em=lambda symbol, indicator: frame(
+                f"financials:{symbol}:{indicator}",
+                [{
+                    "REPORT_DATE": "2025-12-31",
+                    "REPORT_DATE_NAME": "2025年报",
+                    "TOTALOPERATEREVE": 1000,
+                    "PARENTNETPROFIT": 120,
+                    "ROEJQ": 12.5,
+                }],
+            ),
+            stock_value_em=lambda symbol: frame(
+                f"valuation:{symbol}",
+                [{"数据日期": "2026-08-24", "PE(TTM)": 20.1, "市净率": 3.2, "市销率": 2.4}],
+            ),
+            stock_individual_info_em=lambda symbol: frame(
+                f"info:{symbol}",
+                [{"item": "行业", "value": "通信设备"}, {"item": "总市值", "value": 50_000}],
+            ),
+        ),
+    )
+    asset = AssetRef(
+        asset_id="equity:XSHE:301389",
+        asset_class=AssetClass.EQUITY,
+        market=Market.CN,
+        symbol="301389",
+        name="示例公司",
+        exchange_or_provider="XSHE",
+        currency="CNY",
+    )
+
+    data = AkShareProvider().get_fundamentals(asset)
+
+    assert data["provider"] == "akshare"
+    assert data["business_profile"]["主营业务"] == "算力设备"
+    assert data["business_composition"][0]["主营构成"] == "服务器"
+    assert data["financial_indicators"][0]["PARENTNETPROFIT"] == 120
+    assert data["valuation"][0]["PE(TTM)"] == 20.1
+    assert data["company_info"] == {"行业": "通信设备", "总市值": 50_000}
+    assert "financials:301389.SZ:按报告期" in calls
+    assert "composition:SZ301389" in calls

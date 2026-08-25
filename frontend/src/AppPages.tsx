@@ -117,6 +117,24 @@ type ConclusionDetail = {
 
 type ConclusionReference = { label: string; url: string; source: string };
 
+export type FailedResearch = {
+  kind: "asset" | "event";
+  id: string;
+  status: string;
+  asset: { symbol: string; name: string; market: string } | null;
+  event: { id: string; headline: string } | null;
+  error: string | null;
+  updated_at: string;
+  retry_count: number;
+  latest_retry: { id: string; status: string; updated_at: string } | null;
+};
+
+export function failedResearchRetryPath(item: Pick<FailedResearch, "kind" | "id">) {
+  return item.kind === "asset"
+    ? `/api/v1/research-runs/${item.id}/retry`
+    : `/api/v1/event-research-runs/${item.id}/retry`;
+}
+
 function canonicalReferenceUrl(value: string): string {
   try {
     const url = new URL(value);
@@ -173,6 +191,9 @@ export function ConclusionsPage({ apiBase }: { apiBase: string }) {
   const [cursor, setCursor] = useState<string | null>(null);
   const [selected, setSelected] = useState<ConclusionDetail | null>(null);
   const [error, setError] = useState("");
+  const [failedItems, setFailedItems] = useState<FailedResearch[]>([]);
+  const [retryingId, setRetryingId] = useState("");
+  const [retryMessage, setRetryMessage] = useState("");
 
   async function load(append = false) {
     const params = new URLSearchParams({ ...filters, limit: "20" });
@@ -185,7 +206,29 @@ export function ConclusionsPage({ apiBase }: { apiBase: string }) {
       setCursor(payload.next_cursor); setError("");
     } catch (reason) { setError(reason instanceof Error ? reason.message : "结论请求失败"); }
   }
-  useEffect(() => { load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  async function loadFailures() {
+    try {
+      const response = await fetch(`${apiBase}/api/v1/failed-research-runs?limit=50`);
+      if (!response.ok) throw new Error("失败研究记录请求失败");
+      setFailedItems(await response.json() as FailedResearch[]);
+    } catch (reason) {
+      setRetryMessage(reason instanceof Error ? reason.message : "失败研究记录请求失败");
+    }
+  }
+  useEffect(() => { load(); loadFailures(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  async function retry(item: FailedResearch) {
+    setRetryingId(item.id); setRetryMessage("");
+    try {
+      const response = await fetch(`${apiBase}${failedResearchRetryPath(item)}`, { method: "POST" });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.detail || "重新执行失败");
+      setRetryMessage(`已重新排队：${item.asset?.symbol || item.event?.headline || item.id}`);
+      await loadFailures();
+    } catch (reason) {
+      setRetryMessage(reason instanceof Error ? reason.message : "重新执行失败");
+    } finally { setRetryingId(""); }
+  }
 
   async function open(item: Recommendation) {
     const response = await fetch(`${apiBase}/api/v1/conclusions/${item.id}`);
@@ -202,6 +245,21 @@ export function ConclusionsPage({ apiBase }: { apiBase: string }) {
         <button>筛选</button>
       </form>
       {error && <div className="page-error">{error}</div>}
+      <section className="failed-research-panel">
+        <div className="failed-research-heading"><div><p className="eyebrow">RETRY QUEUE</p><h3>历史失败研究</h3></div><button type="button" onClick={loadFailures}>刷新</button></div>
+        <p className="failed-research-copy">重新执行会创建新任务，保留原失败记录，并使用当前数据源和模型配置。</p>
+        {retryMessage && <div className={retryMessage.includes("失败") ? "page-error" : "page-message"}>{retryMessage}</div>}
+        <div className="failed-research-list">
+          {failedItems.map((item) => {
+            const retryActive = ["queued", "running", "verifying"].includes(item.latest_retry?.status || "");
+            return <article key={`${item.kind}-${item.id}`} className="failed-research-item">
+              <div><span>{item.kind === "asset" ? "标的研究" : "事件研报"} · {new Date(item.updated_at).toLocaleString("zh-CN")}</span><strong>{item.asset ? `${item.asset.symbol} · ${item.asset.name}` : item.event?.headline || item.id}</strong><p>{item.error || "未记录错误详情"}</p>{item.latest_retry && <small>最近重跑：{item.latest_retry.status} · {new Date(item.latest_retry.updated_at).toLocaleString("zh-CN")}</small>}</div>
+              <button type="button" disabled={retryingId === item.id || retryActive} onClick={() => retry(item)}>{retryingId === item.id ? "正在排队…" : retryActive ? "重跑中" : "重新执行"}</button>
+            </article>;
+          })}
+          {!failedItems.length && !retryMessage && <div className="page-empty">当前没有失败研究。</div>}
+        </div>
+      </section>
       <div className="conclusion-list">
         {items.map((item) => <button type="button" className="conclusion-card" key={item.id} onClick={() => open(item)}>
           <div><span>{item.asset.market} · {new Date(item.as_of).toLocaleString("zh-CN")}</span><strong>{item.asset.symbol} · {item.asset.name}</strong><p>{item.thesis.summary}</p></div>

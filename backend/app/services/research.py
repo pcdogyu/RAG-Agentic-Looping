@@ -354,6 +354,8 @@ class ResearchService:
                         numeric_unit=run.asset.currency,
                     )
                 )
+            if run.asset.market.value == "CN":
+                evidence.extend(self._a_share_fundamental_evidence(run, fundamentals))
             filings = data.get("filings", [])
             for filing in filings[:10]:
                 url = filing.get("finalLink") or filing.get("link")
@@ -405,6 +407,197 @@ class ResearchService:
                         as_of=run.as_of,
                         excerpt=json.dumps(metrics, ensure_ascii=False, default=str)[:1000],
                         independent_group="coingecko+defillama",
+                    )
+                )
+        return evidence
+
+    @staticmethod
+    def _a_share_source_code(asset: AssetRef) -> str:
+        prefix = {
+            "XSHG": "SH",
+            "XSHE": "SZ",
+            "XBEI": "BJ",
+        }.get(asset.exchange_or_provider, "SH" if asset.symbol.startswith("6") else "SZ")
+        return f"{prefix}{asset.symbol}"
+
+    @staticmethod
+    def _structured_date(value: Any, fallback: datetime) -> datetime:
+        if not value:
+            return fallback
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            return as_utc(parsed)
+        except (TypeError, ValueError):
+            return fallback
+
+    def _a_share_fundamental_evidence(
+        self, run: ResearchRun, fundamentals: dict[str, Any]
+    ) -> list[Evidence]:
+        """Project current AkShare business, financial and valuation snapshots into evidence."""
+
+        evidence: list[Evidence] = []
+        business = fundamentals.get("business_profile")
+        if isinstance(business, dict) and business:
+            fields = {
+                key: business.get(key)
+                for key in ("主营业务", "产品类型", "产品名称", "经营范围")
+                if business.get(key) not in (None, "")
+            }
+            if fields:
+                evidence.append(
+                    Evidence(
+                        run_id=run.id,
+                        claim=f"{run.asset.name}主营业务与产品概况",
+                        source_name="同花顺主营介绍/AkShare",
+                        source_url=(
+                            f"https://basic.10jqka.com.cn/new/{run.asset.symbol}/operate.html"
+                        ),
+                        source_quality=SourceQuality.AGGREGATOR,
+                        published_at=run.as_of,
+                        observed_at=run.as_of,
+                        as_of=run.as_of,
+                        excerpt=json.dumps(fields, ensure_ascii=False, default=str)[:1000],
+                        independent_group="ths-akshare",
+                    )
+                )
+
+        composition = fundamentals.get("business_composition")
+        if isinstance(composition, list) and composition:
+            latest_date = max(
+                (str(item.get("报告日期") or "") for item in composition if isinstance(item, dict)),
+                default="",
+            )
+            latest_rows = [
+                item
+                for item in composition
+                if isinstance(item, dict)
+                and (not latest_date or str(item.get("报告日期") or "") == latest_date)
+            ][:12]
+            if latest_rows:
+                evidence.append(
+                    Evidence(
+                        run_id=run.id,
+                        claim=f"{run.asset.name} {latest_date or '最新'}主营构成",
+                        source_name="东方财富主营构成/AkShare",
+                        source_url=(
+                            "https://emweb.securities.eastmoney.com/PC_HSF10/"
+                            f"BusinessAnalysis/Index?type=web&code={self._a_share_source_code(run.asset)}"
+                        ),
+                        source_quality=SourceQuality.AGGREGATOR,
+                        published_at=self._structured_date(latest_date, run.as_of),
+                        observed_at=run.as_of,
+                        as_of=run.as_of,
+                        excerpt=json.dumps(latest_rows, ensure_ascii=False, default=str)[:1000],
+                        independent_group="eastmoney-akshare",
+                    )
+                )
+
+        financials = fundamentals.get("financial_indicators")
+        if isinstance(financials, list):
+            metric_keys = (
+                "REPORT_DATE_NAME",
+                "TOTALOPERATEREVE",
+                "PARENTNETPROFIT",
+                "KCFJCXSYJLR",
+                "TOTALOPERATEREVETZ",
+                "PARENTNETPROFITTZ",
+                "ROEJQ",
+                "XSMLL",
+                "JYXJLYYSR",
+                "ZCFZL",
+            )
+            for statement in (item for item in financials[:4] if isinstance(item, dict)):
+                snapshot = {
+                    key: statement.get(key)
+                    for key in metric_keys
+                    if statement.get(key) is not None
+                }
+                if not snapshot:
+                    continue
+                date_value = statement.get("REPORT_DATE") or statement.get("REPORT_DATE_NAME")
+                report_name = statement.get("REPORT_DATE_NAME") or date_value or "最新报告期"
+                revenue = statement.get("TOTALOPERATEREVE")
+                net_income = statement.get("PARENTNETPROFIT")
+                evidence.append(
+                    Evidence(
+                        run_id=run.id,
+                        claim=(
+                            f"{run.asset.name} {report_name}财务指标："
+                            f"营业收入={revenue}，归母净利润={net_income}"
+                        ),
+                        source_name="东方财富财务指标/AkShare",
+                        source_url=(
+                            "https://emweb.securities.eastmoney.com/pc_hsf10/pages/"
+                            f"index.html?type=web&code={self._a_share_source_code(run.asset)}#/cwfx"
+                        ),
+                        source_quality=SourceQuality.AGGREGATOR,
+                        published_at=self._structured_date(date_value, run.as_of),
+                        observed_at=run.as_of,
+                        as_of=run.as_of,
+                        excerpt=json.dumps(snapshot, ensure_ascii=False, default=str)[:1000],
+                        independent_group="eastmoney-akshare",
+                        numeric_value=float(revenue)
+                        if isinstance(revenue, int | float)
+                        else None,
+                        numeric_unit=run.asset.currency,
+                    )
+                )
+
+        valuation = fundamentals.get("valuation")
+        company_info = fundamentals.get("company_info")
+        if isinstance(valuation, list) and valuation:
+            latest = next(
+                (item for item in reversed(valuation) if isinstance(item, dict)),
+                None,
+            )
+            if latest:
+                snapshot = {
+                    key: latest.get(key)
+                    for key in (
+                        "数据日期",
+                        "当日收盘价",
+                        "总市值",
+                        "流通市值",
+                        "PE(TTM)",
+                        "PE(静)",
+                        "市净率",
+                        "PEG值",
+                        "市现率",
+                        "市销率",
+                    )
+                    if latest.get(key) is not None
+                }
+                if isinstance(company_info, dict):
+                    snapshot.update(
+                        {
+                            key: company_info.get(key)
+                            for key in ("行业", "总市值", "流通市值")
+                            if company_info.get(key) is not None and key not in snapshot
+                        }
+                    )
+                date_value = latest.get("数据日期")
+                evidence.append(
+                    Evidence(
+                        run_id=run.id,
+                        claim=(
+                            f"{run.asset.name} {date_value or '最新'}估值："
+                            f"PE(TTM)={latest.get('PE(TTM)')}，"
+                            f"PB={latest.get('市净率')}，PS={latest.get('市销率')}"
+                        ),
+                        source_name="东方财富个股估值/AkShare",
+                        source_url=f"https://data.eastmoney.com/gzfx/detail/{run.asset.symbol}.html",
+                        source_quality=SourceQuality.AGGREGATOR,
+                        published_at=self._structured_date(date_value, run.as_of),
+                        observed_at=run.as_of,
+                        as_of=run.as_of,
+                        excerpt=json.dumps(snapshot, ensure_ascii=False, default=str)[:1000],
+                        independent_group="eastmoney-akshare",
+                        numeric_value=(
+                            float(latest["PE(TTM)"])
+                            if isinstance(latest.get("PE(TTM)"), int | float)
+                            else None
+                        ),
+                        numeric_unit="multiple",
                     )
                 )
         return evidence

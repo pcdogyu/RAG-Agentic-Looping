@@ -285,6 +285,28 @@ def list_runs(db: Session, limit: int = 100) -> list[ResearchRun]:
     return [ResearchRun.model_validate(row.payload) for row in rows]
 
 
+def list_failed_runs(db: Session, limit: int = 100) -> list[ResearchRun]:
+    rows = db.scalars(
+        select(ResearchRunRow)
+        .where(ResearchRunRow.status == "failed")
+        .order_by(desc(ResearchRunRow.updated_at))
+        .limit(limit)
+    ).all()
+    return [ResearchRun.model_validate(row.payload) for row in rows]
+
+
+def list_retries_for_run(db: Session, run_id: UUID) -> list[ResearchRun]:
+    rows = db.scalars(
+        select(ResearchRunRow).order_by(desc(ResearchRunRow.created_at))
+    ).all()
+    retries = [
+        ResearchRun.model_validate(row.payload)
+        for row in rows
+        if str((row.payload or {}).get("retry_of_run_id") or "") == str(run_id)
+    ]
+    return retries
+
+
 def get_run_for_event_asset(
     db: Session, event_id: UUID, asset_id: str
 ) -> ResearchRun | None:
@@ -339,6 +361,18 @@ def list_event_research_runs(db: Session, limit: int = 100) -> list[EventResearc
     rows = db.scalars(
         select(EventResearchRunRow)
         .order_by(desc(EventResearchRunRow.created_at))
+        .limit(limit)
+    ).all()
+    return [EventResearchRun.model_validate(row.payload) for row in rows]
+
+
+def list_failed_event_research_runs(
+    db: Session, limit: int = 100
+) -> list[EventResearchRun]:
+    rows = db.scalars(
+        select(EventResearchRunRow)
+        .where(EventResearchRunRow.status == "failed")
+        .order_by(desc(EventResearchRunRow.updated_at))
         .limit(limit)
     ).all()
     return [EventResearchRun.model_validate(row.payload) for row in rows]

@@ -222,6 +222,8 @@ class ResearchRun(BaseModel):
     status: RunStatus = RunStatus.QUEUED
     as_of: datetime = Field(default_factory=utc_now)
     historical_replay: bool = False
+    retry_of_run_id: UUID | None = None
+    retry_attempt: int = Field(default=0, ge=0)
     verification_round: int = 0
     missing_requirements: list[str] = Field(default_factory=list)
     contradictions: list[str] = Field(default_factory=list)
@@ -252,6 +254,7 @@ class EventResearchRun(BaseModel):
     status: RunStatus = RunStatus.QUEUED
     as_of: datetime = Field(default_factory=utc_now)
     verification_round: int = 0
+    retry_count: int = Field(default=0, ge=0)
     missing_requirements: list[str] = Field(default_factory=list)
     contradictions: list[str] = Field(default_factory=list)
     evidence: list[Evidence] = Field(default_factory=list)

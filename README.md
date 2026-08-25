@@ -245,6 +245,7 @@ stateDiagram-v2
 | 美股新闻与财务 | FMP MCP | FMP Stable REST | MCP 请求失败时自动调用 REST；缓存并执行限流 |
 | 美股官方披露 | SEC EDGAR / EdgarTools | FMP filings | 官方 SEC 链接优先，聚合披露作为补充 |
 | A 股新闻与行情 | AkShare / 东方财富 | RSS、公司 IR 或授权 Feed | 公共接口失败时保留其他来源结果，不阻塞整批扫描 |
+| A 股业务、财务与估值 | AkShare（同花顺主营、东方财富财务指标/主营构成/个股估值） | CNInfo 公告、新闻证据 | 各数据集独立缓存和降级，单个接口失败不丢弃其余证据 |
 | A 股公告 | CNInfo/AkShare | 官方 RSS 或 IR Feed | 无可靠公告时研究会降低证据完整度 |
 | 港股新闻与行情 | AkShare | RSS、HKEX/公司 IR Feed | 公共接口失败时输出证据不足，不猜测数据 |
 | 加密资产目录与行情 | CoinGecko | FMP crypto quote、CCXT Kraken | 交易所价格偏差超过阈值时标记交叉验证失败 |
@@ -455,6 +456,9 @@ curl http://localhost:8000/health
 | `POST` | `/api/v1/research` | 按资产和可选事件启动深研 |
 | `GET` | `/api/v1/research-runs` | 研究轨迹列表 |
 | `GET` | `/api/v1/research-runs/{run_id}` | 单次研究、证据和验证结果 |
+| `GET` | `/api/v1/failed-research-runs` | 历史失败的标的研究与事件研报 |
+| `POST` | `/api/v1/research-runs/{run_id}/retry` | 保留原记录并以最新数据重新执行失败标的研究 |
+| `POST` | `/api/v1/event-research-runs/{run_id}/retry` | 重新排队失败事件研报 |
 | `GET` | `/api/v1/recommendations` | 五级建议、概率、置信度和论文 |
 | `GET` | `/api/v1/portfolio` | 模拟现金、净值、持仓和加密权重 |
 | `POST` | `/api/v1/paper-orders` | 从已验证看多建议创建模拟订单 |

@@ -3,8 +3,10 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import {
+  ConclusionsPage,
   conclusionReferences,
   factSourceGroupOptions,
+  failedResearchRetryPath,
   firstUnhealthyGroup,
   isSearchSource,
   NativeConfigEditor,
@@ -47,6 +49,19 @@ describe("open source and search settings", () => {
       "洪通燃气：上半年归母净利润9895.63万元 同比增长35.77%",
       "独立公告",
     ]);
+  });
+
+  it("shows failed research recovery and builds kind-specific retry paths", () => {
+    const markup = renderToStaticMarkup(createElement(ConclusionsPage, { apiBase: "" }));
+
+    expect(markup).toContain("历史失败研究");
+    expect(markup).toContain("重新执行会创建新任务");
+    expect(failedResearchRetryPath({ kind: "asset", id: "asset-run" })).toBe(
+      "/api/v1/research-runs/asset-run/retry",
+    );
+    expect(failedResearchRetryPath({ kind: "event", id: "event-run" })).toBe(
+      "/api/v1/event-research-runs/event-run/retry",
+    );
   });
 
   it("shows MCP management controls without an administrator unlock", () => {
