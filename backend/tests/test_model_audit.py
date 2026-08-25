@@ -12,7 +12,7 @@ from sqlalchemy import select
 from backend.app.config import Settings
 from backend.app.db import ModelCallAuditRow, SessionLocal
 from backend.app.domain import AnalysisStep, EventType, NewsEvent, NewsItem, SourceQuality, utc_now
-from backend.app.llm import LlmGateway
+from backend.app.llm import LlmGateway, serialize_keep_alive
 from backend.app.main import app
 from backend.app.model_audit import (
     backfill_legacy_model_audits,
@@ -46,6 +46,14 @@ class FakeClient:
     def post(self, *args, **kwargs):
         self.last_request = {"args": args, "kwargs": kwargs}
         return FakeResponse(self.payload)
+
+
+@pytest.mark.parametrize(
+    ("configured", "serialized"),
+    [("-1", -1), ("0", 0), ("3600", 3600), ("5m", "5m"), ("24h", "24h")],
+)
+def test_ollama_keep_alive_serialization(configured, serialized):
+    assert serialize_keep_alive(configured) == serialized
 
 
 def test_gateway_records_exact_redacted_input_output(monkeypatch):

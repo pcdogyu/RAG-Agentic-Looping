@@ -20,6 +20,15 @@ class LlmError(RuntimeError):
     pass
 
 
+def serialize_keep_alive(value: str) -> str | int:
+    """Preserve duration strings while sending numeric Ollama values as numbers."""
+    normalized = value.strip()
+    try:
+        return int(normalized)
+    except ValueError:
+        return normalized
+
+
 class GpuSemaphore:
     """One global inference slot. Redis coordinates API and Celery processes."""
 
@@ -108,7 +117,9 @@ class LlmGateway:
                             "messages": messages,
                             "format": schema_hint,
                             "stream": False,
-                            "keep_alive": self.settings.ollama_keep_alive,
+                            "keep_alive": serialize_keep_alive(
+                                self.settings.ollama_keep_alive
+                            ),
                             "options": options,
                         },
                     )
