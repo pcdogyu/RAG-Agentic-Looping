@@ -1,5 +1,8 @@
+from hashlib import sha256
+
 from fastapi.testclient import TestClient
 
+from backend.app.domain import NewsItem, utc_now
 from backend.app.main import app
 
 
@@ -48,3 +51,48 @@ def test_scan_pause_and_resume_endpoints(monkeypatch):
     assert paused.json()["scan"]["state"] == "paused"
     assert resumed.status_code == 200
     assert resumed.json()["scan"]["state"] == "running"
+
+
+def test_synchronous_scan_applies_title_filter_before_event_ingest(monkeypatch):
+    items = [
+        NewsItem(
+            source="test",
+            title="今日天气预报",
+            url="https://example.com/weather",
+            published_at=utc_now(),
+            content_hash=sha256(b"weather-api-scan").hexdigest(),
+        ),
+        NewsItem(
+            source="test",
+            title="上市公司发布业绩公告",
+            url="https://example.com/earnings",
+            published_at=utc_now(),
+            content_hash=sha256(b"earnings-api-scan").hexdigest(),
+        ),
+    ]
+    ingested: list[NewsItem] = []
+
+    class RegistryStub:
+        def all_assets(self):
+            return []
+
+        def discover_news(self, **_kwargs):
+            return items
+
+    class EventServiceStub:
+        def __init__(self, _registry):
+            pass
+
+        def ingest(self, _db, accepted):
+            ingested.extend(accepted)
+            return []
+
+    monkeypatch.setattr("backend.app.main._provider_registry", lambda _db: RegistryStub())
+    monkeypatch.setattr("backend.app.main.EventService", EventServiceStub)
+
+    with TestClient(app) as client:
+        response = client.post("/api/v1/scan", json={"background": False})
+
+    assert response.status_code == 200
+    assert response.json() == {"news": 2, "accepted": 1, "filtered": 1, "events": 0}
+    assert [item.title for item in ingested] == ["上市公司发布业绩公告"]

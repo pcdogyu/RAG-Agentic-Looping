@@ -35,6 +35,7 @@ from backend.app.services.mcp_registry import seed_integrations
 from backend.app.services.notifications import notifier
 from backend.app.services.portfolio import PortfolioError, PortfolioService
 from backend.app.services.research import ResearchService
+from backend.app.services.source_filter import filter_news_items
 from backend.app.storage import (
     get_asset,
     get_event,
@@ -220,8 +221,14 @@ def start_scan(request: ScanRequest, db: Session = Depends(get_db)):
     active_registry = _provider_registry(db)
     since = utc_now() - timedelta(minutes=settings.scan_interval_minutes * 2)
     items = active_registry.discover_news(since=since, limit=settings.scan_batch_size)
-    created = EventService(active_registry).ingest(db, items)
-    return {"news": len(items), "events": len(created)}
+    accepted_items, filtered = filter_news_items(db, items)
+    created = EventService(active_registry).ingest(db, accepted_items)
+    return {
+        "news": len(items),
+        "accepted": len(accepted_items),
+        "filtered": filtered,
+        "events": len(created),
+    }
 
 
 @app.get("/api/v1/scan/status")
