@@ -615,6 +615,62 @@ def test_search_source_connection_test_calls_upstream(monkeypatch):
     ]
 
 
+def test_jin10_connection_test_uses_financial_news_query_and_adapter(monkeypatch, db):
+    calls: list[tuple[str, dict[str, object]]] = []
+    source = McpSourceRow(
+        name="金十",
+        url="https://mcp.jin10.com/mcp",
+        priority=80,
+        enabled=True,
+        tool_mappings={
+            "news_search": {
+                "tool_name": "search_flash",
+                "input_bindings": {"query": "keyword"},
+                "defaults": {},
+                "output_adapter": "jin10_flash_v1",
+            }
+        },
+    )
+    db.add(source)
+    db.commit()
+
+    async def fake_discover(_row):
+        return [{"name": "search_flash", "input_schema": {"type": "object"}}]
+
+    async def fake_call(row, purpose, arguments):
+        calls.append((row.name, {"purpose": purpose, **arguments}))
+        return {
+            "data": {
+                "items": [
+                    {
+                        "content": "ETF市场快讯。",
+                        "url": "https://jin10.example/flash/etf",
+                    }
+                ]
+            }
+        }
+
+    monkeypatch.setattr("backend.app.api_integrations.discover_source", fake_discover)
+    monkeypatch.setattr("backend.app.api_integrations.call_source_tool", fake_call)
+    with TestClient(app) as client:
+        tested = client.post(f"/api/v1/admin/mcp-sources/{source.id}/test")
+
+    assert tested.status_code == 200
+    assert tested.json()["source"]["last_status"] == "healthy"
+    assert calls == [
+        (
+            "金十",
+            {
+                "purpose": "news_search",
+                "query": "ETF",
+                "limit": 1,
+                "language": "zh-CN",
+                "time_range": "day",
+            },
+        )
+    ]
+
+
 def test_search_source_connection_test_rejects_empty_upstream(monkeypatch):
     async def fake_discover(_row):
         return [{"name": "web_search", "input_schema": {"type": "object"}}]

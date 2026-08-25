@@ -208,10 +208,16 @@ async def _probe(row: McpSourceRow, db: Session, *, discover: bool) -> dict[str,
             row.discovered_tools = tools
         elif {"web_search", "news_search"} & set(row.tool_mappings or {}):
             purpose = "web_search" if "web_search" in (row.tool_mappings or {}) else "news_search"
+            probe_query = "latest market news" if purpose == "web_search" else "ETF"
             result = await call_source_tool(
                 row,
                 purpose,
-                {"query": "latest market news", "limit": 1, "language": "en", "time_range": "day"},
+                {
+                    "query": probe_query,
+                    "limit": 1,
+                    "language": "en" if purpose == "web_search" else "zh-CN",
+                    "time_range": "day",
+                },
             )
             adapter = str(
                 (row.tool_mappings or {})[purpose].get("output_adapter")
