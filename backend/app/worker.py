@@ -34,6 +34,7 @@ from backend.app.services.notifications import notifier
 from backend.app.services.outcomes import OutcomeService
 from backend.app.services.portfolio import PortfolioService
 from backend.app.services.research import ResearchService
+from backend.app.services.source_filter import filter_news_items
 from backend.app.services.source_lineage import canonicalize_url
 from backend.app.storage import (
     get_asset,
@@ -635,24 +636,26 @@ def scan_news(self) -> dict:
         registry = ProviderRegistry()
         since = utc_now() - timedelta(minutes=settings.scan_interval_minutes * 2)
         items = registry.discover_news(since=since, limit=settings.scan_batch_size)
+        with SessionLocal() as db:
+            accepted_items, filtered_count = filter_news_items(db, items)
         _require_scan_gate(client, task_id)
         self.update_state(
             state="PROGRESS",
-            meta={"phase": "extracting", "current": 0, "total": len(items)},
+            meta={"phase": "extracting", "current": 0, "total": len(accepted_items)},
         )
         _update_scan_status(
             client,
             state="running",
             phase="extracting",
             current=0,
-            total=len(items),
+            total=len(accepted_items),
         )
         _wait_if_scan_paused(
             client,
             task_id,
             phase="extracting",
             current=0,
-            total=len(items),
+            total=len(accepted_items),
         )
 
         def update_progress(current: int, total: int) -> None:
@@ -679,7 +682,7 @@ def scan_news(self) -> dict:
         with SessionLocal() as db:
             registry.add_assets(list_assets(db))
             service = EventService(registry)
-            events = service.ingest(db, items, progress=update_progress)
+            events = service.ingest(db, accepted_items, progress=update_progress)
             for error in registry.last_errors:
                 notifier.send(f"数据源故障：{error}")
             for event in events:
@@ -716,6 +719,8 @@ def scan_news(self) -> dict:
         result = {
             "status": "completed",
             "discovered": len(items),
+            "accepted": len(accepted_items),
+            "filtered": filtered_count,
             "events": len(events),
             "research_queued": queued,
             "asset_mapping_queued": mapping_queued,

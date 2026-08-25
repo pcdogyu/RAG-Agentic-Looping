@@ -11,7 +11,12 @@ import {
   updateHealthTracking,
 } from "./App";
 import BuildFooter, { buildInfo } from "./BuildFooter";
-import { factSourceGroupDefinitions, routeFromHash, TopNavigation } from "./AppPages";
+import {
+  factSourceGroupDefinitions,
+  navigationGroups,
+  routeFromHash,
+  TopNavigation,
+} from "./AppPages";
 import ModelLogsPage, {
   buildModelLogQuery,
   fidelityLabel,
@@ -217,8 +222,9 @@ describe("model log navigation and filters", () => {
 });
 
 describe("shared hash navigation", () => {
-  it("recognizes all six routes and falls back to home", () => {
+  it("recognizes all seven routes and falls back to home", () => {
     expect(routeFromHash("#/home")).toBe("home");
+    expect(routeFromHash("#/source-filter")).toBe("source-filter");
     expect(routeFromHash("#/conclusions")).toBe("conclusions");
     expect(routeFromHash("#/sources")).toBe("sources");
     expect(routeFromHash("#/model-logs")).toBe("model-logs");
@@ -228,10 +234,18 @@ describe("shared hash navigation", () => {
     expect(routeFromHash("")).toBe("home");
   });
 
-  it("renders six menu links and exposes the current page accessibly", () => {
-    const markup = renderToStaticMarkup(createElement(TopNavigation, { current: "sources" }));
-    expect((markup.match(/<a /g) || []).length).toBe(6);
-    expect(markup).toContain('href="#/sources" aria-current="page"');
+  it("renders grouped menu links in order and exposes the current page accessibly", () => {
+    expect(navigationGroups.left.map((item) => item.route)).toEqual([
+      "home", "source-filter", "sources", "conclusions",
+    ]);
+    expect(navigationGroups.right.map((item) => item.route)).toEqual([
+      "model-logs", "search", "weknora",
+    ]);
+    const markup = renderToStaticMarkup(createElement(TopNavigation, { current: "source-filter" }));
+    expect((markup.match(/<a /g) || []).length).toBe(7);
+    expect(markup).toContain('href="#/source-filter" aria-current="page"');
+    expect(markup.indexOf("数据源过滤")).toBeLessThan(markup.indexOf(">数据源<"));
+    expect(markup.indexOf("结论")).toBeLessThan(markup.indexOf("模型日志"));
     expect(markup).toContain("搜索引擎");
     expect(markup).toContain("WeKnora");
   });

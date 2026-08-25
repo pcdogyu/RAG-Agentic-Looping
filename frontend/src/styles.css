@@ -73,7 +73,9 @@ body { margin: 0; min-width: 320px; min-height: 100vh; background:
 button { font: inherit; }
 main { width: 100%; margin: 0; padding: 34px 36px 60px; }
 header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 30px; }
-.top-navigation { display: flex; gap: 5px; overflow-x: auto; margin: -12px 0 24px; padding: 5px; border: 1px solid var(--line); border-radius: 11px; background: var(--panel-surface); scrollbar-width: thin; }
+.top-navigation { display: flex; justify-content: space-between; gap: 5px; overflow-x: auto; margin: -12px 0 24px; padding: 5px; border: 1px solid var(--line); border-radius: 11px; background: var(--panel-surface); scrollbar-width: thin; }
+.navigation-group { display: flex; flex: 0 0 auto; gap: 5px; }
+.navigation-group.right { margin-left: auto; }
 .top-navigation a { flex: 0 0 auto; padding: 9px 15px; border-radius: 7px; color: var(--secondary); text-decoration: none; font-size: 13px; white-space: nowrap; }
 .top-navigation a:hover { color: var(--mint); background: var(--soft-hover); }
 .top-navigation a[aria-current="page"] { color: var(--button-text); background: var(--mint); font-weight: 600; }
@@ -223,6 +225,39 @@ h1 span { color: var(--mint); font-weight: 400; }
 .page-error { border-color: rgba(255,122,122,.32); color: var(--red); }
 .page-empty { padding: 50px 20px; text-align: center; }
 .page-toolbar, .card-actions, .weknora-toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.filter-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 12px; }
+.filter-metrics > div { display: grid; gap: 5px; padding: 17px 19px; border: 1px solid var(--line); border-radius: 11px; background: var(--model-surface); }
+.filter-metrics span, .filter-metrics small { color: var(--muted); font-size: 11px; }
+.filter-metrics strong { color: var(--text); font: 500 22px "DM Mono", monospace; }
+.filter-metrics strong.enabled { color: var(--mint); }
+.filter-metrics strong.disabled { color: var(--amber); }
+.source-filter-form { margin-bottom: 16px; padding: 18px; border: 1px solid var(--line); border-radius: 11px; background: var(--panel); }
+.filter-master-switch { display: flex; align-items: center; gap: 12px; margin-bottom: 17px; color: var(--text); cursor: pointer; }
+.filter-master-switch input { width: 18px; height: 18px; margin: 0; accent-color: var(--mint); }
+.filter-master-switch span { display: grid; gap: 3px; }
+.filter-master-switch small { color: var(--muted); font-size: 11px; }
+.keyword-panels { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.keyword-panels label { display: grid; gap: 9px; color: var(--muted); font-size: 11px; }
+.keyword-panels label > span { display: flex; justify-content: space-between; gap: 12px; }
+.keyword-panels label strong { color: var(--text); font-size: 13px; }
+.keyword-panels textarea { min-height: 180px; padding: 12px; resize: vertical; border: 1px solid var(--line); border-radius: 8px; color: var(--text); background: var(--model-surface); font: 12px/1.7 "DM Mono", monospace; }
+.keyword-panels textarea:focus { outline: 1px solid var(--mint); border-color: var(--mint); }
+.filter-note { margin: 13px 0; color: var(--muted); font-size: 11px; line-height: 1.7; }
+.filter-audit { overflow: hidden; border: 1px solid var(--line); border-radius: 11px; background: var(--panel); }
+.filter-audit-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 17px 19px; border-bottom: 1px solid var(--line); }
+.filter-audit-heading .eyebrow { margin-bottom: 4px; }
+.filter-audit-heading h3 { margin: 0; font-size: 16px; }
+.filter-audit-heading > span { color: var(--muted); font-size: 11px; }
+.filter-log-list { display: grid; }
+.filter-log-list article { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 18px; align-items: center; padding: 15px 19px; border-bottom: 1px solid var(--line); }
+.filter-log-list article:last-child { border-bottom: 0; }
+.filter-log-list article > div { display: grid; gap: 5px; min-width: 0; }
+.filter-log-list article > div:last-child { justify-items: end; }
+.filter-log-list span, .filter-log-list small { color: var(--muted); font-size: 10px; }
+.filter-log-list h4 { margin: 0; font-size: 14px; }
+.filter-log-list a { color: var(--text); text-decoration: none; }
+.filter-log-list a:hover { color: var(--mint); }
+.filter-log-list strong { color: var(--amber); font-size: 11px; }
 .conclusion-list, .source-list, .search-results { display: grid; gap: 11px; }
 .conclusion-card { display: grid; grid-template-columns: 1fr auto; gap: 24px; width: 100%; padding: 20px; border: 1px solid var(--line); border-radius: 11px; color: inherit; background: var(--panel); text-align: left; cursor: pointer; }
 .conclusion-card:hover { border-color: rgba(99,242,186,.45); background: var(--soft-hover); }
@@ -383,6 +418,7 @@ h1 span { color: var(--mint); font-weight: 400; }
   .fact-group-summary { grid-template-columns: 74px minmax(220px, 1fr) auto 20px; }
   .fact-group-counts { display: none; }
   .fact-group-detail { grid-template-columns: 1fr; }
+  .filter-metrics { grid-template-columns: repeat(2, 1fr); }
 }
 
 @media (max-width: 560px) {
@@ -409,7 +445,8 @@ h1 span { color: var(--mint); font-weight: 400; }
   .model-log-summary > div:nth-child(2), .model-log-summary > div:nth-child(3), .model-log-summary .fidelity { display: none; }
   .model-log-detail { padding: 6px 12px 16px; }
   .model-log-meta { grid-template-columns: 1fr; }
-  .top-navigation { margin-top: 0; }
+  .top-navigation { justify-content: flex-start; margin-top: 0; }
+  .navigation-group.right { margin-left: 20px; }
   .fact-group-summary { grid-template-columns: 60px 1fr 18px; gap: 11px; min-height: 76px; padding: 14px; }
   .fact-group-title small { white-space: normal; line-height: 1.5; }
   .group-status { grid-column: 2; grid-row: 2; }
@@ -423,4 +460,7 @@ h1 span { color: var(--mint); font-weight: 400; }
   .source-card-main > div:last-child { text-align: left; }
   .page-filters > *, .search-form > *, .integration-editor > *, .admin-unlock > * { width: 100%; }
   .weknora-frame { min-height: 420px; }
+  .filter-metrics, .keyword-panels { grid-template-columns: 1fr; }
+  .filter-log-list article { grid-template-columns: 1fr; }
+  .filter-log-list article > div:last-child { justify-items: start; }
 }

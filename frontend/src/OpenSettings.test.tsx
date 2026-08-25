@@ -6,7 +6,9 @@ import {
   factSourceGroupOptions,
   firstUnhealthyGroup,
   NativeConfigEditor,
+  parseFilterKeywords,
   SearchPage,
+  SourceFilterPage,
   SourcesPage,
 } from "./AppPages";
 
@@ -70,5 +72,23 @@ describe("open source and search settings", () => {
     expect(markup).toContain("输入需要验证的问题");
     expect(markup).toContain("搜索验证");
     expect(markup).not.toContain("管理员令牌");
+  });
+
+  it("shows public source-filter defaults and editing guidance", () => {
+    const markup = renderToStaticMarkup(createElement(SourceFilterPage, { apiBase: "" }));
+
+    expect(markup).toContain("数据源过滤");
+    expect(markup).toContain("启用新闻标题过滤");
+    expect(markup).toContain("白名单关键字");
+    expect(markup).toContain("黑名单关键字");
+    expect(markup).toContain("天气");
+    expect(markup).toContain("白名单优先");
+    expect(markup).not.toContain("管理员令牌");
+  });
+
+  it("splits, trims, and deduplicates filter keywords", () => {
+    expect(parseFilterKeywords(" 天气, WEATHER，weather\n公告 ")).toEqual([
+      "天气", "WEATHER", "公告",
+    ]);
   });
 });

@@ -43,6 +43,13 @@ from backend.app.services.mcp_registry import (
     validate_mappings,
 )
 from backend.app.services.secret_store import encrypt_secret
+from backend.app.services.source_filter import (
+    SourceFilterConfig,
+    list_filter_logs,
+    reset_source_filter,
+    save_source_filter,
+    source_filter_payload,
+)
 from backend.app.storage import get_event, get_news, get_run
 
 router = APIRouter()
@@ -67,6 +74,30 @@ class EnabledInput(BaseModel):
 
 class WeknoraInput(BaseModel):
     url: HttpUrl
+
+
+@router.get("/api/v1/source-filter")
+def get_source_filter_config(db: Db) -> dict[str, Any]:
+    return source_filter_payload(db)
+
+
+@router.put("/api/v1/source-filter")
+def update_source_filter_config(payload: SourceFilterConfig, db: Db) -> dict[str, Any]:
+    save_source_filter(db, payload)
+    return source_filter_payload(db)
+
+
+@router.delete("/api/v1/source-filter")
+def reset_source_filter_config(db: Db) -> dict[str, Any]:
+    reset_source_filter(db)
+    return source_filter_payload(db)
+
+
+@router.get("/api/v1/source-filter/logs")
+def get_source_filter_logs(
+    db: Db, limit: int = Query(default=100, ge=1, le=500)
+) -> dict[str, Any]:
+    return {"items": list_filter_logs(db, limit=limit)}
 
 
 def _apply_source(row: McpSourceRow, payload: SourceInput, *, creating: bool = False) -> None:

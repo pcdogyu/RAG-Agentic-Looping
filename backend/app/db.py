@@ -65,6 +65,25 @@ class NewsRow(Base):
     raw_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
+class NewsFilterLogRow(Base):
+    __tablename__ = "news_filter_logs"
+
+    id: Mapped[UUID] = mapped_column(GUID(), primary_key=True, default=uuid4)
+    content_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    source: Mapped[str] = mapped_column(String(120), index=True)
+    title: Mapped[str] = mapped_column(Text)
+    url: Mapped[str] = mapped_column(Text)
+    matched_keyword: Mapped[str] = mapped_column(String(80), index=True)
+    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    first_filtered_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now
+    )
+    last_filtered_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, index=True
+    )
+    hit_count: Mapped[int] = mapped_column(Integer, default=1)
+
+
 class EventRow(Base):
     __tablename__ = "news_events"
 
