@@ -12,7 +12,7 @@ from sqlalchemy import select
 from backend.app.config import Settings
 from backend.app.db import ModelCallAuditRow, SessionLocal
 from backend.app.domain import AnalysisStep, EventType, NewsEvent, NewsItem, SourceQuality, utc_now
-from backend.app.llm import LlmGateway, serialize_keep_alive
+from backend.app.llm import GpuSemaphore, LlmError, LlmGateway, serialize_keep_alive
 from backend.app.main import app
 from backend.app.model_audit import (
     backfill_legacy_model_audits,
@@ -105,6 +105,52 @@ def test_gateway_records_exact_redacted_input_output(monkeypatch):
     assert "[REDACTED]" in serialized
     assert "JSON Schema" in row.messages[-1]["content"]
     assert row.raw_response == '{"answer": "完成"}'
+
+
+@pytest.mark.parametrize(
+    ("model", "expected_threads", "expected_capacity"),
+    [
+        ("qwen2.5:3b", 8, 1),
+        ("qwen2.5:14b", 16, 2),
+        ("qwen2.5-coder:7b", 6, 1),
+        ("custom:latest", 4, 1),
+    ],
+)
+def test_gateway_uses_model_specific_threads_and_capacity(
+    model, expected_threads, expected_capacity
+):
+    settings = Settings(
+        ollama_num_threads=4,
+        ollama_extract_num_threads=8,
+        ollama_research_num_threads=16,
+        ollama_code_num_threads=6,
+        ollama_extract_max_concurrency=1,
+        ollama_research_max_concurrency=2,
+        ollama_code_max_concurrency=1,
+    )
+    gateway = LlmGateway(settings)
+
+    assert gateway._num_threads_for(model) == expected_threads
+    assert gateway.gpu.capacity_for(model) == expected_capacity
+
+
+def test_model_semaphore_enforces_independent_local_capacities():
+    settings = Settings(
+        ollama_extract_max_concurrency=1,
+        ollama_research_max_concurrency=2,
+    )
+    semaphore = GpuSemaphore(settings)
+    semaphore._redis = None
+
+    with semaphore.acquire(settings.ollama_extract_model, timeout=0.01):
+        with pytest.raises(LlmError, match="local extract"):
+            with semaphore.acquire(settings.ollama_extract_model, timeout=0.01):
+                pass
+        with semaphore.acquire(settings.ollama_research_model, timeout=0.01):
+            with semaphore.acquire(settings.ollama_research_model, timeout=0.01):
+                with pytest.raises(LlmError, match="local research"):
+                    with semaphore.acquire(settings.ollama_research_model, timeout=0.01):
+                        pass
 
 
 class _null_context:

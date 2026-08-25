@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
-from time import sleep
+from time import monotonic, sleep
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -30,10 +31,12 @@ def serialize_keep_alive(value: str) -> str | int:
 
 
 class GpuSemaphore:
-    """One global inference slot. Redis coordinates API and Celery processes."""
+    """Model-aware inference slots coordinated across API and Celery processes."""
 
     def __init__(self, settings: Settings) -> None:
-        self._local = threading.Lock()
+        self.settings = settings
+        self._local: dict[str, threading.BoundedSemaphore] = {}
+        self._local_guard = threading.Lock()
         self._redis = None
         try:
             from redis import Redis
@@ -44,28 +47,58 @@ class GpuSemaphore:
         except Exception:
             self._redis = None
 
+    def _lane(self, model: str) -> tuple[str, int]:
+        if model == self.settings.ollama_extract_model:
+            return "extract", self.settings.ollama_extract_max_concurrency
+        if model == self.settings.ollama_research_model:
+            return "research", self.settings.ollama_research_max_concurrency
+        if model == self.settings.ollama_code_model:
+            return "code", self.settings.ollama_code_max_concurrency
+        lane = re.sub(r"[^a-z0-9]+", "-", model.casefold()).strip("-") or "unknown"
+        return lane[:48], 1
+
+    def capacity_for(self, model: str) -> int:
+        return self._lane(model)[1]
+
+    def _local_semaphore(self, lane: str, capacity: int) -> threading.BoundedSemaphore:
+        with self._local_guard:
+            return self._local.setdefault(lane, threading.BoundedSemaphore(capacity))
+
     @contextmanager
-    def acquire(self, timeout: int = 300) -> Iterator[None]:
+    def acquire(self, model: str, timeout: float = 300) -> Iterator[None]:
+        lane, capacity = self._lane(model)
         if self._redis:
-            lock = self._redis.lock(
-                "market-loop:gpu", timeout=timeout + 30, blocking_timeout=timeout
-            )
-            acquired = lock.acquire(blocking=True)
-            if not acquired:
-                raise LlmError("timed out waiting for the GPU inference slot")
+            deadline = monotonic() + timeout
+            lock = None
+            while lock is None:
+                for slot in range(capacity):
+                    candidate = self._redis.lock(
+                        f"market-loop:llm:{lane}:{slot}",
+                        timeout=timeout + 30,
+                        blocking_timeout=0,
+                    )
+                    if candidate.acquire(blocking=False):
+                        lock = candidate
+                        break
+                if lock is not None:
+                    break
+                if monotonic() >= deadline:
+                    raise LlmError(f"timed out waiting for the {lane} inference slot")
+                sleep(min(0.1, max(0.0, deadline - monotonic())))
             try:
                 yield
             finally:
                 if lock.owned():
                     lock.release()
             return
-        acquired = self._local.acquire(timeout=timeout)
+        semaphore = self._local_semaphore(lane, capacity)
+        acquired = semaphore.acquire(timeout=timeout)
         if not acquired:
-            raise LlmError("timed out waiting for the local inference slot")
+            raise LlmError(f"timed out waiting for the local {lane} inference slot")
         try:
             yield
         finally:
-            self._local.release()
+            semaphore.release()
 
 
 class LlmGateway:
@@ -73,6 +106,15 @@ class LlmGateway:
         self.settings = settings or get_settings()
         self.client = httpx.Client(timeout=self.settings.ollama_timeout_seconds)
         self.gpu = GpuSemaphore(self.settings)
+
+    def _num_threads_for(self, model: str) -> int:
+        if model == self.settings.ollama_extract_model:
+            return self.settings.ollama_extract_num_threads or self.settings.ollama_num_threads
+        if model == self.settings.ollama_research_model:
+            return self.settings.ollama_research_num_threads or self.settings.ollama_num_threads
+        if model == self.settings.ollama_code_model:
+            return self.settings.ollama_code_num_threads or self.settings.ollama_num_threads
+        return self.settings.ollama_num_threads
 
     def generate_json(
         self,
@@ -107,9 +149,10 @@ class LlmGateway:
                     "num_ctx": 8192,
                     "num_predict": self.settings.ollama_max_output_tokens,
                 }
-                if self.settings.ollama_num_threads:
-                    options["num_thread"] = self.settings.ollama_num_threads
-                with self.gpu.acquire(self.settings.ollama_timeout_seconds + 30):
+                num_threads = self._num_threads_for(model)
+                if num_threads:
+                    options["num_thread"] = num_threads
+                with self.gpu.acquire(model, self.settings.ollama_timeout_seconds + 30):
                     response = self.client.post(
                         f"{self.settings.ollama_base_url.rstrip('/')}/api/chat",
                         json={

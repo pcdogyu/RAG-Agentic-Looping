@@ -24,6 +24,12 @@ class Settings(BaseSettings):
     ollama_code_model: str = "qwen2.5-coder:7b"
     ollama_timeout_seconds: int = 240
     ollama_num_threads: int = Field(default=0, ge=0, le=256)
+    ollama_extract_num_threads: int = Field(default=0, ge=0, le=256)
+    ollama_research_num_threads: int = Field(default=0, ge=0, le=256)
+    ollama_code_num_threads: int = Field(default=0, ge=0, le=256)
+    ollama_extract_max_concurrency: int = Field(default=1, ge=1, le=16)
+    ollama_research_max_concurrency: int = Field(default=2, ge=1, le=16)
+    ollama_code_max_concurrency: int = Field(default=1, ge=1, le=16)
     ollama_max_output_tokens: int = Field(default=1024, ge=64, le=8192)
     ollama_keep_alive: str = "-1"
     research_prompt_evidence_chars: int = Field(default=12000, ge=2000, le=24000)
