@@ -91,8 +91,7 @@ services:
       FMP_ACCESS_TOKEN: ${FMP_ACCESS_TOKEN:-}
       FMP_TOOL_SETS: search,company,quotes,statements,calendar,charts,news,crypto,sec-filings,earnings,dcf
       PORT: 8080
-    ports:
-      - "8081:8080"
+    restart: unless-stopped
 
   api:
     <<: *backend

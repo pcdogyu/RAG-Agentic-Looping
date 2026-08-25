@@ -177,17 +177,22 @@ def seed_integrations(db: Session, settings: Settings | None = None) -> None:
                 },
             )
         )
-    if not db.scalar(select(McpSourceRow).where(McpSourceRow.name == "FMP")):
+    fmp_url = cfg.fmp_mcp_url or "http://fmp-mcp:8080/mcp"
+    fmp_source = db.scalar(select(McpSourceRow).where(McpSourceRow.name == "FMP"))
+    if not fmp_source:
         db.add(
             McpSourceRow(
                 name="FMP",
-                url=cfg.fmp_mcp_url or "http://fmp-mcp:8000/mcp",
+                url=fmp_url,
                 description="内置受管的 Financial Modeling Prep 来源",
                 priority=100,
                 enabled=cfg.fmp_enabled,
                 managed=True,
             )
         )
+    elif fmp_source.managed and fmp_source.url == "http://fmp-mcp:8000/mcp":
+        fmp_source.url = fmp_url
+        fmp_source.updated_at = datetime.now().astimezone()
     if not db.get(IntegrationSettingRow, "weknora"):
         db.add(IntegrationSettingRow(key="weknora", payload={"url": cfg.weknora_default_url}))
     db.commit()

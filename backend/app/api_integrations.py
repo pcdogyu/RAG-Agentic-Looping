@@ -151,7 +151,10 @@ async def _probe(row: McpSourceRow, db: Session, *, discover: bool) -> dict[str,
         row.last_error = None
     except Exception as exc:
         row.last_status = "failed"
-        row.last_error = f"{type(exc).__name__}: {exc}"[:1000]
+        leaf = exc
+        while isinstance(leaf, BaseExceptionGroup) and leaf.exceptions:
+            leaf = leaf.exceptions[0]
+        row.last_error = f"{type(leaf).__name__}: {leaf}"[:1000]
         tools = []
     row.last_checked_at = utc_now()
     row.updated_at = utc_now()

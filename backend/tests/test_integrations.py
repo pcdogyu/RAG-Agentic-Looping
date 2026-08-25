@@ -88,9 +88,24 @@ def test_managed_sources_seed_and_cannot_be_deleted():
         names = {item["name"] for item in items}
         assert {"SearXNG", "FMP"} <= names
         searxng = next(item for item in items if item["name"] == "SearXNG")
+        fmp = next(item for item in items if item["name"] == "FMP")
         assert "web_search" in searxng["tool_mappings"]
+        assert fmp["url"] == "http://fmp-mcp:8080/mcp"
         response = client.delete(f"/api/v1/admin/mcp-sources/{searxng['id']}", headers=ADMIN)
     assert response.status_code == 409
+
+
+def test_probe_unwraps_exception_group(monkeypatch, db):
+    async def failing_discover(_row):
+        raise ExceptionGroup("task group", [ConnectionError("service unavailable")])
+
+    monkeypatch.setattr("backend.app.api_integrations.discover_source", failing_discover)
+    with TestClient(app) as client:
+        items = client.get("/api/v1/admin/mcp-sources", headers=ADMIN).json()
+        source = next(item for item in items if item["name"] == "FMP")
+        tested = client.post(f"/api/v1/admin/mcp-sources/{source['id']}/test", headers=ADMIN)
+    assert tested.status_code == 200
+    assert tested.json()["source"]["last_error"] == "ConnectionError: service unavailable"
 
 
 def test_discover_records_tools_and_validates_mapping(monkeypatch):
