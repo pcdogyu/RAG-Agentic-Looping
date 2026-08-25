@@ -75,13 +75,13 @@ def _apply_source(row: McpSourceRow, payload: SourceInput, *, creating: bool = F
     row.updated_at = utc_now()
 
 
-@router.get("/api/v1/admin/mcp-sources", dependencies=[Depends(require_admin)])
+@router.get("/api/v1/admin/mcp-sources")
 def list_mcp_sources(db: Db) -> list[dict[str, Any]]:
     rows = db.scalars(select(McpSourceRow).order_by(desc(McpSourceRow.priority))).all()
     return [source_public(row) for row in rows]
 
 
-@router.post("/api/v1/admin/mcp-sources", dependencies=[Depends(require_admin)], status_code=201)
+@router.post("/api/v1/admin/mcp-sources", status_code=201)
 def create_mcp_source(payload: SourceInput, db: Db) -> dict[str, Any]:
     row = McpSourceRow(name=payload.name, url=str(payload.url))
     try:
@@ -98,7 +98,7 @@ def create_mcp_source(payload: SourceInput, db: Db) -> dict[str, Any]:
     return source_public(row)
 
 
-@router.put("/api/v1/admin/mcp-sources/{source_id}", dependencies=[Depends(require_admin)])
+@router.put("/api/v1/admin/mcp-sources/{source_id}")
 def update_mcp_source(source_id: UUID, payload: SourceInput, db: Db) -> dict[str, Any]:
     row = db.get(McpSourceRow, source_id)
     if not row:
@@ -116,7 +116,7 @@ def update_mcp_source(source_id: UUID, payload: SourceInput, db: Db) -> dict[str
     return source_public(row)
 
 
-@router.delete("/api/v1/admin/mcp-sources/{source_id}", dependencies=[Depends(require_admin)])
+@router.delete("/api/v1/admin/mcp-sources/{source_id}")
 def delete_mcp_source(source_id: UUID, db: Db) -> dict[str, bool]:
     row = db.get(McpSourceRow, source_id)
     if not row:
@@ -128,9 +128,7 @@ def delete_mcp_source(source_id: UUID, db: Db) -> dict[str, bool]:
     return {"deleted": True}
 
 
-@router.patch(
-    "/api/v1/admin/mcp-sources/{source_id}/enabled", dependencies=[Depends(require_admin)]
-)
+@router.patch("/api/v1/admin/mcp-sources/{source_id}/enabled")
 def set_mcp_source_enabled(source_id: UUID, payload: EnabledInput, db: Db) -> dict[str, Any]:
     row = db.get(McpSourceRow, source_id)
     if not row:
@@ -163,9 +161,7 @@ async def _probe(row: McpSourceRow, db: Session, *, discover: bool) -> dict[str,
     return {"source": source_public(row), "tools": tools}
 
 
-@router.post(
-    "/api/v1/admin/mcp-sources/{source_id}/discover", dependencies=[Depends(require_admin)]
-)
+@router.post("/api/v1/admin/mcp-sources/{source_id}/discover")
 async def discover_mcp_source(source_id: UUID, db: Db) -> dict[str, Any]:
     row = db.get(McpSourceRow, source_id)
     if not row:
@@ -173,7 +169,7 @@ async def discover_mcp_source(source_id: UUID, db: Db) -> dict[str, Any]:
     return await _probe(row, db, discover=True)
 
 
-@router.post("/api/v1/admin/mcp-sources/{source_id}/test", dependencies=[Depends(require_admin)])
+@router.post("/api/v1/admin/mcp-sources/{source_id}/test")
 async def test_mcp_source(source_id: UUID, db: Db) -> dict[str, Any]:
     row = db.get(McpSourceRow, source_id)
     if not row:
@@ -181,7 +177,7 @@ async def test_mcp_source(source_id: UUID, db: Db) -> dict[str, Any]:
     return await _probe(row, db, discover=False)
 
 
-@router.post("/api/v1/admin/search", dependencies=[Depends(require_admin)])
+@router.post("/api/v1/admin/search")
 async def admin_search(payload: SearchRequest) -> dict[str, Any]:
     results, errors = await search_enabled_sources(payload)
     return {"items": [item.model_dump(mode="json") for item in results], "errors": errors}

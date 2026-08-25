@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 
 import ModelLogsPage from "./ModelLogs";
 
@@ -206,25 +206,23 @@ function sourceDraft(source?: McpSource): SourceDraft {
 }
 
 export function SourcesPage({ apiBase }: { apiBase: string }) {
-  const [token, setToken] = useState(readToken);
   const [items, setItems] = useState<McpSource[]>([]);
   const [fmpStatus, setFmpStatus] = useState<FmpFactStatus>("checking");
   const [editing, setEditing] = useState<string | "new" | null>(null);
   const [draft, setDraft] = useState<SourceDraft>(sourceDraft());
   const [message, setMessage] = useState("");
-  const headers = useMemo(() => ({ "Content-Type": "application/json", "X-Admin-Token": token }), [token]);
+  const headers = { "Content-Type": "application/json" };
   async function load() {
-    if (!token) return;
     const response = await fetch(`${apiBase}/api/v1/admin/mcp-sources`, { headers });
-    if (response.status === 401) { setMessage("管理员令牌无效。"); return; }
-    if (response.ok) { setItems(await response.json() as McpSource[]); setMessage(""); }
+    if (response.ok) { setItems(await response.json() as McpSource[]); setMessage(""); return; }
+    setMessage("无法读取 MCP 来源配置。");
   }
   useEffect(() => {
     fetch(`${apiBase}/health`).then((response) => response.json()).then((health: { fmp_configured?: boolean; fmp_mcp_configured?: boolean }) => {
       setFmpStatus(health.fmp_mcp_configured ? "mcp" : health.fmp_configured ? "rest" : "unconfigured");
     }).catch(() => setFmpStatus("unconfigured"));
   }, [apiBase]);
-  useEffect(() => { load(); }, [token]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { load(); }, [apiBase]); // eslint-disable-line react-hooks/exhaustive-deps
   async function action(id: string, kind: "test" | "discover") {
     setMessage("正在连接 MCP 来源…");
     const response = await fetch(`${apiBase}/api/v1/admin/mcp-sources/${id}/${kind}`, { method: "POST", headers });
@@ -251,18 +249,15 @@ export function SourcesPage({ apiBase }: { apiBase: string }) {
   return <section className="app-page sources-page">
     <PageHeading eyebrow="RESEARCH DATA FABRIC" title="数据源" copy="统一查看研究使用的事实来源，并管理可热更新的远程 Streamable HTTP MCP。" />
     <FactDataSources fmpStatus={fmpStatus} />
-    <div className="managed-sources-heading"><span>CONTROLLED MCP REGISTRY</span><h3>可管理 MCP 来源</h3><p>管理员可启停来源、测试连接、发现工具并维护受控用途映射。</p></div>
-    <AdminUnlock token={token} onToken={setToken} />
+    <div className="managed-sources-heading"><span>OPEN MCP REGISTRY</span><h3>可管理 MCP 来源</h3><p>默认开放启停、连接测试、工具发现及受控用途映射设置。</p></div>
     {message && <div className="page-message">{message}</div>}
-    {token && <>
-      <div className="page-toolbar"><button type="button" onClick={() => { setEditing("new"); setDraft(sourceDraft()); }}>新增 MCP 来源</button><button type="button" onClick={load}>刷新</button></div>
-      <div className="source-list">{items.map((item) => <article className="source-card" key={item.id}>
+    <div className="page-toolbar"><button type="button" onClick={() => { setEditing("new"); setDraft(sourceDraft()); }}>新增 MCP 来源</button><button type="button" onClick={load}>刷新</button></div>
+    <div className="source-list">{items.map((item) => <article className="source-card" key={item.id}>
         <div className="source-card-main"><div><span className={`health-dot ${item.last_status}`} /> <strong>{item.name}</strong>{item.managed && <small>内置</small>}<p>{item.description || item.url}</p><code>{item.url}</code></div><div><span>优先级 {item.priority}</span><span>{item.discovered_tools.length} 个工具</span><span>{item.secret_configured ? "凭据已配置" : "无凭据"}</span></div></div>
         {item.last_error && <p className="page-error">{item.last_error}</p>}
         <div className="card-actions"><button type="button" onClick={() => toggle(item)}>{item.enabled ? "关闭" : "启用"}</button><button type="button" onClick={() => action(item.id, "test")}>连接测试</button><button type="button" onClick={() => action(item.id, "discover")}>工具发现</button><button type="button" onClick={() => { setEditing(item.id); setDraft(sourceDraft(item)); }}>编辑</button>{!item.managed && <button type="button" className="danger" onClick={() => remove(item)}>删除</button>}</div>
         {item.discovered_tools.length > 0 && <details><summary>已发现工具与 Schema</summary>{item.discovered_tools.map((tool) => <pre key={tool.name}>{tool.name}\n{tool.description}\n{JSON.stringify(tool.input_schema, null, 2)}</pre>)}</details>}
       </article>)}</div>
-    </>}
     {editing && <div className="modal-backdrop" onClick={() => setEditing(null)}><form className="modal source-editor" onSubmit={save} onClick={(e) => e.stopPropagation()}><button type="button" className="close" onClick={() => setEditing(null)}>×</button><h2>{editing === "new" ? "新增数据源" : "编辑数据源"}</h2>
       <label>名称<input required value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} /></label><label>Streamable HTTP URL<input required type="url" value={draft.url} onChange={(e) => setDraft({ ...draft, url: e.target.value })} /></label><label>描述<textarea value={draft.description} onChange={(e) => setDraft({ ...draft, description: e.target.value })} /></label><label>优先级<input type="number" min="0" max="1000" value={draft.priority} onChange={(e) => setDraft({ ...draft, priority: Number(e.target.value) })} /></label><label>认证<select value={draft.auth_type} onChange={(e) => setDraft({ ...draft, auth_type: e.target.value })}><option value="none">无</option><option value="bearer">Bearer</option><option value="api_key_header">API Key Header</option></select></label>{draft.auth_type === "api_key_header" && <label>Header 名称<input value={draft.auth_header_name} onChange={(e) => setDraft({ ...draft, auth_header_name: e.target.value })} /></label>}{draft.auth_type !== "none" && <><label>新凭据<input type="password" value={draft.secret} placeholder="留空则保留现有凭据" onChange={(e) => setDraft({ ...draft, secret: e.target.value })} /></label><label className="inline-check"><input type="checkbox" checked={draft.clear_secret} onChange={(e) => setDraft({ ...draft, clear_secret: e.target.checked })} />清除现有凭据</label></>}<label>用途映射 JSON<textarea className="json-editor" value={draft.tool_mappings} onChange={(e) => setDraft({ ...draft, tool_mappings: e.target.value })} /></label><button type="submit">保存配置</button>
     </form></div>}
@@ -272,15 +267,14 @@ export function SourcesPage({ apiBase }: { apiBase: string }) {
 type SearchItem = { title: string; url: string; snippet: string; source: string; domain: string; published_at: string | null };
 
 export function SearchPage({ apiBase }: { apiBase: string }) {
-  const [token, setToken] = useState(readToken);
   const [sources, setSources] = useState<McpSource[]>([]);
   const [query, setQuery] = useState(""); const [sourceId, setSourceId] = useState("");
   const [language, setLanguage] = useState("zh-CN"); const [timeRange, setTimeRange] = useState(""); const [limit, setLimit] = useState(10);
   const [items, setItems] = useState<SearchItem[]>([]); const [errors, setErrors] = useState<Array<{ source: string; error: string }>>([]); const [loading, setLoading] = useState(false);
-  const headers = { "Content-Type": "application/json", "X-Admin-Token": token };
-  useEffect(() => { if (token) fetch(`${apiBase}/api/v1/admin/mcp-sources`, { headers }).then((r) => r.ok ? r.json() : []).then(setSources); }, [token]); // eslint-disable-line react-hooks/exhaustive-deps
+  const headers = { "Content-Type": "application/json" };
+  useEffect(() => { fetch(`${apiBase}/api/v1/admin/mcp-sources`, { headers }).then((r) => r.ok ? r.json() : []).then(setSources); }, [apiBase]); // eslint-disable-line react-hooks/exhaustive-deps
   async function search(event: FormEvent) { event.preventDefault(); setLoading(true); setErrors([]); try { const response = await fetch(`${apiBase}/api/v1/admin/search`, { method: "POST", headers, body: JSON.stringify({ query, source_id: sourceId || null, language, time_range: timeRange, limit }) }); const payload = await response.json(); if (!response.ok) throw new Error(payload.detail || "搜索失败"); setItems(payload.items); setErrors(payload.errors); } catch (reason) { setErrors([{ source: "系统", error: reason instanceof Error ? reason.message : "搜索失败" }]); } finally { setLoading(false); } }
-  return <section className="app-page search-page"><PageHeading eyebrow="NETWORK VERIFICATION" title="搜索引擎" copy="通过已启用 MCP 来源手动验证本地模型结论，结果始终保留原始链接。" /><AdminUnlock token={token} onToken={setToken} />{token && <form className="search-form" onSubmit={search}><input required aria-label="搜索查询" placeholder="输入需要验证的问题" value={query} onChange={(e) => setQuery(e.target.value)} /><select aria-label="搜索来源" value={sourceId} onChange={(e) => setSourceId(e.target.value)}><option value="">全部启用来源</option>{sources.filter((item) => item.enabled && "web_search" in item.tool_mappings).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select><select aria-label="语言" value={language} onChange={(e) => setLanguage(e.target.value)}><option value="zh-CN">中文</option><option value="en">英文</option><option value="all">不限</option></select><select aria-label="时间范围" value={timeRange} onChange={(e) => setTimeRange(e.target.value)}><option value="">不限时间</option><option value="day">24 小时</option><option value="week">一周</option><option value="month">一月</option><option value="year">一年</option></select><label>结果数<input type="number" min="1" max="20" value={limit} onChange={(e) => setLimit(Number(e.target.value))} /></label><button disabled={loading}>{loading ? "正在搜索…" : "搜索验证"}</button></form>}{errors.map((item) => <div className="page-error" key={`${item.source}-${item.error}`}>{item.source}: {item.error}</div>)}<div className="search-results">{items.map((item) => <article key={item.url}><span>{item.source} · {item.domain}{item.published_at ? ` · ${new Date(item.published_at).toLocaleString("zh-CN")}` : ""}</span><h3><a href={item.url} target="_blank" rel="noreferrer">{item.title}</a></h3><p>{item.snippet}</p></article>)}</div></section>;
+  return <section className="app-page search-page"><PageHeading eyebrow="NETWORK VERIFICATION" title="搜索引擎" copy="通过已启用 MCP 来源手动验证本地模型结论，结果始终保留原始链接。" /><form className="search-form" onSubmit={search}><input required aria-label="搜索查询" placeholder="输入需要验证的问题" value={query} onChange={(e) => setQuery(e.target.value)} /><select aria-label="搜索来源" value={sourceId} onChange={(e) => setSourceId(e.target.value)}><option value="">全部启用来源</option>{sources.filter((item) => item.enabled && "web_search" in item.tool_mappings).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select><select aria-label="语言" value={language} onChange={(e) => setLanguage(e.target.value)}><option value="zh-CN">中文</option><option value="en">英文</option><option value="all">不限</option></select><select aria-label="时间范围" value={timeRange} onChange={(e) => setTimeRange(e.target.value)}><option value="">不限时间</option><option value="day">24 小时</option><option value="week">一周</option><option value="month">一月</option><option value="year">一年</option></select><label>结果数<input type="number" min="1" max="20" value={limit} onChange={(e) => setLimit(Number(e.target.value))} /></label><button disabled={loading}>{loading ? "正在搜索…" : "搜索验证"}</button></form>{errors.map((item) => <div className="page-error" key={`${item.source}-${item.error}`}>{item.source}: {item.error}</div>)}<div className="search-results">{items.map((item) => <article key={item.url}><span>{item.source} · {item.domain}{item.published_at ? ` · ${new Date(item.published_at).toLocaleString("zh-CN")}` : ""}</span><h3><a href={item.url} target="_blank" rel="noreferrer">{item.title}</a></h3><p>{item.snippet}</p></article>)}</div></section>;
 }
 
 export function WeknoraPage({ apiBase }: { apiBase: string }) {

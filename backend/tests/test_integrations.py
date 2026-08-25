@@ -28,7 +28,7 @@ from backend.app.storage import save_recommendation, save_run
 ADMIN = {"X-Admin-Token": "test-admin-token"}
 
 
-def test_admin_auth_and_secret_round_trip_are_safe():
+def test_mcp_registry_is_open_and_secret_round_trip_is_safe():
     require_admin_token("test-admin-token")
     ciphertext = encrypt_secret("very-secret")
     assert "very-secret" not in ciphertext
@@ -37,8 +37,8 @@ def test_admin_auth_and_secret_round_trip_are_safe():
     with TestClient(app) as client:
         missing = client.get("/api/v1/admin/mcp-sources")
         wrong = client.get("/api/v1/admin/mcp-sources", headers={"X-Admin-Token": "wrong"})
-    assert missing.status_code == 401
-    assert wrong.status_code == 401
+    assert missing.status_code == 200
+    assert wrong.status_code == 200
 
 
 def test_mcp_crud_masks_preserves_and_clears_credentials(db):
@@ -53,7 +53,7 @@ def test_mcp_crud_masks_preserves_and_clears_credentials(db):
         "tool_mappings": {},
     }
     with TestClient(app) as client:
-        created = client.post("/api/v1/admin/mcp-sources", headers=ADMIN, json=payload)
+        created = client.post("/api/v1/admin/mcp-sources", json=payload)
         assert created.status_code == 201
         body = created.json()
         assert body["secret_configured"] is True
@@ -62,29 +62,28 @@ def test_mcp_crud_masks_preserves_and_clears_credentials(db):
         source_id = body["id"]
         payload["description"] = "updated"
         payload["secret"] = None
-        updated = client.put(f"/api/v1/admin/mcp-sources/{source_id}", headers=ADMIN, json=payload)
+        updated = client.put(f"/api/v1/admin/mcp-sources/{source_id}", json=payload)
         assert updated.status_code == 200
         assert updated.json()["secret_configured"] is True
 
         payload["clear_secret"] = True
-        cleared = client.put(f"/api/v1/admin/mcp-sources/{source_id}", headers=ADMIN, json=payload)
+        cleared = client.put(f"/api/v1/admin/mcp-sources/{source_id}", json=payload)
         assert cleared.json()["secret_configured"] is False
 
         disabled = client.patch(
             f"/api/v1/admin/mcp-sources/{source_id}/enabled",
-            headers=ADMIN,
             json={"enabled": False},
         )
         assert disabled.json()["enabled"] is False
         assert db.get(McpSourceRow, source_id).enabled is False
 
-        deleted = client.delete(f"/api/v1/admin/mcp-sources/{source_id}", headers=ADMIN)
+        deleted = client.delete(f"/api/v1/admin/mcp-sources/{source_id}")
         assert deleted.status_code == 200
 
 
 def test_managed_sources_seed_and_cannot_be_deleted():
     with TestClient(app) as client:
-        items = client.get("/api/v1/admin/mcp-sources", headers=ADMIN).json()
+        items = client.get("/api/v1/admin/mcp-sources").json()
         names = {item["name"] for item in items}
         assert {"SearXNG", "FMP"} <= names
         searxng = next(item for item in items if item["name"] == "SearXNG")
@@ -92,7 +91,7 @@ def test_managed_sources_seed_and_cannot_be_deleted():
         assert "web_search" in searxng["tool_mappings"]
         assert fmp["url"] == "http://fmp-mcp:8080/mcp"
         assert set(fmp["tool_mappings"]) == {"quote", "fundamentals", "filings"}
-        response = client.delete(f"/api/v1/admin/mcp-sources/{searxng['id']}", headers=ADMIN)
+        response = client.delete(f"/api/v1/admin/mcp-sources/{searxng['id']}")
     assert response.status_code == 409
 
 
@@ -102,9 +101,9 @@ def test_probe_unwraps_exception_group(monkeypatch, db):
 
     monkeypatch.setattr("backend.app.api_integrations.discover_source", failing_discover)
     with TestClient(app) as client:
-        items = client.get("/api/v1/admin/mcp-sources", headers=ADMIN).json()
+        items = client.get("/api/v1/admin/mcp-sources").json()
         source = next(item for item in items if item["name"] == "FMP")
-        tested = client.post(f"/api/v1/admin/mcp-sources/{source['id']}/test", headers=ADMIN)
+        tested = client.post(f"/api/v1/admin/mcp-sources/{source['id']}/test")
     assert tested.status_code == 200
     assert tested.json()["source"]["last_error"] == "ConnectionError: service unavailable"
 
@@ -122,11 +121,9 @@ def test_discover_records_tools_and_validates_mapping(monkeypatch):
 
     monkeypatch.setattr("backend.app.api_integrations.discover_source", fake_discover)
     with TestClient(app) as client:
-        items = client.get("/api/v1/admin/mcp-sources", headers=ADMIN).json()
+        items = client.get("/api/v1/admin/mcp-sources").json()
         source = next(item for item in items if item["name"] == "SearXNG")
-        discovered = client.post(
-            f"/api/v1/admin/mcp-sources/{source['id']}/discover", headers=ADMIN
-        )
+        discovered = client.post(f"/api/v1/admin/mcp-sources/{source['id']}/discover")
     assert discovered.status_code == 200
     assert discovered.json()["source"]["last_status"] == "healthy"
     assert discovered.json()["tools"][0]["name"] == "web_search"
@@ -151,6 +148,17 @@ def test_search_result_normalization_dedicated_shape():
     assert len(items) == 1
     assert items[0].url == "https://example.com/story?id=2"
     assert items[0].domain == "example.com"
+
+
+def test_manual_search_is_open_without_admin_token(monkeypatch):
+    async def fake_search(_payload):
+        return [], []
+
+    monkeypatch.setattr("backend.app.api_integrations.search_enabled_sources", fake_search)
+    with TestClient(app) as client:
+        response = client.post("/api/v1/admin/search", json={"query": "market verification"})
+    assert response.status_code == 200
+    assert response.json() == {"items": [], "errors": []}
 
 
 def test_mapping_arguments_must_match_discovered_tool_schema():
