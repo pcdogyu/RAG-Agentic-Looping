@@ -104,8 +104,12 @@ export function fidelityLabel(value: string) {
 
 export function buildModelLogQuery(filters: Filters, now = Date.now()) {
   const params = new URLSearchParams();
-  const days = filters.range.endsWith("d") ? Number(filters.range.slice(0, -1)) : 0;
-  if (days > 0) params.set("start", new Date(now - days * 86400000).toISOString());
+  const range = filters.range.match(/^(\d+)(m|h|d)$/);
+  const unitMilliseconds = { m: 60000, h: 3600000, d: 86400000 } as const;
+  if (range) {
+    const [, amount, unit] = range;
+    params.set("start", new Date(now - Number(amount) * unitMilliseconds[unit as keyof typeof unitMilliseconds]).toISOString());
+  }
   for (const key of ["model", "provider", "operation", "status", "language", "fidelity"] as const) {
     if (filters[key]) params.set(key, filters[key]);
   }
@@ -259,7 +263,9 @@ export default function ModelLogsPage({ apiBase, onBack, embedded = false }: { a
 
       <section className="model-log-filters" aria-label="模型日志筛选">
         <label>时间<select value={filters.range} onChange={(e) => updateFilter("range", e.target.value)}>
-          <option value="1d">最近24小时</option><option value="7d">最近7天</option>
+          <option value="30m">最近30分钟</option><option value="1h">最近1小时</option>
+          <option value="12h">最近12小时</option><option value="1d">最近24小时</option>
+          <option value="3d">最近3天</option><option value="7d">最近7天</option>
           <option value="30d">最近30天</option><option value="90d">最近90天</option>
           <option value="all">全部</option>
         </select></label>

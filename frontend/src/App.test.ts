@@ -180,6 +180,25 @@ describe("model log navigation and filters", () => {
     expect(query.get("fidelity")).toBe("exact");
   });
 
+  it.each([
+    ["30m", "2026-08-22T23:30:00.000Z"],
+    ["1h", "2026-08-22T23:00:00.000Z"],
+    ["12h", "2026-08-22T12:00:00.000Z"],
+    ["3d", "2026-08-20T00:00:00.000Z"],
+  ])("supports the %s model log time range", (range, expectedStart) => {
+    const query = buildModelLogQuery({
+      range,
+      model: "",
+      provider: "",
+      operation: "",
+      status: "",
+      language: "",
+      fidelity: "",
+    }, Date.parse("2026-08-23T00:00:00Z"));
+
+    expect(query.get("start")).toBe(expectedStart);
+  });
+
   it("labels reconstructed history and renders the full-screen shell", () => {
     expect(fidelityLabel("reconstructed")).toBe("历史重建");
     const markup = renderToStaticMarkup(createElement(ModelLogsPage, {
@@ -189,6 +208,10 @@ describe("model log navigation and filters", () => {
     expect(markup).toContain("模型日志");
     expect(markup).toContain("返回主看板");
     expect(markup).toContain("模型日志筛选");
+    expect(markup).toContain("最近30分钟");
+    expect(markup).toContain("最近1小时");
+    expect(markup).toContain("最近12小时");
+    expect(markup).toContain("最近3天");
     expect(markup).toContain("正在读取模型日志");
   });
 });
