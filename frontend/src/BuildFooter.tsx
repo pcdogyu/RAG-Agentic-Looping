@@ -10,7 +10,7 @@ export default function BuildFooter() {
   return (
     <footer className="build-footer" aria-label="构建版本信息">
       <span>
-        Code by <a href="mailto:Yuhao@jiansutech.co">Yuhao@jiansutech.co</a>
+        Code by <a href="mailto:Yuhao@jiansutech.com">Yuhao@jiansutech.com</a>
       </span>
       <span aria-hidden="true">-</span>
       <time dateTime={buildInfo.commitTime}>{buildInfo.commitTime}</time>
