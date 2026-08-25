@@ -81,6 +81,14 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  duckduckgo-mcp:
+    build:
+      context: ./infra/duckduckgo-mcp
+    environment:
+      DUCKDUCKGO_TIMEOUT_SECONDS: 15
+      DUCKDUCKGO_MIN_INTERVAL_SECONDS: 2
+    restart: unless-stopped
+
   fmp-mcp:
     profiles: ["mcp"]
     build:
@@ -106,6 +114,8 @@ services:
       redis:
         condition: service_healthy
       search-mcp:
+        condition: service_started
+      duckduckgo-mcp:
         condition: service_started
 
   io-worker:

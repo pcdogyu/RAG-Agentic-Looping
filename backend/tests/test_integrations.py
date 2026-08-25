@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 
 import pytest
@@ -23,8 +24,10 @@ from backend.app.services.fact_sources import (
     save_native_group_config,
 )
 from backend.app.services.mcp_registry import (
+    SearchRequest,
     normalize_search_results,
     require_admin_token,
+    search_enabled_sources,
     validate_mappings,
 )
 from backend.app.services.secret_store import decrypt_secret, encrypt_secret
@@ -92,11 +95,17 @@ def test_managed_sources_seed_and_cannot_be_deleted():
     with TestClient(app) as client:
         items = client.get("/api/v1/admin/mcp-sources").json()
         names = {item["name"] for item in items}
-        assert {"SearXNG", "FMP"} <= names
+        assert {"SearXNG", "DuckDuckGo", "FMP"} <= names
         searxng = next(item for item in items if item["name"] == "SearXNG")
+        duckduckgo = next(item for item in items if item["name"] == "DuckDuckGo")
         fmp = next(item for item in items if item["name"] == "FMP")
         assert "web_search" in searxng["tool_mappings"]
         assert searxng["group_id"] == "search"
+        assert duckduckgo["url"] == "http://duckduckgo-mcp:8080/mcp"
+        assert duckduckgo["priority"] == 40
+        assert duckduckgo["enabled"] is True
+        assert duckduckgo["managed"] is True
+        assert duckduckgo["group_id"] == "search"
         assert fmp["url"] == "http://fmp-mcp:8080/mcp"
         assert fmp["group_id"] == "fmp"
         assert set(fmp["tool_mappings"]) == {"quote", "fundamentals", "filings"}
@@ -127,7 +136,7 @@ def test_fact_source_groups_nest_managed_sources_and_hide_other_when_empty():
     fmp = next(item for item in payload if item["id"] == "fmp")
     search = next(item for item in payload if item["id"] == "search")
     assert [item["name"] for item in fmp["mcp_sources"]] == ["FMP"]
-    assert [item["name"] for item in search["mcp_sources"]] == ["SearXNG"]
+    assert [item["name"] for item in search["mcp_sources"]] == ["SearXNG", "DuckDuckGo"]
     assert "access_token" not in fmp["config"]
 
 
@@ -296,6 +305,147 @@ def test_search_result_normalization_dedicated_shape():
     assert len(items) == 1
     assert items[0].url == "https://example.com/story?id=2"
     assert items[0].domain == "example.com"
+    assert items[0].sources == ["SearXNG"]
+
+
+def test_search_sources_run_in_parallel_and_merge_balanced_results(monkeypatch):
+    calls: list[tuple[str, int]] = []
+
+    async def fake_call(row, _purpose, arguments):
+        calls.append((row.name, arguments["limit"]))
+        await asyncio.sleep(0)
+        if row.name == "SearXNG":
+            return {
+                "results": [
+                    {
+                        "title": "Shared result",
+                        "url": "https://example.com/shared?utm_source=searxng",
+                        "snippet": "SearXNG summary",
+                    },
+                    {
+                        "title": "SearXNG one",
+                        "url": "https://searx.example/one",
+                        "snippet": "SearXNG result one",
+                    },
+                    {
+                        "title": "SearXNG two",
+                        "url": "https://searx.example/two",
+                        "snippet": "SearXNG result two",
+                    },
+                ]
+            }
+        return {
+            "results": [
+                {
+                    "title": "Shared result",
+                    "url": "https://example.com/shared",
+                    "snippet": "DuckDuckGo summary",
+                },
+                {
+                    "title": "DuckDuckGo one",
+                    "url": "https://duck.example/one",
+                    "snippet": "DuckDuckGo result one",
+                },
+                {
+                    "title": "DuckDuckGo two",
+                    "url": "https://duck.example/two",
+                    "snippet": "DuckDuckGo result two",
+                },
+            ]
+        }
+
+    monkeypatch.setattr("backend.app.services.mcp_registry.call_source_tool", fake_call)
+    with TestClient(app):
+        items, errors = asyncio.run(
+            search_enabled_sources(SearchRequest(query="market verification", limit=6))
+        )
+
+    assert errors == []
+    assert calls == [("SearXNG", 5), ("DuckDuckGo", 5)]
+    assert [item.source for item in items] == [
+        "SearXNG",
+        "SearXNG",
+        "DuckDuckGo",
+        "SearXNG",
+        "DuckDuckGo",
+    ]
+    assert items[0].sources == ["SearXNG", "DuckDuckGo"]
+
+
+def test_search_source_failure_does_not_hide_healthy_results(monkeypatch):
+    async def fake_call(row, _purpose, _arguments):
+        if row.name == "DuckDuckGo":
+            raise TimeoutError("rate limited")
+        return {
+            "results": [
+                {
+                    "title": "Healthy result",
+                    "url": "https://example.com/healthy",
+                    "snippet": "Available from the healthy source",
+                }
+            ]
+        }
+
+    monkeypatch.setattr("backend.app.services.mcp_registry.call_source_tool", fake_call)
+    with TestClient(app):
+        items, errors = asyncio.run(
+            search_enabled_sources(SearchRequest(query="market verification"))
+        )
+
+    assert [item.source for item in items] == ["SearXNG"]
+    assert errors == [{"source": "DuckDuckGo", "error": "TimeoutError: rate limited"}]
+
+
+def test_search_source_connection_test_calls_upstream(monkeypatch):
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    async def fake_discover(_row):
+        return [{"name": "web_search", "input_schema": {"type": "object"}}]
+
+    async def fake_call(row, purpose, arguments):
+        calls.append((row.name, {"purpose": purpose, **arguments}))
+        return {"results": [{"title": "ok", "url": "https://example.com", "snippet": "ok"}]}
+
+    monkeypatch.setattr("backend.app.api_integrations.discover_source", fake_discover)
+    monkeypatch.setattr("backend.app.api_integrations.call_source_tool", fake_call)
+    with TestClient(app) as client:
+        sources = client.get("/api/v1/admin/mcp-sources").json()
+        duckduckgo = next(item for item in sources if item["name"] == "DuckDuckGo")
+        tested = client.post(f"/api/v1/admin/mcp-sources/{duckduckgo['id']}/test")
+
+    assert tested.status_code == 200
+    assert tested.json()["source"]["last_status"] == "healthy"
+    assert calls == [
+        (
+            "DuckDuckGo",
+            {
+                "purpose": "web_search",
+                "query": "latest market news",
+                "limit": 1,
+                "language": "en",
+                "time_range": "day",
+            },
+        )
+    ]
+
+
+def test_search_source_connection_test_rejects_empty_upstream(monkeypatch):
+    async def fake_discover(_row):
+        return [{"name": "web_search", "input_schema": {"type": "object"}}]
+
+    async def empty_search(_row, _purpose, _arguments):
+        return {"results": []}
+
+    monkeypatch.setattr("backend.app.api_integrations.discover_source", fake_discover)
+    monkeypatch.setattr("backend.app.api_integrations.call_source_tool", empty_search)
+    with TestClient(app) as client:
+        sources = client.get("/api/v1/admin/mcp-sources").json()
+        duckduckgo = next(item for item in sources if item["name"] == "DuckDuckGo")
+        tested = client.post(f"/api/v1/admin/mcp-sources/{duckduckgo['id']}/test")
+
+    assert tested.status_code == 200
+    assert tested.json()["source"]["last_status"] == "failed"
+    assert "search upstream returned no results" in tested.json()["source"]["last_error"]
 
 
 def test_manual_search_is_open_without_admin_token(monkeypatch):

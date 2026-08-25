@@ -36,7 +36,9 @@ from backend.app.services.fact_sources import (
 from backend.app.services.mcp_registry import (
     SearchRequest,
     SourceInput,
+    call_source_tool,
     discover_source,
+    normalize_search_results,
     require_admin_token,
     search_enabled_sources,
     source_public,
@@ -204,6 +206,15 @@ async def _probe(row: McpSourceRow, db: Session, *, discover: bool) -> dict[str,
         tools = await discover_source(row)
         if discover:
             row.discovered_tools = tools
+        elif {"web_search", "news_search"} & set(row.tool_mappings or {}):
+            purpose = "web_search" if "web_search" in (row.tool_mappings or {}) else "news_search"
+            result = await call_source_tool(
+                row,
+                purpose,
+                {"query": "latest market news", "limit": 1, "language": "en", "time_range": "day"},
+            )
+            if not normalize_search_results(result, row.name):
+                raise RuntimeError("search upstream returned no results")
         row.last_status = "healthy"
         row.last_error = None
     except Exception as exc:

@@ -82,6 +82,7 @@ class SearchResult(BaseModel):
     url: str
     snippet: str
     source: str
+    sources: list[str] = Field(default_factory=list)
     domain: str
     published_at: datetime | None = None
 
@@ -191,6 +192,32 @@ def seed_integrations(db: Session, settings: Settings | None = None) -> None:
             },
         )
         db.add(searxng_source)
+    duckduckgo_source = db.scalar(
+        select(McpSourceRow).where(McpSourceRow.name == "DuckDuckGo")
+    )
+    if not duckduckgo_source:
+        duckduckgo_source = McpSourceRow(
+            name="DuckDuckGo",
+            url=cfg.duckduckgo_mcp_url,
+            description="独立 DuckDuckGo 全网页搜索交叉验证服务",
+            priority=40,
+            enabled=True,
+            managed=True,
+            tool_mappings={
+                "web_search": {
+                    "tool_name": "web_search",
+                    "input_bindings": {
+                        "query": "query",
+                        "limit": "limit",
+                        "language": "language",
+                        "time_range": "time_range",
+                    },
+                    "defaults": {},
+                    "output_adapter": "search_results_v1",
+                }
+            },
+        )
+        db.add(duckduckgo_source)
     fmp_url = cfg.fmp_mcp_url or "http://fmp-mcp:8080/mcp"
     fmp_source = db.scalar(select(McpSourceRow).where(McpSourceRow.name == "FMP"))
     if not fmp_source:
@@ -214,6 +241,7 @@ def seed_integrations(db: Session, settings: Settings | None = None) -> None:
         db.add(IntegrationSettingRow(key="weknora", payload={"url": cfg.weknora_default_url}))
     db.flush()
     ensure_builtin_source_group(db, searxng_source.id, searxng_source.name)
+    ensure_builtin_source_group(db, duckduckgo_source.id, duckduckgo_source.name)
     ensure_builtin_source_group(db, fmp_source.id, fmp_source.name)
     db.commit()
 
@@ -335,6 +363,7 @@ def normalize_search_results(payload: Any, source: str) -> list[SearchResult]:
                 url=_canonical_url(url),
                 snippet=snippet[:2000],
                 source=source,
+                sources=[source],
                 domain=parsed.netloc.lower(),
                 published_at=published_at,
             )
@@ -351,25 +380,45 @@ async def search_enabled_sources(
             query = query.where(McpSourceRow.id == request.source_id)
         rows = list(db.scalars(query.order_by(desc(McpSourceRow.priority))).all())
     rows = [row for row in rows if {"web_search", "news_search"} & set(row.tool_mappings or {})]
-    results: list[SearchResult] = []
+    per_source_limit = request.limit if request.source_id else min(request.limit, 5)
+
+    async def search_row(row: McpSourceRow) -> list[SearchResult]:
+        purpose = "web_search" if "web_search" in (row.tool_mappings or {}) else "news_search"
+        arguments = request.model_dump()
+        arguments["limit"] = per_source_limit
+        payload = await call_source_tool(row, purpose, arguments)
+        return normalize_search_results(payload, row.name)[:per_source_limit]
+
+    outcomes = await asyncio.gather(*(search_row(row) for row in rows), return_exceptions=True)
+    buckets: list[list[SearchResult]] = []
     errors: list[dict[str, str]] = []
-    for row in rows:
-        try:
-            purpose = "web_search" if "web_search" in (row.tool_mappings or {}) else "news_search"
-            payload = await call_source_tool(row, purpose, request.model_dump())
-            results.extend(normalize_search_results(payload, row.name)[: request.limit])
-        except Exception as exc:
-            errors.append({"source": row.name, "error": f"{type(exc).__name__}: {exc}"[:500]})
-    deduped: list[SearchResult] = []
-    seen: set[str] = set()
-    for item in results:
-        if item.url in seen:
+    for row, outcome in zip(rows, outcomes, strict=True):
+        if isinstance(outcome, BaseException):
+            errors.append({"source": row.name, "error": f"{type(outcome).__name__}: {outcome}"[:500]})
+            buckets.append([])
             continue
-        seen.add(item.url)
+        buckets.append(outcome)
+
+    interleaved: list[SearchResult] = []
+    for index in range(max((len(bucket) for bucket in buckets), default=0)):
+        for bucket in buckets:
+            if index < len(bucket):
+                interleaved.append(bucket[index])
+
+    deduped: list[SearchResult] = []
+    by_url: dict[str, SearchResult] = {}
+    for item in interleaved:
+        existing = by_url.get(item.url)
+        if existing:
+            for source in item.sources or [item.source]:
+                if source not in existing.sources:
+                    existing.sources.append(source)
+            continue
+        if not item.sources:
+            item.sources = [item.source]
+        by_url[item.url] = item
         deduped.append(item)
-        if len(deduped) >= request.limit:
-            break
-    return deduped, errors
+    return deduped[: request.limit], errors
 
 
 def search_enabled_sources_sync(

@@ -12,3 +12,7 @@ search:
   formats:
     - html
     - json
+
+engines:
+  - name: duckduckgo
+    disabled: true

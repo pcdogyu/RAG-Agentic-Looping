@@ -41,6 +41,7 @@ embeddings = [
   "fastembed>=0.7,<1",
 ]
 dev = [
+  "ddgs==9.15.0",
   "pip-audit>=2.9,<3",
   "pytest>=9.0.3,<10",
   "pytest-cov>=6,<8",

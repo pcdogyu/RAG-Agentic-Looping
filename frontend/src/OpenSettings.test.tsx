@@ -7,6 +7,7 @@ import {
   firstUnhealthyGroup,
   NativeConfigEditor,
   parseFilterKeywords,
+  searchSourceLabel,
   SearchPage,
   SourceFilterPage,
   SourcesPage,
@@ -72,6 +73,14 @@ describe("open source and search settings", () => {
     expect(markup).toContain("输入需要验证的问题");
     expect(markup).toContain("搜索验证");
     expect(markup).not.toContain("管理员令牌");
+  });
+
+  it("shows every search source that found a merged result", () => {
+    expect(searchSourceLabel({
+      source: "SearXNG",
+      sources: ["SearXNG", "DuckDuckGo", "SearXNG"],
+    })).toBe("SearXNG + DuckDuckGo");
+    expect(searchSourceLabel({ source: "DuckDuckGo" })).toBe("DuckDuckGo");
   });
 
   it("shows public source-filter defaults and editing guidance", () => {
