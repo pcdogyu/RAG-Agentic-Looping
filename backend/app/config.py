@@ -38,6 +38,11 @@ class Settings(BaseSettings):
     fmp_mcp_url: str = ""
     fmp_rate_limit_per_minute: int = Field(default=240, ge=1, le=300)
     fmp_news_lookback_hours: int = Field(default=12, ge=1, le=168)
+    admin_api_token: str = ""
+    mcp_secret_key: str = ""
+    searxng_mcp_url: str = "http://search-mcp:8080/mcp"
+    weknora_default_url: str = "http://10.15.0.28/"
+    web_search_timeout_seconds: int = Field(default=20, ge=2, le=120)
     coingecko_base_url: str = "https://api.coingecko.com/api/v3"
     defillama_base_url: str = "https://api.llama.fi"
     sec_identity: str = ""

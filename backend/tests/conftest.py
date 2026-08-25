@@ -6,6 +6,8 @@ os.environ["OLLAMA_BASE_URL"] = "http://127.0.0.1:1"
 os.environ["FMP_ACCESS_TOKEN"] = ""
 os.environ["FMP_MCP_URL"] = ""
 os.environ["AKSHARE_ASSET_MASTER_ENABLED"] = "false"
+os.environ["ADMIN_API_TOKEN"] = "test-admin-token"
+os.environ["MCP_SECRET_KEY"] = "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA="
 
 import pytest
 

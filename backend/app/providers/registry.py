@@ -4,13 +4,17 @@ from collections.abc import Iterable
 from datetime import datetime
 from typing import Any
 
+from sqlalchemy import select
+
 from backend.app.config import Settings, get_settings
+from backend.app.db import McpSourceRow, SessionLocal
 from backend.app.domain import AssetClass, AssetRef, Market, NewsItem
 from backend.app.providers.akshare_provider import AkShareProvider
 from backend.app.providers.crypto import CryptoProvider
 from backend.app.providers.fmp import FmpProvider
 from backend.app.providers.rss import RssProvider
 from backend.app.providers.sec import SecProvider
+from backend.app.services.mcp_registry import call_enabled_purpose_sync
 
 SEED_ASSETS = [
     AssetRef(
@@ -87,6 +91,14 @@ class ProviderRegistry:
         self.last_errors: list[str] = []
         self.mapping_errors: list[str] = []
 
+    def _source_enabled(self, name: str, default: bool = True) -> bool:
+        try:
+            with SessionLocal() as db:
+                value = db.scalar(select(McpSourceRow.enabled).where(McpSourceRow.name == name))
+            return default if value is None else bool(value)
+        except Exception:
+            return default
+
     def add_assets(self, assets: Iterable[AssetRef]) -> None:
         self._assets.update({asset.asset_id: asset for asset in assets})
 
@@ -105,6 +117,8 @@ class ProviderRegistry:
         unique: dict[str, NewsItem] = {}
         self.last_errors = []
         for provider in self.providers:
+            if provider is self.fmp and not self._source_enabled("FMP", self.settings.fmp_enabled):
+                continue
             try:
                 for item in provider.discover_news(since=since, limit=limit):
                     unique[item.content_hash] = item
@@ -126,6 +140,8 @@ class ProviderRegistry:
             return exact
         output: dict[str, AssetRef] = {}
         providers = [self.fmp, self.crypto]
+        if not self._source_enabled("FMP", self.settings.fmp_enabled):
+            providers.remove(self.fmp)
         if self.settings.akshare_asset_master_enabled:
             providers.insert(0, self.akshare)
         for provider in providers:
@@ -159,18 +175,79 @@ class ProviderRegistry:
                 metrics = provider.get_crypto_metrics(asset)
             except Exception:
                 pass
-            try:
-                metrics["fmp_quote"] = self.fmp.get_crypto_metrics(asset)
-            except Exception:
-                pass
+            if self._source_enabled("FMP", self.settings.fmp_enabled):
+                try:
+                    metrics["fmp_quote"] = self.fmp.get_crypto_metrics(asset)
+                except Exception:
+                    pass
             return {"crypto_metrics": metrics}
         fundamentals: dict[str, Any] = {}
         filings: list[dict[str, Any]] = []
+        canonical_args = {
+            "asset_id": asset.asset_id,
+            "symbol": asset.symbol,
+            "market": asset.market.value,
+        }
         try:
-            fundamentals = provider.get_fundamentals(asset)
-            filings = provider.get_filings(asset)
+            mcp_fundamentals, errors = call_enabled_purpose_sync("fundamentals", canonical_args)
+            self.last_errors.extend(f"{item['source']}: MCP fundamentals" for item in errors)
+            for source, payload in mcp_fundamentals:
+                if isinstance(payload, dict):
+                    candidate = payload.get("data", payload)
+                    if isinstance(candidate, dict):
+                        for key, value in candidate.items():
+                            if (
+                                key in fundamentals
+                                and isinstance(fundamentals[key], list)
+                                and isinstance(value, list)
+                            ):
+                                fundamentals[key].extend(value)
+                            else:
+                                fundamentals.setdefault(key, value)
+                        fundamentals.setdefault("mcp_sources", []).append(source)
         except Exception:
             pass
+        try:
+            mcp_filings, errors = call_enabled_purpose_sync("filings", canonical_args)
+            self.last_errors.extend(f"{item['source']}: MCP filings" for item in errors)
+            for source, payload in mcp_filings:
+                candidate = (
+                    payload.get("results") or payload.get("data")
+                    if isinstance(payload, dict)
+                    else payload
+                )
+                if isinstance(candidate, dict):
+                    candidate = [candidate]
+                if isinstance(candidate, list):
+                    filings.extend(
+                        {**item, "source": item.get("source") or source}
+                        for item in candidate
+                        if isinstance(item, dict)
+                    )
+        except Exception:
+            pass
+        try:
+            mcp_quotes, errors = call_enabled_purpose_sync("quote", canonical_args)
+            self.last_errors.extend(f"{item['source']}: MCP quote" for item in errors)
+            if mcp_quotes:
+                fundamentals["quote"] = mcp_quotes[0][1]
+        except Exception:
+            pass
+        if provider is not self.fmp or self._source_enabled("FMP", self.settings.fmp_enabled):
+            try:
+                provider_fundamentals = provider.get_fundamentals(asset)
+                for key, value in provider_fundamentals.items():
+                    if (
+                        key in fundamentals
+                        and isinstance(fundamentals[key], list)
+                        and isinstance(value, list)
+                    ):
+                        fundamentals[key].extend(value)
+                    else:
+                        fundamentals.setdefault(key, value)
+                filings.extend(provider.get_filings(asset))
+            except Exception:
+                pass
         if asset.market is Market.US:
             official = self.sec.get_filings(asset)
             seen = {

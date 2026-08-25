@@ -6,6 +6,7 @@ from backend.app.config import Settings
 from backend.app.domain import EventResearchRun, NewsEvent, NewsItem, SourceQuality
 from backend.app.main import _analysis_logs
 from backend.app.services.event_research import EventReportDraft, EventResearchService
+from backend.app.services.mcp_registry import SearchResult
 from backend.app.storage import (
     list_event_research_runs,
     list_recommendations,
@@ -34,6 +35,16 @@ class AllEvidenceEventResearchLlm(EventResearchLlm):
     def generate_json(self, *, prompt, **kwargs):
         payload = super().generate_json(prompt=prompt, **kwargs)
         payload["evidence_ids"] = re.findall(r'"id":\s*"([0-9a-f-]{36})"', prompt)
+        return payload
+
+
+class EvidenceOnlyEventResearchLlm(EventResearchLlm):
+    def generate_json(self, *, prompt, **kwargs):
+        payload = super().generate_json(prompt=prompt, **kwargs)
+        evidence_payload = prompt.split("证据：", 1)[-1]
+        payload["evidence_ids"] = re.findall(
+            r'"id":\s*"([0-9a-f-]{36})"', evidence_payload
+        )
         return payload
 
 
@@ -121,10 +132,71 @@ def test_syndicated_reprints_count_as_one_independent_source(db, tmp_path):
     run = EventResearchRun(event_id=event.id, as_of=observed)
     settings = Settings(fmp_access_token="", fmp_mcp_url="", reports_dir=tmp_path)
 
-    result = EventResearchService(
-        db, settings, AllEvidenceEventResearchLlm()
-    ).run(event, run)
+    result = EventResearchService(db, settings, AllEvidenceEventResearchLlm()).run(event, run)
 
     assert len({item.independent_group for item in result.evidence}) == 1
     assert result.status.value == "insufficient_evidence"
     assert result.missing_requirements == ["one official source or two independent sources"]
+
+
+def test_event_research_uses_one_bounded_web_supplement(monkeypatch, db, tmp_path):
+    observed = datetime(2026, 8, 22, 12, 0, tzinfo=UTC)
+    news = NewsItem(
+        source="Aggregator",
+        source_quality=SourceQuality.AGGREGATOR,
+        title="供应链事件需要独立验证",
+        summary="当前只有一个聚合来源。",
+        url="https://a.example/event",
+        published_at=observed,
+        observed_at=observed,
+        as_of=observed,
+        content_hash=sha256(b"event-web-supplement").hexdigest(),
+    )
+    event = NewsEvent(
+        news_item_ids=[news.id],
+        headline=news.title,
+        event_type="supply_chain",
+        entities=["航运"],
+        direct_impact=news.summary,
+        source_quality=news.source_quality,
+        published_at=observed,
+        observed_at=observed,
+        as_of=observed,
+    )
+    save_news(db, news)
+    save_event(db, event)
+    calls = []
+
+    def fake_search(request):
+        calls.append(request)
+        return (
+            [
+                SearchResult(
+                    title="Independent shipping report",
+                    url="https://b.example/independent-report",
+                    snippet="An independent publisher confirms the disruption.",
+                    source="Search MCP",
+                    domain="b.example",
+                    published_at=observed,
+                )
+            ],
+            [],
+        )
+
+    monkeypatch.setattr(
+        "backend.app.services.event_research.search_enabled_sources_sync", fake_search
+    )
+    result = EventResearchService(
+        db,
+        Settings(fmp_access_token="", fmp_mcp_url="", reports_dir=tmp_path),
+        EvidenceOnlyEventResearchLlm(),
+    ).run(event, EventResearchRun(event_id=event.id, as_of=observed))
+
+    assert 1 <= len(calls) <= 3
+    assert result.status.value == "completed", (
+        result.missing_requirements,
+        result.contradictions,
+        [step.model_dump(mode="json") for step in result.analysis_steps],
+    )
+    assert len(result.evidence) == 2
+    assert [step.phase for step in result.analysis_steps].count("web_search_verification") == 1

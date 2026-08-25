@@ -142,7 +142,7 @@ function ContentBlock({ title, value }: { title: string; value: string }) {
   );
 }
 
-export default function ModelLogsPage({ apiBase, onBack }: { apiBase: string; onBack: () => void }) {
+export default function ModelLogsPage({ apiBase, onBack, embedded = false }: { apiBase: string; onBack: () => void; embedded?: boolean }) {
   const [filters, setFilters] = useState<Filters>(initialFilters);
   const [usage, setUsage] = useState<Usage | null>(null);
   const [items, setItems] = useState<ModelLogSummary[]>([]);
@@ -238,15 +238,16 @@ export default function ModelLogsPage({ apiBase, onBack }: { apiBase: string; on
   }
 
   return (
-    <main className="model-logs-page">
-      <header className="model-logs-header">
+    <div className="model-logs-page">
+      {!embedded && <header className="model-logs-header">
         <div>
           <p className="eyebrow">MODEL I/O AUDIT</p>
           <h1>模型<span>日志</span></h1>
           <p className="subhead">查看本项目模型的历史输入、输出与运行指标</p>
         </div>
         <button type="button" className="back-dashboard" onClick={onBack}>← 返回主看板</button>
-      </header>
+      </header>}
+      {embedded && <div className="page-heading"><p className="eyebrow">MODEL I/O AUDIT</p><h2>模型日志</h2><p>查看本项目模型的历史输入、输出与运行指标。</p></div>}
 
       <section className="model-usage-metrics" aria-label="模型使用汇总">
         <div><span>调用总数</span><strong>{usage?.calls ?? "—"}</strong></div>
@@ -342,7 +343,7 @@ export default function ModelLogsPage({ apiBase, onBack }: { apiBase: string; on
         </div>
         {nextCursor && <button type="button" className="load-more" onClick={loadMore} disabled={loadingMore}>{loadingMore ? "正在加载…" : "加载更多"}</button>}
       </section>
-      <BuildFooter />
-    </main>
+      {!embedded && <BuildFooter />}
+    </div>
   );
 }

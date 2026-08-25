@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import BuildFooter from "./BuildFooter";
-import ModelLogsPage, { isModelLogsHash } from "./ModelLogs";
+import { AppRoute, RoutedPage, routeFromHash, TopNavigation } from "./AppPages";
 
 const API = import.meta.env.VITE_API_URL || "";
 
@@ -314,8 +314,8 @@ export default function App() {
   const [expandedLog, setExpandedLog] = useState<string | null>(null);
   const [selected, setSelected] = useState<Recommendation | null>(null);
   const [scanActionPending, setScanActionPending] = useState(false);
-  const [showModelLogs, setShowModelLogs] = useState(() => (
-    typeof window !== "undefined" && isModelLogsHash(window.location.hash)
+  const [route, setRoute] = useState<AppRoute>(() => (
+    typeof window !== "undefined" ? routeFromHash(window.location.hash) : "home"
   ));
 
   const applyScanStatus = useCallback((status: ScanStatus) => {
@@ -388,7 +388,7 @@ export default function App() {
   }, [applyScanStatus, pollHealth, refresh]);
 
   useEffect(() => {
-    const handleHashChange = () => setShowModelLogs(isModelLogsHash(window.location.hash));
+    const handleHashChange = () => setRoute(routeFromHash(window.location.hash));
     window.addEventListener("hashchange", handleHashChange);
     return () => window.removeEventListener("hashchange", handleHashChange);
   }, []);
@@ -484,86 +484,54 @@ export default function App() {
       snapshot.recommendations.length;
   }, [snapshot.recommendations]);
 
-  if (showModelLogs) {
-    return (
-      <ModelLogsPage
-        apiBase={API}
-        onBack={() => {
-          window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
-          setShowModelLogs(false);
-        }}
-      />
-    );
+  const sharedHeader = <>
+    <header>
+      <div>
+        <p className="eyebrow">EVIDENCE-FIRST RESEARCH OS</p>
+        <h1>Market Loop <span>Agent</span></h1>
+        <p className="subhead">跨市场新闻发现、证据验证与模拟组合</p>
+      </div>
+      <div className="header-actions">
+        <div className="health-cluster">
+          <div
+            className={`status ${healthTracking.ollama.state === "available" ? "online" : healthTracking.ollama.state}`}
+            aria-label={`Ollama ${ollamaStateLabels[healthTracking.ollama.state]}`}
+          >
+            <i /> Ollama
+          </div>
+          <div className="model-statuses" aria-label="千问模型连接状态">
+            {ollamaModels.map((model) => (
+              <ModelStatus key={model} state={healthTracking.models[model].state} model={model} />
+            ))}
+          </div>
+        </div>
+        <div className="theme-switcher" role="group" aria-label="主题切换">
+          <button type="button" className={theme === "dark" ? "active" : undefined} aria-pressed={theme === "dark"} onClick={() => setTheme("dark")}>深色</button>
+          <button type="button" className={theme === "light" ? "active" : undefined} aria-pressed={theme === "light"} onClick={() => setTheme("light")}>浅色</button>
+        </div>
+        <button
+          type="button"
+          onClick={scan}
+          disabled={scanActionPending}
+          className={scanPaused ? "paused" : scanBusy ? "scanning" : undefined}
+          aria-pressed={scanPaused}
+          aria-live="polite"
+          title={scanPaused ? "点击继续当前扫描" : scanBusy ? "点击暂停；当前新闻处理完成后生效" : scanStatus?.next_scan_at ? "点击可提前扫描" : undefined}
+        >
+          {scanActionPending ? "正在切换…" : scanLabel}
+        </button>
+      </div>
+    </header>
+    <TopNavigation current={route} />
+  </>;
+
+  if (route !== "home") {
+    return <main>{sharedHeader}<RoutedPage route={route} apiBase={API} /><BuildFooter /></main>;
   }
 
   return (
     <main>
-      <header>
-        <div>
-          <p className="eyebrow">EVIDENCE-FIRST RESEARCH OS</p>
-          <h1>Market Loop <span>Agent</span></h1>
-          <p className="subhead">跨市场新闻发现、证据验证与模拟组合</p>
-        </div>
-        <div className="header-actions">
-          <div className="health-cluster">
-            <div
-              className={`status ${healthTracking.ollama.state === "available" ? "online" : healthTracking.ollama.state}`}
-              aria-label={`Ollama ${ollamaStateLabels[healthTracking.ollama.state]}`}
-            >
-              <i /> Ollama
-            </div>
-            <div className="model-statuses" aria-label="千问模型连接状态">
-              {ollamaModels.map((model) => (
-                <ModelStatus key={model} state={healthTracking.models[model].state} model={model} />
-              ))}
-            </div>
-          </div>
-          <button
-            type="button"
-            className="model-log-nav"
-            onClick={() => { window.location.hash = "/model-logs"; }}
-          >
-            模型日志
-          </button>
-          <div className="theme-switcher" role="group" aria-label="主题切换">
-            <button
-              type="button"
-              className={theme === "dark" ? "active" : undefined}
-              aria-pressed={theme === "dark"}
-              onClick={() => setTheme("dark")}
-            >
-              深色
-            </button>
-            <button
-              type="button"
-              className={theme === "light" ? "active" : undefined}
-              aria-pressed={theme === "light"}
-              onClick={() => setTheme("light")}
-            >
-              浅色
-            </button>
-          </div>
-          <button
-            type="button"
-            onClick={scan}
-            disabled={scanActionPending}
-            className={scanPaused ? "paused" : scanBusy ? "scanning" : undefined}
-            aria-pressed={scanPaused}
-            aria-live="polite"
-            title={
-              scanPaused
-                ? "点击继续当前扫描"
-                : scanBusy
-                  ? "点击暂停；当前新闻处理完成后生效"
-                  : scanStatus?.next_scan_at
-                    ? "点击可提前扫描"
-                    : undefined
-            }
-          >
-            {scanActionPending ? "正在切换…" : scanLabel}
-          </button>
-        </div>
-      </header>
+      {sharedHeader}
 
       <section className="metrics">
         <Metric label="组合净值" value={portfolio ? money(portfolio.nav_usd) : "—"} note="模拟资金" />

@@ -1,0 +1,306 @@
+from __future__ import annotations
+
+import base64
+from datetime import datetime
+from typing import Annotated, Any
+from uuid import UUID
+
+import httpx
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from pydantic import BaseModel, HttpUrl
+from sqlalchemy import and_, desc, or_, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
+from backend.app.config import get_settings
+from backend.app.db import (
+    IntegrationSettingRow,
+    McpSourceRow,
+    RecommendationRow,
+    get_db,
+)
+from backend.app.domain import Recommendation, utc_now
+from backend.app.services.mcp_registry import (
+    SearchRequest,
+    SourceInput,
+    discover_source,
+    encrypt_secret,
+    require_admin_token,
+    search_enabled_sources,
+    source_public,
+    validate_mappings,
+)
+from backend.app.storage import get_event, get_news, get_run
+
+router = APIRouter()
+
+
+def require_admin(x_admin_token: Annotated[str | None, Header()] = None) -> None:
+    try:
+        require_admin_token(x_admin_token)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=401, detail="administrator token required") from exc
+
+
+Admin = Annotated[None, Depends(require_admin)]
+Db = Annotated[Session, Depends(get_db)]
+
+
+class EnabledInput(BaseModel):
+    enabled: bool
+
+
+class WeknoraInput(BaseModel):
+    url: HttpUrl
+
+
+def _apply_source(row: McpSourceRow, payload: SourceInput, *, creating: bool = False) -> None:
+    row.name = payload.name.strip()
+    row.url = str(payload.url)
+    row.description = payload.description.strip()
+    row.priority = payload.priority
+    row.enabled = payload.enabled
+    row.auth_type = payload.auth_type
+    row.auth_header_name = payload.auth_header_name
+    validate_mappings(payload.tool_mappings, row.discovered_tools or [])
+    row.tool_mappings = payload.tool_mappings
+    if payload.clear_secret or payload.auth_type == "none":
+        row.encrypted_secret = None
+    elif payload.secret:
+        row.encrypted_secret = encrypt_secret(payload.secret)
+    elif creating and payload.auth_type != "none":
+        raise ValueError("credential is required for the selected auth type")
+    row.updated_at = utc_now()
+
+
+@router.get("/api/v1/admin/mcp-sources", dependencies=[Depends(require_admin)])
+def list_mcp_sources(db: Db) -> list[dict[str, Any]]:
+    rows = db.scalars(select(McpSourceRow).order_by(desc(McpSourceRow.priority))).all()
+    return [source_public(row) for row in rows]
+
+
+@router.post("/api/v1/admin/mcp-sources", dependencies=[Depends(require_admin)], status_code=201)
+def create_mcp_source(payload: SourceInput, db: Db) -> dict[str, Any]:
+    row = McpSourceRow(name=payload.name, url=str(payload.url))
+    try:
+        _apply_source(row, payload, creating=True)
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+    except (ValueError, RuntimeError) as exc:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="source name already exists") from exc
+    return source_public(row)
+
+
+@router.put("/api/v1/admin/mcp-sources/{source_id}", dependencies=[Depends(require_admin)])
+def update_mcp_source(source_id: UUID, payload: SourceInput, db: Db) -> dict[str, Any]:
+    row = db.get(McpSourceRow, source_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="MCP source not found")
+    try:
+        _apply_source(row, payload)
+        db.commit()
+        db.refresh(row)
+    except (ValueError, RuntimeError) as exc:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="source name already exists") from exc
+    return source_public(row)
+
+
+@router.delete("/api/v1/admin/mcp-sources/{source_id}", dependencies=[Depends(require_admin)])
+def delete_mcp_source(source_id: UUID, db: Db) -> dict[str, bool]:
+    row = db.get(McpSourceRow, source_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="MCP source not found")
+    if row.managed:
+        raise HTTPException(status_code=409, detail="managed source cannot be deleted")
+    db.delete(row)
+    db.commit()
+    return {"deleted": True}
+
+
+@router.patch(
+    "/api/v1/admin/mcp-sources/{source_id}/enabled", dependencies=[Depends(require_admin)]
+)
+def set_mcp_source_enabled(source_id: UUID, payload: EnabledInput, db: Db) -> dict[str, Any]:
+    row = db.get(McpSourceRow, source_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="MCP source not found")
+    row.enabled = payload.enabled
+    row.updated_at = utc_now()
+    db.commit()
+    db.refresh(row)
+    return source_public(row)
+
+
+async def _probe(row: McpSourceRow, db: Session, *, discover: bool) -> dict[str, Any]:
+    try:
+        tools = await discover_source(row)
+        if discover:
+            row.discovered_tools = tools
+        row.last_status = "healthy"
+        row.last_error = None
+    except Exception as exc:
+        row.last_status = "failed"
+        row.last_error = f"{type(exc).__name__}: {exc}"[:1000]
+        tools = []
+    row.last_checked_at = utc_now()
+    row.updated_at = utc_now()
+    db.commit()
+    db.refresh(row)
+    return {"source": source_public(row), "tools": tools}
+
+
+@router.post(
+    "/api/v1/admin/mcp-sources/{source_id}/discover", dependencies=[Depends(require_admin)]
+)
+async def discover_mcp_source(source_id: UUID, db: Db) -> dict[str, Any]:
+    row = db.get(McpSourceRow, source_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="MCP source not found")
+    return await _probe(row, db, discover=True)
+
+
+@router.post("/api/v1/admin/mcp-sources/{source_id}/test", dependencies=[Depends(require_admin)])
+async def test_mcp_source(source_id: UUID, db: Db) -> dict[str, Any]:
+    row = db.get(McpSourceRow, source_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="MCP source not found")
+    return await _probe(row, db, discover=False)
+
+
+@router.post("/api/v1/admin/search", dependencies=[Depends(require_admin)])
+async def admin_search(payload: SearchRequest) -> dict[str, Any]:
+    results, errors = await search_enabled_sources(payload)
+    return {"items": [item.model_dump(mode="json") for item in results], "errors": errors}
+
+
+def _weknora_payload(db: Session) -> dict[str, str]:
+    row = db.get(IntegrationSettingRow, "weknora")
+    return row.payload if row else {"url": get_settings().weknora_default_url}
+
+
+@router.get("/api/v1/integrations/weknora")
+def get_weknora(db: Db) -> dict[str, str]:
+    return _weknora_payload(db)
+
+
+@router.put("/api/v1/admin/integrations/weknora", dependencies=[Depends(require_admin)])
+def update_weknora(payload: WeknoraInput, db: Db) -> dict[str, str]:
+    row = db.get(IntegrationSettingRow, "weknora") or IntegrationSettingRow(key="weknora")
+    row.payload = {"url": str(payload.url)}
+    row.updated_at = utc_now()
+    db.add(row)
+    db.commit()
+    return row.payload
+
+
+@router.post("/api/v1/admin/integrations/weknora/test", dependencies=[Depends(require_admin)])
+async def test_weknora(payload: WeknoraInput) -> dict[str, Any]:
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=5) as client:
+            response = await client.get(str(payload.url))
+        return {"ok": response.status_code < 500, "status_code": response.status_code}
+    except httpx.HTTPError as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"[:500]}
+
+
+def _encode_cursor(as_of: datetime, recommendation_id: UUID) -> str:
+    raw = f"{as_of.isoformat()}|{recommendation_id}"
+    return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
+
+
+def _decode_cursor(cursor: str) -> tuple[datetime, UUID]:
+    try:
+        padded = cursor + "=" * (-len(cursor) % 4)
+        stamp, item_id = base64.urlsafe_b64decode(padded).decode().split("|", 1)
+        return datetime.fromisoformat(stamp), UUID(item_id)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail="invalid cursor") from exc
+
+
+def _conclusion_detail(db: Session, recommendation: Recommendation) -> dict[str, Any]:
+    run = get_run(db, recommendation.run_id)
+    event = get_event(db, run.event_id) if run and run.event_id else None
+    news = [get_news(db, item_id) for item_id in event.news_item_ids] if event else []
+    return {
+        "recommendation": recommendation.model_dump(mode="json"),
+        "run": run.model_dump(mode="json") if run else None,
+        "event": event.model_dump(mode="json") if event else None,
+        "news": [item.model_dump(mode="json") for item in news if item],
+        "evidence": [item.model_dump(mode="json") for item in (run.evidence if run else [])],
+    }
+
+
+@router.get("/api/v1/conclusions")
+def list_conclusions(
+    db: Db,
+    q: str = "",
+    market: str = "",
+    rating: str = "",
+    evidence_status: str = "",
+    cursor: str | None = None,
+    limit: int = Query(default=20, ge=1, le=100),
+) -> dict[str, Any]:
+    statement = select(RecommendationRow)
+    if rating:
+        statement = statement.where(RecommendationRow.rating == rating)
+    if cursor:
+        cursor_time, cursor_id = _decode_cursor(cursor)
+        statement = statement.where(
+            or_(
+                RecommendationRow.as_of < cursor_time,
+                and_(RecommendationRow.as_of == cursor_time, RecommendationRow.id < cursor_id),
+            )
+        )
+    rows = list(
+        db.scalars(
+            statement.order_by(desc(RecommendationRow.as_of), desc(RecommendationRow.id)).limit(
+                limit + 1
+            )
+        ).all()
+    )
+    items: list[Recommendation] = []
+    query_text = q.strip().lower()
+    for row in rows:
+        recommendation = Recommendation.model_validate(row.payload)
+        if market and recommendation.asset.market.value.casefold() != market.casefold():
+            continue
+        if (
+            query_text
+            and query_text
+            not in (
+                f"{recommendation.asset.symbol} {recommendation.asset.name} "
+                f"{recommendation.thesis.summary}"
+            ).lower()
+        ):
+            continue
+        if evidence_status == "complete" and not recommendation.evidence_complete:
+            continue
+        if evidence_status == "incomplete" and recommendation.evidence_complete:
+            continue
+        items.append(recommendation)
+    has_more = len(rows) > limit
+    items = items[:limit]
+    next_cursor = _encode_cursor(items[-1].as_of, items[-1].id) if has_more and items else None
+    return {
+        "items": [item.model_dump(mode="json") for item in items],
+        "next_cursor": next_cursor,
+    }
+
+
+@router.get("/api/v1/conclusions/{recommendation_id}")
+def get_conclusion(recommendation_id: UUID, db: Db) -> dict[str, Any]:
+    row = db.get(RecommendationRow, recommendation_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="conclusion not found")
+    return _conclusion_detail(db, Recommendation.model_validate(row.payload))

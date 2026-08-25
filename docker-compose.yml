@@ -56,6 +56,31 @@ services:
       timeout: 3s
       retries: 20
 
+  searxng:
+    image: ghcr.io/searxng/searxng:2026.8.21-bbb3c7d82@sha256:4e211fc2669b3e2ddfe571ec23fae6648e748353b31137eb8ef4972744969cda
+    environment:
+      SEARXNG_SECRET: ${SEARXNG_SECRET:-}
+      GRANIAN_WORKERS: 1
+      FORCE_OWNERSHIP: "false"
+    volumes:
+      - ./infra/searxng/settings.yml:/etc/searxng/settings.yml:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  search-mcp:
+    build:
+      context: ./infra/search-mcp
+    environment:
+      SEARXNG_URL: http://searxng:8080
+    depends_on:
+      searxng:
+        condition: service_healthy
+    restart: unless-stopped
+
   fmp-mcp:
     profiles: ["mcp"]
     build:
@@ -74,6 +99,15 @@ services:
     command: uvicorn backend.app.main:app --host 0.0.0.0 --port 8000
     ports:
       - "8000:8000"
+    depends_on:
+      reports-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      search-mcp:
+        condition: service_started
 
   io-worker:
     <<: *backend

@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
+from backend.app.api_integrations import router as integrations_router
 from backend.app.config import get_settings
 from backend.app.db import ModelCallAuditRow, NewsRow, SessionLocal, engine, get_db, init_db
 from backend.app.domain import (
@@ -29,6 +30,7 @@ from backend.app.model_audit import audit_detail, list_model_audits, model_usage
 from backend.app.providers.registry import ProviderRegistry
 from backend.app.services.events import EventService
 from backend.app.services.evolution import EvolutionError, EvolutionService
+from backend.app.services.mcp_registry import seed_integrations
 from backend.app.services.notifications import notifier
 from backend.app.services.portfolio import PortfolioError, PortfolioService
 from backend.app.services.research import ResearchService
@@ -71,6 +73,7 @@ async def lifespan(app: FastAPI):
     init_db()
     with SessionLocal() as db:
         normalize_legacy_akshare_timestamps(db)
+        seed_integrations(db, settings)
         for asset in registry.all_assets():
             upsert_asset(db, asset)
         registry.add_assets(list_assets(db))
@@ -90,6 +93,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(integrations_router)
 
 
 class ResearchRequest(BaseModel):
@@ -133,7 +137,9 @@ def health() -> dict:
     if latest_news and latest_news.tzinfo is None:
         latest_news = latest_news.replace(tzinfo=utc_now().tzinfo)
     news_age_seconds = (utc_now() - latest_news).total_seconds() if latest_news else None
-    data_fresh = news_age_seconds is None or news_age_seconds <= settings.scan_interval_minutes * 180
+    data_fresh = (
+        news_age_seconds is None or news_age_seconds <= settings.scan_interval_minutes * 180
+    )
     ollama = False
     models: list[str] = []
     try:
@@ -316,21 +322,35 @@ def _analysis_logs(db: Session, limit: int) -> list[dict]:
             for news_id in (event.news_item_ids if event else [])
             if (item := get_news(db, news_id)) is not None
         ]
-        steps = event_run.analysis_steps if event_run else (
-            run.analysis_steps
-            if run and run.analysis_steps
-            else (event.analysis_steps if event else [])
+        steps = (
+            event_run.analysis_steps
+            if event_run
+            else (
+                run.analysis_steps
+                if run and run.analysis_steps
+                else (event.analysis_steps if event else [])
+            )
         )
         model_names = list(dict.fromkeys(step.model for step in steps if step.model))
         recommendation = run.recommendation if run else None
         report = event_run.report if event_run else None
-        asset = run.asset if run else (event.candidates[0].asset if event and event.candidates else None)
-        status = run.status.value if run else (
-            event_run.status.value if event_run else _event_mapping_status(event)
+        asset = (
+            run.asset
+            if run
+            else (event.candidates[0].asset if event and event.candidates else None)
         )
-        updated_at = run.updated_at if run else (
-            event_run.updated_at if event_run else max(
-                [event.observed_at, *[step.occurred_at for step in event.analysis_steps]]
+        status = (
+            run.status.value
+            if run
+            else (event_run.status.value if event_run else _event_mapping_status(event))
+        )
+        updated_at = (
+            run.updated_at
+            if run
+            else (
+                event_run.updated_at
+                if event_run
+                else max([event.observed_at, *[step.occurred_at for step in event.analysis_steps]])
             )
         )
         payload = {
@@ -425,9 +445,7 @@ def _analysis_logs(db: Session, limit: int) -> list[dict]:
 
 
 @app.get("/api/v1/analysis-logs")
-def analysis_logs(
-    limit: int = Query(default=10, ge=1, le=50), db: Session = Depends(get_db)
-):
+def analysis_logs(limit: int = Query(default=10, ge=1, le=50), db: Session = Depends(get_db)):
     return _analysis_logs(db, limit)
 
 
@@ -546,9 +564,7 @@ def propose_evolution(request: EvolutionRequest, db: Session = Depends(get_db)):
 
 
 @app.post("/api/v1/evolution/{candidate_id}/execute", response_model=EvolutionCandidate | dict)
-def execute_evolution(
-    candidate_id: UUID, background: bool = True, db: Session = Depends(get_db)
-):
+def execute_evolution(candidate_id: UUID, background: bool = True, db: Session = Depends(get_db)):
     candidate = next((item for item in list_evolutions(db) if item.id == candidate_id), None)
     if not candidate:
         raise HTTPException(404, "evolution candidate not found")
@@ -575,8 +591,7 @@ async def event_stream() -> AsyncIterator[str]:
                         item.model_dump(mode="json") for item in list_recommendations(db, 10)
                     ],
                     "event_research_runs": [
-                        item.model_dump(mode="json")
-                        for item in list_event_research_runs(db, 10)
+                        item.model_dump(mode="json") for item in list_event_research_runs(db, 10)
                     ],
                     "analysis_logs": _analysis_logs(db, 10),
                 },

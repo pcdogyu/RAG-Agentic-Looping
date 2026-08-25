@@ -33,6 +33,7 @@ from backend.app.domain import (
 )
 from backend.app.llm import LlmGateway, gateway
 from backend.app.providers.registry import ProviderRegistry
+from backend.app.services.mcp_registry import SearchRequest, search_enabled_sources_sync
 from backend.app.services.retrieval import RetrievalService
 from backend.app.services.source_lineage import (
     canonicalize_url,
@@ -269,7 +270,9 @@ class ResearchService:
         except Exception as exc:
             # Retrieval failure must not discard already collected structured evidence.
             retrieval_error = type(exc).__name__
-        independent_sources = {item.independent_group for item in evidence if item.independent_group}
+        independent_sources = {
+            item.independent_group for item in evidence if item.independent_group
+        }
         run.analysis_steps.append(
             AnalysisStep(
                 phase="evidence_gathering",
@@ -277,7 +280,11 @@ class ResearchService:
                 executor="providers+retrieval",
                 summary=(
                     f"已收集 {len(evidence)} 条证据，来自 {len(independent_sources)} 个独立来源。"
-                    + (f" 混合检索不可用（{retrieval_error}），保留结构化证据。" if retrieval_error else "")
+                    + (
+                        f" 混合检索不可用（{retrieval_error}），保留结构化证据。"
+                        if retrieval_error
+                        else ""
+                    )
                 ),
                 metrics={
                     "evidence_count": len(evidence),
@@ -307,8 +314,7 @@ class ResearchService:
             for item_id in event.news_item_ids:
                 item = get_news(self.db, item_id)
                 if not item or any(
-                    value > run.as_of
-                    for value in (item.published_at, item.observed_at, item.as_of)
+                    value > run.as_of for value in (item.published_at, item.observed_at, item.as_of)
                 ):
                     continue
                 evidence.append(self._news_evidence(run, item))
@@ -364,8 +370,7 @@ class ResearchService:
                 if published > run.as_of:
                     continue
                 official_domain = any(
-                    domain in url.lower()
-                    for domain in ("sec.gov", "cninfo.com.cn", "hkexnews.hk")
+                    domain in url.lower() for domain in ("sec.gov", "cninfo.com.cn", "hkexnews.hk")
                 )
                 evidence.append(
                     Evidence(
@@ -374,9 +379,7 @@ class ResearchService:
                         source_name=str(filing.get("source") or "Regulatory filing"),
                         source_url=url,
                         source_quality=(
-                            SourceQuality.OFFICIAL
-                            if official_domain
-                            else SourceQuality.AGGREGATOR
+                            SourceQuality.OFFICIAL if official_domain else SourceQuality.AGGREGATOR
                         ),
                         published_at=published,
                         observed_at=run.as_of,
@@ -458,7 +461,9 @@ class ResearchService:
                 phase="report_drafting",
                 status="fallback" if draft_error else "completed",
                 executor="ollama" if not draft_error else "rules",
-                model=self.settings.ollama_research_model if not draft_error else "research-fallback:v1",
+                model=self.settings.ollama_research_model
+                if not draft_error
+                else "research-fallback:v1",
                 summary=(
                     f"已生成研究草稿，初始置信度 {draft_output.confidence:.0%}，引用 "
                     f"{len(draft_output.evidence_ids)} 条证据。"
@@ -515,9 +520,7 @@ class ResearchService:
         if unknown:
             unsupported.append(f"unknown evidence ids: {sorted(unknown)}")
         if any(
-            item.published_at > run.as_of
-            or item.observed_at > run.as_of
-            or item.as_of > run.as_of
+            item.published_at > run.as_of or item.observed_at > run.as_of or item.as_of > run.as_of
             for item in evidence
         ):
             contradictions.append("point-in-time boundary violation")
@@ -580,10 +583,7 @@ class ResearchService:
             and can_retry
         ):
             return "acquire_evidence"
-        if (
-            (not verification.evidence_complete or abs(draft.score) >= 60)
-            and can_retry
-        ):
+        if (not verification.evidence_complete or abs(draft.score) >= 60) and can_retry:
             return "revise"
         return "finalize"
 
@@ -632,6 +632,61 @@ class ResearchService:
                     candidate_by_url[canonicalize_url(enriched.url)] = enriched
         except Exception as exc:
             provider_error = type(exc).__name__
+
+        web_results = []
+        web_errors: list[dict[str, str]] = []
+        for query in queries[:3]:
+            try:
+                found, errors = search_enabled_sources_sync(
+                    SearchRequest(query=query, language="zh-CN", limit=5)
+                )
+                web_results.extend(found)
+                web_errors.extend(errors)
+            except Exception as exc:
+                web_errors.append(
+                    {"source": "registry", "error": f"{type(exc).__name__}: {exc}"[:500]}
+                )
+
+        web_added = 0
+        seen_web_urls = {canonicalize_url(item.source_url) for item in evidence}
+        for result in web_results:
+            url = canonicalize_url(result.url)
+            if url in seen_web_urls or web_added >= 8:
+                continue
+            observed = utc_now()
+            if result.published_at and as_utc(result.published_at) > as_utc(observed):
+                continue
+            run.as_of = max(as_utc(run.as_of), as_utc(observed))
+            evidence.append(
+                Evidence(
+                    run_id=run.id,
+                    claim=result.title,
+                    source_name=result.source,
+                    source_url=result.url,
+                    source_quality=SourceQuality.AGGREGATOR,
+                    published_at=result.published_at or observed,
+                    observed_at=observed,
+                    as_of=observed,
+                    excerpt=result.snippet[:1000],
+                    independent_group=f"web:{result.domain}",
+                )
+            )
+            seen_web_urls.add(url)
+            web_added += 1
+
+        run.analysis_steps.append(
+            AnalysisStep(
+                phase="web_search_verification",
+                status="completed" if web_added else ("failed" if web_errors else "no_results"),
+                executor="mcp-search-registry",
+                summary=f"联网补证完成，接受 {web_added} 条带原始链接的搜索结果。",
+                metrics={
+                    "queries": queries[:3],
+                    "accepted_results": web_added,
+                    "errors": web_errors,
+                },
+            )
+        )
 
         seen_urls = {canonicalize_url(item.source_url) for item in evidence}
         accepted: list[NewsItem] = []
@@ -714,7 +769,7 @@ class ResearchService:
 
         run.evidence = evidence
         independent_sources = independent_evidence_groups(evidence)
-        added_count = structured_added + len(accepted)
+        added_count = structured_added + len(accepted) + web_added
         run.analysis_steps.append(
             AnalysisStep(
                 phase="targeted_evidence_acquisition",
@@ -732,6 +787,7 @@ class ResearchService:
                     "accepted_evidence": added_count,
                     "accepted_structured_evidence": structured_added,
                     "accepted_news_evidence": len(accepted),
+                    "accepted_web_evidence": web_added,
                     "independent_sources": len(independent_sources),
                     "structured_provider_error": structured_error,
                     "provider_error": provider_error,
@@ -766,9 +822,7 @@ class ResearchService:
         return f"{asset.name} {asset.symbol} {event.headline if event else ''}".strip()
 
     @staticmethod
-    def _is_targeted_candidate(
-        item: NewsItem, asset: AssetRef, event: NewsEvent | None
-    ) -> bool:
+    def _is_targeted_candidate(item: NewsItem, asset: AssetRef, event: NewsEvent | None) -> bool:
         text = normalize_text(f"{item.title} {item.summary}")
         explicit_symbol = asset.symbol.casefold() in {value.casefold() for value in item.symbols}
         asset_terms = [asset.symbol, asset.name, *asset.aliases]
@@ -826,10 +880,16 @@ class ResearchService:
                 phase="report_revision",
                 status="fallback" if revision_error else "completed",
                 executor="ollama" if not revision_error else "rules",
-                model=self.settings.ollama_research_model if not revision_error else "revision-fallback:v1",
+                model=self.settings.ollama_research_model
+                if not revision_error
+                else "revision-fallback:v1",
                 summary=(
                     f"已根据校验结果修订报告，置信度调整为 {revised_output.confidence:.0%}。"
-                    + (f" 模型不可用（{revision_error}），已强制采用中性保守结论。" if revision_error else "")
+                    + (
+                        f" 模型不可用（{revision_error}），已强制采用中性保守结论。"
+                        if revision_error
+                        else ""
+                    )
                 ),
                 metrics={"confidence": revised_output.confidence, "score": revised_output.score},
             )

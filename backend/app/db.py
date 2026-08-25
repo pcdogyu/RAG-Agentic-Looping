@@ -206,11 +206,39 @@ class ModelCallAuditRow(Base):
     messages: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     schema_payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     raw_response: Mapped[str] = mapped_column(Text, default="")
-    parsed_response: Mapped[dict[str, Any] | list[Any] | None] = mapped_column(
-        JSON, nullable=True
-    )
+    parsed_response: Mapped[dict[str, Any] | list[Any] | None] = mapped_column(JSON, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     metrics: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class McpSourceRow(Base):
+    __tablename__ = "mcp_sources"
+
+    id: Mapped[UUID] = mapped_column(GUID(), primary_key=True, default=uuid4)
+    name: Mapped[str] = mapped_column(String(120), unique=True, index=True)
+    url: Mapped[str] = mapped_column(Text)
+    description: Mapped[str] = mapped_column(Text, default="")
+    priority: Mapped[int] = mapped_column(Integer, default=50, index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    managed: Mapped[bool] = mapped_column(Boolean, default=False)
+    auth_type: Mapped[str] = mapped_column(String(30), default="none")
+    auth_header_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    encrypted_secret: Mapped[str | None] = mapped_column(Text, nullable=True)
+    discovered_tools: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    tool_mappings: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    last_status: Mapped[str] = mapped_column(String(30), default="unchecked")
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class IntegrationSettingRow(Base):
+    __tablename__ = "integration_settings"
+
+    key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
 def _make_engine():

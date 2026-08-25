@@ -11,6 +11,7 @@ import {
   updateHealthTracking,
 } from "./App";
 import BuildFooter, { buildInfo } from "./BuildFooter";
+import { routeFromHash, TopNavigation } from "./AppPages";
 import ModelLogsPage, {
   buildModelLogQuery,
   fidelityLabel,
@@ -189,5 +190,26 @@ describe("model log navigation and filters", () => {
     expect(markup).toContain("返回主看板");
     expect(markup).toContain("模型日志筛选");
     expect(markup).toContain("正在读取模型日志");
+  });
+});
+
+describe("shared hash navigation", () => {
+  it("recognizes all six routes and falls back to home", () => {
+    expect(routeFromHash("#/home")).toBe("home");
+    expect(routeFromHash("#/conclusions")).toBe("conclusions");
+    expect(routeFromHash("#/sources")).toBe("sources");
+    expect(routeFromHash("#/model-logs")).toBe("model-logs");
+    expect(routeFromHash("#/search")).toBe("search");
+    expect(routeFromHash("#/weknora")).toBe("weknora");
+    expect(routeFromHash("#/unknown")).toBe("home");
+    expect(routeFromHash("")).toBe("home");
+  });
+
+  it("renders six menu links and exposes the current page accessibly", () => {
+    const markup = renderToStaticMarkup(createElement(TopNavigation, { current: "sources" }));
+    expect((markup.match(/<a /g) || []).length).toBe(6);
+    expect(markup).toContain('href="#/sources" aria-current="page"');
+    expect(markup).toContain("搜索引擎");
+    expect(markup).toContain("WeKnora");
   });
 });

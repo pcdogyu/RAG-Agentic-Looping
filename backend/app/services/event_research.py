@@ -15,8 +15,10 @@ from backend.app.domain import (
     NewsEvent,
     RunStatus,
     SourceQuality,
+    utc_now,
 )
 from backend.app.llm import LlmGateway, gateway
+from backend.app.services.mcp_registry import SearchRequest, search_enabled_sources_sync
 from backend.app.services.source_lineage import independent_evidence_groups, source_group
 from backend.app.storage import get_news, save_event_research_run
 
@@ -59,9 +61,7 @@ class EventResearchService:
                 ),
                 metrics={
                     "evidence_count": len(run.evidence),
-                    "independent_sources": len(
-                        {item.independent_group for item in run.evidence}
-                    ),
+                    "independent_sources": len({item.independent_group for item in run.evidence}),
                 },
             )
         )
@@ -90,9 +90,31 @@ class EventResearchService:
         run.missing_requirements = missing
         run.contradictions = contradictions
         run.analysis_steps.append(self._verification_step(1, complete, missing, contradictions))
+        source_gate = "one official source or two independent sources"
+        if not complete and source_gate in missing:
+            added, errors = self._supplement_web_evidence(event, run)
+            run.analysis_steps.append(
+                AnalysisStep(
+                    phase="web_search_verification",
+                    status="completed" if added else ("failed" if errors else "no_results"),
+                    executor="mcp-search-registry",
+                    summary=f"联网补证完成，接受 {added} 条带原始链接的搜索结果。",
+                    metrics={"accepted_results": added, "errors": errors},
+                )
+            )
+            save_event_research_run(self.db, run)
+            if added and self.settings.max_verification_rounds > 1:
+                draft = self._generate_draft(event, run)
+                complete, missing, contradictions = self._verify(run, draft)
+                run.verification_round = 2
+                run.missing_requirements = missing
+                run.contradictions = contradictions
+                run.analysis_steps.append(
+                    self._verification_step(2, complete, missing, contradictions)
+                )
         if (
             not complete
-            and self.settings.max_verification_rounds > 1
+            and run.verification_round < self.settings.max_verification_rounds
             and self._draft_can_be_repaired(missing, contradictions)
         ):
             draft = self._revise(event, run, draft, missing, contradictions)
@@ -108,9 +130,7 @@ class EventResearchService:
             run.verification_round = 2
             run.missing_requirements = missing
             run.contradictions = contradictions
-            run.analysis_steps.append(
-                self._verification_step(2, complete, missing, contradictions)
-            )
+            run.analysis_steps.append(self._verification_step(2, complete, missing, contradictions))
 
         valid_ids = {str(item.id): item.id for item in run.evidence}
         run.report = EventReport(
@@ -146,9 +166,51 @@ class EventResearchService:
         self._write_report(event, run)
         return run
 
-    def _build_evidence(
-        self, run: EventResearchRun, event: NewsEvent
-    ) -> list[Evidence]:
+    def _supplement_web_evidence(
+        self, event: NewsEvent, run: EventResearchRun
+    ) -> tuple[int, list[dict[str, str]]]:
+        queries = [event.headline, *[f"{event.headline} {entity}" for entity in event.entities]][:3]
+        seen = {item.source_url.rstrip("/") for item in run.evidence}
+        added = 0
+        errors: list[dict[str, str]] = []
+        for query in queries:
+            try:
+                results, source_errors = search_enabled_sources_sync(
+                    SearchRequest(query=query, language="zh-CN", limit=5)
+                )
+                errors.extend(source_errors)
+            except Exception as exc:
+                errors.append({"source": "registry", "error": f"{type(exc).__name__}: {exc}"[:500]})
+                continue
+            for result in results:
+                url = result.url.rstrip("/")
+                if url in seen or added >= 8:
+                    continue
+                observed = utc_now()
+                if result.published_at and result.published_at > observed:
+                    continue
+                run.as_of = max(run.as_of, observed)
+                run.evidence.append(
+                    Evidence(
+                        run_id=run.id,
+                        claim=result.title,
+                        source_name=result.source,
+                        source_url=result.url,
+                        source_quality=SourceQuality.AGGREGATOR,
+                        published_at=result.published_at or observed,
+                        observed_at=observed,
+                        as_of=observed,
+                        excerpt=result.snippet[:1000],
+                        independent_group=f"web:{result.domain}",
+                    )
+                )
+                seen.add(url)
+                added += 1
+            if added >= 8:
+                break
+        return added, errors
+
+    def _build_evidence(self, run: EventResearchRun, event: NewsEvent) -> list[Evidence]:
         evidence: list[Evidence] = []
         for news_id in event.news_item_ids:
             item = get_news(self.db, news_id)
@@ -170,9 +232,7 @@ class EventResearchService:
             )
         return evidence
 
-    def _generate_draft(
-        self, event: NewsEvent, run: EventResearchRun
-    ) -> EventReportDraft:
+    def _generate_draft(self, event: NewsEvent, run: EventResearchRun) -> EventReportDraft:
         prompt = (
             f"事件：{event.model_dump_json(exclude={'analysis_steps', 'candidates'})}\n"
             f"研究截止：{run.as_of.isoformat()}\n"
@@ -238,16 +298,12 @@ class EventResearchService:
         if unknown:
             missing.append(f"unknown evidence ids: {sorted(unknown)}")
         if any(
-            item.published_at > run.as_of
-            or item.observed_at > run.as_of
-            or item.as_of > run.as_of
+            item.published_at > run.as_of or item.observed_at > run.as_of or item.as_of > run.as_of
             for item in run.evidence
         ):
             contradictions.append("point-in-time boundary violation")
         cited_evidence = [item for item in run.evidence if str(item.id) in cited_ids]
-        official = any(
-            item.source_quality is SourceQuality.OFFICIAL for item in cited_evidence
-        )
+        official = any(item.source_quality is SourceQuality.OFFICIAL for item in cited_evidence)
         independent = independent_evidence_groups(cited_evidence)
         if not official and len(independent) < 2:
             missing.append("one official source or two independent sources")
@@ -300,7 +356,9 @@ class EventResearchService:
             f"- 截止时间：{run.as_of.isoformat()}\n\n"
             f"## 事件摘要\n\n{report.summary}\n\n"
             "## 受影响市场与行业\n\n"
-            + "\n".join(f"- {item}" for item in [*report.affected_markets, *report.affected_sectors])
+            + "\n".join(
+                f"- {item}" for item in [*report.affected_markets, *report.affected_sectors]
+            )
             + "\n\n## 情景\n\n"
             + "\n".join(f"- {item}" for item in report.scenarios)
             + "\n\n## 催化剂\n\n"

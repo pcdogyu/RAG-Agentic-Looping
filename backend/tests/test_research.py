@@ -13,6 +13,7 @@ from backend.app.domain import (
     SourceQuality,
 )
 from backend.app.providers.registry import SEED_ASSETS
+from backend.app.services.mcp_registry import SearchResult
 from backend.app.services.research import DraftOutput, ResearchService
 from backend.app.storage import get_event, save_event, save_news
 
@@ -157,9 +158,9 @@ def test_research_graph_produces_verified_recommendation(db, tmp_path):
     assert not any("prompt" in step.metrics for step in run.analysis_steps)
     assert list(tmp_path.glob("AAPL_*.md"))
 
-    strong_run = ResearchService(
-        FakeRegistry(), db, settings, FakeStrongResearchLlm()
-    ).run(asset, event, as_of)
+    strong_run = ResearchService(FakeRegistry(), db, settings, FakeStrongResearchLlm()).run(
+        asset, event, as_of
+    )
     assert strong_run.recommendation is not None
     assert strong_run.recommendation.evidence_complete is True
     assert strong_run.recommendation.rating is Rating.WATCH
@@ -192,7 +193,7 @@ def test_research_draft_respects_cpu_prompt_budgets(db, tmp_path):
     assert llm.prompts[0].count("y") <= settings.research_prompt_context_chars
 
 
-def test_explicit_historical_replay_skips_live_providers(db, tmp_path):
+def test_explicit_historical_replay_skips_live_providers(db, tmp_path, monkeypatch):
     as_of = datetime(2025, 1, 31, tzinfo=UTC)
     registry = FakeRegistry()
     settings = Settings(
@@ -200,6 +201,10 @@ def test_explicit_historical_replay_skips_live_providers(db, tmp_path):
         reports_dir=tmp_path,
         fmp_access_token="",
         fmp_mcp_url="",
+    )
+    monkeypatch.setattr(
+        "backend.app.services.research.search_enabled_sources_sync",
+        lambda _request: (_ for _ in ()).throw(AssertionError("historical replay searched web")),
     )
 
     run = ResearchService(registry, db, settings, FakeResearchLlm()).run(
@@ -214,7 +219,9 @@ def test_explicit_historical_replay_skips_live_providers(db, tmp_path):
     assert run.status.value == "insufficient_evidence"
 
 
-def test_verification_gap_triggers_targeted_acquisition_and_reverification(db, tmp_path):
+def test_verification_gap_triggers_targeted_acquisition_and_reverification(
+    db, tmp_path, monkeypatch
+):
     as_of = datetime(2025, 1, 31, 12, 0, tzinfo=UTC)
     initial = NewsItem(
         source="Aggregator A",
@@ -269,17 +276,38 @@ def test_verification_gap_triggers_targeted_acquisition_and_reverification(db, t
         fmp_access_token="",
         fmp_mcp_url="",
     )
+    search_calls = []
 
-    run = ResearchService(registry, db, settings, FakeResearchLlm()).run(
-        asset, event, as_of
-    )
+    def fake_search(request):
+        search_calls.append(request)
+        return (
+            [
+                SearchResult(
+                    title="Apple investor update",
+                    url="https://c.example/apple-update?utm_source=test",
+                    snippet="A third independent source confirms Services growth.",
+                    source="Search MCP",
+                    domain="c.example",
+                    published_at=as_of,
+                )
+            ],
+            [],
+        )
+
+    monkeypatch.setattr("backend.app.services.research.search_enabled_sources_sync", fake_search)
+
+    run = ResearchService(registry, db, settings, FakeResearchLlm()).run(asset, event, as_of)
 
     assert registry.discovery_calls == 1
+    assert 1 <= len(search_calls) <= 3
+    assert all(call.limit == 5 for call in search_calls)
     assert run.status.value == "completed"
     assert run.verification_round == 2
-    assert len({item.independent_group for item in run.evidence}) == 2
+    assert len({item.independent_group for item in run.evidence}) == 3
     phases = [step.phase for step in run.analysis_steps]
     assert phases.count("verification") == 2
+    assert phases.count("web_search_verification") == 1
+    assert len([item for item in run.evidence if item.source_name == "Search MCP"]) == 1
     assert phases.index("targeted_evidence_acquisition") < phases.index("report_revision")
     persisted_event = get_event(db, event.id)
     assert persisted_event is not None
