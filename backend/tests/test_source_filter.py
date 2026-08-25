@@ -8,6 +8,7 @@ from backend.app.domain import NewsItem, SourceQuality, utc_now
 from backend.app.main import app
 from backend.app.providers.registry import ProviderRegistry
 from backend.app.services.events import EventService, ExtractedEvent
+from backend.app.services.mcp_registry import normalize_news_feed_page
 from backend.app.services.source_filter import (
     SourceFilterConfig,
     evaluate_title,
@@ -77,6 +78,34 @@ def test_filtered_news_is_audited_but_never_enters_news_or_event_tables(db):
 
     filter_news_items(db, [blocked])
     assert list_filter_logs(db)[0]["hit_count"] == 2
+
+
+def test_jin10_synthesized_flash_title_uses_the_existing_filter_chain(db):
+    now = utc_now().replace(microsecond=0)
+    items, _, _, _ = normalize_news_feed_page(
+        {
+            "data": {
+                "items": [
+                    {
+                        "title": "",
+                        "content": "北京今日天气晴朗。该内容与股票研究无关。",
+                        "time": now.isoformat(),
+                        "url": "https://jin10.example/flash/weather",
+                    }
+                ]
+            }
+        },
+        "金十",
+        "jin10_flash_v1",
+        now - timedelta(minutes=1),
+    )
+
+    accepted, filtered = filter_news_items(db, items)
+
+    assert accepted == []
+    assert filtered == 1
+    assert list_filter_logs(db)[0]["source"] == "金十"
+    assert list_filter_logs(db)[0]["matched_keyword"] == "天气"
 
 
 def test_filter_log_retention_removes_old_and_overflow_rows(db, monkeypatch):

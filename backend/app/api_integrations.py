@@ -213,7 +213,11 @@ async def _probe(row: McpSourceRow, db: Session, *, discover: bool) -> dict[str,
                 purpose,
                 {"query": "latest market news", "limit": 1, "language": "en", "time_range": "day"},
             )
-            if not normalize_search_results(result, row.name):
+            adapter = str(
+                (row.tool_mappings or {})[purpose].get("output_adapter")
+                or "search_results_v1"
+            )
+            if not normalize_search_results(result, row.name, adapter):
                 raise RuntimeError("search upstream returned no results")
         row.last_status = "healthy"
         row.last_error = None

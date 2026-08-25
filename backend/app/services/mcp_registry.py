@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
+import re
 from datetime import datetime
+from hashlib import sha256
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import UUID
@@ -17,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from backend.app.config import Settings, get_settings
 from backend.app.db import IntegrationSettingRow, McpSourceRow, SessionLocal
+from backend.app.domain import NewsItem, SourceQuality, as_utc, utc_now
 from backend.app.services.fact_sources import (
     FACT_SOURCE_GROUP_IDS,
     ensure_builtin_source_group,
@@ -27,6 +30,7 @@ from backend.app.services.secret_store import decrypt_secret
 MCP_PURPOSES = {
     "web_search",
     "news_search",
+    "news_feed",
     "asset_search",
     "quote",
     "fundamentals",
@@ -38,7 +42,10 @@ OUTPUT_ADAPTERS = {
     "asset_list_v1",
     "raw_records_v1",
     "filings_v1",
+    "jin10_flash_v1",
 }
+
+MCP_NEWS_FEED_MAX_PAGES = 3
 
 
 class SourceInput(BaseModel):
@@ -331,32 +338,62 @@ def _canonical_url(value: str) -> str:
     )
 
 
-def normalize_search_results(payload: Any, source: str) -> list[SearchResult]:
-    if isinstance(payload, dict):
+def _adapter_items(payload: Any, adapter: str) -> list[dict[str, Any]]:
+    if adapter == "jin10_flash_v1":
+        data = payload.get("data") if isinstance(payload, dict) else None
+        items = data.get("items") if isinstance(data, dict) else None
+    elif isinstance(payload, dict):
         items = payload.get("results") or payload.get("items") or payload.get("data") or []
     else:
         items = payload
     if isinstance(items, dict):
         items = [items]
+    return [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+
+
+def _published_at(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return as_utc(parsed)
+
+
+def flash_headline(content: str, max_length: int = 120) -> str:
+    compact = " ".join(content.split())
+    if not compact:
+        return ""
+    sentence = re.split(r"(?<=[。！？；.!?])\s*", compact, maxsplit=1)[0]
+    candidate = sentence or compact
+    return candidate if len(candidate) <= max_length else f"{candidate[: max_length - 1]}…"
+
+
+def normalize_search_results(
+    payload: Any, source: str, adapter: str = "search_results_v1"
+) -> list[SearchResult]:
     normalized: list[SearchResult] = []
-    for item in items if isinstance(items, list) else []:
-        if not isinstance(item, dict):
-            continue
-        title = str(item.get("title") or "").strip()
+    for item in _adapter_items(payload, adapter):
+        content = str(item.get("content") or "").strip()
+        title = str(item.get("title") or "").strip() or flash_headline(content)
         url = str(item.get("url") or item.get("link") or "").strip()
         snippet = str(
-            item.get("snippet") or item.get("content") or item.get("summary") or ""
+            item.get("snippet")
+            or content
+            or item.get("summary")
+            or item.get("introduction")
+            or ""
         ).strip()
         parsed = urlsplit(url)
         if not title or not snippet or parsed.scheme not in {"http", "https"} or not parsed.netloc:
             continue
-        published = item.get("published_at") or item.get("publishedDate") or item.get("date")
-        try:
-            published_at = (
-                datetime.fromisoformat(str(published).replace("Z", "+00:00")) if published else None
-            )
-        except ValueError:
-            published_at = None
+        published = (
+            item.get("published_at")
+            or item.get("publishedDate")
+            or item.get("date")
+            or item.get("time")
+        )
         normalized.append(
             SearchResult(
                 title=title,
@@ -365,10 +402,62 @@ def normalize_search_results(payload: Any, source: str) -> list[SearchResult]:
                 source=source,
                 sources=[source],
                 domain=parsed.netloc.lower(),
-                published_at=published_at,
+                published_at=_published_at(published),
             )
         )
     return normalized
+
+
+def normalize_news_feed_page(
+    payload: Any,
+    source: str,
+    adapter: str,
+    since: datetime,
+) -> tuple[list[NewsItem], str, bool, bool]:
+    data = payload.get("data") if isinstance(payload, dict) else None
+    next_cursor = str(data.get("next_cursor") or "") if isinstance(data, dict) else ""
+    has_more = bool(data.get("has_more")) if isinstance(data, dict) else False
+    observed = utc_now()
+    reached_since = False
+    output: list[NewsItem] = []
+    for item in _adapter_items(payload, adapter):
+        content = str(item.get("content") or item.get("introduction") or "").strip()
+        title = str(item.get("title") or "").strip() or flash_headline(content)
+        url = str(item.get("url") or item.get("link") or "").strip()
+        published = _published_at(item.get("time") or item.get("published_at"))
+        parsed = urlsplit(url)
+        if published and published < as_utc(since):
+            reached_since = True
+            continue
+        if (
+            not title
+            or not content
+            or not published
+            or parsed.scheme not in {"http", "https"}
+            or not parsed.netloc
+        ):
+            continue
+        canonical_url = _canonical_url(url)
+        output.append(
+            NewsItem(
+                source=source,
+                source_quality=SourceQuality.PROFESSIONAL,
+                title=title,
+                summary=content,
+                url=canonical_url,
+                language="zh",
+                published_at=published,
+                observed_at=observed,
+                as_of=published,
+                content_hash=sha256(" ".join(content.split()).casefold().encode()).hexdigest(),
+                raw_metadata={
+                    "mcp_source": source,
+                    "mcp_adapter": adapter,
+                    "upstream_id": item.get("id"),
+                },
+            )
+        )
+    return output, next_cursor, has_more, reached_since
 
 
 async def search_enabled_sources(
@@ -384,10 +473,15 @@ async def search_enabled_sources(
 
     async def search_row(row: McpSourceRow) -> list[SearchResult]:
         purpose = "web_search" if "web_search" in (row.tool_mappings or {}) else "news_search"
+        mapping = (row.tool_mappings or {})[purpose]
         arguments = request.model_dump()
         arguments["limit"] = per_source_limit
         payload = await call_source_tool(row, purpose, arguments)
-        return normalize_search_results(payload, row.name)[:per_source_limit]
+        return normalize_search_results(
+            payload,
+            row.name,
+            str(mapping.get("output_adapter") or "search_results_v1"),
+        )[:per_source_limit]
 
     outcomes = await asyncio.gather(*(search_row(row) for row in rows), return_exceptions=True)
     buckets: list[list[SearchResult]] = []
@@ -425,6 +519,72 @@ def search_enabled_sources_sync(
     request: SearchRequest,
 ) -> tuple[list[SearchResult], list[dict[str, str]]]:
     return asyncio.run(search_enabled_sources(request))
+
+
+async def fetch_enabled_news_feeds(
+    since: datetime, limit: int
+) -> tuple[list[NewsItem], list[dict[str, str]]]:
+    with SessionLocal() as db:
+        rows = list(
+            db.scalars(
+                select(McpSourceRow)
+                .where(McpSourceRow.enabled.is_(True))
+                .order_by(desc(McpSourceRow.priority))
+            ).all()
+        )
+    rows = [row for row in rows if "news_feed" in (row.tool_mappings or {})]
+
+    async def fetch_row(row: McpSourceRow) -> list[NewsItem]:
+        mapping = (row.tool_mappings or {})["news_feed"]
+        adapter = str(mapping.get("output_adapter") or "news_items_v1")
+        cursor = ""
+        output: list[NewsItem] = []
+        seen_hashes: set[str] = set()
+        seen_urls: set[str] = set()
+        for _ in range(MCP_NEWS_FEED_MAX_PAGES):
+            payload = await call_source_tool(row, "news_feed", {"cursor": cursor})
+            items, next_cursor, has_more, reached_since = normalize_news_feed_page(
+                payload,
+                row.name,
+                adapter,
+                since,
+            )
+            for item in items:
+                if item.content_hash in seen_hashes or item.url in seen_urls:
+                    continue
+                seen_hashes.add(item.content_hash)
+                seen_urls.add(item.url)
+                output.append(item)
+                if len(output) >= limit:
+                    return output
+            if reached_since or not has_more or not next_cursor or next_cursor == cursor:
+                break
+            cursor = next_cursor
+        return output
+
+    outcomes = await asyncio.gather(*(fetch_row(row) for row in rows), return_exceptions=True)
+    output: dict[str, NewsItem] = {}
+    output_urls: set[str] = set()
+    errors: list[dict[str, str]] = []
+    for row, outcome in zip(rows, outcomes, strict=True):
+        if isinstance(outcome, BaseException):
+            errors.append(
+                {"source": row.name, "error": f"{type(outcome).__name__}: {outcome}"[:500]}
+            )
+            continue
+        for item in outcome:
+            if item.url in output_urls:
+                continue
+            output.setdefault(item.content_hash, item)
+            output_urls.add(item.url)
+    items = sorted(output.values(), key=lambda item: item.published_at, reverse=True)
+    return items[:limit], errors
+
+
+def fetch_enabled_news_feeds_sync(
+    since: datetime, limit: int
+) -> tuple[list[NewsItem], list[dict[str, str]]]:
+    return asyncio.run(fetch_enabled_news_feeds(since, limit))
 
 
 async def call_enabled_purpose(

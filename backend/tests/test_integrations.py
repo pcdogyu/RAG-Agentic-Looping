@@ -25,6 +25,9 @@ from backend.app.services.fact_sources import (
 )
 from backend.app.services.mcp_registry import (
     SearchRequest,
+    fetch_enabled_news_feeds,
+    flash_headline,
+    normalize_news_feed_page,
     normalize_search_results,
     require_admin_token,
     search_enabled_sources,
@@ -306,6 +309,189 @@ def test_search_result_normalization_dedicated_shape():
     assert items[0].url == "https://example.com/story?id=2"
     assert items[0].domain == "example.com"
     assert items[0].sources == ["SearXNG"]
+
+
+def test_jin10_flash_adapter_builds_title_and_parses_nested_results():
+    published = utc_now().replace(microsecond=0)
+    payload = {
+        "data": {
+            "items": [
+                {
+                    "id": "flash-1",
+                    "title": "",
+                    "content": "沪深两市成交额突破一万亿元。市场交易保持活跃。",
+                    "time": published.isoformat(),
+                    "url": "https://www.jin10.com/example/?utm_source=test&id=1",
+                },
+                {
+                    "content": "unsafe result",
+                    "time": published.isoformat(),
+                    "url": "javascript:alert(1)",
+                },
+            ],
+            "next_cursor": "page-2",
+            "has_more": True,
+        }
+    }
+
+    search_items = normalize_search_results(payload, "金十", "jin10_flash_v1")
+    news_items, cursor, has_more, reached_since = normalize_news_feed_page(
+        payload,
+        "金十",
+        "jin10_flash_v1",
+        published - timedelta(minutes=1),
+    )
+
+    assert flash_headline("第一句。第二句。") == "第一句。"
+    assert len(flash_headline("A" * 200)) == 120
+    assert len(search_items) == 1
+    assert search_items[0].title == "沪深两市成交额突破一万亿元。"
+    assert search_items[0].url == "https://www.jin10.com/example?id=1"
+    assert search_items[0].published_at == published
+    assert len(news_items) == 1
+    assert news_items[0].source == "金十"
+    assert news_items[0].source_quality == "professional"
+    assert news_items[0].language == "zh"
+    assert cursor == "page-2"
+    assert has_more is True
+    assert reached_since is False
+
+
+def test_jin10_feed_paginates_deduplicates_and_stops_at_time_boundary(db, monkeypatch):
+    source = McpSourceRow(
+        name="金十",
+        url="https://mcp.jin10.com/mcp",
+        description="财经快讯",
+        priority=80,
+        enabled=True,
+        tool_mappings={
+            "news_feed": {
+                "tool_name": "list_flash",
+                "input_bindings": {"cursor": "cursor"},
+                "defaults": {},
+                "output_adapter": "jin10_flash_v1",
+            }
+        },
+    )
+    db.add(source)
+    db.commit()
+    now = utc_now().replace(microsecond=0)
+    calls: list[str] = []
+
+    async def fake_call(_row, purpose, arguments):
+        assert purpose == "news_feed"
+        cursor = str(arguments.get("cursor") or "")
+        calls.append(cursor)
+        if not cursor:
+            return {
+                "data": {
+                    "items": [
+                        {
+                            "id": "1",
+                            "content": "央行发布最新政策。",
+                            "time": now.isoformat(),
+                            "url": "https://jin10.example/flash/1?utm_source=a",
+                        }
+                    ],
+                    "next_cursor": "page-2",
+                    "has_more": True,
+                }
+            }
+        return {
+            "data": {
+                "items": [
+                    {
+                        "id": "duplicate",
+                        "content": "央行发布最新政策。",
+                        "time": now.isoformat(),
+                        "url": "https://jin10.example/flash/duplicate",
+                    },
+                    {
+                        "id": "old",
+                        "content": "边界之外的旧快讯。",
+                        "time": (now - timedelta(hours=2)).isoformat(),
+                        "url": "https://jin10.example/flash/old",
+                    },
+                ],
+                "next_cursor": "page-3",
+                "has_more": True,
+            }
+        }
+
+    monkeypatch.setattr("backend.app.services.mcp_registry.call_source_tool", fake_call)
+    items, errors = asyncio.run(fetch_enabled_news_feeds(now - timedelta(hours=1), 40))
+
+    assert errors == []
+    assert calls == ["", "page-2"]
+    assert [item.title for item in items] == ["央行发布最新政策。"]
+
+
+def test_news_feed_caps_pages_and_isolates_source_failures(db, monkeypatch):
+    mapping = {
+        "news_feed": {
+            "tool_name": "list_flash",
+            "input_bindings": {"cursor": "cursor"},
+            "defaults": {},
+            "output_adapter": "jin10_flash_v1",
+        }
+    }
+    db.add_all(
+        [
+            McpSourceRow(
+                name="金十",
+                url="https://mcp.jin10.com/mcp",
+                priority=80,
+                enabled=True,
+                tool_mappings=mapping,
+            ),
+            McpSourceRow(
+                name="故障快讯",
+                url="https://broken.example/mcp",
+                priority=70,
+                enabled=True,
+                tool_mappings=mapping,
+            ),
+            McpSourceRow(
+                name="已关闭快讯",
+                url="https://disabled.example/mcp",
+                priority=60,
+                enabled=False,
+                tool_mappings=mapping,
+            ),
+        ]
+    )
+    db.commit()
+    now = utc_now().replace(microsecond=0)
+    calls: list[tuple[str, str]] = []
+
+    async def fake_call(row, _purpose, arguments):
+        cursor = str(arguments.get("cursor") or "")
+        calls.append((row.name, cursor))
+        if row.name == "故障快讯":
+            raise TimeoutError("upstream unavailable")
+        page = len([name for name, _ in calls if name == row.name])
+        return {
+            "data": {
+                "items": [
+                    {
+                        "id": str(page),
+                        "content": f"第{page}页财经快讯。",
+                        "time": now.isoformat(),
+                        "url": f"https://jin10.example/flash/{page}",
+                    }
+                ],
+                "next_cursor": f"page-{page + 1}",
+                "has_more": True,
+            }
+        }
+
+    monkeypatch.setattr("backend.app.services.mcp_registry.call_source_tool", fake_call)
+    items, errors = asyncio.run(fetch_enabled_news_feeds(now - timedelta(hours=1), 40))
+
+    assert len(items) == 3
+    assert [cursor for name, cursor in calls if name == "金十"] == ["", "page-2", "page-3"]
+    assert not any(name == "已关闭快讯" for name, _ in calls)
+    assert errors == [{"source": "故障快讯", "error": "TimeoutError: upstream unavailable"}]
 
 
 def test_search_sources_run_in_parallel_and_merge_balanced_results(monkeypatch):

@@ -15,7 +15,10 @@ from backend.app.providers.fmp import FmpProvider
 from backend.app.providers.rss import RssProvider
 from backend.app.providers.sec import SecProvider
 from backend.app.services.fact_sources import get_effective_settings
-from backend.app.services.mcp_registry import call_enabled_purpose_sync
+from backend.app.services.mcp_registry import (
+    call_enabled_purpose_sync,
+    fetch_enabled_news_feeds_sync,
+)
 
 SEED_ASSETS = [
     AssetRef(
@@ -116,16 +119,32 @@ class ProviderRegistry:
 
     def discover_news(self, *, since: datetime, limit: int = 200) -> list[NewsItem]:
         unique: dict[str, NewsItem] = {}
+        seen_urls: set[str] = set()
         self.last_errors = []
         for provider in self.providers:
             if provider is self.fmp and not self._source_enabled("FMP", self.settings.fmp_enabled):
                 continue
             try:
                 for item in provider.discover_news(since=since, limit=limit):
+                    if item.url in seen_urls:
+                        continue
                     unique[item.content_hash] = item
+                    seen_urls.add(item.url)
             except Exception as exc:
                 self.last_errors.append(f"{provider.name}: {type(exc).__name__}")
                 continue
+        try:
+            items, errors = fetch_enabled_news_feeds_sync(since, limit)
+            for item in items:
+                if item.url in seen_urls:
+                    continue
+                unique[item.content_hash] = item
+                seen_urls.add(item.url)
+            self.last_errors.extend(
+                f"{item['source']}: MCP news feed ({item['error']})" for item in errors
+            )
+        except Exception as exc:
+            self.last_errors.append(f"mcp-news: {type(exc).__name__}")
         return sorted(unique.values(), key=lambda item: item.published_at, reverse=True)[:limit]
 
     def resolve_assets(self, query: str) -> list[AssetRef]:

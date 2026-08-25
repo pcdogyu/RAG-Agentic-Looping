@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
   factSourceGroupOptions,
   firstUnhealthyGroup,
+  isSearchSource,
   NativeConfigEditor,
   parseFilterKeywords,
   searchSourceLabel,
@@ -81,6 +82,13 @@ describe("open source and search settings", () => {
       sources: ["SearXNG", "DuckDuckGo", "SearXNG"],
     })).toBe("SearXNG + DuckDuckGo");
     expect(searchSourceLabel({ source: "DuckDuckGo" })).toBe("DuckDuckGo");
+  });
+
+  it("offers enabled web and financial-news MCP sources in search", () => {
+    expect(isSearchSource({ enabled: true, tool_mappings: { web_search: {} } })).toBe(true);
+    expect(isSearchSource({ enabled: true, tool_mappings: { news_search: {} } })).toBe(true);
+    expect(isSearchSource({ enabled: false, tool_mappings: { news_search: {} } })).toBe(false);
+    expect(isSearchSource({ enabled: true, tool_mappings: { news_feed: {} } })).toBe(false);
   });
 
   it("shows public source-filter defaults and editing guidance", () => {
