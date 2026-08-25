@@ -8,14 +8,39 @@ from backend.app.domain import (
     EventType,
     NewsEvent,
     NewsItem,
+    Rating,
+    Recommendation,
     ResearchRun,
     RunStatus,
     SourceQuality,
+    Thesis,
     utc_now,
 )
 from backend.app.main import app
 from backend.app.providers.registry import SEED_ASSETS
-from backend.app.storage import save_event, save_event_research_run, save_run
+from backend.app.storage import (
+    list_recommendations,
+    save_event,
+    save_event_research_run,
+    save_recommendation,
+    save_run,
+)
+
+
+def recommendation_for(run: ResearchRun, *, score: int = 0) -> Recommendation:
+    return Recommendation(
+        run_id=run.id,
+        asset=run.asset,
+        score=score,
+        rating=Rating.WATCH,
+        confidence=0.45,
+        bull_probability=0.2,
+        base_probability=0.6,
+        bear_probability=0.2,
+        thesis=Thesis(summary="Existing execution result"),
+        as_of=run.as_of,
+        evidence_complete=False,
+    )
 
 
 def test_health_and_asset_endpoints():
@@ -142,6 +167,59 @@ def test_failed_asset_research_can_be_requeued_with_latest_data(db, monkeypatch)
     assert response.json()["retry_attempt"] == 1
     assert captured["historical_replay"] is False
     assert captured["as_of"] > original.as_of
+
+
+def test_failed_asset_research_is_hidden_when_result_already_exists(db):
+    original = ResearchRun(
+        asset=SEED_ASSETS[1],
+        status=RunStatus.FAILED,
+        error="IntegrityError: recommendation already exists",
+    )
+    save_run(db, original)
+    save_recommendation(db, recommendation_for(original))
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/failed-research-runs")
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_failed_asset_research_is_hidden_while_retry_is_active(db):
+    original = ResearchRun(
+        asset=SEED_ASSETS[1],
+        status=RunStatus.FAILED,
+        error="TimeoutError: model timed out",
+    )
+    retry = ResearchRun(
+        asset=original.asset,
+        status=RunStatus.QUEUED,
+        retry_of_run_id=original.id,
+        retry_attempt=1,
+    )
+    save_run(db, original)
+    save_run(db, retry)
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/failed-research-runs")
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_recommendation_save_is_idempotent_for_run(db):
+    run = ResearchRun(asset=SEED_ASSETS[1])
+    first = recommendation_for(run)
+    replacement = recommendation_for(run, score=10)
+
+    save_recommendation(db, first)
+    save_recommendation(db, replacement)
+
+    saved = list_recommendations(db)
+    assert len(saved) == 1
+    assert saved[0].id == first.id
+    assert saved[0].score == 10
+    assert replacement.id == first.id
 
 
 def test_non_failed_research_cannot_be_requeued(db):

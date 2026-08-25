@@ -43,6 +43,7 @@ from backend.app.storage import (
     get_event,
     get_event_research_run,
     get_news,
+    get_recommendation_for_run,
     get_run,
     list_active_runs,
     list_assets,
@@ -326,11 +327,18 @@ def failed_research_runs(
     limit: int = Query(default=50, ge=1, le=200), db: Session = Depends(get_db)
 ):
     items: list[dict] = []
+    active_statuses = {RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.VERIFYING}
     for run in list_failed_runs(db, min(limit * 4, 800)):
         if run.retry_of_run_id is not None:
             continue
         retries = list_retries_for_run(db, run.id)
         latest_retry = retries[0] if retries else None
+        if get_recommendation_for_run(db, run.id) or any(
+            get_recommendation_for_run(db, retry.id) for retry in retries
+        ):
+            continue
+        if latest_retry and latest_retry.status in active_statuses:
+            continue
         event = get_event(db, run.event_id) if run.event_id else None
         items.append(
             {

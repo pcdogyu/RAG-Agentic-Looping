@@ -388,18 +388,26 @@ def list_failed_event_research_runs(
 
 
 def save_recommendation(db: Session, recommendation: Recommendation) -> None:
-    row = RecommendationRow(
-        id=recommendation.id,
-        run_id=recommendation.run_id,
-        asset_id=recommendation.asset.asset_id,
-        score=recommendation.score,
-        rating=recommendation.rating.value,
-        confidence=recommendation.confidence,
-        as_of=recommendation.as_of,
-        payload=recommendation.model_dump(mode="json"),
+    row = db.scalar(
+        select(RecommendationRow).where(RecommendationRow.run_id == recommendation.run_id)
     )
+    if row is None:
+        row = RecommendationRow(id=recommendation.id, run_id=recommendation.run_id)
+    else:
+        recommendation.id = row.id
+    row.asset_id = recommendation.asset.asset_id
+    row.score = recommendation.score
+    row.rating = recommendation.rating.value
+    row.confidence = recommendation.confidence
+    row.as_of = recommendation.as_of
+    row.payload = recommendation.model_dump(mode="json")
     db.add(row)
     db.commit()
+
+
+def get_recommendation_for_run(db: Session, run_id: UUID) -> Recommendation | None:
+    row = db.scalar(select(RecommendationRow).where(RecommendationRow.run_id == run_id))
+    return Recommendation.model_validate(row.payload) if row else None
 
 
 def list_recommendations(db: Session, limit: int = 100) -> list[Recommendation]:
