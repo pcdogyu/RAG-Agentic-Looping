@@ -85,3 +85,33 @@ def test_cancel_and_clear_endpoints_revoke_only_research_tasks(db, monkeypatch):
     assert cleared["cancelled"] == 1
     assert cleared["purged"] == 1
     assert revoked == ["research-one", "research-two"]
+
+
+def test_generic_clear_endpoint_uses_only_the_selected_model_queue(db, monkeypatch):
+    purged: list[str] = []
+    revoked: list[str] = []
+    monkeypatch.setattr(
+        main,
+        "clear_news_extraction_queue",
+        lambda: {"cancelled": 2, "celery_task_ids": ["extract-1", "extract-2"]},
+    )
+    monkeypatch.setattr(
+        main, "_purge_model_queue", lambda queue: purged.append(queue) or 3
+    )
+    monkeypatch.setattr(
+        main,
+        "_revoke_model_tasks",
+        lambda task_ids: revoked.extend(task_ids) or len(task_ids),
+    )
+    monkeypatch.setattr(main, "_mark_model_queue_snapshot_stale", lambda: None)
+
+    result = main.clear_model_queue("extract", db)
+
+    assert result == {
+        "queue_id": "extract",
+        "cancelled": 2,
+        "purged": 3,
+        "revoked": 2,
+    }
+    assert purged == ["extract"]
+    assert revoked == ["extract-1", "extract-2"]

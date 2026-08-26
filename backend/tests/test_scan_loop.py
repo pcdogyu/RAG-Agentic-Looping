@@ -124,6 +124,37 @@ def test_news_extraction_registry_sorts_active_items_and_keeps_failed(monkeypatc
     assert payload["truncated"] is True
 
 
+def test_clear_news_extraction_queue_cancels_only_active_items():
+    redis = FakeRedis()
+    now = datetime(2026, 8, 26, 8, 0, tzinfo=UTC).isoformat()
+    entries = [
+        {
+            "task_id": f"task-{status}",
+            "news_id": f"news-{status}",
+            "title": status,
+            "status": status,
+            "queued_at": now,
+            "updated_at": now,
+        }
+        for status in ("queued", "running", "completed", "failed")
+    ]
+    worker._initialize_news_extraction_queue(redis, "scan-1", entries, {})
+    redis.set(worker.SCAN_GATE_KEY, "scan-1")
+
+    result = worker.clear_news_extraction_queue(redis)
+    payload = worker._read_news_extraction_queue(redis)
+
+    assert result == {
+        "cancelled": 2,
+        "celery_task_ids": ["task-queued", "task-running"],
+    }
+    assert payload["state"] == "cancelled"
+    assert [item["status"] for item in payload["items"]] == [
+        "cancelled", "cancelled", "completed", "failed",
+    ]
+    assert redis.get(worker.SCAN_GATE_KEY) is None
+
+
 def test_news_extraction_timing_accumulates_attempts_without_retry_wait(monkeypatch):
     redis = FakeRedis()
     monkeypatch.setattr(worker, "_redis_client", lambda: redis)

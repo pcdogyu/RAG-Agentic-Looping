@@ -41,6 +41,7 @@ from backend.app.services.mcp_registry import seed_integrations
 from backend.app.services.model_queue import (
     ModelQueueOverviewResponse,
     build_model_queue_overview,
+    cancel_model_tasks,
     record_model_task,
     update_model_task,
 )
@@ -81,6 +82,7 @@ from backend.app.storage import (
 )
 from backend.app.worker import (
     celery_app,
+    clear_news_extraction_queue,
     enqueue_event_research_retry,
     enqueue_research,
     enqueue_scan,
@@ -592,24 +594,32 @@ def model_queue_overview(
     return _model_queue_snapshot_for_limit(_cached_model_queue_snapshot(), limit)
 
 
-def _revoke_research_tasks(task_ids: list[str]) -> int:
+def _revoke_model_tasks(task_ids: list[str]) -> int:
     revoked = 0
     for task_id in task_ids:
         try:
             celery_app.control.revoke(task_id, terminate=True, signal="SIGTERM")
             revoked += 1
         except Exception:
-            logger.warning("research task revoke failed: %s", task_id, exc_info=True)
+            logger.warning("model task revoke failed: %s", task_id, exc_info=True)
     return revoked
 
 
-def _purge_research_queue() -> int:
+def _purge_model_queue(queue_name: str) -> int:
     try:
         with celery_app.connection_for_write() as connection:
-            return int(connection.default_channel.queue_purge("research") or 0)
+            return int(connection.default_channel.queue_purge(queue_name) or 0)
     except Exception:
-        logger.warning("research queue purge failed", exc_info=True)
+        logger.warning("model queue purge failed: %s", queue_name, exc_info=True)
         return 0
+
+
+def _revoke_research_tasks(task_ids: list[str]) -> int:
+    return _revoke_model_tasks(task_ids)
+
+
+def _purge_research_queue() -> int:
+    return _purge_model_queue("research")
 
 
 def _mark_model_queue_snapshot_stale() -> None:
@@ -661,6 +671,37 @@ def clear_research_tasks(db: Session = Depends(get_db)):
     _mark_model_queue_snapshot_stale()
     return {
         **result.model_dump(exclude={"celery_task_ids"}),
+        "purged": purged,
+        "revoked": revoked,
+    }
+
+
+@app.post("/api/v1/model-queues/{queue_id}/clear", status_code=202)
+def clear_model_queue(queue_id: str, db: Session = Depends(get_db)):
+    queue_names = {
+        "extract": "extract",
+        "research": "research",
+        "assist": "mapping",
+        "code": "evolution",
+    }
+    if queue_id not in queue_names:
+        raise HTTPException(422, "unknown model queue")
+    if queue_id == "research":
+        return clear_research_tasks(db)
+    if queue_id == "extract":
+        result = clear_news_extraction_queue()
+        cancelled = int(result["cancelled"])
+        task_ids = list(result["celery_task_ids"])
+    else:
+        result = cancel_model_tasks("assist" if queue_id == "assist" else "code")
+        cancelled = result.cancelled
+        task_ids = result.celery_task_ids
+    purged = _purge_model_queue(queue_names[queue_id])
+    revoked = _revoke_model_tasks(task_ids)
+    _mark_model_queue_snapshot_stale()
+    return {
+        "queue_id": queue_id,
+        "cancelled": cancelled,
         "purged": purged,
         "revoked": revoked,
     }

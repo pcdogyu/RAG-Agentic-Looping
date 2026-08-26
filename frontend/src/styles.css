@@ -267,8 +267,8 @@ h1 span { color: var(--mint); font-weight: 400; }
 .research-instance-status i { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
 .research-instance-status .healthy { color: var(--mint); }
 .research-instance-status .unavailable { color: var(--red); }
-.model-task-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); align-content: start; gap: 10px; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
-.model-task-card { display: grid; align-content: start; gap: 8px; min-width: 0; min-height: 220px; padding: 12px; overflow: hidden; border: 1px solid var(--line); border-top: 3px solid var(--amber); border-radius: 9px; background: var(--panel); }
+.model-task-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); align-content: start; gap: 10px; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scroll-padding-top: 2px; scroll-snap-type: y proximity; }
+.model-task-card { display: grid; align-content: start; gap: 8px; min-width: 0; min-height: 220px; padding: 12px; overflow: hidden; border: 1px solid var(--line); border-top: 3px solid var(--amber); border-radius: 9px; background: var(--panel); scroll-snap-align: start; }
 .model-task-card.running, .model-task-card.generating, .model-task-card.testing, .model-task-card.merging { border-top-color: var(--cyan); }
 .model-task-card.verifying, .model-task-card.completed, .model-task-card.merged { border-top-color: var(--mint); }
 .model-task-card.failed, .model-task-card.rejected, .model-task-card.rolled_back { border-top-color: var(--red); }
@@ -283,7 +283,7 @@ h1 span { color: var(--mint); font-weight: 400; }
 .model-task-card.running .model-task-status, .model-task-card.generating .model-task-status, .model-task-card.testing .model-task-status, .model-task-card.merging .model-task-status { color: var(--cyan); }
 .model-task-card.verifying .model-task-status, .model-task-card.completed .model-task-status, .model-task-card.merged .model-task-status { color: var(--mint); }
 .model-task-card.failed .model-task-status, .model-task-card.rejected .model-task-status, .model-task-card.rolled_back .model-task-status { color: var(--red); }
-.model-task-card h4 { display: -webkit-box; margin: 0; overflow: hidden; color: var(--text); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 4; }
+.model-task-card h4 { display: -webkit-box; min-height: 3em; margin: 0; overflow: hidden; color: var(--text); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 4; }
 .model-task-card > p { display: -webkit-box; margin: 0; overflow: hidden; color: var(--secondary); font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .model-task-count { color: var(--mint); font: 400 8px "DM Mono", monospace; }
 .model-task-results { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; }

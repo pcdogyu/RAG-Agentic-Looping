@@ -720,7 +720,7 @@ describe("research queue page", () => {
     expect(markup).toContain("research-1 · 离线");
   });
 
-  it("renders per-task cancellation and model-level clear controls only for active research", () => {
+  it("renders per-task cancellation for research and clear controls for every model", () => {
     const research = overviewQueue({
       id: "research", model: "qwen2.5:14b", purpose: "标的研究",
       tasks: [{
@@ -748,6 +748,13 @@ describe("research queue page", () => {
     expect(panel).toContain('class="model-queue-clear"');
     expect(panel).toContain(">清空</button>");
     expect(mapping).not.toContain("model-task-cancel");
+    for (const id of ["extract", "assist", "code"] as const) {
+      const modelPanel = renderToStaticMarkup(createElement(UnifiedModelQueuePanel, {
+        queue: overviewQueue({ id }), onClear: () => undefined,
+      }));
+      expect(modelPanel).toContain('class="model-queue-clear"');
+      expect(modelPanel).toContain(">清空</button>");
+    }
   });
 });
 

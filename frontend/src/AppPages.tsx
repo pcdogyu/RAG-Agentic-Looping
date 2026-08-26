@@ -442,12 +442,12 @@ export function UnifiedModelQueuePanel({
       </div>
       <div className="model-queue-header-actions">
         <span className={`model-queue-state ${queue.state}`}>{modelQueueStateLabels[queue.state] ?? queue.state}</span>
-        {queue.id === "research" && <button
+        <button
           type="button"
           className="model-queue-clear"
           disabled={clearing || activeCount === 0}
           onClick={onClear}
-        >{clearing ? "清空中…" : "清空"}</button>}
+        >{clearing ? "清空中…" : "清空"}</button>
       </div>
     </header>
     <div className="queue-metrics unified-queue-metrics" aria-live="polite">
@@ -491,7 +491,7 @@ export function QueuePage({ apiBase }: { apiBase: string }) {
   const [error, setError] = useState("");
   const [actionMessage, setActionMessage] = useState("");
   const [cancellingTaskId, setCancellingTaskId] = useState<string | null>(null);
-  const [clearing, setClearing] = useState(false);
+  const [clearingQueueId, setClearingQueueId] = useState<ModelQueueOverviewItem["id"] | null>(null);
   const requestInFlight = useRef(false);
 
   const loadQueues = useCallback(async (signal?: AbortSignal, showLoading = false) => {
@@ -512,17 +512,20 @@ export function QueuePage({ apiBase }: { apiBase: string }) {
     }
   }, [apiBase]);
 
-  const removeResearchTasks = useCallback((predicate: (task: ModelQueueTask) => boolean) => {
+  const removeQueueTasks = useCallback((
+    queueId: ModelQueueOverviewItem["id"],
+    predicate: (task: ModelQueueTask) => boolean,
+  ) => {
     setOverview((current) => current ? {
       ...current,
       queues: current.queues.map((queue) => {
-        if (queue.id !== "research") return queue;
+        if (queue.id !== queueId) return queue;
         const removed = queue.tasks.filter(predicate);
         if (!removed.length) return queue;
         const counts = { ...queue.counts };
         for (const task of removed) {
-          const field = task.status === "queued" ? "queued"
-            : task.status === "running" ? "running"
+          const field = ["queued", "proposed"].includes(task.status) ? "queued"
+            : ["running", "generating", "testing", "merging"].includes(task.status) ? "running"
               : task.status === "retrying" ? "retrying"
                 : task.status === "verifying" ? "verifying" : null;
           if (field) counts[field] = Math.max(0, counts[field] - 1);
@@ -545,37 +548,36 @@ export function QueuePage({ apiBase }: { apiBase: string }) {
       });
       if (!response.ok) throw new Error(`取消研究失败（HTTP ${response.status}）`);
       const result = await response.json() as { cancelled: number };
-      removeResearchTasks((item) => item.task_id === task.task_id);
+      removeQueueTasks("research", (item) => item.task_id === task.task_id);
       setActionMessage(`已取消“${task.title}”的 ${result.cancelled} 个活动研究任务。`);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "取消研究失败");
     } finally {
       setCancellingTaskId(null);
     }
-  }, [apiBase, removeResearchTasks]);
+  }, [apiBase, removeQueueTasks]);
 
-  const clearResearchTasks = useCallback(async () => {
-    const research = overview?.queues.find((queue) => queue.id === "research");
-    if (!research) return;
-    const activeCount = research.counts.queued + research.counts.running
-      + research.counts.retrying + research.counts.verifying;
-    if (!activeCount || !window.confirm(`确认清空当前 ${activeCount} 项 14B 研究任务？正在执行的研究会立即停止，未完成进度不会保留；后续扫描仍可产生新任务。`)) return;
-    setClearing(true);
+  const clearModelQueue = useCallback(async (queue: ModelQueueOverviewItem) => {
+    const activeCount = queue.counts.queued + queue.counts.running
+      + queue.counts.retrying + queue.counts.verifying;
+    if (!activeCount || !window.confirm(`确认清空 ${queue.model} 当前 ${activeCount} 项${queue.purpose}任务？正在执行的任务会立即停止，未完成进度不会保留；后续扫描或调度仍可产生新任务。`)) return;
+    setClearingQueueId(queue.id);
     setActionMessage("");
     setError("");
     try {
-      const response = await fetch(`${apiBase}/api/v1/model-queues/research/clear`, { method: "POST" });
-      if (!response.ok) throw new Error(`清空研究队列失败（HTTP ${response.status}）`);
+      const response = await fetch(`${apiBase}/api/v1/model-queues/${queue.id}/clear`, { method: "POST" });
+      if (!response.ok) throw new Error(`清空${queue.purpose}队列失败（HTTP ${response.status}）`);
       const result = await response.json() as { cancelled: number };
-      removeResearchTasks((task) => ["asset_research", "event_research"].includes(task.kind)
-        && cancellableResearchStatuses.has(task.status));
-      setActionMessage(`已清空 ${result.cancelled} 个当前研究任务；后续扫描产生的新任务不受影响。`);
+      removeQueueTasks(queue.id, (task) => [
+        "queued", "proposed", "running", "generating", "retrying", "verifying", "testing", "merging",
+      ].includes(task.status));
+      setActionMessage(`已清空 ${queue.model} 的 ${result.cancelled} 个当前${queue.purpose}任务；后续新任务不受影响。`);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "清空研究队列失败");
+      setError(reason instanceof Error ? reason.message : `清空${queue.purpose}队列失败`);
     } finally {
-      setClearing(false);
+      setClearingQueueId(null);
     }
-  }, [apiBase, overview, removeResearchTasks]);
+  }, [apiBase, removeQueueTasks]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -610,9 +612,9 @@ export function QueuePage({ apiBase }: { apiBase: string }) {
         queue={queue}
         key={queue.id}
         onCancelTask={cancelResearchTask}
-        onClear={clearResearchTasks}
+        onClear={() => void clearModelQueue(queue)}
         cancellingTaskId={cancellingTaskId}
-        clearing={clearing}
+        clearing={clearingQueueId === queue.id}
       />)}
     </div>
   </section>;

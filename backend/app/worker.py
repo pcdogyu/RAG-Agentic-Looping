@@ -32,7 +32,11 @@ from backend.app.services.asset_mapping import AssetMappingService
 from backend.app.services.event_research import EventResearchService
 from backend.app.services.events import EventService
 from backend.app.services.evolution import EvolutionService
-from backend.app.services.model_queue import record_model_task, update_model_task
+from backend.app.services.model_queue import (
+    model_task_is_cancelled,
+    record_model_task,
+    update_model_task,
+)
 from backend.app.services.notifications import notifier
 from backend.app.services.outcomes import OutcomeService
 from backend.app.services.portfolio import PortfolioService
@@ -377,6 +381,52 @@ def get_news_extraction_queue(limit: int = 200) -> dict[str, Any]:
         }
 
 
+def clear_news_extraction_queue(
+    redis_client: Redis | None = None,
+) -> dict[str, Any]:
+    """Cancel the current 3B extraction batch and return its Celery task ids."""
+
+    client = redis_client or _redis_client()
+    payload = _read_news_extraction_queue(client)
+    now = utc_now()
+    task_ids: list[str] = []
+    active_statuses = {"queued", "running", "retrying"}
+    for item in payload.get("items", []):
+        if item.get("status") not in active_statuses:
+            continue
+        task_id = item.get("task_id")
+        if task_id:
+            task_ids.append(str(task_id))
+        active_attempt = _elapsed_ms(item.get("attempt_started_at"), now)
+        if active_attempt is not None:
+            item["execution_duration_ms"] = max(
+                0, int(item.get("execution_duration_ms") or 0)
+            ) + active_attempt
+        item.update(
+            status="cancelled",
+            updated_at=now.isoformat(),
+            completed_at=now.isoformat(),
+            attempt_started_at=None,
+            error=None,
+        )
+    payload["state"] = "cancelled"
+    payload["error"] = None
+    _write_news_extraction_queue(client, payload)
+    scan_task_id = payload.get("scan_task_id")
+    if scan_task_id:
+        _update_scan_status(
+            client,
+            state="cancelled",
+            phase="extracting",
+            current=int(payload.get("total_items") or 0) - len(task_ids),
+            total=int(payload.get("total_items") or 0),
+        )
+        if _decode(client.get(SCAN_GATE_KEY)) == scan_task_id:
+            client.delete(SCAN_GATE_KEY)
+        client.delete(SCAN_PAUSE_KEY)
+    return {"cancelled": len(task_ids), "celery_task_ids": task_ids}
+
+
 def _update_scan_status(client: Redis, **updates: Any) -> dict[str, Any]:
     payload = _read_scan_status(client)
     payload.update(updates)
@@ -430,6 +480,8 @@ def _update_news_extraction_item(
         if item.get("news_id") != news_id:
             continue
         previous_status = item.get("status")
+        if previous_status == "cancelled":
+            return payload
         if status == "running":
             if not item.get("started_at"):
                 item["started_at"] = now.isoformat()
@@ -477,6 +529,8 @@ def _finish_news_extraction_queue(
     payload = _read_news_extraction_queue(client)
     if payload.get("scan_task_id") != scan_task_id:
         return None
+    if payload.get("state") == "cancelled":
+        return payload
     counts = _news_extraction_counts(payload)
     payload["state"] = "failed" if error else (
         "completed_with_errors" if counts["failed"] else "completed"
@@ -1225,6 +1279,11 @@ def extract_news_item(self, scan_task_id: str, news_id: str) -> dict[str, Any]:
     try:
         _require_scan_gate(client, scan_task_id)
         payload = _read_news_extraction_queue(client)
+        if any(
+            item.get("news_id") == news_id and item.get("status") == "cancelled"
+            for item in payload.get("items", [])
+        ):
+            return {"status": "cancelled", "news_id": news_id, "event_ids": []}
         counts = _news_extraction_counts(payload)
         done = counts["completed"] + counts["failed"]
         _wait_if_scan_paused(
@@ -1429,6 +1488,8 @@ def finalize_news_extraction(
 @celery_app.task(bind=True, name="market_loop.resolve_event_assets", max_retries=2)
 def resolve_event_assets(self, event_id: str) -> dict:
     task_id = str(self.request.id or f"event:{event_id}")
+    if model_task_is_cancelled("assist", task_id):
+        return {"status": "cancelled", "event_id": event_id}
     update_model_task(
         "assist",
         task_id,
@@ -1830,6 +1891,8 @@ def _run_evolution_failures(
 @celery_app.task(bind=True, name="market_loop.evolve_from_outcomes")
 def evolve_from_outcomes(self) -> dict:
     task_id = str(self.request.id or uuid4())
+    if model_task_is_cancelled("code", task_id):
+        return {"status": "cancelled"}
     record_model_task(
         "code",
         task_id=task_id,
@@ -1861,6 +1924,8 @@ def evolve_from_outcomes(self) -> dict:
 @celery_app.task(bind=True, name="market_loop.evolve_failures")
 def evolve_failures(self, failures: list[dict]) -> dict:
     task_id = str(self.request.id or uuid4())
+    if model_task_is_cancelled("code", task_id):
+        return {"status": "cancelled"}
     if not settings.evolution_enabled:
         update_model_task(
             "code",
@@ -1884,6 +1949,8 @@ def evolve_failures(self, failures: list[dict]) -> dict:
 @celery_app.task(bind=True, name="market_loop.execute_evolution")
 def execute_evolution(self, candidate_id: str) -> dict:
     task_id = str(self.request.id or uuid4())
+    if model_task_is_cancelled("code", task_id):
+        return {"status": "cancelled", "candidate_id": candidate_id}
     init_db()
     with SessionLocal() as db:
         candidate = next(

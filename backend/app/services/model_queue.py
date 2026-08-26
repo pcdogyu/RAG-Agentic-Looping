@@ -134,6 +134,11 @@ class ModelQueueOverviewResponse(BaseModel):
     queues: list[ModelQueueItem]
 
 
+class ModelTaskCancellationResult(BaseModel):
+    cancelled: int = 0
+    celery_task_ids: list[str] = Field(default_factory=list)
+
+
 def _task_hash_key(lane: str) -> str:
     return f"{MODEL_TASK_HASH_PREFIX}:{lane}:tasks"
 
@@ -182,10 +187,69 @@ def record_model_task(
     try:
         client = redis_client or _redis_client()
         key = _task_hash_key(lane)
+        current = client.hget(key, task_id)
+        if current:
+            value = current.decode() if isinstance(current, bytes) else current
+            if json.loads(value).get("status") == "cancelled":
+                return
         client.hset(key, task_id, json.dumps(payload, ensure_ascii=False))
         client.expire(key, MODEL_TASK_KEY_TTL_SECONDS)
     except Exception:
         return
+
+
+def cancel_model_tasks(
+    lane: Literal["assist", "code"],
+    *,
+    redis_client: Redis | None = None,
+) -> ModelTaskCancellationResult:
+    """Cancel active tasks for one model lane without touching other queues."""
+
+    try:
+        client = redis_client or _redis_client()
+        key = _task_hash_key(lane)
+        now = utc_now().isoformat()
+        task_ids: list[str] = []
+        for field, raw in client.hgetall(key).items():
+            task_id = field.decode() if isinstance(field, bytes) else str(field)
+            value = raw.decode() if isinstance(raw, bytes) else raw
+            try:
+                payload = json.loads(value)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if payload.get("status") not in ACTIVE_STATUSES:
+                continue
+            payload.update(
+                status="cancelled",
+                updated_at=now,
+                completed_at=now,
+                error=None,
+            )
+            client.hset(key, task_id, json.dumps(payload, ensure_ascii=False))
+            task_ids.append(str(payload.get("task_id") or task_id))
+        client.expire(key, MODEL_TASK_KEY_TTL_SECONDS)
+        return ModelTaskCancellationResult(
+            cancelled=len(task_ids), celery_task_ids=task_ids
+        )
+    except Exception:
+        return ModelTaskCancellationResult()
+
+
+def model_task_is_cancelled(
+    lane: Literal["assist", "code"],
+    task_id: str,
+    *,
+    redis_client: Redis | None = None,
+) -> bool:
+    try:
+        client = redis_client or _redis_client()
+        raw = client.hget(_task_hash_key(lane), task_id)
+        if not raw:
+            return False
+        value = raw.decode() if isinstance(raw, bytes) else raw
+        return json.loads(value).get("status") == "cancelled"
+    except Exception:
+        return False
 
 
 def update_model_task(
@@ -225,6 +289,8 @@ def update_model_task(
             "error": None,
             "metrics": {},
         }
+        if payload.get("status") == "cancelled":
+            return
         payload["status"] = status
         payload["updated_at"] = now.isoformat()
         if attempt is not None:
@@ -243,7 +309,7 @@ def update_model_task(
             payload["metrics"] = {**payload.get("metrics", {}), **metrics}
         if status in RUNNING_STATUSES and not payload.get("started_at"):
             payload["started_at"] = now.isoformat()
-        if status in FAILED_STATUSES | COMPLETED_STATUSES:
+        if status in FAILED_STATUSES | COMPLETED_STATUSES | {"cancelled"}:
             payload["completed_at"] = now.isoformat()
         client.hset(key, task_id, json.dumps(payload, ensure_ascii=False))
         client.expire(key, MODEL_TASK_KEY_TTL_SECONDS)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 
 from backend.app.config import Settings
@@ -14,7 +15,9 @@ from backend.app.domain import (
 from backend.app.providers.registry import SEED_ASSETS
 from backend.app.services.model_queue import (
     build_model_queue_overview,
+    cancel_model_tasks,
     list_model_task_records,
+    model_task_is_cancelled,
     record_model_task,
     update_model_task,
 )
@@ -78,6 +81,40 @@ def _empty_extraction(now: datetime):
         "items": [],
         "error": None,
     }
+
+
+def test_cancel_model_tasks_is_lane_scoped_and_terminal_safe():
+    redis = FakeRedis()
+    record_model_task(
+        "assist", task_id="mapping-active", kind="asset_mapping", title="宏观新闻",
+        redis_client=redis,
+    )
+    record_model_task(
+        "assist", task_id="mapping-done", kind="asset_mapping", title="已完成映射",
+        redis_client=redis,
+    )
+    update_model_task(
+        "assist", "mapping-done", status="completed", redis_client=redis
+    )
+    record_model_task(
+        "code", task_id="code-active", kind="code_evolution", title="代码演进",
+        redis_client=redis,
+    )
+
+    result = cancel_model_tasks("assist", redis_client=redis)
+    update_model_task(
+        "assist", "mapping-active", status="completed", redis_client=redis
+    )
+
+    assert result.cancelled == 1
+    assert result.celery_task_ids == ["mapping-active"]
+    assert model_task_is_cancelled(
+        "assist", "mapping-active", redis_client=redis
+    )
+    assert not model_task_is_cancelled("code", "code-active", redis_client=redis)
+    assert json.loads(redis.hget("market-loop:model-queue:assist:tasks", "mapping-done"))[
+        "status"
+    ] == "completed"
 
 
 def test_extraction_summary_keeps_completed_counts_and_recorded_metrics(db):
