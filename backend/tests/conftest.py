@@ -3,6 +3,7 @@ import os
 os.environ["DATABASE_URL"] = "sqlite:///./data/test_agent.db"
 os.environ["REDIS_URL"] = "redis://127.0.0.1:6399/15"
 os.environ["OLLAMA_BASE_URL"] = "http://127.0.0.1:1"
+os.environ["OLLAMA_RESEARCH_BASE_URLS"] = ""
 os.environ["FMP_ACCESS_TOKEN"] = ""
 os.environ["FMP_MCP_URL"] = ""
 os.environ["AKSHARE_ASSET_MASTER_ENABLED"] = "false"

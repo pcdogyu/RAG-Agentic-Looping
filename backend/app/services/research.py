@@ -34,6 +34,7 @@ from backend.app.domain import (
 from backend.app.llm import LlmGateway, gateway
 from backend.app.providers.registry import ProviderRegistry
 from backend.app.services.mcp_registry import SearchRequest, search_enabled_sources_sync
+from backend.app.services.prompt_budget import compact_evidence, compact_json_records
 from backend.app.services.retrieval import RetrievalService
 from backend.app.services.source_lineage import (
     canonicalize_url,
@@ -95,6 +96,7 @@ class CloudVerification(BaseModel):
 class ResearchState(TypedDict, total=False):
     run: dict[str, Any]
     event: dict[str, Any] | None
+    events: list[dict[str, Any]]
     research_data: dict[str, Any]
     evidence: list[dict[str, Any]]
     retrieved_context: list[dict[str, Any]]
@@ -177,14 +179,18 @@ class ResearchService:
         as_of: datetime | None = None,
         historical_replay: bool | None = None,
         queued_run: ResearchRun | None = None,
+        events: list[NewsEvent] | None = None,
     ) -> ResearchRun:
+        trigger_events = events or ([event] if event else [])
+        primary_event = event or (trigger_events[0] if trigger_events else None)
         run = queued_run or ResearchRun(
-            event_id=event.id if event else None,
+            event_id=primary_event.id if primary_event else None,
+            trigger_event_ids=[item.id for item in trigger_events],
             asset=asset,
             as_of=as_of or utc_now(),
             historical_replay=bool(historical_replay),
             analysis_steps=[
-                *(event.analysis_steps if event else []),
+                *(primary_event.analysis_steps if primary_event else []),
                 AnalysisStep(
                     phase="research_queue",
                     executor="celery",
@@ -194,13 +200,16 @@ class ResearchService:
         )
         if historical_replay is not None:
             run.historical_replay = historical_replay
+        if trigger_events:
+            run.trigger_event_ids = list(dict.fromkeys([*run.trigger_event_ids, *(item.id for item in trigger_events)]))
         if run.started_at is None:
             run.started_at = utc_now()
         run.status = RunStatus.RUNNING
         save_run(self.db, run)
         state: ResearchState = {
             "run": run.model_dump(mode="json"),
-            "event": event.model_dump(mode="json") if event else None,
+            "event": primary_event.model_dump(mode="json") if primary_event else None,
+            "events": [item.model_dump(mode="json") for item in trigger_events],
             "verification_round": 0,
             "acquisition_attempts": 0,
             "historical_replay": run.historical_replay,
@@ -240,11 +249,19 @@ class ResearchService:
         research_data = (
             {} if state.get("historical_replay") else self.registry.get_research_data(run.asset)
         )
-        evidence = self._build_evidence(run, state.get("event"), research_data)
+        evidence = self._build_evidence(
+            run,
+            state.get("event"),
+            research_data,
+            state.get("events"),
+        )
         run.evidence = evidence
         save_run(self.db, run)
         event = NewsEvent.model_validate(state["event"]) if state.get("event") else None
-        query = f"{run.asset.name} {run.asset.symbol} {event.headline if event else ''}"
+        headlines = " ".join(
+            NewsEvent.model_validate(item).headline for item in state.get("events", [])
+        )
+        query = f"{run.asset.name} {run.asset.symbol} {headlines or (event.headline if event else '')}"
         retrieved_context: list[dict[str, Any]] = []
         retrieval_error: str | None = None
         try:
@@ -310,11 +327,18 @@ class ResearchService:
         run: ResearchRun,
         event_payload: dict[str, Any] | None,
         data: dict[str, Any],
+        event_payloads: list[dict[str, Any]] | None = None,
     ) -> list[Evidence]:
         evidence: list[Evidence] = []
-        event = NewsEvent.model_validate(event_payload) if event_payload else None
-        if event:
+        events = [NewsEvent.model_validate(item) for item in (event_payloads or [])]
+        if not events and event_payload:
+            events = [NewsEvent.model_validate(event_payload)]
+        seen_news_ids: set[UUID] = set()
+        for event in events:
             for item_id in event.news_item_ids:
+                if item_id in seen_news_ids:
+                    continue
+                seen_news_ids.add(item_id)
                 item = get_news(self.db, item_id)
                 if not item or any(
                     value > run.as_of for value in (item.published_at, item.observed_at, item.as_of)
@@ -632,9 +656,9 @@ class ResearchService:
             f"研究对象：{run.asset.model_dump_json()}\n研究截止：{run.as_of.isoformat()}\n"
             f"报告模板：{asset_template}\n"
             "证据："
-            f"{json.dumps(evidence, ensure_ascii=False)[: self.settings.research_prompt_evidence_chars]}\n"
+            f"{compact_evidence(evidence, self.settings.research_prompt_evidence_chars)}\n"
             "混合检索上下文："
-            f"{json.dumps(state.get('retrieved_context', []), ensure_ascii=False)[: self.settings.research_prompt_context_chars]}\n"
+            f"{compact_json_records(state.get('retrieved_context', []), self.settings.research_prompt_context_chars)}\n"
             "只能引用 evidence_ids 中存在的证据。证据不足时降低 confidence 和 score，不得编造。"
         )
         draft_error: str | None = None
@@ -650,6 +674,7 @@ class ResearchService:
             )
         except Exception as exc:
             draft_error = type(exc).__name__
+            run.retryable_reason = f"model_{type(exc).__name__}"
             draft = self._fallback_draft(run, evidence).model_dump(mode="json")
         draft_output = DraftOutput.model_validate(draft)
         run.analysis_steps.append(
@@ -1051,7 +1076,7 @@ class ResearchService:
         prompt = (
             f"当前报告：{current.model_dump_json()}\n验证结果：{verification.model_dump_json()}\n"
             "可用证据："
-            f"{json.dumps(state.get('evidence', []), ensure_ascii=False)[: self.settings.research_prompt_evidence_chars]}\n"
+            f"{compact_evidence(state.get('evidence', []), self.settings.research_prompt_evidence_chars)}\n"
             "修订报告。不能通过编造来补足缺失来源；无法补足时保持低置信度和中性分数。"
         )
         revision_error: str | None = None
@@ -1066,8 +1091,10 @@ class ResearchService:
                 entity_id=run.id,
             )
             revised_output = DraftOutput.model_validate(revised)
+            run.retryable_reason = None
         except Exception as exc:
             revision_error = type(exc).__name__
+            run.retryable_reason = f"model_{type(exc).__name__}"
             current.confidence = min(current.confidence, 0.5)
             current.score = 0
             revised_output = current
@@ -1116,7 +1143,7 @@ class ResearchService:
                         f"复核高影响研究结论：{draft.model_dump_json()}\n"
                         f"验证结果：{verification.model_dump_json()}\n"
                         "证据："
-                        f"{json.dumps(state.get('evidence', []), ensure_ascii=False)[: self.settings.research_prompt_evidence_chars]}\n"
+                        f"{compact_evidence(state.get('evidence', []), self.settings.research_prompt_evidence_chars)}\n"
                         "只判断给定证据是否支持该方向与置信度，不补充外部事实。"
                     ),
                     CloudVerification,

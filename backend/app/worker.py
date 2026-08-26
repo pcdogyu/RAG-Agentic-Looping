@@ -37,6 +37,11 @@ from backend.app.services.notifications import notifier
 from backend.app.services.outcomes import OutcomeService
 from backend.app.services.portfolio import PortfolioService
 from backend.app.services.research import ResearchService
+from backend.app.services.research_lifecycle import (
+    compact_queued_research_runs,
+    reconcile_stale_research_runs,
+    research_lease,
+)
 from backend.app.services.source_filter import filter_news_items
 from backend.app.services.source_lineage import canonicalize_url, enrich_news_lineage
 from backend.app.storage import (
@@ -45,6 +50,7 @@ from backend.app.storage import (
     get_event,
     get_event_research_for_event,
     get_event_research_run,
+    get_mergeable_queued_run,
     get_news,
     get_news_by_content_hash,
     get_run,
@@ -116,6 +122,11 @@ celery_app.conf.update(
             "schedule": 24 * 60 * 60,
             "options": {"queue": "io"},
         },
+        "reconcile-research-leases": {
+            "task": "market_loop.reconcile_research_leases",
+            "schedule": 5 * 60,
+            "options": {"queue": "io"},
+        },
         "evolve-from-failures": {
             "task": "market_loop.evolve_from_outcomes",
             "schedule": 7 * 24 * 60 * 60,
@@ -145,6 +156,26 @@ def cleanup_model_audit_records() -> dict[str, int]:
     with SessionLocal() as db:
         deleted = cleanup_model_audits(db, settings.model_audit_retention_days)
     return {"deleted": deleted, "retention_days": settings.model_audit_retention_days}
+
+
+@celery_app.task(name="market_loop.reconcile_research_leases")
+def reconcile_research_leases() -> dict[str, int]:
+    init_db()
+    try:
+        client = _redis_client()
+        client.ping()
+    except Exception:
+        client = None
+    with SessionLocal() as db:
+        repaired = reconcile_stale_research_runs(db, client, settings)
+    return {"repaired": repaired}
+
+
+@celery_app.task(name="market_loop.compact_research_backlog")
+def compact_research_backlog(dry_run: bool = True) -> dict[str, int]:
+    init_db()
+    with SessionLocal() as db:
+        return compact_queued_research_runs(db, settings, dry_run=dry_run)
 
 
 def _record_task_result(kind: str) -> None:
@@ -684,13 +715,55 @@ def enqueue_research(
 ) -> tuple[str, ResearchRun]:
     """Persist a visible queued run before handing work to the LLM worker."""
 
+    if event and not historical_replay and retry_of_run_id is None:
+        canonical = get_mergeable_queued_run(
+            db,
+            asset.asset_id,
+            utc_now() - timedelta(hours=settings.research_coalesce_window_hours),
+        )
+        if canonical is not None and event.id not in canonical.trigger_event_ids:
+            canonical.trigger_event_ids.append(event.id)
+            canonical.analysis_steps.append(
+                AnalysisStep(
+                    phase="research_coalescing",
+                    executor="celery",
+                    summary=f"已把事件 {event.headline} 合并到该标的研究任务。",
+                    metrics={"trigger_event_id": str(event.id)},
+                )
+            )
+            save_run(db, canonical)
+            merged = ResearchRun(
+                event_id=event.id,
+                trigger_event_ids=[event.id],
+                asset=asset,
+                status=RunStatus.COALESCED,
+                as_of=as_of or utc_now(),
+                celery_task_id=canonical.celery_task_id,
+                coalesced_into_run_id=canonical.id,
+                completed_at=utc_now(),
+                analysis_steps=[
+                    *event.analysis_steps,
+                    AnalysisStep(
+                        phase="research_coalescing",
+                        executor="celery",
+                        summary=f"已合并到同标的主研究任务 {canonical.id}。",
+                        metrics={"canonical_run_id": str(canonical.id)},
+                    ),
+                ],
+            )
+            save_run(db, merged)
+            return canonical.celery_task_id or f"research:{canonical.id}", merged
+
+    task_id = str(uuid4())
     run = ResearchRun(
         event_id=event.id if event else None,
+        trigger_event_ids=[event.id] if event else [],
         asset=asset,
         as_of=as_of or utc_now(),
         historical_replay=historical_replay,
         retry_of_run_id=retry_of_run_id,
         retry_attempt=retry_attempt,
+        celery_task_id=task_id,
         analysis_steps=[
             *(event.analysis_steps if event else []),
             AnalysisStep(
@@ -714,6 +787,7 @@ def enqueue_research(
         task = research_asset.apply_async(
             args=[asset.asset_id, str(event.id) if event else None, str(run.id)],
             queue="research",
+            task_id=task_id,
         )
     except Exception as exc:
         run.status = RunStatus.FAILED
@@ -843,9 +917,11 @@ def enqueue_event_report(db, event: NewsEvent) -> tuple[str | None, EventResearc
     existing = get_event_research_for_event(db, event.id)
     if existing:
         return None, existing
+    task_id = str(uuid4())
     run = EventResearchRun(
         event_id=event.id,
         as_of=max(event.as_of, event.observed_at),
+        celery_task_id=task_id,
         analysis_steps=[
             *event.analysis_steps,
             AnalysisStep(
@@ -862,6 +938,7 @@ def enqueue_event_report(db, event: NewsEvent) -> tuple[str | None, EventResearc
         task = research_event.apply_async(
             args=[str(event.id), str(run.id)],
             queue="research",
+            task_id=task_id,
         )
     except Exception as exc:
         run.status = RunStatus.FAILED
@@ -893,6 +970,9 @@ def enqueue_event_research_retry(
     run.evidence = []
     run.report = None
     run.error = None
+    run.retryable_reason = None
+    task_id = str(uuid4())
+    run.celery_task_id = task_id
     run.analysis_steps.append(
         AnalysisStep(
             phase="event_research_retry_queue",
@@ -908,6 +988,7 @@ def enqueue_event_research_retry(
         task = research_event.apply_async(
             args=[str(event.id), str(run.id)],
             queue="research",
+            task_id=task_id,
         )
     except Exception as exc:
         run.status = RunStatus.FAILED
@@ -1521,6 +1602,11 @@ def resolve_event_assets(self, event_id: str) -> dict:
 @celery_app.task(bind=True, name="market_loop.research_event", max_retries=2)
 def research_event(self, event_id: str, run_id: str) -> dict:
     init_db()
+    try:
+        client = _redis_client()
+        client.ping()
+    except Exception:
+        client = None
     with SessionLocal() as db:
         event = get_event(db, UUID(event_id))
         run = get_event_research_run(db, UUID(run_id))
@@ -1528,79 +1614,104 @@ def research_event(self, event_id: str, run_id: str) -> dict:
             raise ValueError(f"unknown event research run: {run_id}")
         if run.status in {RunStatus.COMPLETED, RunStatus.INSUFFICIENT_EVIDENCE}:
             return run.model_dump(mode="json")
-        try:
-            result = EventResearchService(db).run(event, run)
-            notifier.send(
-                f"事件研究完成：{event.headline}\n"
-                f"证据{'完整' if result.report and result.report.evidence_complete else '不足'}"
-            )
-            return result.model_dump(mode="json")
-        except Exception as exc:
-            db.rollback()
-            run = get_event_research_run(db, UUID(run_id)) or run
-            retrying = self.request.retries < self.max_retries
-            run.status = RunStatus.QUEUED if retrying else RunStatus.FAILED
-            run.error = f"{type(exc).__name__}: {exc}"
-            run.analysis_steps.append(
-                AnalysisStep(
-                    phase="event_research_failed",
-                    status="retrying" if retrying else "failed",
-                    executor="event-research",
-                    model=settings.ollama_research_model,
-                    summary=(
-                        f"中性事件研报{'暂时失败，等待重试' if retrying else '最终失败'}"
-                        f"（{type(exc).__name__}）。"
-                    ),
+        with research_lease(
+            client,
+            run_id=str(run.id),
+            task_id=str(self.request.id),
+            settings=settings,
+        ):
+            try:
+                result = EventResearchService(db).run(event, run)
+                notifier.send(
+                    f"事件研究完成：{event.headline}\n"
+                    f"证据{'完整' if result.report and result.report.evidence_complete else '不足'}"
                 )
-            )
-            save_event_research_run(db, run)
-            if retrying:
-                raise self.retry(
-                    exc=exc,
-                    countdown=min(60, 2 ** (self.request.retries + 1)),
-                ) from exc
-            raise
+                return result.model_dump(mode="json")
+            except Exception as exc:
+                db.rollback()
+                run = get_event_research_run(db, UUID(run_id)) or run
+                retrying = self.request.retries < self.max_retries
+                run.status = RunStatus.QUEUED if retrying else RunStatus.FAILED
+                run.error = f"{type(exc).__name__}: {exc}"
+                run.analysis_steps.append(
+                    AnalysisStep(
+                        phase="event_research_failed",
+                        status="retrying" if retrying else "failed",
+                        executor="event-research",
+                        model=settings.ollama_research_model,
+                        summary=(
+                            f"中性事件研报{'暂时失败，等待重试' if retrying else '最终失败'}"
+                            f"（{type(exc).__name__}）。"
+                        ),
+                    )
+                )
+                save_event_research_run(db, run)
+                if retrying:
+                    raise self.retry(
+                        exc=exc,
+                        countdown=min(60, 2 ** (self.request.retries + 1)),
+                    ) from exc
+                raise
 
 
-@celery_app.task(
-    name="market_loop.research_asset", autoretry_for=(Exception,), retry_backoff=True, max_retries=2
-)
+@celery_app.task(bind=True, name="market_loop.research_asset")
 def research_asset(
-    asset_id: str, event_id: str | None = None, run_id: str | None = None
+    self, asset_id: str, event_id: str | None = None, run_id: str | None = None
 ) -> dict:
     init_db()
     registry = ProviderRegistry()
     with SessionLocal() as db:
+        queued_run = get_run(db, UUID(run_id)) if run_id else None
+        if queued_run and queued_run.status is RunStatus.COALESCED:
+            return queued_run.model_dump(mode="json")
         registry.add_assets(list_assets(db))
         asset = get_asset(db, asset_id) or registry.get_asset(asset_id)
         if not asset:
             raise ValueError(f"unknown asset: {asset_id}")
         event = get_event(db, UUID(event_id)) if event_id else None
-        queued_run = get_run(db, UUID(run_id)) if run_id else None
+        trigger_events = [
+            value
+            for trigger_id in (queued_run.trigger_event_ids if queued_run else [])
+            if (value := get_event(db, trigger_id)) is not None
+        ]
     # PostgresSaver.setup() may run concurrent index DDL on first use. Close the
     # read transaction above first so that DDL cannot wait on its own task.
-    with SessionLocal() as db:
-        run = ResearchService(registry, db).run(
-            asset,
-            event,
-            as_of=queued_run.as_of if queued_run else None,
-            historical_replay=queued_run.historical_replay if queued_run else False,
-            queued_run=queued_run,
-        )
-        if run.recommendation:
-            notifier.recommendation(run.recommendation)
-            if settings.auto_paper_trade and run.recommendation.rating in {
-                Rating.BULLISH,
-                Rating.STRONGLY_BULLISH,
-            }:
-                portfolio = PortfolioService(registry)
-                price = portfolio.current_price(run.recommendation)
-                if price > 0:
-                    order = portfolio.create_from_recommendation(db, run.recommendation, price)
-                    notifier.send(
-                        f"模拟仓位变化：{order.side.value} {order.asset.symbol} "
-                        f"{order.quantity:g} @ {order.price:g} {order.currency}"
-                    )
+    try:
+        client = _redis_client()
+        client.ping()
+    except Exception:
+        client = None
+    with research_lease(
+        client,
+        run_id=str(queued_run.id) if queued_run else str(run_id or self.request.id),
+        task_id=str(self.request.id),
+        settings=settings,
+    ):
+        with SessionLocal() as db:
+            run = ResearchService(registry, db).run(
+                asset,
+                event,
+                as_of=queued_run.as_of if queued_run else None,
+                historical_replay=queued_run.historical_replay if queued_run else False,
+                queued_run=queued_run,
+                events=trigger_events,
+            )
+            if run.recommendation:
+                notifier.recommendation(run.recommendation)
+                if settings.auto_paper_trade and run.recommendation.rating in {
+                    Rating.BULLISH,
+                    Rating.STRONGLY_BULLISH,
+                }:
+                    portfolio = PortfolioService(registry)
+                    price = portfolio.current_price(run.recommendation)
+                    if price > 0:
+                        order = portfolio.create_from_recommendation(
+                            db, run.recommendation, price
+                        )
+                        notifier.send(
+                            f"模拟仓位变化：{order.side.value} {order.asset.symbol} "
+                            f"{order.quantity:g} @ {order.price:g} {order.currency}"
+                        )
         return run.model_dump(mode="json")
 
 

@@ -58,6 +58,7 @@ def test_ollama_keep_alive_serialization(configured, serialized):
 
 def test_gateway_records_exact_redacted_input_output(monkeypatch):
     settings = Settings(
+        _env_file=None,
         ollama_base_url="http://ollama.invalid",
         ollama_context_length=4096,
         ollama_num_threads=8,
@@ -190,7 +191,7 @@ class _null_context:
         return False
 
 
-def test_gateway_records_both_failed_attempts(monkeypatch):
+def test_gateway_does_not_retry_transport_failures(monkeypatch):
     settings = Settings(ollama_base_url="http://ollama.invalid")
     gateway = LlmGateway(settings)
 
@@ -208,10 +209,80 @@ def test_gateway_records_both_failed_attempts(monkeypatch):
 
     with SessionLocal() as db:
         rows = list(db.scalars(select(ModelCallAuditRow).order_by(ModelCallAuditRow.attempt)))
-    assert [row.attempt for row in rows] == [1, 2]
+    assert [row.attempt for row in rows] == [1]
     assert {row.logical_call_id for row in rows} == {rows[0].logical_call_id}
     assert {row.status for row in rows} == {"failed"}
     assert all("retry-secret-token" not in (row.error or "") for row in rows)
+
+
+def test_gateway_retries_invalid_json_once(monkeypatch):
+    settings = Settings(ollama_base_url="http://ollama.invalid")
+    gateway = LlmGateway(settings)
+
+    class InvalidThenValidClient:
+        def __init__(self):
+            self.calls = 0
+
+        def post(self, *args, **kwargs):
+            self.calls += 1
+            content = "not-json" if self.calls == 1 else '{"answer":"ok"}'
+            return FakeResponse({"message": {"content": content}})
+
+    client = InvalidThenValidClient()
+    gateway.client = client
+    monkeypatch.setattr("backend.app.llm.sleep", lambda _: None)
+    monkeypatch.setattr(gateway.gpu, "acquire", lambda *args, **kwargs: _null_context())
+
+    assert gateway.generate_json(
+        model="qwen2.5:7b",
+        system="system",
+        prompt="prompt",
+        schema=AuditOutput,
+    ) == {"answer": "ok"}
+    assert client.calls == 2
+
+
+def test_research_pool_routes_one_slot_per_endpoint(monkeypatch):
+    settings = Settings(
+        ollama_base_url="http://main.invalid",
+        ollama_research_base_urls="http://research-0.invalid,http://research-1.invalid",
+        ollama_research_max_output_tokens=1024,
+        ollama_research_timeout_seconds=900,
+    )
+    gateway = LlmGateway(settings)
+    gateway.gpu._redis = None
+
+    class PoolClient:
+        def __init__(self):
+            self.urls = []
+
+        def get(self, *args, **kwargs):
+            return FakeResponse({"models": [{"name": settings.ollama_research_model}]})
+
+        def post(self, url, **kwargs):
+            self.urls.append((url, kwargs))
+            return FakeResponse({"message": {"content": '{"answer":"ok"}'}})
+
+    client = PoolClient()
+    gateway.client = client
+    monkeypatch.setattr("backend.app.llm.persist_model_audit", lambda **kwargs: None)
+
+    for _ in range(2):
+        assert gateway.generate_json(
+            model=settings.ollama_research_model,
+            system="system",
+            prompt="prompt",
+            schema=AuditOutput,
+        ) == {"answer": "ok"}
+
+    assert [item[0] for item in client.urls] == [
+        "http://research-0.invalid/api/chat",
+        "http://research-1.invalid/api/chat",
+    ]
+    assert all(
+        item[1]["json"]["options"]["num_predict"] == 1024 for item in client.urls
+    )
+    assert all(item[1]["timeout"] == 900 for item in client.urls)
 
 
 def test_legacy_backfill_is_idempotent_and_labeled(db):

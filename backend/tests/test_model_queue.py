@@ -348,3 +348,54 @@ def test_estimated_clear_time_uses_capacity_and_average_execution(db):
     assist = overview.queues[2]
     assert assist.metrics.average_execution_duration_ms == 2 * 60 * 1000
     assert assist.metrics.estimated_clear_ms == 3 * 2 * 60 * 1000
+
+
+def test_research_metrics_exclude_active_duration_and_expose_instances(db):
+    now = datetime(2026, 8, 26, 8, 0, tzinfo=UTC)
+    save_run(
+        db,
+        ResearchRun(
+            asset=SEED_ASSETS[0],
+            status=RunStatus.RUNNING,
+            created_at=now - timedelta(hours=5),
+            started_at=now - timedelta(hours=4),
+        ),
+    )
+    save_run(
+        db,
+        ResearchRun(
+            asset=SEED_ASSETS[1],
+            status=RunStatus.COMPLETED,
+            created_at=now - timedelta(minutes=5),
+            started_at=now - timedelta(minutes=4),
+            completed_at=now - timedelta(minutes=2),
+        ),
+    )
+    overview = build_model_queue_overview(
+        db,
+        extraction_queue=_empty_extraction(now),
+        inference_statuses={
+            "extract": _inference(),
+            "research": {
+                **_inference(capacity=2, running=1),
+                "instances": [
+                    {"id": "research-0", "healthy": True, "model_available": True},
+                    {"id": "research-1", "healthy": False, "model_available": False},
+                ],
+            },
+            "assist": _inference(),
+            "code": _inference(),
+        },
+        threads={"extract": 4, "research": 16, "assist": 4, "code": 4},
+        limit=500,
+        settings=Settings(_env_file=None),
+        redis_client=FakeRedis(),
+        generated_at=now,
+    )
+
+    research = overview.queues[1]
+    assert research.metrics.average_execution_duration_ms == 2 * 60 * 1000
+    assert research.metrics.execution_p50_ms == 2 * 60 * 1000
+    assert research.metrics.execution_p90_ms == 2 * 60 * 1000
+    assert research.metrics.throughput_per_hour == 1 / 24
+    assert [instance.healthy for instance in research.instances] == [True, False]

@@ -636,6 +636,55 @@ def test_7b_fallback_queues_at_most_three_distinct_assets_idempotently(db, monke
     assert len(list_runs(db)) == 3
 
 
+def test_distinct_events_for_same_asset_share_one_queued_research(db, monkeypatch):
+    queued_tasks = []
+    monkeypatch.setattr(
+        worker.research_asset,
+        "apply_async",
+        lambda **kwargs: queued_tasks.append(kwargs) or SimpleNamespace(id=kwargs["task_id"]),
+    )
+    observed = datetime(2026, 8, 22, 12, 0, tzinfo=UTC)
+    candidate = CandidateAsset(
+        asset=SEED_ASSETS[0],
+        relationship="direct",
+        relevance=1,
+        rationale="verified by master data",
+    )
+    first = NewsEvent(
+        news_item_ids=[],
+        headline="Apple publishes first update",
+        event_type="other",
+        direct_impact="First update",
+        source_quality=SourceQuality.PROFESSIONAL,
+        published_at=observed,
+        observed_at=observed,
+        as_of=observed,
+        candidates=[candidate],
+    )
+    second = NewsEvent(
+        news_item_ids=[],
+        headline="Apple publishes second update",
+        event_type="other",
+        direct_impact="Second update",
+        source_quality=SourceQuality.PROFESSIONAL,
+        published_at=observed + timedelta(hours=1),
+        observed_at=observed + timedelta(hours=1),
+        as_of=observed + timedelta(hours=1),
+        candidates=[candidate],
+    )
+
+    worker.enqueue_event_researches(db, first, 1)
+    worker.enqueue_event_researches(db, second, 1)
+
+    runs = sorted(list_runs(db), key=lambda item: item.created_at)
+    assert len(queued_tasks) == 1
+    assert len(runs) == 2
+    assert runs[0].status is RunStatus.QUEUED
+    assert runs[0].trigger_event_ids == [first.id, second.id]
+    assert runs[1].status is RunStatus.COALESCED
+    assert runs[1].coalesced_into_run_id == runs[0].id
+
+
 def test_insufficient_run_requeues_when_persistent_cluster_gets_new_evidence(db, monkeypatch):
     queued_tasks = []
     monkeypatch.setattr(

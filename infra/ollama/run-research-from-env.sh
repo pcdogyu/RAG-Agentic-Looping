@@ -1,6 +1,7 @@
 #!/bin/sh
 set -eu
 
+instance="${1:?research instance index is required}"
 project_env="${OLLAMA_PROJECT_ENV_FILE:-/opt/RAG-Agentic-Looping/.env}"
 
 read_project_value() {
@@ -17,9 +18,7 @@ read_project_value() {
       }
     ' "$project_env")
   fi
-  if [ -z "$value" ]; then
-    value="$fallback"
-  fi
+  [ -n "$value" ] || value="$fallback"
   case "$value" in
     \"*\") value=${value#\"}; value=${value%\"} ;;
     \'*\') value=${value#\'}; value=${value%\'} ;;
@@ -27,11 +26,29 @@ read_project_value() {
   printf '%s' "$value"
 }
 
+case "$instance" in
+  0)
+    host="172.17.0.1:11435"
+    cpus="0-15"
+    node="0"
+    ;;
+  1)
+    host="172.17.0.1:11436"
+    cpus="20-35"
+    node="1"
+    ;;
+  *)
+    echo "unsupported research instance: $instance" >&2
+    exit 2
+    ;;
+esac
+
+export OLLAMA_HOST="$host"
 export OLLAMA_KEEP_ALIVE="$(read_project_value OLLAMA_KEEP_ALIVE -1)"
-export OLLAMA_MAX_LOADED_MODELS="$(read_project_value OLLAMA_MAX_LOADED_MODELS 3)"
-export OLLAMA_NUM_PARALLEL="$(read_project_value OLLAMA_NUM_PARALLEL 2)"
+export OLLAMA_MAX_LOADED_MODELS=1
+export OLLAMA_NUM_PARALLEL=1
 export OLLAMA_CONTEXT_LENGTH="$(read_project_value OLLAMA_CONTEXT_LENGTH 8192)"
 export OLLAMA_MAX_QUEUE="$(read_project_value OLLAMA_MAX_QUEUE 256)"
 export OLLAMA_LOAD_TIMEOUT="$(read_project_value OLLAMA_LOAD_TIMEOUT 10m)"
 
-exec /usr/local/bin/ollama serve
+exec numactl --physcpubind="$cpus" --membind="$node" /usr/local/bin/ollama serve

@@ -30,6 +30,7 @@ from backend.app.domain import (
     PaperOrder,
     Recommendation,
     ResearchRun,
+    RunStatus,
     as_utc,
     utc_now,
 )
@@ -294,6 +295,36 @@ def list_active_runs(db: Session) -> list[ResearchRun]:
     return [ResearchRun.model_validate(row.payload) for row in rows]
 
 
+def list_queued_runs(db: Session) -> list[ResearchRun]:
+    rows = db.scalars(
+        select(ResearchRunRow)
+        .where(ResearchRunRow.status == RunStatus.QUEUED.value)
+        .order_by(ResearchRunRow.created_at)
+    ).all()
+    return [ResearchRun.model_validate(row.payload) for row in rows]
+
+
+def get_mergeable_queued_run(
+    db: Session,
+    asset_id: str,
+    created_after: datetime,
+) -> ResearchRun | None:
+    rows = db.scalars(
+        select(ResearchRunRow)
+        .where(
+            ResearchRunRow.asset_id == asset_id,
+            ResearchRunRow.status == RunStatus.QUEUED.value,
+            ResearchRunRow.created_at >= created_after,
+        )
+        .order_by(ResearchRunRow.created_at)
+    ).all()
+    for row in rows:
+        run = ResearchRun.model_validate(row.payload)
+        if not run.historical_replay and run.retry_of_run_id is None:
+            return run
+    return None
+
+
 def list_failed_runs(db: Session, limit: int = 100) -> list[ResearchRun]:
     rows = db.scalars(
         select(ResearchRunRow)
@@ -302,6 +333,25 @@ def list_failed_runs(db: Session, limit: int = 100) -> list[ResearchRun]:
         .limit(limit)
     ).all()
     return [ResearchRun.model_validate(row.payload) for row in rows]
+
+
+def list_retryable_runs(db: Session, limit: int = 100) -> list[ResearchRun]:
+    rows = db.scalars(
+        select(ResearchRunRow)
+        .where(
+            ResearchRunRow.status.in_(
+                (RunStatus.FAILED.value, RunStatus.INSUFFICIENT_EVIDENCE.value)
+            )
+        )
+        .order_by(desc(ResearchRunRow.updated_at))
+        .limit(limit * 4)
+    ).all()
+    values = [ResearchRun.model_validate(row.payload) for row in rows]
+    return [
+        run
+        for run in values
+        if run.status is RunStatus.FAILED or run.retryable_reason is not None
+    ][:limit]
 
 
 def list_retries_for_run(db: Session, run_id: UUID) -> list[ResearchRun]:
@@ -385,6 +435,27 @@ def list_failed_event_research_runs(
         .limit(limit)
     ).all()
     return [EventResearchRun.model_validate(row.payload) for row in rows]
+
+
+def list_retryable_event_research_runs(
+    db: Session, limit: int = 100
+) -> list[EventResearchRun]:
+    rows = db.scalars(
+        select(EventResearchRunRow)
+        .where(
+            EventResearchRunRow.status.in_(
+                (RunStatus.FAILED.value, RunStatus.INSUFFICIENT_EVIDENCE.value)
+            )
+        )
+        .order_by(desc(EventResearchRunRow.updated_at))
+        .limit(limit * 2)
+    ).all()
+    values = [EventResearchRun.model_validate(row.payload) for row in rows]
+    return [
+        run
+        for run in values
+        if run.status is RunStatus.FAILED or run.retryable_reason is not None
+    ][:limit]
 
 
 def save_recommendation(db: Session, recommendation: Recommendation) -> None:

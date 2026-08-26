@@ -19,14 +19,19 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
 
     ollama_base_url: str = "http://localhost:11434"
+    ollama_research_base_urls: str = ""
     ollama_extract_model: str = "qwen2.5:3b"
     ollama_assist_model: str = "qwen2.5:7b"
     ollama_research_model: str = "qwen2.5:14b"
     ollama_code_model: str = "qwen2.5-coder:7b"
     ollama_timeout_seconds: int = 240
+    ollama_research_timeout_seconds: int = Field(default=900, ge=30, le=3600)
+    ollama_research_validation_retry_timeout_seconds: int = Field(
+        default=300, ge=30, le=900
+    )
     ollama_context_length: int = Field(default=8192, ge=512, le=262144)
     ollama_num_parallel: int = Field(default=2, ge=1, le=16)
-    ollama_max_loaded_models: int = Field(default=4, ge=1, le=16)
+    ollama_max_loaded_models: int = Field(default=3, ge=1, le=16)
     ollama_max_queue: int = Field(default=256, ge=1, le=65536)
     ollama_load_timeout: str = "10m"
     ollama_num_threads: int = Field(default=0, ge=0, le=256)
@@ -39,9 +44,13 @@ class Settings(BaseSettings):
     ollama_research_max_concurrency: int = Field(default=2, ge=1, le=16)
     ollama_code_max_concurrency: int = Field(default=1, ge=1, le=16)
     ollama_max_output_tokens: int = Field(default=1024, ge=64, le=8192)
+    ollama_research_max_output_tokens: int = Field(default=1024, ge=64, le=4096)
     ollama_keep_alive: str = "-1"
-    research_prompt_evidence_chars: int = Field(default=12000, ge=2000, le=24000)
-    research_prompt_context_chars: int = Field(default=4000, ge=1000, le=12000)
+    research_prompt_evidence_chars: int = Field(default=8000, ge=2000, le=24000)
+    research_prompt_context_chars: int = Field(default=2000, ge=1000, le=12000)
+    research_coalesce_window_hours: int = Field(default=24, ge=1, le=168)
+    research_heartbeat_seconds: int = Field(default=30, ge=10, le=120)
+    research_lease_seconds: int = Field(default=120, ge=30, le=600)
     model_audit_enabled: bool = True
     model_audit_retention_days: int = Field(default=90, ge=1, le=3650)
     embedding_model: str = "intfloat/multilingual-e5-small"
@@ -98,6 +107,15 @@ class Settings(BaseSettings):
     @property
     def cloud_verifier_enabled(self) -> bool:
         return bool(self.cloud_llm_base_url and self.cloud_llm_api_key and self.cloud_llm_model)
+
+    @property
+    def ollama_research_urls(self) -> list[str]:
+        values = [
+            value.strip().rstrip("/")
+            for value in self.ollama_research_base_urls.split(",")
+            if value.strip()
+        ]
+        return values or [self.ollama_base_url.rstrip("/")]
 
     @property
     def fmp_enabled(self) -> bool:

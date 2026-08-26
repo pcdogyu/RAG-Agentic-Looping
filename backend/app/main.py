@@ -62,13 +62,13 @@ from backend.app.storage import (
     list_event_research_runs,
     list_events,
     list_evolutions,
-    list_failed_event_research_runs,
-    list_failed_runs,
     list_news,
     list_outcomes,
     list_recent_events,
     list_recommendations,
     list_retries_for_run,
+    list_retryable_event_research_runs,
+    list_retryable_runs,
     list_runs,
     normalize_legacy_akshare_timestamps,
     save_evolution,
@@ -170,15 +170,54 @@ def health() -> dict:
     data_fresh = (
         news_age_seconds is None or news_age_seconds <= settings.scan_interval_minutes * 180
     )
-    ollama = False
+    ollama_instances: list[dict] = []
     models: list[str] = []
-    try:
-        response = httpx.get(f"{settings.ollama_base_url.rstrip('/')}/api/tags", timeout=2)
-        response.raise_for_status()
-        models = [item["name"] for item in response.json().get("models", [])]
-        ollama = True
-    except Exception:
-        pass
+    endpoints = [
+        ("main", settings.ollama_base_url.rstrip("/"), None),
+        *[
+            (f"research-{index}", url, settings.ollama_research_model)
+            for index, url in enumerate(settings.ollama_research_urls)
+            if url != settings.ollama_base_url.rstrip("/")
+        ],
+    ]
+    for instance_id, url, required_model in endpoints:
+        healthy = False
+        available_models: list[str] = []
+        loaded_models: list[str] = []
+        try:
+            response = httpx.get(f"{url}/api/tags", timeout=2)
+            response.raise_for_status()
+            available_models = [item["name"] for item in response.json().get("models", [])]
+            healthy = True
+            try:
+                running = httpx.get(f"{url}/api/ps", timeout=2)
+                running.raise_for_status()
+                loaded_models = [
+                    item["name"] for item in running.json().get("models", [])
+                ]
+            except Exception:
+                pass
+        except Exception:
+            pass
+        models.extend(available_models)
+        ollama_instances.append(
+            {
+                "id": instance_id,
+                "healthy": healthy,
+                "model_available": (
+                    bool(available_models)
+                    if required_model is None
+                    else required_model in available_models
+                ),
+                "model_loaded": (
+                    bool(loaded_models)
+                    if required_model is None
+                    else required_model in loaded_models
+                ),
+            }
+        )
+    models = list(dict.fromkeys(models))
+    ollama = bool(ollama_instances and ollama_instances[0]["healthy"])
     redis_ok = False
     task_failure_rate = None
     try:
@@ -200,6 +239,7 @@ def health() -> dict:
         "task_failure_rate": task_failure_rate,
         "ollama": ollama,
         "models": models,
+        "ollama_instances": ollama_instances,
         "fmp_configured": provider_settings.fmp_enabled,
         "fmp_mcp_configured": bool(settings.fmp_mcp_url),
         "latest_news_at": latest_news,
@@ -364,7 +404,7 @@ def model_inference_queues():
     items = []
     for spec in model_specs:
         model = str(spec["model"])
-        status = gateway.gpu.queue_status(model)
+        status = gateway.queue_status(model)
         if not status["observable"]:
             state = "unavailable"
         elif status["queued"]:
@@ -396,7 +436,7 @@ def model_queue_overview(
         "code": settings.ollama_code_model,
     }
     inference_statuses = {
-        lane: gateway.gpu.queue_status(model) for lane, model in models.items()
+        lane: gateway.queue_status(model) for lane, model in models.items()
     }
     threads = {
         lane: gateway.num_threads_for(model) for lane, model in models.items()
@@ -425,13 +465,16 @@ def failed_research_runs(
 ):
     items: list[dict] = []
     active_statuses = {RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.VERIFYING}
-    for run in list_failed_runs(db, min(limit * 4, 800)):
+    for run in list_retryable_runs(db, min(limit * 4, 800)):
         if run.retry_of_run_id is not None:
             continue
         retries = list_retries_for_run(db, run.id)
         latest_retry = retries[0] if retries else None
-        if get_recommendation_for_run(db, run.id) or any(
-            get_recommendation_for_run(db, retry.id) for retry in retries
+        if run.retryable_reason is None and get_recommendation_for_run(db, run.id):
+            continue
+        if any(
+            retry.retryable_reason is None and get_recommendation_for_run(db, retry.id)
+            for retry in retries
         ):
             continue
         if latest_retry and latest_retry.status in active_statuses:
@@ -446,7 +489,7 @@ def failed_research_runs(
                 "event": (
                     {"id": str(event.id), "headline": event.headline} if event else None
                 ),
-                "error": run.error,
+                "error": run.error or run.retryable_reason,
                 "updated_at": run.updated_at.isoformat(),
                 "retry_count": len(retries),
                 "latest_retry": (
@@ -460,7 +503,7 @@ def failed_research_runs(
                 ),
             }
         )
-    for run in list_failed_event_research_runs(db, limit):
+    for run in list_retryable_event_research_runs(db, limit):
         event = get_event(db, run.event_id)
         items.append(
             {
@@ -471,7 +514,7 @@ def failed_research_runs(
                 "event": (
                     {"id": str(event.id), "headline": event.headline} if event else None
                 ),
-                "error": run.error,
+                "error": run.error or run.retryable_reason,
                 "updated_at": run.updated_at.isoformat(),
                 "retry_count": run.retry_count,
                 "latest_retry": None,
@@ -486,8 +529,8 @@ def retry_research_run(run_id: UUID, db: Session = Depends(get_db)):
     original = get_run(db, run_id)
     if not original:
         raise HTTPException(404, "run not found")
-    if original.status is not RunStatus.FAILED:
-        raise HTTPException(409, "only failed research runs can be retried")
+    if original.status is not RunStatus.FAILED and original.retryable_reason is None:
+        raise HTTPException(409, "only failed or model-degraded research runs can be retried")
     if original.retry_of_run_id is not None:
         raise HTTPException(409, "retry the original failed research run")
     retries = list_retries_for_run(db, original.id)
@@ -521,8 +564,10 @@ def retry_event_research_run(run_id: UUID, db: Session = Depends(get_db)):
     run = get_event_research_run(db, run_id)
     if not run:
         raise HTTPException(404, "event research run not found")
-    if run.status is not RunStatus.FAILED:
-        raise HTTPException(409, "only failed event research runs can be retried")
+    if run.status is not RunStatus.FAILED and run.retryable_reason is None:
+        raise HTTPException(
+            409, "only failed or model-degraded event research runs can be retried"
+        )
     event = get_event(db, run.event_id)
     if not event:
         raise HTTPException(409, "source event no longer exists")

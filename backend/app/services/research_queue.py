@@ -105,7 +105,7 @@ def build_research_queue(
                 market=run.asset.market,
                 asset_class=run.asset.asset_class,
                 status=run.status,
-                task_count=1,
+                task_count=max(1, len(run.trigger_event_ids)),
                 queued_at=as_utc(run.created_at),
                 representative_queued_at=as_utc(run.created_at),
                 started_at=as_utc(run.started_at) if run.started_at else None,
@@ -117,7 +117,7 @@ def build_research_queue(
             representatives[run.asset.asset_id] = run
             continue
 
-        current.task_count += 1
+        current.task_count += max(1, len(run.trigger_event_ids))
         current.queued_at = min(current.queued_at, as_utc(run.created_at))
         current.updated_at = max(current.updated_at, as_utc(run.updated_at))
         representative = representatives[run.asset.asset_id]

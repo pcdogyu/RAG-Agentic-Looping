@@ -183,6 +183,11 @@ export type ModelQueueOverviewItem = {
   capacity: number;
   available: number;
   observable: boolean;
+  instances: Array<{
+    id: string;
+    healthy: boolean;
+    model_available: boolean;
+  }>;
   counts: {
     queued: number;
     running: number;
@@ -199,6 +204,9 @@ export type ModelQueueOverviewItem = {
     estimated_clear_ms: number | null;
     queue_duration_sample_count: number;
     execution_duration_sample_count: number;
+    execution_p50_ms: number | null;
+    execution_p90_ms: number | null;
+    throughput_per_hour: number | null;
   };
   total_tasks: number;
   truncated: boolean;
@@ -404,7 +412,7 @@ export function UnifiedModelQueuePanel({ queue }: { queue: ModelQueueOverviewIte
       <span>重试/验证<strong>{secondary}</strong></span>
       <span>完成/失败<strong>{queue.counts.completed}/{queue.counts.failed}</strong></span>
       <span title={`样本 ${queue.metrics.queue_duration_sample_count}`}>平均排队<strong>{formatQueueDuration(queue.metrics.average_queue_duration_ms)}</strong></span>
-      <span title={`样本 ${queue.metrics.execution_duration_sample_count}`}>平均执行<strong>{formatQueueDuration(queue.metrics.average_execution_duration_ms)}</strong></span>
+      <span title={`近 24 小时终态样本 ${queue.metrics.execution_duration_sample_count}`}>近24h平均执行<strong>{formatQueueDuration(queue.metrics.average_execution_duration_ms)}</strong></span>
     </div>
     <div className="model-queue-runtime">
       <span>模型等待<strong>{queue.counts.waiting_for_model}</strong></span>
@@ -412,7 +420,20 @@ export function UnifiedModelQueuePanel({ queue }: { queue: ModelQueueOverviewIte
       <span>CPU<strong>{queue.threads} 线程</strong></span>
       <span>最长等待<strong>{formatQueueDuration(queue.metrics.longest_wait_ms)}</strong></span>
       <span>预计清空<strong>{formatQueueDuration(queue.metrics.estimated_clear_ms)}</strong></span>
+      {queue.id === "research" && <>
+        <span>P50<strong>{formatQueueDuration(queue.metrics.execution_p50_ms)}</strong></span>
+        <span>P90<strong>{formatQueueDuration(queue.metrics.execution_p90_ms)}</strong></span>
+        <span>近24h吞吐<strong>{queue.metrics.throughput_per_hour === null ? "—" : `${queue.metrics.throughput_per_hour.toFixed(1)}/时`}</strong></span>
+      </>}
     </div>
+    {queue.id === "research" && !!queue.instances.length && <div className="research-instance-status" aria-label="14B 研究实例状态">
+      {queue.instances.map((instance) => {
+        const ready = instance.healthy && instance.model_available;
+        return <span className={ready ? "healthy" : "unavailable"} key={instance.id}>
+          <i />{instance.id} · {ready ? "可用" : (instance.healthy ? "模型缺失" : "离线")}
+        </span>;
+      })}
+    </div>}
     {!queue.observable && <div className="page-error">模型推理槽位状态暂时不可用。</div>}
     {queue.error && <div className="page-error">{queue.error}</div>}
     {queue.truncated && <div className="page-message">队列过长，当前显示前 500 张任务卡。</div>}

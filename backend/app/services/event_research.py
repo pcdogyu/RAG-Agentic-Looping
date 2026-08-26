@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -19,6 +18,7 @@ from backend.app.domain import (
 )
 from backend.app.llm import LlmGateway, gateway
 from backend.app.services.mcp_registry import SearchRequest, search_enabled_sources_sync
+from backend.app.services.prompt_budget import compact_evidence
 from backend.app.services.source_lineage import independent_evidence_groups, source_group
 from backend.app.storage import get_news, save_event_research_run
 
@@ -67,15 +67,27 @@ class EventResearchService:
         )
         save_event_research_run(self.db, run)
 
-        draft = self._generate_draft(event, run)
+        draft_error: str | None = None
+        try:
+            draft = self._generate_draft(event, run)
+        except Exception as exc:
+            draft_error = type(exc).__name__
+            run.retryable_reason = f"model_{draft_error}"
+            draft = self._fallback_draft(event, run)
         run.analysis_steps.append(
             AnalysisStep(
                 phase="event_report_drafting",
-                executor="ollama",
-                model=self.settings.ollama_research_model,
+                status="fallback" if draft_error else "completed",
+                executor="rules" if draft_error else "ollama",
+                model=(
+                    "event-research-fallback:v1"
+                    if draft_error
+                    else self.settings.ollama_research_model
+                ),
                 summary=(
                     f"已生成中性事件研报草稿，置信度 {draft.confidence:.0%}，"
                     f"引用 {len(draft.evidence_ids)} 条证据。"
+                    + (f" 模型不可用（{draft_error}），当前为保守结果。" if draft_error else "")
                 ),
                 metrics={
                     "confidence": draft.confidence,
@@ -106,7 +118,12 @@ class EventResearchService:
             )
             save_event_research_run(self.db, run)
             if added and self.settings.max_verification_rounds > 1:
-                draft = self._generate_draft(event, run)
+                try:
+                    draft = self._generate_draft(event, run)
+                    run.retryable_reason = None
+                except Exception as exc:
+                    run.retryable_reason = f"model_{type(exc).__name__}"
+                    draft = self._fallback_draft(event, run)
                 complete, missing, contradictions = self._verify(run, draft)
                 run.verification_round = 2
                 run.missing_requirements = missing
@@ -119,13 +136,32 @@ class EventResearchService:
             and run.verification_round < self.settings.max_verification_rounds
             and self._draft_can_be_repaired(missing, contradictions)
         ):
-            draft = self._revise(event, run, draft, missing, contradictions)
+            try:
+                draft = self._revise(event, run, draft, missing, contradictions)
+                revision_error = None
+                run.retryable_reason = None
+            except Exception as exc:
+                revision_error = type(exc).__name__
+                run.retryable_reason = f"model_{revision_error}"
+                draft.confidence = min(draft.confidence, 0.5)
             run.analysis_steps.append(
                 AnalysisStep(
                     phase="event_report_revision",
-                    executor="ollama",
-                    model=self.settings.ollama_research_model,
-                    summary="已根据结构和引用校验结果修订中性事件研报。",
+                    status="fallback" if revision_error else "completed",
+                    executor="rules" if revision_error else "ollama",
+                    model=(
+                        "event-revision-fallback:v1"
+                        if revision_error
+                        else self.settings.ollama_research_model
+                    ),
+                    summary=(
+                        "已根据结构和引用校验结果修订中性事件研报。"
+                        + (
+                            f" 模型不可用（{revision_error}），已保留保守草稿。"
+                            if revision_error
+                            else ""
+                        )
+                    ),
                 )
             )
             complete, missing, contradictions = self._verify(run, draft)
@@ -167,6 +203,19 @@ class EventResearchService:
         save_event_research_run(self.db, run)
         self._write_report(event, run)
         return run
+
+    @staticmethod
+    def _fallback_draft(event: NewsEvent, run: EventResearchRun) -> EventReportDraft:
+        return EventReportDraft(
+            summary=f"已收集 {len(run.evidence)} 条与“{event.headline}”相关的证据，但本地研究模型暂时不可用。",
+            affected_markets=[],
+            affected_sectors=[],
+            scenarios=["等待模型恢复后重新生成中性事件研报"],
+            risks=["当前为保守回退结果，尚未完成模型综合分析"],
+            unresolved_questions=["重新执行模型研究并复核证据引用"],
+            evidence_ids=[str(item.id) for item in run.evidence],
+            confidence=min(0.45, len(run.evidence) * 0.1),
+        )
 
     def _supplement_web_evidence(
         self, event: NewsEvent, run: EventResearchRun
@@ -238,7 +287,7 @@ class EventResearchService:
         prompt = (
             f"事件：{event.model_dump_json(exclude={'analysis_steps', 'candidates'})}\n"
             f"研究截止：{run.as_of.isoformat()}\n"
-            f"证据：{json.dumps([item.model_dump(mode='json') for item in run.evidence], ensure_ascii=False)[:24000]}\n"
+            f"证据：{compact_evidence(run.evidence, self.settings.research_prompt_evidence_chars)}\n"
             "生成不绑定证券的中性事件研报。区分事实、情景和未知；不得给个股评级、方向分数或交易指令。"
             "只能引用给定 evidence_ids；证据不足时降低 confidence 并列入 unresolved_questions。"
         )
@@ -264,7 +313,7 @@ class EventResearchService:
         prompt = (
             f"事件：{event.headline}\n当前草稿：{draft.model_dump_json()}\n"
             f"缺失：{missing}\n矛盾：{contradictions}\n"
-            f"证据：{json.dumps([item.model_dump(mode='json') for item in run.evidence], ensure_ascii=False)[:24000]}\n"
+            f"证据：{compact_evidence(run.evidence, self.settings.research_prompt_evidence_chars)}\n"
             "只修复结构或引用问题。不能通过编造补足独立来源，无法确认的内容写入待验证问题。"
         )
         payload = self.llm.generate_json(

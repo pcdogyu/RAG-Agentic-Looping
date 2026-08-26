@@ -100,6 +100,8 @@ def _run_status(run: ResearchRun | EventResearchRun) -> NewsProcessingStatus:
         return "revising"
     if run.status in {RunStatus.QUEUED, RunStatus.RUNNING}:
         return "researching"
+    if run.status is RunStatus.COALESCED:
+        return "researching"
     if run.status is RunStatus.COMPLETED:
         return "completed"
     if run.status is RunStatus.INSUFFICIENT_EVIDENCE:

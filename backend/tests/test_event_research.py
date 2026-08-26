@@ -48,6 +48,11 @@ class EvidenceOnlyEventResearchLlm(EventResearchLlm):
         return payload
 
 
+class FailingEventResearchLlm:
+    def generate_json(self, **kwargs):
+        raise TimeoutError("research model timeout")
+
+
 def test_event_report_is_neutral_and_marks_single_source_evidence_incomplete(db, tmp_path):
     observed = datetime(2026, 8, 22, 12, 0, tzinfo=UTC)
     news = NewsItem(
@@ -94,6 +99,45 @@ def test_event_report_is_neutral_and_marks_single_source_evidence_incomplete(db,
     assert log["result"]["kind"] == "event_report"
     assert "rating" not in log["result"]
     assert log["asset"] is None
+
+
+def test_event_model_timeout_returns_retryable_conservative_report(db, tmp_path):
+    observed = datetime(2026, 8, 22, 12, 0, tzinfo=UTC)
+    news = NewsItem(
+        source="Official Bulletin",
+        source_quality=SourceQuality.OFFICIAL,
+        title="官方发布供应链更新",
+        summary="官方披露了最新进展。",
+        url="https://official.example/update",
+        published_at=observed,
+        observed_at=observed,
+        as_of=observed,
+        content_hash=sha256(b"event-timeout").hexdigest(),
+    )
+    event = NewsEvent(
+        news_item_ids=[news.id],
+        headline=news.title,
+        event_type="supply_chain",
+        direct_impact=news.summary,
+        source_quality=news.source_quality,
+        published_at=observed,
+        observed_at=observed,
+        as_of=observed,
+    )
+    save_news(db, news)
+    save_event(db, event)
+
+    result = EventResearchService(
+        db,
+        Settings(_env_file=None, reports_dir=tmp_path),
+        FailingEventResearchLlm(),
+    ).run(event, EventResearchRun(event_id=event.id, as_of=observed))
+
+    assert result.status.value == "insufficient_evidence"
+    assert result.retryable_reason == "model_TimeoutError"
+    assert result.report is not None
+    assert result.report.confidence <= 0.45
+    assert any(step.status == "fallback" for step in result.analysis_steps)
 
 
 def test_syndicated_reprints_count_as_one_independent_source(db, tmp_path):

@@ -56,6 +56,7 @@ class RunStatus(StrEnum):
     COMPLETED = "completed"
     INSUFFICIENT_EVIDENCE = "insufficient_evidence"
     FAILED = "failed"
+    COALESCED = "coalesced"
 
 
 class Rating(StrEnum):
@@ -218,12 +219,16 @@ class Recommendation(BaseModel):
 class ResearchRun(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     event_id: UUID | None = None
+    trigger_event_ids: list[UUID] = Field(default_factory=list)
     asset: AssetRef
     status: RunStatus = RunStatus.QUEUED
     as_of: datetime = Field(default_factory=utc_now)
     historical_replay: bool = False
     retry_of_run_id: UUID | None = None
     retry_attempt: int = Field(default=0, ge=0)
+    celery_task_id: str | None = None
+    coalesced_into_run_id: UUID | None = None
+    retryable_reason: str | None = None
     verification_round: int = 0
     missing_requirements: list[str] = Field(default_factory=list)
     contradictions: list[str] = Field(default_factory=list)
@@ -235,6 +240,12 @@ class ResearchRun(BaseModel):
     started_at: datetime | None = None
     completed_at: datetime | None = None
     updated_at: datetime = Field(default_factory=utc_now)
+
+    @model_validator(mode="after")
+    def include_primary_trigger(self) -> ResearchRun:
+        if self.event_id is not None and self.event_id not in self.trigger_event_ids:
+            self.trigger_event_ids.insert(0, self.event_id)
+        return self
 
 
 class EventReport(BaseModel):
@@ -257,6 +268,8 @@ class EventResearchRun(BaseModel):
     as_of: datetime = Field(default_factory=utc_now)
     verification_round: int = 0
     retry_count: int = Field(default=0, ge=0)
+    celery_task_id: str | None = None
+    retryable_reason: str | None = None
     missing_requirements: list[str] = Field(default_factory=list)
     contradictions: list[str] = Field(default_factory=list)
     evidence: list[Evidence] = Field(default_factory=list)

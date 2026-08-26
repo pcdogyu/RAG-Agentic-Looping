@@ -21,6 +21,7 @@ from backend.app.domain import (
     utc_now,
 )
 from backend.app.model_audit import redact_text
+from backend.app.services.research_lifecycle import live_research_run_ids
 from backend.app.services.research_queue import build_research_queue
 from backend.app.storage import (
     list_event_research_runs,
@@ -77,6 +78,15 @@ class ModelQueueMetrics(BaseModel):
     estimated_clear_ms: int | None = Field(default=None, ge=0)
     queue_duration_sample_count: int = Field(default=0, ge=0)
     execution_duration_sample_count: int = Field(default=0, ge=0)
+    execution_p50_ms: int | None = Field(default=None, ge=0)
+    execution_p90_ms: int | None = Field(default=None, ge=0)
+    throughput_per_hour: float | None = Field(default=None, ge=0)
+
+
+class ModelQueueInstance(BaseModel):
+    id: str
+    healthy: bool
+    model_available: bool
 
 
 class ModelQueueTask(BaseModel):
@@ -110,6 +120,7 @@ class ModelQueueItem(BaseModel):
     capacity: int = Field(ge=0)
     available: int = Field(ge=0)
     observable: bool = True
+    instances: list[ModelQueueInstance] = Field(default_factory=list)
     counts: ModelQueueCounts
     metrics: ModelQueueMetrics
     total_tasks: int = Field(ge=0)
@@ -460,22 +471,26 @@ def _counts(tasks: list[ModelQueueTask]) -> ModelQueueCounts:
     counts = ModelQueueCounts()
     for item in tasks:
         if item.status in {"queued", "proposed"}:
-            counts.queued += item.task_count
+            counts.queued += 1
         elif item.status in RUNNING_STATUSES:
-            counts.running += item.task_count
+            counts.running += 1
         elif item.status == "retrying":
-            counts.retrying += item.task_count
+            counts.retrying += 1
         elif item.status == "verifying":
-            counts.verifying += item.task_count
+            counts.verifying += 1
         elif item.status in FAILED_STATUSES:
-            counts.failed += item.task_count
+            counts.failed += 1
         elif item.status in COMPLETED_STATUSES:
-            counts.completed += item.task_count
+            counts.completed += 1
     return counts
 
 
 def _metrics(
-    tasks: list[ModelQueueTask], counts: ModelQueueCounts, capacity: int
+    tasks: list[ModelQueueTask],
+    counts: ModelQueueCounts,
+    capacity: int,
+    *,
+    use_throughput: bool = False,
 ) -> ModelQueueMetrics:
     queue_durations = [
         item.queue_duration_ms for item in tasks if item.queue_duration_ms is not None
@@ -484,6 +499,7 @@ def _metrics(
         item.execution_duration_ms
         for item in tasks
         if item.execution_duration_ms is not None
+        and (item.status in COMPLETED_STATUSES or item.status in FAILED_STATUSES)
     ]
     waiting = [
         item.queue_duration_ms
@@ -494,9 +510,25 @@ def _metrics(
         sum(execution_durations) // len(execution_durations) if execution_durations else None
     )
     work = counts.queued + counts.retrying + counts.running + counts.verifying
+    completed = [
+        item
+        for item in tasks
+        if item.status in COMPLETED_STATUSES and item.completed_at is not None
+    ]
+    throughput_per_hour = len(completed) / 24 if use_throughput and completed else None
     estimated_clear = None
-    if average_execution is not None and capacity > 0 and work > 0:
+    if throughput_per_hour and work > 0:
+        estimated_clear = ceil(work / throughput_per_hour * 60 * 60 * 1000)
+    elif average_execution is not None and capacity > 0 and work > 0:
         estimated_clear = ceil(work / capacity) * average_execution
+    ordered_execution = sorted(execution_durations)
+
+    def percentile(ratio: float) -> int | None:
+        if not ordered_execution:
+            return None
+        index = ceil(len(ordered_execution) * ratio) - 1
+        return ordered_execution[max(0, min(index, len(ordered_execution) - 1))]
+
     return ModelQueueMetrics(
         average_queue_duration_ms=(
             sum(queue_durations) // len(queue_durations) if queue_durations else None
@@ -506,6 +538,9 @@ def _metrics(
         estimated_clear_ms=estimated_clear,
         queue_duration_sample_count=len(queue_durations),
         execution_duration_sample_count=len(execution_durations),
+        execution_p50_ms=percentile(0.5),
+        execution_p90_ms=percentile(0.9),
+        throughput_per_hour=throughput_per_hour,
     )
 
 
@@ -568,12 +603,19 @@ def _queue_item(
     for field, value in (count_overrides or {}).items():
         if hasattr(counts, field):
             setattr(counts, field, max(0, int(value or 0)))
-    metrics = _metrics(tasks, counts, capacity)
+    metrics = _metrics(
+        tasks,
+        counts,
+        capacity,
+        use_throughput=queue_id == "research",
+    )
     for field, value in (metric_overrides or {}).items():
         if hasattr(metrics, field):
             setattr(metrics, field, value)
     work = counts.queued + counts.retrying + counts.running + counts.verifying
     if (
+        not metrics.throughput_per_hour
+        and
         metrics.average_execution_duration_ms is not None
         and capacity > 0
         and work > 0
@@ -593,6 +635,7 @@ def _queue_item(
         capacity=max(0, capacity),
         available=available,
         observable=observable,
+        instances=[ModelQueueInstance.model_validate(item) for item in inference.get("instances", [])],
         counts=counts,
         metrics=metrics,
         total_tasks=sum(
@@ -648,12 +691,18 @@ def _research_tasks(
     model: str,
     limit: int,
     now: datetime,
+    live_run_ids: set[str] | None = None,
 ) -> list[ModelQueueTask]:
     cutoff = now - MODEL_TASK_RETENTION
     active_runs = [
         run
         for run in runs
         if run.status in {RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.VERIFYING}
+        and (
+            run.status is RunStatus.QUEUED
+            or live_run_ids is None
+            or str(run.id) in live_run_ids
+        )
     ]
     failed_runs = [
         run
@@ -755,6 +804,12 @@ def _research_tasks(
             and as_utc(run.updated_at) < cutoff
         ):
             continue
+        if (
+            run.status in {RunStatus.RUNNING, RunStatus.VERIFYING}
+            and live_run_ids is not None
+            and str(run.id) not in live_run_ids
+        ):
+            continue
         event = event_map.get(str(run.event_id))
         started_step = next(
             (
@@ -852,6 +907,7 @@ def build_model_queue_overview(
         source_errors["code"] = "代码演进候选状态暂时不可用。"
 
     extract_tasks = _extraction_tasks(extraction_queue, now)
+    research_live_ids = live_research_run_ids(client) if client is not None else None
     research_tasks = _research_tasks(
         runs,
         event_runs,
@@ -859,6 +915,7 @@ def build_model_queue_overview(
         model=active_settings.ollama_research_model,
         limit=limit,
         now=now,
+        live_run_ids=research_live_ids,
     )
     assist_records = list_model_task_records(
         "assist", now=now, redis_client=client

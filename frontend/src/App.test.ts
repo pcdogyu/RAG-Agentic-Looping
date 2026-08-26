@@ -461,6 +461,7 @@ describe("research queue page", () => {
     capacity: 1,
     available: 0,
     observable: true,
+    instances: [],
     counts: {
       queued: 2,
       running: 1,
@@ -477,6 +478,9 @@ describe("research queue page", () => {
       estimated_clear_ms: 720_000,
       queue_duration_sample_count: 4,
       execution_duration_sample_count: 3,
+      execution_p50_ms: 150_000,
+      execution_p90_ms: 210_000,
+      throughput_per_hour: 2.5,
     },
     total_tasks: 14,
     truncated: false,
@@ -694,6 +698,26 @@ describe("research queue page", () => {
     expect(markup).toContain("预计清空<strong>12分0秒</strong>");
     expect(markup).toContain("映射记录暂时不可用");
     expect(markup).toContain("当前显示前 500 张任务卡");
+  });
+
+  it("renders research instance health and rolling latency metrics", () => {
+    const markup = renderToStaticMarkup(createElement(UnifiedModelQueuePanel, {
+      queue: overviewQueue({
+        id: "research",
+        model: "qwen2.5:14b",
+        purpose: "标的研究",
+        instances: [
+          { id: "research-0", healthy: true, model_available: true },
+          { id: "research-1", healthy: false, model_available: false },
+        ],
+      }),
+    }));
+
+    expect(markup).toContain("P50<strong>2分30秒</strong>");
+    expect(markup).toContain("P90<strong>3分30秒</strong>");
+    expect(markup).toContain("近24h吞吐<strong>2.5/时</strong>");
+    expect(markup).toContain("research-0 · 可用");
+    expect(markup).toContain("research-1 · 离线");
   });
 });
 
