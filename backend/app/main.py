@@ -34,6 +34,7 @@ from backend.app.services.events import EventService
 from backend.app.services.evolution import EvolutionError, EvolutionService
 from backend.app.services.fact_sources import get_effective_settings
 from backend.app.services.mcp_registry import seed_integrations
+from backend.app.services.news_board import NewsBoardResponse, build_news_board
 from backend.app.services.notifications import notifier
 from backend.app.services.portfolio import PortfolioError, PortfolioService
 from backend.app.services.research import ResearchService
@@ -225,6 +226,19 @@ def events(
     db: Session = Depends(get_db),
 ):
     return list_events(db, limit, as_of)
+
+
+@app.get("/api/v1/news-board", response_model=NewsBoardResponse)
+def news_board(
+    per_source: int = Query(default=50, ge=1, le=50),
+    db: Session = Depends(get_db),
+):
+    extraction_queue = get_news_extraction_queue(limit=200)
+    return build_news_board(
+        db,
+        per_source=per_source,
+        extraction_items=extraction_queue.get("items", []),
+    )
 
 
 @app.post("/api/v1/scan")

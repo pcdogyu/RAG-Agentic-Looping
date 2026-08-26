@@ -20,6 +20,10 @@ import {
   formatQueueDuration,
   ModelInferenceQueuePanel,
   navigationGroups,
+  newsBoardRefreshIntervalMs,
+  newsBoardStatusLabels,
+  newsSourceDesktopColumns,
+  NewsSourcePanel,
   queueDesktopColumns,
   QueueGrid,
   NewsExtractionList,
@@ -346,11 +350,12 @@ describe("model log navigation and filters", () => {
 });
 
 describe("shared hash navigation", () => {
-  it("recognizes all eight routes and falls back to home", () => {
+  it("recognizes all ten routes and falls back to home", () => {
     expect(routeFromHash("#/home")).toBe("home");
     expect(routeFromHash("#/source-filter")).toBe("source-filter");
     expect(routeFromHash("#/conclusions")).toBe("conclusions");
     expect(routeFromHash("#/sources")).toBe("sources");
+    expect(routeFromHash("#/news")).toBe("news");
     expect(routeFromHash("#/queue")).toBe("queue");
     expect(routeFromHash("#/analysis")).toBe("analysis");
     expect(routeFromHash("#/model-logs")).toBe("model-logs");
@@ -362,25 +367,80 @@ describe("shared hash navigation", () => {
 
   it("renders grouped menu links in order and exposes the current page accessibly", () => {
     expect(navigationGroups.left.map((item) => item.route)).toEqual([
-      "home", "source-filter", "sources", "queue", "analysis", "conclusions",
+      "home", "source-filter", "sources", "news", "queue", "analysis", "conclusions",
     ]);
     expect(navigationGroups.right.map((item) => item.route)).toEqual([
       "model-logs", "search", "weknora",
     ]);
     const markup = renderToStaticMarkup(createElement(TopNavigation, { current: "source-filter" }));
+    const newsMarkup = renderToStaticMarkup(createElement(TopNavigation, { current: "news" }));
     const queueMarkup = renderToStaticMarkup(createElement(TopNavigation, { current: "queue" }));
     const analysisMarkup = renderToStaticMarkup(createElement(TopNavigation, { current: "analysis" }));
-    expect((markup.match(/<a /g) || []).length).toBe(9);
+    expect((markup.match(/<a /g) || []).length).toBe(10);
     expect(markup).toContain('href="#/source-filter" aria-current="page"');
+    expect(newsMarkup).toContain('href="#/news" aria-current="page"');
     expect(queueMarkup).toContain('href="#/queue" aria-current="page"');
     expect(analysisMarkup).toContain('href="#/analysis" aria-current="page"');
     expect(markup.indexOf("数据源过滤")).toBeLessThan(markup.indexOf(">数据源<"));
-    expect(markup.indexOf(">数据源<")).toBeLessThan(markup.indexOf(">队列<"));
+    expect(markup.indexOf(">数据源<")).toBeLessThan(markup.indexOf(">新闻<"));
+    expect(markup.indexOf(">新闻<")).toBeLessThan(markup.indexOf(">队列<"));
     expect(markup.indexOf(">队列<")).toBeLessThan(markup.indexOf("分析链路"));
     expect(markup.indexOf("分析链路")).toBeLessThan(markup.indexOf("结论"));
     expect(markup.indexOf("结论")).toBeLessThan(markup.indexOf("模型日志"));
     expect(markup).toContain("搜索引擎");
     expect(markup).toContain("WeKnora");
+  });
+});
+
+describe("news board page", () => {
+  it("renders one source panel with linked news, status, quality, and assets", () => {
+    const markup = renderToStaticMarkup(createElement(NewsSourcePanel, {
+      group: {
+        source: "金十",
+        latest_published_at: "2026-08-26T04:03:00Z",
+        item_count: 1,
+        error: null,
+        items: [{
+          id: "news-1",
+          title: "上市公司发布最新业绩",
+          summary: "业绩摘要",
+          url: "https://example.com/news-1",
+          source_quality: "professional",
+          published_at: "2026-08-26T04:03:00Z",
+          observed_at: "2026-08-26T04:03:01Z",
+          status: "mapping",
+          status_updated_at: "2026-08-26T04:03:02Z",
+          events: [{ id: "event-1", headline: "业绩", event_type: "earnings", priority: 0.8 }],
+          assets: [{ asset_id: "cn:sse:600000", symbol: "600000", name: "浦发银行", market: "CN" }],
+        }],
+      },
+    }));
+
+    expect(markup).toContain('class="news-source-panel"');
+    expect(markup).toContain("金十");
+    expect(markup).toContain("最新 1/50 条");
+    expect(markup).toContain('href="https://example.com/news-1"');
+    expect(markup).toContain("股票映射中");
+    expect(markup).toContain("专业财经");
+    expect(markup).toContain("600000");
+    expect(newsBoardStatusLabels.revising).toBe("修订中");
+    expect(newsBoardRefreshIntervalMs).toBe(5000);
+    expect(newsSourceDesktopColumns).toBe(3);
+  });
+
+  it("keeps one source failure local to that source panel", () => {
+    const markup = renderToStaticMarkup(createElement(NewsSourcePanel, {
+      group: {
+        source: "FMP Stock News",
+        latest_published_at: "2026-08-26T04:03:00Z",
+        item_count: 0,
+        items: [],
+        error: "source query failed",
+      },
+    }));
+
+    expect(markup).toContain("FMP Stock News");
+    expect(markup).toContain("source query failed");
   });
 });
 

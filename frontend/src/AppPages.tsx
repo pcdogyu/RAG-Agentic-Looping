@@ -3,13 +3,14 @@ import { FormEvent, useCallback, useEffect, useState } from "react";
 import AnalysisPage, { type AnalysisLog } from "./AnalysisPage";
 import ModelLogsPage from "./ModelLogs";
 
-export type AppRoute = "home" | "source-filter" | "sources" | "queue" | "analysis" | "conclusions" | "model-logs" | "search" | "weknora";
+export type AppRoute = "home" | "source-filter" | "sources" | "news" | "queue" | "analysis" | "conclusions" | "model-logs" | "search" | "weknora";
 
 export const navigationGroups: Record<"left" | "right", Array<{ route: AppRoute; label: string }>> = {
   left: [
     { route: "home", label: "首页" },
     { route: "source-filter", label: "数据源过滤" },
     { route: "sources", label: "数据源" },
+    { route: "news", label: "新闻" },
     { route: "queue", label: "队列" },
     { route: "analysis", label: "分析链路" },
     { route: "conclusions", label: "结论" },
@@ -88,6 +89,8 @@ function PageHeading({ eyebrow, title, copy }: { eyebrow: string; title: string;
 
 export const queueRefreshIntervalMs = 5000;
 export const queueDesktopColumns = 5;
+export const newsBoardRefreshIntervalMs = 5000;
+export const newsSourceDesktopColumns = 3;
 
 export function formatQueueDuration(value: number | null | undefined) {
   if (value == null) return "—";
@@ -421,6 +424,151 @@ export function QueuePage({ apiBase }: { apiBase: string }) {
       {!inferenceQueues.length && inferenceLoading && <div className="page-message model-inference-loading">正在读取 7B 模型队列…</div>}
       {inferenceQueues.map((item) => <ModelInferenceQueuePanel item={item} key={item.lane} />)}
     </div>
+  </section>;
+}
+
+export type NewsBoardStatus =
+  | "extracting"
+  | "mapping"
+  | "researching"
+  | "revising"
+  | "completed"
+  | "insufficient_evidence"
+  | "failed"
+  | "pending";
+
+export type NewsBoardItem = {
+  id: string;
+  title: string;
+  summary: string;
+  url: string;
+  source_quality: string;
+  published_at: string;
+  observed_at: string;
+  status: NewsBoardStatus;
+  status_updated_at: string;
+  events: Array<{ id: string; headline: string; event_type: string; priority: number }>;
+  assets: Array<{ asset_id: string; symbol: string; name: string; market: string }>;
+};
+
+export type NewsBoardSource = {
+  source: string;
+  latest_published_at: string;
+  item_count: number;
+  items: NewsBoardItem[];
+  error: string | null;
+};
+
+type NewsBoardResponse = {
+  generated_at: string;
+  per_source: number;
+  total_sources: number;
+  sources: NewsBoardSource[];
+};
+
+export const newsBoardStatusLabels: Record<NewsBoardStatus, string> = {
+  extracting: "抽取中",
+  mapping: "股票映射中",
+  researching: "研究中",
+  revising: "修订中",
+  completed: "已完成",
+  insufficient_evidence: "证据不足",
+  failed: "失败",
+  pending: "待处理",
+};
+
+const eventTypeLabels: Record<string, string> = {
+  earnings: "业绩",
+  product: "产品",
+  regulation: "监管",
+  m_and_a: "并购",
+  management: "管理层",
+  security: "安全",
+  macro: "宏观",
+  supply_chain: "供应链",
+  tokenomics: "代币经济",
+  other: "其他",
+};
+
+const sourceQualityLabels: Record<string, string> = {
+  official: "官方",
+  primary: "一手来源",
+  professional: "专业财经",
+  aggregator: "聚合来源",
+  social: "社交来源",
+};
+
+export function NewsSourcePanel({ group }: { group: NewsBoardSource }) {
+  return <section className="news-source-panel">
+    <header>
+      <div><p className="eyebrow">NEWS SOURCE</p><h3>{group.source}</h3></div>
+      <span>最新 {group.item_count}/50 条</span>
+    </header>
+    {group.error && <div className="page-error">{group.error}</div>}
+    {!group.error && !group.items.length && <div className="page-empty">该来源暂无新闻。</div>}
+    <div className="news-source-items">
+      {group.items.map((item) => {
+        const eventType = item.events[0]?.event_type;
+        return <article className={`news-board-item ${item.status}`} key={item.id}>
+          <div className="news-board-item-heading">
+            <span className="news-event-type">{eventType ? (eventTypeLabels[eventType] ?? eventType) : "待归类"}</span>
+            <span className={`news-processing-status ${item.status}`}><i />{newsBoardStatusLabels[item.status]}</span>
+          </div>
+          <h4><a href={item.url} target="_blank" rel="noreferrer" title={item.title}>{item.title}</a></h4>
+          <div className="news-board-meta">
+            <time dateTime={item.published_at}>{new Date(item.published_at).toLocaleString("zh-CN")}</time>
+            <span>{sourceQualityLabels[item.source_quality] ?? item.source_quality}</span>
+          </div>
+          {!!item.assets.length && <div className="news-board-assets" aria-label="关联标的">
+            {item.assets.slice(0, 5).map((asset) => <span key={asset.asset_id} title={`${asset.name} · ${asset.market}`}>{asset.symbol}</span>)}
+            {item.assets.length > 5 && <small>+{item.assets.length - 5}</small>}
+          </div>}
+        </article>;
+      })}
+    </div>
+  </section>;
+}
+
+export function NewsPage({ apiBase }: { apiBase: string }) {
+  const [board, setBoard] = useState<NewsBoardResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  const load = useCallback(async (signal?: AbortSignal, showLoading = false) => {
+    if (showLoading) setLoading(true);
+    try {
+      const response = await fetch(`${apiBase}/api/v1/news-board?per_source=50`, { signal });
+      if (!response.ok) throw new Error(`新闻看板请求失败（HTTP ${response.status}）`);
+      setBoard(await response.json() as NewsBoardResponse);
+      setError("");
+    } catch (reason) {
+      if (signal?.aborted) return;
+      setError(reason instanceof Error ? reason.message : "新闻看板请求失败");
+    } finally {
+      if (!signal?.aborted) setLoading(false);
+    }
+  }, [apiBase]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void load(controller.signal, true);
+    const timer = window.setInterval(() => void load(controller.signal), newsBoardRefreshIntervalMs);
+    return () => {
+      controller.abort();
+      window.clearInterval(timer);
+    };
+  }, [load]);
+
+  return <section className="app-page news-page">
+    <PageHeading eyebrow="LIVE NEWS PIPELINE" title="新闻" copy="按来源查看最新 50 条新闻及其抽取、股票映射、研究和修订状态；页面每 5 秒自动更新。" />
+    <div className="news-board-toolbar">
+      <span>{board ? `${board.total_sources} 个来源 · 每来源最新 ${board.per_source} 条` : "正在读取新闻来源…"}</span>
+      <button type="button" disabled={loading} onClick={() => void load(undefined, true)}>{loading ? "刷新中…" : "立即刷新"}</button>
+    </div>
+    {error && <div className="page-error">{error}</div>}
+    {!board && loading && <div className="page-message">正在读取新闻状态…</div>}
+    {board && !board.sources.length && <div className="page-empty">当前没有已入库新闻。</div>}
+    {board && <div className="news-source-grid" data-columns={newsSourceDesktopColumns}>{board.sources.map((group) => <NewsSourcePanel group={group} key={group.source} />)}</div>}
   </section>;
 }
 
@@ -1068,6 +1216,7 @@ export function RoutedPage({
   if (route === "source-filter") return <SourceFilterPage apiBase={apiBase} />;
   if (route === "conclusions") return <ConclusionsPage apiBase={apiBase} />;
   if (route === "sources") return <SourcesPage apiBase={apiBase} />;
+  if (route === "news") return <NewsPage apiBase={apiBase} />;
   if (route === "queue") return <QueuePage apiBase={apiBase} />;
   if (route === "analysis") return <AnalysisPage logs={analysisLogs} />;
   if (route === "search") return <SearchPage apiBase={apiBase} />;

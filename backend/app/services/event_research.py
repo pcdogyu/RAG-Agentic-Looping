@@ -85,6 +85,8 @@ class EventResearchService:
         )
         save_event_research_run(self.db, run)
 
+        run.status = RunStatus.VERIFYING
+        save_event_research_run(self.db, run)
         complete, missing, contradictions = self._verify(run, draft)
         run.verification_round = 1
         run.missing_requirements = missing
