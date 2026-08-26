@@ -183,6 +183,53 @@ def test_model_semaphore_enforces_independent_local_capacities():
                         pass
 
 
+def test_model_semaphore_renews_short_redis_lease(monkeypatch):
+    import time as time_module
+
+    class FakeLock:
+        def __init__(self):
+            self.extensions = 0
+            self.released = False
+
+        def acquire(self, blocking=False):
+            return True
+
+        def extend(self, _seconds, replace_ttl=False):
+            assert replace_ttl is True
+            self.extensions += 1
+
+        def owned(self):
+            return not self.released
+
+        def release(self):
+            self.released = True
+
+    lock = FakeLock()
+
+    class FakeRedis:
+        def zadd(self, *_args):
+            return 1
+
+        def zrem(self, *_args):
+            return 1
+
+        def lock(self, _key, *, timeout, blocking_timeout, thread_local):
+            assert timeout == 120
+            assert blocking_timeout == 0
+            assert thread_local is False
+            return lock
+
+    semaphore = GpuSemaphore(Settings(ollama_research_max_concurrency=1))
+    semaphore._redis = FakeRedis()
+    monkeypatch.setattr("backend.app.llm.INFERENCE_LOCK_HEARTBEAT_SECONDS", 0.01)
+
+    with semaphore.acquire(semaphore.settings.ollama_research_model, timeout=0.1):
+        time_module.sleep(0.035)
+
+    assert lock.extensions >= 2
+    assert lock.released is True
+
+
 class _null_context:
     def __enter__(self):
         return None

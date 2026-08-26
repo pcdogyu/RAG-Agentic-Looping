@@ -353,7 +353,17 @@ function taskSourceLabel(source: string | null) {
   return source || "业务任务";
 }
 
-export function ModelQueueTaskGrid({ queue }: { queue: ModelQueueOverviewItem }) {
+const cancellableResearchStatuses = new Set(["queued", "running", "retrying", "verifying"]);
+
+export function ModelQueueTaskGrid({
+  queue,
+  onCancel,
+  cancellingTaskId,
+}: {
+  queue: ModelQueueOverviewItem;
+  onCancel?: (task: ModelQueueTask) => void;
+  cancellingTaskId?: string | null;
+}) {
   if (!queue.enabled && queue.id === "code") {
     return <div className="page-empty">代码演进未启用（EVOLUTION_ENABLED=false）。</div>;
   }
@@ -363,11 +373,24 @@ export function ModelQueueTaskGrid({ queue }: { queue: ModelQueueOverviewItem })
   return <div className="model-task-grid" data-queue={queue.id}>{queue.tasks.map((task) => {
     const isMapping = task.kind === "asset_mapping";
     const isEvolution = task.kind === "code_evolution";
+    const isCancellableResearch = queue.id === "research"
+      && ["asset_research", "event_research"].includes(task.kind)
+      && cancellableResearchStatuses.has(task.status);
     const branch = queueMetricValue(task.metrics.branch);
     return <article className={`model-task-card ${task.status}`} key={task.task_id} title={task.title}>
       <div className="model-task-heading">
         <span className="model-task-status"><i />{modelTaskStatusLabels[task.status] ?? task.status}</span>
-        <small>{taskSourceLabel(task.source)}</small>
+        <div className="model-task-heading-actions">
+          <small>{taskSourceLabel(task.source)}</small>
+          {isCancellableResearch && <button
+            type="button"
+            className="model-task-cancel"
+            aria-label={`取消 ${task.title} 的研究`}
+            title="取消该标的研究"
+            disabled={cancellingTaskId === task.task_id}
+            onClick={() => onCancel?.(task)}
+          >×</button>}
+        </div>
       </div>
       <h4>{task.title}</h4>
       <p>{task.subtitle || task.kind}</p>
@@ -395,8 +418,21 @@ export function ModelQueueTaskGrid({ queue }: { queue: ModelQueueOverviewItem })
   })}</div>;
 }
 
-export function UnifiedModelQueuePanel({ queue }: { queue: ModelQueueOverviewItem }) {
+export function UnifiedModelQueuePanel({
+  queue,
+  onCancelTask,
+  onClear,
+  cancellingTaskId,
+  clearing,
+}: {
+  queue: ModelQueueOverviewItem;
+  onCancelTask?: (task: ModelQueueTask) => void;
+  onClear?: () => void;
+  cancellingTaskId?: string | null;
+  clearing?: boolean;
+}) {
   const secondary = queue.counts.retrying + queue.counts.verifying;
+  const activeCount = queue.counts.queued + queue.counts.running + secondary;
   return <section className={`model-queue-panel unified-model-queue-panel ${queue.id}`}>
     <header>
       <div>
@@ -404,7 +440,15 @@ export function UnifiedModelQueuePanel({ queue }: { queue: ModelQueueOverviewIte
         <h3>{queue.model} {queue.purpose}队列</h3>
         <small>{queue.binding}</small>
       </div>
-      <span className={`model-queue-state ${queue.state}`}>{modelQueueStateLabels[queue.state] ?? queue.state}</span>
+      <div className="model-queue-header-actions">
+        <span className={`model-queue-state ${queue.state}`}>{modelQueueStateLabels[queue.state] ?? queue.state}</span>
+        {queue.id === "research" && <button
+          type="button"
+          className="model-queue-clear"
+          disabled={clearing || activeCount === 0}
+          onClick={onClear}
+        >{clearing ? "清空中…" : "清空"}</button>}
+      </div>
     </header>
     <div className="queue-metrics unified-queue-metrics" aria-live="polite">
       <span>待处理<strong>{queue.counts.queued}</strong></span>
@@ -437,7 +481,7 @@ export function UnifiedModelQueuePanel({ queue }: { queue: ModelQueueOverviewIte
     {!queue.observable && <div className="page-error">模型推理槽位状态暂时不可用。</div>}
     {queue.error && <div className="page-error">{queue.error}</div>}
     {queue.truncated && <div className="page-message">队列过长，当前显示前 500 张任务卡。</div>}
-    <ModelQueueTaskGrid queue={queue} />
+    <ModelQueueTaskGrid queue={queue} onCancel={onCancelTask} cancellingTaskId={cancellingTaskId} />
   </section>;
 }
 
@@ -445,6 +489,9 @@ export function QueuePage({ apiBase }: { apiBase: string }) {
   const [overview, setOverview] = useState<ModelQueueOverviewResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [actionMessage, setActionMessage] = useState("");
+  const [cancellingTaskId, setCancellingTaskId] = useState<string | null>(null);
+  const [clearing, setClearing] = useState(false);
   const requestInFlight = useRef(false);
 
   const loadQueues = useCallback(async (signal?: AbortSignal, showLoading = false) => {
@@ -464,6 +511,71 @@ export function QueuePage({ apiBase }: { apiBase: string }) {
       if (!signal?.aborted) setLoading(false);
     }
   }, [apiBase]);
+
+  const removeResearchTasks = useCallback((predicate: (task: ModelQueueTask) => boolean) => {
+    setOverview((current) => current ? {
+      ...current,
+      queues: current.queues.map((queue) => {
+        if (queue.id !== "research") return queue;
+        const removed = queue.tasks.filter(predicate);
+        if (!removed.length) return queue;
+        const counts = { ...queue.counts };
+        for (const task of removed) {
+          const field = task.status === "queued" ? "queued"
+            : task.status === "running" ? "running"
+              : task.status === "retrying" ? "retrying"
+                : task.status === "verifying" ? "verifying" : null;
+          if (field) counts[field] = Math.max(0, counts[field] - 1);
+        }
+        return { ...queue, counts, tasks: queue.tasks.filter((task) => !predicate(task)) };
+      }),
+    } : current);
+  }, []);
+
+  const cancelResearchTask = useCallback(async (task: ModelQueueTask) => {
+    if (!window.confirm(`确认取消“${task.title}”的当前研究？正在执行的研究会立即停止，未完成进度不会保留。`)) return;
+    setCancellingTaskId(task.task_id);
+    setActionMessage("");
+    setError("");
+    try {
+      const response = await fetch(`${apiBase}/api/v1/model-queues/research/tasks/cancel`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ task_id: task.task_id, kind: task.kind, entity_id: task.entity_id }),
+      });
+      if (!response.ok) throw new Error(`取消研究失败（HTTP ${response.status}）`);
+      const result = await response.json() as { cancelled: number };
+      removeResearchTasks((item) => item.task_id === task.task_id);
+      setActionMessage(`已取消“${task.title}”的 ${result.cancelled} 个活动研究任务。`);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "取消研究失败");
+    } finally {
+      setCancellingTaskId(null);
+    }
+  }, [apiBase, removeResearchTasks]);
+
+  const clearResearchTasks = useCallback(async () => {
+    const research = overview?.queues.find((queue) => queue.id === "research");
+    if (!research) return;
+    const activeCount = research.counts.queued + research.counts.running
+      + research.counts.retrying + research.counts.verifying;
+    if (!activeCount || !window.confirm(`确认清空当前 ${activeCount} 项 14B 研究任务？正在执行的研究会立即停止，未完成进度不会保留；后续扫描仍可产生新任务。`)) return;
+    setClearing(true);
+    setActionMessage("");
+    setError("");
+    try {
+      const response = await fetch(`${apiBase}/api/v1/model-queues/research/clear`, { method: "POST" });
+      if (!response.ok) throw new Error(`清空研究队列失败（HTTP ${response.status}）`);
+      const result = await response.json() as { cancelled: number };
+      removeResearchTasks((task) => ["asset_research", "event_research"].includes(task.kind)
+        && cancellableResearchStatuses.has(task.status));
+      setActionMessage(`已清空 ${result.cancelled} 个当前研究任务；后续扫描产生的新任务不受影响。`);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "清空研究队列失败");
+    } finally {
+      setClearing(false);
+    }
+  }, [apiBase, overview, removeResearchTasks]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -491,9 +603,17 @@ export function QueuePage({ apiBase }: { apiBase: string }) {
       </button>
     </div>
     {error && <div className="page-error">{error}</div>}
+    {actionMessage && <div className="page-message">{actionMessage}</div>}
     {!overview && loading && <div className="page-message">正在读取四个模型队列…</div>}
     <div className="model-queue-columns">
-      {overview?.queues.map((queue) => <UnifiedModelQueuePanel queue={queue} key={queue.id} />)}
+      {overview?.queues.map((queue) => <UnifiedModelQueuePanel
+        queue={queue}
+        key={queue.id}
+        onCancelTask={cancelResearchTask}
+        onClear={clearResearchTasks}
+        cancellingTaskId={cancellingTaskId}
+        clearing={clearing}
+      />)}
     </div>
   </section>;
 }

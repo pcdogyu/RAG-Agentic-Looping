@@ -48,6 +48,7 @@ from backend.app.services.news_board import NewsBoardResponse, build_news_board
 from backend.app.services.notifications import notifier
 from backend.app.services.portfolio import PortfolioError, PortfolioService
 from backend.app.services.research import ResearchService
+from backend.app.services.research_cancellation import cancel_research_tasks
 from backend.app.services.research_queue import (
     NewsExtractionQueueResponse,
     ResearchQueueResponse,
@@ -300,6 +301,12 @@ class PaperOrderRequest(BaseModel):
 class EvolutionRequest(BaseModel):
     failures: list[dict]
     background: bool = True
+
+
+class ResearchCancellationRequest(BaseModel):
+    task_id: str
+    kind: str
+    entity_id: str | None = None
 
 
 @app.get("/health")
@@ -583,6 +590,80 @@ def model_queue_overview(
     limit: int = Query(default=500, ge=1, le=500),
 ):
     return _model_queue_snapshot_for_limit(_cached_model_queue_snapshot(), limit)
+
+
+def _revoke_research_tasks(task_ids: list[str]) -> int:
+    revoked = 0
+    for task_id in task_ids:
+        try:
+            celery_app.control.revoke(task_id, terminate=True, signal="SIGTERM")
+            revoked += 1
+        except Exception:
+            logger.warning("research task revoke failed: %s", task_id, exc_info=True)
+    return revoked
+
+
+def _purge_research_queue() -> int:
+    try:
+        with celery_app.connection_for_write() as connection:
+            return int(connection.default_channel.queue_purge("research") or 0)
+    except Exception:
+        logger.warning("research queue purge failed", exc_info=True)
+        return 0
+
+
+def _mark_model_queue_snapshot_stale() -> None:
+    global _model_queue_refreshing, _model_queue_snapshot
+    with _model_queue_snapshot_ready:
+        if _model_queue_snapshot is not None:
+            _model_queue_snapshot = (0.0, _model_queue_snapshot[1])
+        if _model_queue_refreshing:
+            return
+        _model_queue_refreshing = True
+    Thread(
+        target=_refresh_model_queue_snapshot_in_background,
+        name="model-queue-snapshot",
+        daemon=True,
+    ).start()
+
+
+@app.post("/api/v1/model-queues/research/tasks/cancel", status_code=202)
+def cancel_research_task(
+    request: ResearchCancellationRequest,
+    db: Session = Depends(get_db),
+):
+    if request.kind not in {"asset_research", "event_research"}:
+        raise HTTPException(422, "only research tasks can be cancelled")
+    try:
+        result = cancel_research_tasks(
+            db,
+            kind=request.kind,
+            entity_id=request.entity_id,
+            task_id=request.task_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    if result.cancelled == 0:
+        raise HTTPException(404, "active research task not found")
+    revoked = _revoke_research_tasks(result.celery_task_ids)
+    _mark_model_queue_snapshot_stale()
+    return {
+        **result.model_dump(exclude={"celery_task_ids"}),
+        "revoked": revoked,
+    }
+
+
+@app.post("/api/v1/model-queues/research/clear", status_code=202)
+def clear_research_tasks(db: Session = Depends(get_db)):
+    result = cancel_research_tasks(db)
+    purged = _purge_research_queue()
+    revoked = _revoke_research_tasks(result.celery_task_ids)
+    _mark_model_queue_snapshot_stale()
+    return {
+        **result.model_dump(exclude={"celery_task_ids"}),
+        "purged": purged,
+        "revoked": revoked,
+    }
 
 
 @app.get("/api/v1/research-runs/{run_id}")

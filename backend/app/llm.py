@@ -26,6 +26,10 @@ class LlmResponseError(LlmError):
     """The model responded, but the structured payload was unusable."""
 
 
+INFERENCE_LOCK_LEASE_SECONDS = 120
+INFERENCE_LOCK_HEARTBEAT_SECONDS = 30
+
+
 def serialize_keep_alive(value: str) -> str | int:
     """Preserve duration strings while sending numeric Ollama values as numbers."""
     normalized = value.strip()
@@ -156,8 +160,9 @@ class GpuSemaphore:
                     for slot in slots:
                         candidate = self._redis.lock(
                             f"market-loop:llm:{lane}:{slot}",
-                            timeout=timeout + 30,
+                            timeout=INFERENCE_LOCK_LEASE_SECONDS,
                             blocking_timeout=0,
+                            thread_local=False,
                         )
                         if candidate.acquire(blocking=False):
                             lock = candidate
@@ -168,11 +173,31 @@ class GpuSemaphore:
                         raise LlmError(f"timed out waiting for the {lane} inference slot")
                     sleep(min(0.1, max(0.0, deadline - monotonic())))
                 self._redis.zrem(waiting_key, waiter_id)
+                heartbeat_stop = threading.Event()
+
+                def renew_lock() -> None:
+                    while not heartbeat_stop.wait(INFERENCE_LOCK_HEARTBEAT_SECONDS):
+                        try:
+                            lock.extend(INFERENCE_LOCK_LEASE_SECONDS, replace_ttl=True)
+                        except Exception:
+                            break
+
+                heartbeat = threading.Thread(
+                    target=renew_lock,
+                    name=f"{lane}-{slot}-lease",
+                    daemon=True,
+                )
+                heartbeat.start()
                 try:
                     yield slot
                 finally:
-                    if lock.owned():
-                        lock.release()
+                    heartbeat_stop.set()
+                    heartbeat.join(timeout=1)
+                    try:
+                        if lock.owned():
+                            lock.release()
+                    except Exception:
+                        pass
             finally:
                 self._redis.zrem(waiting_key, waiter_id)
             return

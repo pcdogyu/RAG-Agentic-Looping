@@ -57,6 +57,7 @@ class RunStatus(StrEnum):
     INSUFFICIENT_EVIDENCE = "insufficient_evidence"
     FAILED = "failed"
     COALESCED = "coalesced"
+    CANCELLED = "cancelled"
 
 
 class Rating(StrEnum):

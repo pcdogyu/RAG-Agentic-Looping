@@ -251,10 +251,14 @@ h1 span { color: var(--mint); font-weight: 400; }
 .inference-queue-activity span { padding: 14px; border: 1px solid rgba(88,214,255,.25); border-radius: 8px; color: var(--cyan); background: rgba(88,214,255,.05); font-size: 11px; }
 .model-inference-error, .model-inference-loading { grid-column: 1 / -1; }
 .unified-model-queue-panel > header > div { min-width: 0; }
+.unified-model-queue-panel > header > .model-queue-header-actions { display: flex; align-items: center; flex: 0 0 auto; gap: 7px; }
 .unified-model-queue-panel > header h3 { overflow-wrap: anywhere; }
 .unified-model-queue-panel > header small { display: block; margin-top: 5px; color: var(--muted); font-size: 9px; }
 .model-queue-state.failed { border-color: rgba(255,122,122,.38); color: var(--red); }
 .model-queue-state.disabled { border-color: rgba(255,193,94,.35); color: var(--amber); }
+.model-queue-clear { padding: 4px 8px; border: 1px solid rgba(255,122,122,.36); border-radius: 5px; color: var(--red); background: transparent; font: 400 9px "DM Mono", monospace; cursor: pointer; }
+.model-queue-clear:hover { border-color: var(--red); background: rgba(255,122,122,.08); }
+.model-queue-clear:disabled { opacity: .4; cursor: default; }
 .model-queue-runtime { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 7px; margin: 0 0 12px; }
 .model-queue-runtime > span { display: grid; gap: 4px; min-width: 0; padding: 8px 9px; border: 1px solid var(--line); border-radius: 7px; color: var(--muted); background: var(--panel); font-size: 9px; }
 .model-queue-runtime strong { overflow: hidden; color: var(--secondary); font: 500 10px "DM Mono", monospace; text-overflow: ellipsis; white-space: nowrap; }
@@ -270,6 +274,10 @@ h1 span { color: var(--mint); font-weight: 400; }
 .model-task-card.failed, .model-task-card.rejected, .model-task-card.rolled_back { border-top-color: var(--red); }
 .model-task-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
 .model-task-heading small { overflow: hidden; color: var(--muted); font: 400 8px "DM Mono", monospace; text-overflow: ellipsis; white-space: nowrap; }
+.model-task-heading-actions { display: flex; align-items: center; min-width: 0; gap: 6px; }
+.model-task-cancel { display: grid; place-items: center; flex: 0 0 auto; width: 20px; height: 20px; padding: 0; border: 1px solid transparent; border-radius: 5px; color: var(--muted); background: transparent; font: 500 16px/1 "DM Mono", monospace; cursor: pointer; }
+.model-task-cancel:hover { border-color: rgba(255,122,122,.45); color: var(--red); background: rgba(255,122,122,.08); }
+.model-task-cancel:disabled { opacity: .4; cursor: default; }
 .model-task-status { display: inline-flex; align-items: center; gap: 5px; color: var(--amber); font-size: 9px; white-space: nowrap; }
 .model-task-status i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; box-shadow: 0 0 7px currentColor; }
 .model-task-card.running .model-task-status, .model-task-card.generating .model-task-status, .model-task-card.testing .model-task-status, .model-task-card.merging .model-task-status { color: var(--cyan); }

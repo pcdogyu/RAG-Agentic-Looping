@@ -719,6 +719,36 @@ describe("research queue page", () => {
     expect(markup).toContain("research-0 · 可用");
     expect(markup).toContain("research-1 · 离线");
   });
+
+  it("renders per-task cancellation and model-level clear controls only for active research", () => {
+    const research = overviewQueue({
+      id: "research", model: "qwen2.5:14b", purpose: "标的研究",
+      tasks: [{
+        task_id: "asset:cn:600519:queued-at", kind: "asset_research", entity_id: "cn:600519",
+        title: "600519 · 贵州茅台", subtitle: "CN · equity", source: "business", status: "running",
+        attempt: 1, task_count: 2, queued_at: "2026-08-26T01:00:00Z",
+        started_at: "2026-08-26T01:01:00Z", completed_at: null,
+        updated_at: "2026-08-26T01:02:00Z", queue_duration_ms: 60_000,
+        execution_duration_ms: 60_000, error: null, metrics: {},
+      }],
+    });
+    const grid = renderToStaticMarkup(createElement(ModelQueueTaskGrid, {
+      queue: research, onCancel: () => undefined,
+    }));
+    const panel = renderToStaticMarkup(createElement(UnifiedModelQueuePanel, {
+      queue: research, onClear: () => undefined,
+    }));
+    const mapping = renderToStaticMarkup(createElement(ModelQueueTaskGrid, {
+      queue: overviewQueue({ tasks: research.tasks }), onCancel: () => undefined,
+    }));
+
+    expect(grid).toContain('aria-label="取消 600519 · 贵州茅台 的研究"');
+    expect(grid).toContain('title="取消该标的研究"');
+    expect(panel).toContain('class="model-queue-state running"');
+    expect(panel).toContain('class="model-queue-clear"');
+    expect(panel).toContain(">清空</button>");
+    expect(mapping).not.toContain("model-task-cancel");
+  });
 });
 
 describe("fact data sources", () => {

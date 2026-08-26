@@ -1612,7 +1612,11 @@ def research_event(self, event_id: str, run_id: str) -> dict:
         run = get_event_research_run(db, UUID(run_id))
         if not event or not run:
             raise ValueError(f"unknown event research run: {run_id}")
-        if run.status in {RunStatus.COMPLETED, RunStatus.INSUFFICIENT_EVIDENCE}:
+        if run.status in {
+            RunStatus.COMPLETED,
+            RunStatus.INSUFFICIENT_EVIDENCE,
+            RunStatus.CANCELLED,
+        }:
             return run.model_dump(mode="json")
         with research_lease(
             client,
@@ -1622,6 +1626,9 @@ def research_event(self, event_id: str, run_id: str) -> dict:
         ):
             try:
                 result = EventResearchService(db).run(event, run)
+                persisted = get_event_research_run(db, run.id)
+                if persisted and persisted.status is RunStatus.CANCELLED:
+                    return persisted.model_dump(mode="json")
                 notifier.send(
                     f"事件研究完成：{event.headline}\n"
                     f"证据{'完整' if result.report and result.report.evidence_complete else '不足'}"
@@ -1662,7 +1669,10 @@ def research_asset(
     registry = ProviderRegistry()
     with SessionLocal() as db:
         queued_run = get_run(db, UUID(run_id)) if run_id else None
-        if queued_run and queued_run.status is RunStatus.COALESCED:
+        if queued_run and queued_run.status in {
+            RunStatus.COALESCED,
+            RunStatus.CANCELLED,
+        }:
             return queued_run.model_dump(mode="json")
         registry.add_assets(list_assets(db))
         asset = get_asset(db, asset_id) or registry.get_asset(asset_id)
@@ -1696,6 +1706,9 @@ def research_asset(
                 queued_run=queued_run,
                 events=trigger_events,
             )
+            persisted = get_run(db, run.id)
+            if persisted and persisted.status is RunStatus.CANCELLED:
+                return persisted.model_dump(mode="json")
             if run.recommendation:
                 notifier.recommendation(run.recommendation)
                 if settings.auto_paper_trade and run.recommendation.rating in {

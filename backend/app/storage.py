@@ -248,7 +248,14 @@ def list_recent_events(db: Session, limit: int = 100) -> list[NewsEvent]:
 
 def save_run(db: Session, run: ResearchRun) -> None:
     run.updated_at = utc_now()
-    row = db.get(ResearchRunRow, run.id) or ResearchRunRow(id=run.id, created_at=run.created_at)
+    row = db.get(ResearchRunRow, run.id)
+    if row is not None:
+        db.refresh(row, attribute_names=["status"])
+    else:
+        row = ResearchRunRow(id=run.id, created_at=run.created_at)
+    if row.status == RunStatus.CANCELLED.value and run.status is not RunStatus.CANCELLED:
+        db.rollback()
+        return
     row.event_id = run.event_id
     row.asset_id = run.asset.asset_id
     row.status = run.status.value
@@ -380,11 +387,18 @@ def get_run_for_event_asset(
 
 def save_event_research_run(db: Session, run: EventResearchRun) -> None:
     run.updated_at = utc_now()
-    row = db.get(EventResearchRunRow, run.id) or EventResearchRunRow(
-        id=run.id,
-        event_id=run.event_id,
-        created_at=run.created_at,
-    )
+    row = db.get(EventResearchRunRow, run.id)
+    if row is not None:
+        db.refresh(row, attribute_names=["status"])
+    else:
+        row = EventResearchRunRow(
+            id=run.id,
+            event_id=run.event_id,
+            created_at=run.created_at,
+        )
+    if row.status == RunStatus.CANCELLED.value and run.status is not RunStatus.CANCELLED:
+        db.rollback()
+        return
     row.event_id = run.event_id
     row.status = run.status.value
     row.payload = run.model_dump(mode="json")
