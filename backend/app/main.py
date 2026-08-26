@@ -330,9 +330,9 @@ def model_inference_queues():
     model_specs = (
         {
             "model": settings.ollama_assist_model,
-            "purpose": "通用分析",
-            "binding": "尚未绑定自动业务任务",
-            "task_enabled": False,
+            "purpose": "股票映射",
+            "binding": "新闻事件二次股票映射",
+            "task_enabled": True,
         },
         {
             "model": settings.ollama_code_model,

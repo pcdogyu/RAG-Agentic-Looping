@@ -362,6 +362,9 @@ def test_additional_model_inference_queues_are_public(monkeypatch):
     ]
     assert payload["items"][0]["state"] == "queued"
     assert payload["items"][0]["threads"] == 8
+    assert payload["items"][0]["purpose"] == "股票映射"
+    assert payload["items"][0]["binding"] == "新闻事件二次股票映射"
+    assert payload["items"][0]["task_enabled"] is True
     assert payload["items"][1]["state"] == "idle"
 
 

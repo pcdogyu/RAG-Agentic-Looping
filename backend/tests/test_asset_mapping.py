@@ -22,7 +22,11 @@ class StaticRegistry:
 
 
 class MappingLlm:
+    def __init__(self):
+        self.last_request = None
+
     def generate_json(self, **kwargs):
+        self.last_request = kwargs
         return AssetMappingOutput(
             candidates=[
                 {
@@ -114,12 +118,15 @@ def test_7b_mapping_accepts_only_mentioned_master_verified_assets():
         as_of=observed,
     )
 
+    mapping_llm = MappingLlm()
     result = AssetMappingService(
         StaticRegistry(assets),
         Settings(fmp_access_token="", fmp_mcp_url=""),
-        MappingLlm(),
+        mapping_llm,
     ).map_event(event, [news])
 
+    assert mapping_llm.last_request["model"] == "qwen2.5:7b"
+    assert mapping_llm.last_request["operation"] == "asset_mapping"
     assert [item.asset.symbol for item in result.candidates] == ["300308", "001337"]
     assert result.proposed_count == 4
     assert result.rejected_count == 2

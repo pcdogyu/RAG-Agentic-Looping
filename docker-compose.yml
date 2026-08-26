@@ -136,6 +136,10 @@ services:
     <<: *backend
     command: celery -A backend.app.worker:celery_app worker -Q extract --concurrency=1 --prefetch-multiplier=1 --loglevel=INFO
 
+  mapping-worker:
+    <<: *backend
+    command: celery -A backend.app.worker:celery_app worker -Q mapping --concurrency=1 --prefetch-multiplier=1 --loglevel=INFO
+
   research-worker:
     <<: *backend
     command: celery -A backend.app.worker:celery_app worker -Q research,llm --concurrency=2 --prefetch-multiplier=1 --loglevel=INFO

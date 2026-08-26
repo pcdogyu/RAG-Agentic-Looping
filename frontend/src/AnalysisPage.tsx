@@ -68,7 +68,7 @@ const phaseLabels: Record<string, string> = {
   event_extraction: "事件模型提取",
   event_extraction_fallback: "规则回退提取",
   asset_mapping: "证券主数据映射",
-  asset_mapping_queue: "研究模型标的发现入队",
+  asset_mapping_queue: "7B 股票映射入队",
   research_queue: "研究任务入队",
   evidence_gathering: "证据收集与检索",
   report_drafting: "研究报告生成",
@@ -89,8 +89,8 @@ const phaseLabels: Record<string, string> = {
 export function analysisPendingText(status: string) {
   if (status.startsWith("mapping_")) {
     return status === "mapping_failed"
-      ? "研究模型标的发现失败，系统未生成或猜测证券代码。"
-      : "研究模型正在识别并验证新闻中明确提及的证券标的。";
+      ? "7B 股票映射失败，系统未生成或猜测证券代码。"
+      : "7B 股票映射模型正在识别并验证新闻中明确提及的证券标的。";
   }
   if (status === "unmapped") return "该新闻尚未映射到可研究标的。";
   return "研究任务正在排队或处理中，结果会自动更新。";

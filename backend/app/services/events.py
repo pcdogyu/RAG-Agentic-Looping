@@ -285,7 +285,7 @@ class EventService:
                     if candidates
                     else (
                         "确定性证券映射未找到可验证候选，将按配置进入 "
-                        f"{self.settings.ollama_research_model} 二次发现。"
+                        f"{self.settings.ollama_assist_model} 二次发现。"
                     )
                 ),
                 metrics={

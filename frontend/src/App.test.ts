@@ -477,9 +477,9 @@ describe("research queue page", () => {
     const assist = renderToStaticMarkup(createElement(ModelInferenceQueuePanel, { item: {
       lane: "assist",
       model: "qwen2.5:7b",
-      purpose: "通用分析",
-      binding: "尚未绑定自动业务任务",
-      task_enabled: false,
+      purpose: "股票映射",
+      binding: "新闻事件二次股票映射",
+      task_enabled: true,
       threads: 8,
       capacity: 1,
       queued: 0,
@@ -503,9 +503,9 @@ describe("research queue page", () => {
       state: "queued",
     } }));
 
-    expect(assist).toContain("qwen2.5:7b 通用分析队列");
+    expect(assist).toContain("qwen2.5:7b 股票映射队列");
     expect(assist).toContain("CPU 线程<strong>8</strong>");
-    expect(assist).toContain("尚未绑定自动业务任务；推理通道已就绪");
+    expect(assist).toContain("当前没有等待或运行中的模型请求");
     expect(code).toContain("qwen2.5-coder:7b 代码演进队列");
     expect(code).toContain("有请求排队");
     expect(code).toContain("等待进入模型 1 个请求");

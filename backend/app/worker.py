@@ -83,7 +83,7 @@ celery_app.conf.update(
     task_routes={
         "market_loop.extract_news_item": {"queue": "extract"},
         "market_loop.finalize_news_extraction": {"queue": "extract"},
-        "market_loop.resolve_event_assets": {"queue": "research"},
+        "market_loop.resolve_event_assets": {"queue": "mapping"},
         "market_loop.research_event": {"queue": "research"},
         "market_loop.research_asset": {"queue": "research"},
     },
@@ -774,7 +774,7 @@ def _replace_event_step(event: NewsEvent, step: AnalysisStep) -> None:
 
 
 def enqueue_asset_mapping(db, event: NewsEvent) -> str | None:
-    """Queue one visible research-model mapping attempt for an unmapped event."""
+    """Queue one visible 7B mapping attempt for an unmapped event."""
 
     if event.candidates or any(
         step.phase == "asset_mapping_queue" and step.status in {"queued", "completed"}
@@ -787,16 +787,16 @@ def enqueue_asset_mapping(db, event: NewsEvent) -> str | None:
             phase="asset_mapping_queue",
             status="queued",
             executor="celery",
-            model=settings.ollama_research_model,
+            model=settings.ollama_assist_model,
             summary=(
-                f"确定性映射未找到标的，已创建 {settings.ollama_research_model} "
+                f"确定性映射未找到标的，已创建 {settings.ollama_assist_model} "
                 "二次标的发现任务。"
             ),
         ),
     )
     save_event(db, event)
     try:
-        task = resolve_event_assets.apply_async(args=[str(event.id)], queue="research")
+        task = resolve_event_assets.apply_async(args=[str(event.id)], queue="mapping")
     except Exception as exc:
         _replace_event_step(
             event,
@@ -804,9 +804,9 @@ def enqueue_asset_mapping(db, event: NewsEvent) -> str | None:
                 phase="asset_mapping_queue",
                 status="failed",
                 executor="celery",
-                model=settings.ollama_research_model,
+                model=settings.ollama_assist_model,
                 summary=(
-                    f"{settings.ollama_research_model} 标的发现任务入队失败"
+                    f"{settings.ollama_assist_model} 标的发现任务入队失败"
                     f"（{type(exc).__name__}）。"
                 ),
             ),
@@ -1341,9 +1341,9 @@ def resolve_event_assets(self, event_id: str) -> dict:
                         phase="asset_mapping",
                         status="running",
                         executor="ollama+provider-registry",
-                        model=settings.ollama_research_model,
+                        model=settings.ollama_assist_model,
                         summary=(
-                            f"{settings.ollama_research_model} 正在从原文提及中识别证券，"
+                            f"{settings.ollama_assist_model} 正在从原文提及中识别证券，"
                             "并通过主数据验证代码。"
                         ),
                     ),
@@ -1364,9 +1364,9 @@ def resolve_event_assets(self, event_id: str) -> dict:
                         phase="asset_mapping",
                         status="completed" if event.candidates else "unmapped",
                         executor="ollama+provider-registry",
-                        model=settings.ollama_research_model,
+                        model=settings.ollama_assist_model,
                         summary=(
-                            f"{settings.ollama_research_model} 提出 "
+                            f"{settings.ollama_assist_model} 提出 "
                             f"{mapping_result.proposed_count} 个候选，"
                             f"主数据验证通过 {len(event.candidates)} 个、拒绝 "
                             f"{mapping_result.rejected_count} 个。"
@@ -1386,8 +1386,8 @@ def resolve_event_assets(self, event_id: str) -> dict:
                         phase="asset_mapping_queue",
                         status="completed",
                         executor="celery",
-                        model=settings.ollama_research_model,
-                        summary=f"{settings.ollama_research_model} 二次标的发现任务已完成。",
+                        model=settings.ollama_assist_model,
+                        summary=f"{settings.ollama_assist_model} 二次标的发现任务已完成。",
                     ),
                 )
                 save_event(db, event)
@@ -1418,9 +1418,9 @@ def resolve_event_assets(self, event_id: str) -> dict:
                     phase="asset_mapping",
                     status="retrying" if retrying else "failed",
                     executor="ollama+provider-registry",
-                    model=settings.ollama_research_model,
+                    model=settings.ollama_assist_model,
                     summary=(
-                        f"{settings.ollama_research_model} 标的发现"
+                        f"{settings.ollama_assist_model} 标的发现"
                         f"{'暂时失败，等待重试' if retrying else '最终失败'}"
                         f"（{type(exc).__name__}）。"
                     ),

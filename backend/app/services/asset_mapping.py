@@ -73,7 +73,7 @@ class AssetMappingService:
             f"新闻：{json.dumps([item.model_dump(mode='json') for item in news_items], ensure_ascii=False)[:18000]}"
         )
         payload = self.llm.generate_json(
-            model=self.settings.ollama_research_model,
+            model=self.settings.ollama_assist_model,
             system="你是谨慎的跨市场证券主数据映射器。宁可不映射，也不能创造证券或关系。",
             prompt=prompt,
             schema=AssetMappingOutput,

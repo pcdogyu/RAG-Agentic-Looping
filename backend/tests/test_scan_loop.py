@@ -739,9 +739,10 @@ def test_unmapped_event_queues_only_one_visible_7b_mapping_task(db, monkeypatch)
     assert first == "mapping-task"
     assert repeated is None
     assert len(queued) == 1
-    assert queued[0]["queue"] == "research"
+    assert queued[0]["queue"] == "mapping"
     assert event.analysis_steps[-1].phase == "asset_mapping_queue"
     assert event.analysis_steps[-1].status == "queued"
+    assert event.analysis_steps[-1].model == "qwen2.5:7b"
 
 
 def test_7b_mapping_task_persists_candidates_and_queues_top_three(db, monkeypatch):

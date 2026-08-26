@@ -402,6 +402,7 @@ def backfill_legacy_model_audits(db: Session) -> int:
     settings = get_settings()
     configured_models = {
         settings.ollama_extract_model,
+        settings.ollama_assist_model,
         settings.ollama_research_model,
         settings.ollama_code_model,
         settings.cloud_llm_model,
