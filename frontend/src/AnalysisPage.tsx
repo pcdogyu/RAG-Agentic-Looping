@@ -26,8 +26,11 @@ export type AnalysisLog = {
     kind: "asset_recommendation";
     rating: string;
     score: number;
+    raw_score?: number;
     confidence: number;
     evidence_complete: boolean;
+    directional_evidence_complete?: boolean;
+    signal_status?: "technical_failure" | "insufficient_evidence" | "neutral" | "directional";
     summary: string;
   } | {
     kind: "event_report";
@@ -50,6 +53,9 @@ const labels: Record<string, string> = {
   bearish: "看空",
   strongly_bearish: "强烈看空",
   insufficient_evidence: "证据不足",
+  technical_failure: "技术失败",
+  neutral: "中性信号",
+  directional: "方向信号",
   completed: "已完成",
   running: "研究中",
   verifying: "验证中",
@@ -70,6 +76,7 @@ const phaseLabels: Record<string, string> = {
   asset_mapping: "证券主数据映射",
   asset_mapping_queue: "7B 股票映射入队",
   research_queue: "研究任务入队",
+  market_factor_refresh_queue: "市场反应因子重评入队",
   evidence_gathering: "证据收集与检索",
   report_drafting: "研究报告生成",
   verification: "证据与引用校验",
@@ -172,10 +179,13 @@ export function AnalysisTraceList({ logs }: { logs: AnalysisLog[] }) {
           </div>
 
           {log.result?.kind === "asset_recommendation" ? <div className="trace-result">
+            <div><span>信号状态</span><strong>{labels[log.result.signal_status || ""] || "旧版结论"}</strong></div>
             <div><span>最终结果</span><strong>{labels[log.result.rating] || log.result.rating}</strong></div>
-            <div><span>方向分数</span><strong>{log.result.score > 0 ? "+" : ""}{log.result.score}</strong></div>
+            <div><span>发布分</span><strong>{log.result.score > 0 ? "+" : ""}{log.result.score}</strong></div>
+            <div><span>程序原始分</span><strong>{(log.result.raw_score ?? log.result.score) > 0 ? "+" : ""}{log.result.raw_score ?? log.result.score}</strong></div>
             <div><span>置信度</span><strong>{Math.round(log.result.confidence * 100)}%</strong></div>
-            <div><span>证据</span><strong>{log.result.evidence_complete ? "完整" : "不足"}</strong></div>
+            <div><span>资料覆盖</span><strong>{log.result.evidence_complete ? "完整" : "不足"}</strong></div>
+            <div><span>方向证据</span><strong>{log.result.directional_evidence_complete ? "通过" : "未通过"}</strong></div>
             <p>{log.result.summary}</p>
           </div> : log.result?.kind === "event_report" ? <div className="trace-result event-report-result">
             <div><span>最终结果</span><strong>中性事件研报</strong></div>

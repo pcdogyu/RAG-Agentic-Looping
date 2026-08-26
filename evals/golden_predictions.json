@@ -1,0 +1,105 @@
+{
+  "version": 1,
+  "dataset": "frozen-probabilities-v1",
+  "minimums": {
+    "brier_skill": 0.2,
+    "top_label_accuracy": 0.7,
+    "score_probability_consistency": 0.99
+  },
+  "maximums": {
+    "brier_score": 0.2,
+    "expected_calibration_error": 0.05
+  },
+  "cases": [
+    {
+      "id": "bull-correct-1",
+      "as_of": "2025-01-01T00:00:00Z",
+      "bull_probability": 0.8,
+      "base_probability": 0.1,
+      "bear_probability": 0.1,
+      "score": 70,
+      "actual": "bull"
+    },
+    {
+      "id": "bull-correct-2",
+      "as_of": "2025-02-01T00:00:00Z",
+      "bull_probability": 0.8,
+      "base_probability": 0.1,
+      "bear_probability": 0.1,
+      "score": 70,
+      "actual": "bull"
+    },
+    {
+      "id": "bull-correct-3",
+      "as_of": "2025-03-01T00:00:00Z",
+      "bull_probability": 0.8,
+      "base_probability": 0.1,
+      "bear_probability": 0.1,
+      "score": 70,
+      "actual": "bull"
+    },
+    {
+      "id": "bull-miss-base",
+      "as_of": "2025-04-01T00:00:00Z",
+      "bull_probability": 0.8,
+      "base_probability": 0.1,
+      "bear_probability": 0.1,
+      "score": 70,
+      "actual": "base"
+    },
+    {
+      "id": "base-correct-1",
+      "as_of": "2025-05-01T00:00:00Z",
+      "bull_probability": 0.1,
+      "base_probability": 0.8,
+      "bear_probability": 0.1,
+      "score": 0,
+      "actual": "base"
+    },
+    {
+      "id": "base-correct-2",
+      "as_of": "2025-06-01T00:00:00Z",
+      "bull_probability": 0.1,
+      "base_probability": 0.8,
+      "bear_probability": 0.1,
+      "score": 0,
+      "actual": "base"
+    },
+    {
+      "id": "base-correct-3",
+      "as_of": "2025-07-01T00:00:00Z",
+      "bull_probability": 0.1,
+      "base_probability": 0.8,
+      "bear_probability": 0.1,
+      "score": 0,
+      "actual": "base"
+    },
+    {
+      "id": "base-miss-bear",
+      "as_of": "2025-08-01T00:00:00Z",
+      "bull_probability": 0.1,
+      "base_probability": 0.8,
+      "bear_probability": 0.1,
+      "score": 0,
+      "actual": "bear"
+    },
+    {
+      "id": "bear-correct-1",
+      "as_of": "2025-09-01T00:00:00Z",
+      "bull_probability": 0.1,
+      "base_probability": 0.1,
+      "bear_probability": 0.8,
+      "score": -70,
+      "actual": "bear"
+    },
+    {
+      "id": "bear-correct-2",
+      "as_of": "2025-10-01T00:00:00Z",
+      "bull_probability": 0.1,
+      "base_probability": 0.1,
+      "bear_probability": 0.8,
+      "score": -70,
+      "actual": "bear"
+    }
+  ]
+}

@@ -64,7 +64,7 @@ def test_gateway_records_exact_redacted_input_output(monkeypatch):
         ollama_num_threads=8,
         ollama_max_output_tokens=768,
         ollama_keep_alive="5m",
-        cloud_llm_api_key="cloud-secret-value",
+        cloud_llm_api_key="cloud-secret-value",  # pragma: allowlist secret
     )
     gateway = LlmGateway(settings)
     gateway.client = FakeClient(

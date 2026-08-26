@@ -1,3 +1,4 @@
+import json
 import re
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -10,11 +11,17 @@ from backend.app.domain import (
     NewsItem,
     Rating,
     ResearchRun,
+    RunStatus,
     SourceQuality,
 )
 from backend.app.providers.registry import SEED_ASSETS
 from backend.app.services.mcp_registry import SearchResult
-from backend.app.services.research import DraftOutput, ResearchService, VerificationOutput
+from backend.app.services.research import (
+    DraftOutput,
+    ResearchService,
+    SemanticVerificationOutput,
+    VerificationOutput,
+)
 from backend.app.storage import get_event, save_event, save_news
 
 
@@ -48,6 +55,24 @@ class FakeRegistry:
 class FakeResearchLlm:
     def generate_json(self, *, schema, prompt, **kwargs):
         ids = re.findall(r'"id": "([0-9a-f-]{36})"', prompt)
+        if schema is SemanticVerificationOutput:
+            match = re.search(r"待验证观点：(\[.*?\])\n证据：", prompt, re.DOTALL)
+            claims = json.loads(match.group(1)) if match else []
+            return {
+                "claims": [
+                    {
+                        **item,
+                        "stance": 1 if item["claim_kind"] == "catalyst" else 0,
+                        "verdict": "supported",
+                        "evidence_ids": ids[:1],
+                        "confidence": 0.9,
+                        "reason": "The cited evidence directly supports the claim.",
+                    }
+                    for item in claims
+                ],
+                "direction_supported": True,
+                "contradictions": [],
+            }
         return DraftOutput(
             summary="Services growth supports the medium-term thesis, subject to valuation risk.",
             historical_context="Prior earnings provide a comparison point.",
@@ -70,9 +95,61 @@ class FakeResearchLlm:
 class FakeStrongResearchLlm(FakeResearchLlm):
     def generate_json(self, **kwargs):
         payload = super().generate_json(**kwargs)
-        payload["score"] = 80
-        payload["confidence"] = 0.85
+        if kwargs.get("schema") is DraftOutput:
+            payload["score"] = 80
+            payload["confidence"] = 0.85
         return payload
+
+
+class NeutralResearchLlm(FakeResearchLlm):
+    def generate_json(self, **kwargs):
+        payload = super().generate_json(**kwargs)
+        if kwargs.get("schema") is DraftOutput:
+            payload.update(
+                score=80,
+                bull_probability=0.25,
+                base_probability=0.5,
+                bear_probability=0.25,
+            )
+        return payload
+
+
+class UnsupportedSemanticLlm(FakeResearchLlm):
+    def generate_json(self, **kwargs):
+        payload = super().generate_json(**kwargs)
+        if kwargs.get("schema") is SemanticVerificationOutput:
+            for claim in payload["claims"]:
+                claim["verdict"] = "insufficient"
+                claim["evidence_ids"] = []
+                claim["confidence"] = 0.2
+            payload["direction_supported"] = False
+        return payload
+
+
+class LowConfidenceSemanticLlm(FakeResearchLlm):
+    def generate_json(self, **kwargs):
+        payload = super().generate_json(**kwargs)
+        if kwargs.get("schema") is SemanticVerificationOutput:
+            for claim in payload["claims"]:
+                claim["confidence"] = 0.05
+        return payload
+
+
+class ContradictoryStanceLlm(FakeResearchLlm):
+    def generate_json(self, **kwargs):
+        payload = super().generate_json(**kwargs)
+        if kwargs.get("schema") is SemanticVerificationOutput:
+            for claim in payload["claims"]:
+                claim["stance"] = -1
+            payload["direction_supported"] = True
+        return payload
+
+
+class FailingSemanticLlm(FakeResearchLlm):
+    def generate_json(self, **kwargs):
+        if kwargs.get("schema") is SemanticVerificationOutput:
+            raise TimeoutError("independent verifier unavailable")
+        return super().generate_json(**kwargs)
 
 
 class CapturingResearchLlm(FakeResearchLlm):
@@ -183,6 +260,21 @@ def test_research_graph_produces_verified_recommendation(db, tmp_path):
     assert run.recommendation.evidence_complete is True
     assert run.recommendation.rating is Rating.BULLISH
     assert run.recommendation.thesis.evidence_ids
+    assert round(
+        100
+        * (
+            run.recommendation.bull_probability
+            - run.recommendation.bear_probability
+        )
+    ) == run.recommendation.score
+    assert {
+        "historical_context",
+        "financials_and_growth",
+        "products_or_protocol",
+        "competition",
+        "valuation_or_tokenomics",
+        "invalidation_condition",
+    }.issubset({item.claim_kind for item in run.recommendation.claim_assessments})
     phases = [step.phase for step in run.analysis_steps]
     assert "evidence_gathering" in phases
     assert "report_drafting" in phases
@@ -197,8 +289,109 @@ def test_research_graph_produces_verified_recommendation(db, tmp_path):
     )
     assert strong_run.recommendation is not None
     assert strong_run.recommendation.evidence_complete is True
-    assert strong_run.recommendation.rating is Rating.WATCH
-    assert strong_run.verification_round == 2
+    # The model's self-reported 80 is retained only for audit and cannot change
+    # the program score derived from the same probabilities and evidence.
+    assert strong_run.recommendation.model_score == 80
+    assert strong_run.recommendation.raw_score == run.recommendation.raw_score
+    assert strong_run.recommendation.rating is Rating.BULLISH
+    assert strong_run.verification_round == 1
+
+
+def test_final_status_distinguishes_neutral_insufficient_and_technical_failure(
+    db, tmp_path
+):
+    as_of = datetime(2025, 1, 31, tzinfo=UTC)
+    item = NewsItem(
+        source="Issuer IR",
+        source_quality=SourceQuality.OFFICIAL,
+        title="Apple publishes an official business update",
+        summary="The company published an operating update.",
+        url="https://www.apple.com/newsroom/status-test",
+        published_at=as_of,
+        observed_at=as_of,
+        as_of=as_of,
+        content_hash=sha256(b"research-status-test").hexdigest(),
+        symbols=["AAPL"],
+    )
+    save_news(db, item)
+    asset = SEED_ASSETS[0]
+    event = NewsEvent(
+        news_item_ids=[item.id],
+        headline=item.title,
+        event_type=EventType.OTHER,
+        entities=["Apple"],
+        direct_impact=item.summary,
+        source_quality=SourceQuality.OFFICIAL,
+        published_at=as_of,
+        observed_at=as_of,
+        as_of=as_of,
+        candidates=[
+            CandidateAsset(
+                asset=asset,
+                relationship="direct",
+                relevance=1,
+                rationale="AAPL is explicit",
+            )
+        ],
+    )
+    settings = Settings(
+        database_url="sqlite:///./data/test_agent.db",
+        reports_dir=tmp_path,
+        fmp_access_token="",
+        fmp_mcp_url="",
+    )
+
+    neutral = ResearchService(FakeRegistry(), db, settings, NeutralResearchLlm()).run(
+        asset, event, as_of
+    )
+    insufficient = ResearchService(
+        FakeRegistry(), db, settings, UnsupportedSemanticLlm()
+    ).run(asset, event, as_of)
+    technical = ResearchService(
+        FakeRegistry(), db, settings, FailingSemanticLlm()
+    ).run(asset, event, as_of)
+    low_confidence = ResearchService(
+        FakeRegistry(), db, settings, LowConfidenceSemanticLlm()
+    ).run(asset, event, as_of)
+    contradictory_stance = ResearchService(
+        FakeRegistry(), db, settings, ContradictoryStanceLlm()
+    ).run(asset, event, as_of)
+
+    assert neutral.status is RunStatus.COMPLETED
+    assert neutral.recommendation.signal_status.value == "neutral"
+    assert neutral.recommendation.model_score == 80
+    assert neutral.recommendation.raw_score == 0
+    assert neutral.recommendation.score == 0
+
+    assert insufficient.status is RunStatus.INSUFFICIENT_EVIDENCE
+    assert insufficient.recommendation.evidence_complete is True
+    assert insufficient.recommendation.directional_evidence_complete is False
+    assert insufficient.recommendation.signal_status.value == "insufficient_evidence"
+    assert insufficient.recommendation.score == 0
+    assert insufficient.recommendation.gate_reasons
+
+    assert technical.status is RunStatus.FAILED
+    assert technical.recommendation.signal_status.value == "technical_failure"
+    assert technical.recommendation.score == 0
+    assert technical.recommendation.bull_probability == 0.2
+    assert technical.recommendation.base_probability == 0.6
+    assert technical.retryable_reason.startswith("semantic_verifier_")
+
+    assert low_confidence.status is RunStatus.INSUFFICIENT_EVIDENCE
+    assert low_confidence.recommendation.signal_status.value == "insufficient_evidence"
+    assert any(
+        "evidence strength" in reason
+        for reason in low_confidence.recommendation.gate_reasons
+    )
+
+    assert contradictory_stance.status is RunStatus.INSUFFICIENT_EVIDENCE
+    assert contradictory_stance.recommendation.signal_status.value == (
+        "insufficient_evidence"
+    )
+    assert any(
+        "claim stances" in reason
+        for reason in contradictory_stance.recommendation.gate_reasons
+    )
 
 
 def test_research_draft_respects_cpu_prompt_budgets(db, tmp_path):

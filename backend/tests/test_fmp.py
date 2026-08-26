@@ -71,3 +71,31 @@ def test_news_discovery_uses_fmp_specific_lookback(monkeypatch):
     items = provider.discover_news(since=now - timedelta(minutes=20), limit=100)
 
     assert [item.title for item in items] == ["Inside the FMP lookback"]
+
+
+def test_symbol_search_preserves_otc_adr_underlying_issuer(monkeypatch):
+    provider = FmpProvider(Settings(fmp_access_token="", fmp_mcp_url=""))
+    monkeypatch.setattr(
+        provider,
+        "_mcp_or_rest",
+        lambda *args, **kwargs: [
+            {
+                "symbol": "MOPHY",
+                "name": "Monadelphous Group Limited Sponsored ADR",
+                "exchangeShortName": "OTC",
+                "currency": "USD",
+                "issuerId": "monadelphous-group",
+                "underlyingSymbol": "MND.AX",
+                "underlyingExchangeShortName": "ASX",
+            }
+        ],
+    )
+
+    asset = provider.resolve_assets("MOPHY")[0]
+
+    assert asset.asset_id == "equity:OTC:MOPHY"
+    assert asset.exchange_or_provider == "OTC"
+    assert asset.currency == "USD"
+    assert "Monadelphous Group Limited" in asset.aliases
+    assert asset.issuer_id == "fmp:monadelphous-group"
+    assert asset.primary_listing_asset_id == "equity:ASX:MND.AX"

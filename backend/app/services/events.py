@@ -19,7 +19,11 @@ from backend.app.domain import (
     as_utc,
 )
 from backend.app.llm import LlmGateway, gateway
-from backend.app.providers.registry import ProviderRegistry
+from backend.app.providers.registry import (
+    ProviderRegistry,
+    explicit_symbol_present,
+    query_mentions_issuer,
+)
 from backend.app.services.source_lineage import enrich_news_lineage, normalize_text, source_group
 from backend.app.storage import (
     event_news_item_ids,
@@ -54,6 +58,13 @@ KEYWORD_TYPES = {
 
 
 class EventService:
+    _relationship_priority = {
+        "direct": 4,
+        "issuer": 3,
+        "cross_listing_issuer": 2,
+        "entity": 1,
+    }
+
     def __init__(
         self,
         registry: ProviderRegistry,
@@ -151,15 +162,31 @@ class EventService:
         similarity = SequenceMatcher(
             None, normalize_text(left.headline), normalize_text(right.headline)
         ).ratio()
-        left_assets = {candidate.asset.asset_id for candidate in left.candidates}
-        right_assets = {candidate.asset.asset_id for candidate in right.candidates}
+        left_asset = self._primary_asset(left)
+        right_asset = self._primary_asset(right)
         left_entities = {normalize_text(item) for item in left.entities if normalize_text(item)}
         right_entities = {normalize_text(item) for item in right.entities if normalize_text(item)}
-        return similarity >= 0.78 or (
-            bool(left_assets & right_assets)
-            and bool(left_entities & right_entities)
-            and similarity >= 0.58
+        if left_asset and right_asset:
+            return self.registry.same_issuer(left_asset, right_asset) and similarity >= 0.58
+        if left_asset or right_asset:
+            return False
+        return similarity >= 0.92 or (
+            bool(left_entities & right_entities) and similarity >= 0.78
         )
+
+    def _primary_asset(self, event: NewsEvent):
+        if not event.candidates:
+            return None
+        primary = max(
+            event.candidates,
+            key=lambda candidate: (
+                self._relationship_priority.get(candidate.relationship, 0),
+                candidate.relevance,
+                candidate.mapping_confidence,
+                candidate.asset.asset_id,
+            ),
+        )
+        return primary.asset
 
     @staticmethod
     def _record_cluster_step(event: NewsEvent, item: NewsItem) -> None:
@@ -252,19 +279,47 @@ class EventService:
             )
 
         queries = [item.title, *item.symbols, *extracted.entities, *extracted.search_queries]
+        source_text = f"{item.title}\n{item.summary}"
         candidates: dict[str, CandidateAsset] = {}
         for query in queries:
             if not query.strip():
                 continue
             for asset in self.registry.resolve_assets(query):
-                relationship = "direct" if asset.symbol in item.symbols else "entity_or_product"
-                relevance = 0.95 if relationship == "direct" else 0.70
+                direct_symbol = explicit_symbol_present(
+                    source_text, asset.symbol
+                ) or any(
+                    explicit_symbol_present(value, asset.symbol, allow_bare=True)
+                    for value in item.symbols
+                )
+                if not direct_symbol and not query_mentions_issuer(source_text, asset):
+                    continue
+                if direct_symbol:
+                    relationship = "direct"
+                    relevance = 0.95
+                    mapping_confidence = 0.99
+                    identity_basis = ["source_symbol", "provider_master"]
+                elif asset.primary_listing_asset_id:
+                    relationship = "cross_listing_issuer"
+                    relevance = 0.55
+                    mapping_confidence = 0.75
+                    identity_basis = [
+                        "issuer_name",
+                        "provider_master",
+                        "explicit_primary_listing",
+                    ]
+                else:
+                    relationship = "issuer"
+                    relevance = 0.70
+                    mapping_confidence = 0.90
+                    identity_basis = ["issuer_name", "provider_master"]
                 candidates[asset.asset_id] = CandidateAsset(
                     asset=asset,
                     relationship=relationship,
                     impact_direction=extracted.impact_direction,
                     relevance=relevance,
                     rationale=f"新闻中的 {query} 与 {asset.name} 匹配",
+                    mapping_confidence=mapping_confidence,
+                    identity_basis=identity_basis,
                 )
 
         quality_factor = {

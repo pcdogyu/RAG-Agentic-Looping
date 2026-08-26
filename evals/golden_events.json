@@ -1,20 +1,186 @@
-[
-  {
-    "title": "Apple reports quarterly revenue growth led by Services",
-    "expected_event_type": "earnings",
-    "expected_assets": ["equity:XNAS:AAPL"],
-    "as_of": "2025-01-31T00:00:00Z"
+{
+  "version": 2,
+  "dataset": "frozen-pipeline-v2",
+  "minimums": {
+    "mapping_precision": 0.99,
+    "mapping_recall": 0.95,
+    "exact_asset_accuracy": 0.9,
+    "event_type_accuracy": 0.85,
+    "cluster_precision": 0.95,
+    "cluster_recall": 0.8,
+    "temporal_integrity": 1.0
   },
-  {
-    "title": "监管机构发布针对虚拟资产平台的新规",
-    "expected_event_type": "regulation",
-    "expected_assets": [],
-    "as_of": "2025-02-01T00:00:00Z"
+  "walk_forward_minimums": {
+    "mapping_precision": 0.99,
+    "mapping_recall": 0.95,
+    "exact_asset_accuracy": 0.9,
+    "event_type_accuracy": 0.9,
+    "cluster_precision": 0.95,
+    "cluster_recall": 0.8,
+    "temporal_integrity": 1.0
   },
-  {
-    "title": "Ethereum protocol upgrade date confirmed by core developers",
-    "expected_event_type": "product",
-    "expected_assets": ["crypto:coingecko:ethereum"],
-    "as_of": "2025-03-01T00:00:00Z"
-  }
-]
+  "assets": [
+    {
+      "asset_id": "crypto:coingecko:chainlink",
+      "asset_class": "crypto",
+      "market": "CRYPTO",
+      "symbol": "LINK",
+      "name": "Chainlink",
+      "exchange_or_provider": "coingecko",
+      "aliases": ["Chainlink"]
+    },
+    {
+      "asset_id": "equity:XSHE:300024",
+      "asset_class": "equity",
+      "market": "CN",
+      "symbol": "300024",
+      "name": "机器人",
+      "exchange_or_provider": "XSHE",
+      "currency": "CNY",
+      "aliases": ["沈阳新松机器人自动化股份有限公司"]
+    },
+    {
+      "asset_id": "equity:XSHE:002297",
+      "asset_class": "equity",
+      "market": "CN",
+      "symbol": "002297",
+      "name": "博云新材",
+      "exchange_or_provider": "XSHE",
+      "currency": "CNY"
+    },
+    {
+      "asset_id": "equity:XSHE:300811",
+      "asset_class": "equity",
+      "market": "CN",
+      "symbol": "300811",
+      "name": "铂科新材",
+      "exchange_or_provider": "XSHE",
+      "currency": "CNY"
+    },
+    {
+      "asset_id": "equity:OTC:MOPHY",
+      "asset_class": "equity",
+      "market": "US",
+      "symbol": "MOPHY",
+      "name": "Monadelphous Group Limited Sponsored ADR",
+      "exchange_or_provider": "OTC",
+      "aliases": ["Monadelphous ADR"]
+    },
+    {
+      "asset_id": "equity:XASX:MND",
+      "asset_class": "equity",
+      "market": "US",
+      "symbol": "MND",
+      "name": "Monadelphous Group Limited",
+      "exchange_or_provider": "XASX",
+      "currency": "AUD"
+    }
+  ],
+  "cases": [
+    {
+      "id": "apple-earnings-primary",
+      "title": "Apple reports quarterly revenue growth led by Services",
+      "symbols": ["AAPL"],
+      "expected_event_type": "earnings",
+      "expected_assets": ["equity:XNAS:AAPL"],
+      "cluster_id": "apple-earnings-2025q1",
+      "as_of": "2025-01-31T00:00:00Z"
+    },
+    {
+      "id": "apple-earnings-followup",
+      "title": "Apple quarterly revenue growth led by Services in earnings report",
+      "symbols": ["AAPL"],
+      "expected_event_type": "earnings",
+      "expected_assets": ["equity:XNAS:AAPL"],
+      "cluster_id": "apple-earnings-2025q1",
+      "as_of": "2025-01-31T01:00:00Z"
+    },
+    {
+      "id": "generic-crypto-regulation",
+      "title": "监管机构发布针对虚拟资产平台的新规",
+      "expected_event_type": "regulation",
+      "expected_assets": [],
+      "cluster_id": "generic-crypto-regulation",
+      "as_of": "2025-02-01T00:00:00Z"
+    },
+    {
+      "id": "ethereum-upgrade",
+      "title": "Ethereum protocol upgrade date confirmed by core developers",
+      "symbols": ["ETH"],
+      "expected_event_type": "product",
+      "expected_assets": ["crypto:coingecko:ethereum"],
+      "cluster_id": "ethereum-upgrade",
+      "as_of": "2025-03-01T00:00:00Z"
+    },
+    {
+      "id": "starlink-not-chainlink",
+      "title": "SpaceX Starlink launches next-generation satellites",
+      "expected_event_type": "product",
+      "expected_assets": [],
+      "cluster_id": "spacex-starlink-launch",
+      "as_of": "2025-04-01T00:00:00Z"
+    },
+    {
+      "id": "generic-robot-industry",
+      "title": "人形机器人产业迎来政策支持与新品发布",
+      "expected_event_type": "product",
+      "expected_assets": [],
+      "cluster_id": "generic-robot-industry",
+      "as_of": "2025-05-01T00:00:00Z"
+    },
+    {
+      "id": "explicit-robot-issuer",
+      "title": "机器人（300024）发布年度业绩预告",
+      "symbols": ["300024"],
+      "expected_event_type": "earnings",
+      "expected_assets": ["equity:XSHE:300024"],
+      "cluster_id": "robot-earnings",
+      "as_of": "2025-06-01T00:00:00Z"
+    },
+    {
+      "id": "management-change-gap",
+      "title": "Apple appoints Jane Doe as chief financial officer",
+      "symbols": ["AAPL"],
+      "expected_event_type": "management",
+      "expected_assets": ["equity:XNAS:AAPL"],
+      "cluster_id": "apple-management-change",
+      "as_of": "2025-07-01T00:00:00Z"
+    },
+    {
+      "id": "boyun-shareholder-plan",
+      "title": "博云新材：股东减持计划公告",
+      "symbols": ["002297"],
+      "expected_event_type": "other",
+      "expected_assets": ["equity:XSHE:002297"],
+      "cluster_id": "boyun-shareholder-plan",
+      "as_of": "2025-08-01T00:00:00Z"
+    },
+    {
+      "id": "boke-shareholder-plan",
+      "title": "铂科新材：股东减持计划公告",
+      "symbols": ["300811"],
+      "expected_event_type": "other",
+      "expected_assets": ["equity:XSHE:300811"],
+      "cluster_id": "boke-shareholder-plan",
+      "as_of": "2025-08-01T01:00:00Z"
+    },
+    {
+      "id": "monadelphous-adr-results",
+      "title": "Monadelphous Group Limited Sponsored ADR reports annual profit growth",
+      "symbols": ["MOPHY"],
+      "expected_event_type": "earnings",
+      "expected_assets": ["equity:OTC:MOPHY", "equity:XASX:MND"],
+      "cluster_id": "monadelphous-annual-results",
+      "as_of": "2025-09-01T00:00:00Z"
+    },
+    {
+      "id": "monadelphous-asx-results",
+      "title": "Monadelphous Group Limited reports annual profit growth",
+      "symbols": ["MND"],
+      "expected_event_type": "earnings",
+      "expected_assets": ["equity:OTC:MOPHY", "equity:XASX:MND"],
+      "cluster_id": "monadelphous-annual-results",
+      "as_of": "2025-09-01T01:00:00Z"
+    }
+  ]
+}

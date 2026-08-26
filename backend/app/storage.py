@@ -49,6 +49,8 @@ def upsert_asset(db: Session, asset: AssetRef) -> AssetRef:
     row.aliases = asset.aliases
     row.products = asset.products
     row.competitors = asset.competitors
+    row.issuer_id = asset.issuer_id
+    row.primary_listing_asset_id = asset.primary_listing_asset_id
     row.lot_size = asset.lot_size
     row.active = asset.active
     db.add(row)
@@ -68,6 +70,8 @@ def asset_from_row(row: AssetRow) -> AssetRef:
         aliases=row.aliases or [],
         products=row.products or [],
         competitors=row.competitors or [],
+        issuer_id=row.issuer_id,
+        primary_listing_asset_id=row.primary_listing_asset_id,
         lot_size=row.lot_size or 1,
         active=row.active,
     )
@@ -495,9 +499,19 @@ def get_recommendation_for_run(db: Session, run_id: UUID) -> Recommendation | No
     return Recommendation.model_validate(row.payload) if row else None
 
 
-def list_recommendations(db: Session, limit: int = 100) -> list[Recommendation]:
+def list_recommendations(
+    db: Session,
+    limit: int = 100,
+    *,
+    offset: int = 0,
+    oldest_first: bool = False,
+) -> list[Recommendation]:
+    ordering = RecommendationRow.as_of if oldest_first else desc(RecommendationRow.as_of)
     rows = db.scalars(
-        select(RecommendationRow).order_by(desc(RecommendationRow.as_of)).limit(limit)
+        select(RecommendationRow)
+        .order_by(ordering, RecommendationRow.id)
+        .offset(offset)
+        .limit(limit)
     ).all()
     return [Recommendation.model_validate(row.payload) for row in rows]
 

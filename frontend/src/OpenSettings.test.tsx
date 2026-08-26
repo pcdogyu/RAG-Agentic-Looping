@@ -27,9 +27,9 @@ describe("open source and search settings", () => {
       evidenceComplete: true,
     }));
 
-    expect(markup).toContain("方向评分：0");
+    expect(markup).toContain("发布分：0");
     expect(markup).toContain("评级：观察");
-    expect(markup).toContain("置信度 95% · 证据完整");
+    expect(markup).toContain("置信度 95% · 资料覆盖完整");
   });
 
   it("deduplicates a news item repeated as evidence", () => {

@@ -78,6 +78,14 @@ def test_scan_visibility_and_gate_cover_long_running_tasks():
     }
 
 
+def test_market_factor_refresh_advances_only_when_a_larger_window_matures():
+    assert worker._due_market_factor_refresh_session(age_days=1.9) is None
+    assert worker._due_market_factor_refresh_session(age_days=2) == 1
+    assert worker._due_market_factor_refresh_session(age_days=8, completed_session=1) == 5
+    assert worker._due_market_factor_refresh_session(age_days=30, completed_session=5) == 20
+    assert worker._due_market_factor_refresh_session(age_days=40, completed_session=20) is None
+
+
 def test_news_extraction_registry_sorts_active_items_and_keeps_failed(monkeypatch):
     redis = FakeRedis()
     monkeypatch.setattr(worker, "_redis_client", lambda: redis)

@@ -1,55 +1,220 @@
 from __future__ import annotations
 
-from datetime import timedelta
+from dataclasses import dataclass
+from datetime import UTC, date, datetime, time, timedelta
+from math import isfinite, sqrt
+from typing import Any, Literal
 
 from sqlalchemy.orm import Session
 
-from backend.app.domain import AssetClass, Market, Outcome, Recommendation, utc_now
+from backend.app.domain import (
+    Market,
+    Outcome,
+    Recommendation,
+    SignalStatus,
+    as_utc,
+    utc_now,
+)
 from backend.app.providers.registry import ProviderRegistry
 from backend.app.storage import list_outcomes, list_recommendations, save_outcome
 
 
+@dataclass(frozen=True)
+class PricePoint:
+    observed_at: datetime
+    close: float
+
+
+@dataclass(frozen=True)
+class BenchmarkResult:
+    status: Literal["available", "missing", "self_benchmark"]
+    return_value: float | None = None
+
+
 class OutcomeService:
-    horizons = (1, 5, 20, 60, 120)
+    """Evaluate each recommendation at the horizon it actually declared.
+
+    ``Recommendation.horizon_days`` is a calendar-day forecast horizon. Prices are
+    aligned to the first available market observation on or after each boundary,
+    so weekends and exchange holidays never shorten or lengthen the label by using
+    an arbitrary final row returned by a provider.
+    """
+
+    benchmark_symbols = {
+        Market.US: "SPY",
+        Market.CN: "000300",
+        Market.HK: "HSI",
+        Market.CRYPTO: "BTC",
+    }
 
     def __init__(self, registry: ProviderRegistry) -> None:
         self.registry = registry
 
     @staticmethod
-    def _close(item: dict) -> float | None:
+    def _close(item: dict[str, Any]) -> float | None:
         for key in ("close", "adjClose", "price", "收盘"):
             value = item.get(key)
-            if isinstance(value, int | float):
-                return float(value)
+            if isinstance(value, bool) or value is None:
+                continue
+            try:
+                close = float(value)
+            except (TypeError, ValueError):
+                continue
+            if isfinite(close):
+                return close
         return None
+
+    @staticmethod
+    def _timestamp(item: dict[str, Any]) -> datetime | None:
+        value = next(
+            (
+                item[key]
+                for key in ("date", "datetime", "timestamp", "time", "日期")
+                if item.get(key) is not None
+            ),
+            None,
+        )
+        if value is None or isinstance(value, bool):
+            return None
+        if isinstance(value, datetime):
+            return as_utc(value)
+        if isinstance(value, date):
+            return datetime.combine(value, time.min, tzinfo=UTC)
+        if isinstance(value, int | float):
+            seconds = float(value) / 1000 if abs(float(value)) >= 100_000_000_000 else float(value)
+            try:
+                return datetime.fromtimestamp(seconds, UTC)
+            except (OverflowError, OSError, ValueError):
+                return None
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return None
+            try:
+                parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            except ValueError:
+                try:
+                    numeric = float(raw)
+                except ValueError:
+                    return None
+                seconds = numeric / 1000 if abs(numeric) >= 100_000_000_000 else numeric
+                try:
+                    return datetime.fromtimestamp(seconds, UTC)
+                except (OverflowError, OSError, ValueError):
+                    return None
+            return as_utc(parsed)
+        return None
+
+    @classmethod
+    def _price_points(
+        cls,
+        prices: list[dict[str, Any]],
+        *,
+        not_after: datetime,
+    ) -> list[PricePoint]:
+        by_timestamp: dict[datetime, PricePoint] = {}
+        boundary = as_utc(not_after)
+        for item in prices:
+            observed_at = cls._timestamp(item)
+            close = cls._close(item)
+            if observed_at is None or close is None or close <= 0 or observed_at > boundary:
+                continue
+            by_timestamp[observed_at] = PricePoint(observed_at=observed_at, close=close)
+        return sorted(by_timestamp.values(), key=lambda item: item.observed_at)
+
+    @staticmethod
+    def _window(
+        points: list[PricePoint], *, start: datetime, target: datetime
+    ) -> list[PricePoint]:
+        start = as_utc(start)
+        target = as_utc(target)
+        entry_index = next(
+            (index for index, point in enumerate(points) if point.observed_at >= start),
+            None,
+        )
+        if entry_index is None:
+            return []
+        exit_index = next(
+            (
+                index
+                for index, point in enumerate(points[entry_index + 1 :], start=entry_index + 1)
+                if point.observed_at >= target
+            ),
+            None,
+        )
+        if exit_index is None:
+            return []
+        return points[entry_index : exit_index + 1]
 
     def evaluate_due(self, db: Session) -> list[Outcome]:
         existing = {(item.recommendation_id, item.horizon_days) for item in list_outcomes(db)}
         now = utc_now()
         created: list[Outcome] = []
-        for recommendation in list_recommendations(db, limit=1000):
-            for horizon in self.horizons:
+        batch_size = 500
+        offset = 0
+        while True:
+            recommendations = list_recommendations(
+                db,
+                limit=batch_size,
+                offset=offset,
+                oldest_first=True,
+            )
+            if not recommendations:
+                break
+            for recommendation in recommendations:
+                horizon = recommendation.horizon_days
                 if (recommendation.id, horizon) in existing:
                     continue
-                if recommendation.as_of + timedelta(days=horizon) > now:
+                if as_utc(recommendation.as_of) + timedelta(days=horizon) > now:
                     continue
-                outcome = self._evaluate(recommendation, horizon)
+                outcome = self._evaluate(recommendation, horizon, observed_at=now)
                 if outcome:
                     save_outcome(db, outcome)
                     created.append(outcome)
+                    existing.add((recommendation.id, horizon))
+            offset += len(recommendations)
         return created
 
-    def _evaluate(self, recommendation: Recommendation, horizon: int) -> Outcome | None:
-        provider = self.registry.provider_for(recommendation.asset)
-        end = recommendation.as_of + timedelta(days=horizon + 7)
-        prices = provider.get_prices(recommendation.asset, start=recommendation.as_of, end=end)
-        closes = [value for item in prices if (value := self._close(item)) is not None]
-        if len(closes) < 2 or closes[0] <= 0:
+    def _evaluate(
+        self,
+        recommendation: Recommendation,
+        horizon: int,
+        *,
+        observed_at: datetime | None = None,
+    ) -> Outcome | None:
+        if recommendation.signal_status in {
+            SignalStatus.TECHNICAL_FAILURE,
+            SignalStatus.INSUFFICIENT_EVIDENCE,
+        }:
             return None
-        raw_return = closes[-1] / closes[0] - 1
-        benchmark = self._benchmark_return(recommendation, horizon)
-        actual = (1.0, 0.0, 0.0) if raw_return > 0.02 else (0.0, 0.0, 1.0)
-        if -0.02 <= raw_return <= 0.02:
+        observed_at = as_utc(observed_at or utc_now())
+        start = as_utc(recommendation.as_of)
+        target = start + timedelta(days=horizon)
+        if target > observed_at:
+            return None
+
+        provider = self.registry.provider_for(recommendation.asset)
+        prices = provider.get_prices(recommendation.asset, start=start, end=observed_at)
+        points = self._price_points(prices, not_after=observed_at)
+        window = self._window(points, start=start, target=target)
+        if len(window) < 2:
+            return None
+
+        entry = window[0]
+        exit_point = window[-1]
+        raw_return = exit_point.close / entry.close - 1
+        benchmark = self._benchmark_return(
+            recommendation,
+            entry_at=entry.observed_at,
+            exit_at=exit_point.observed_at,
+            observed_at=observed_at,
+        )
+        benchmark_return = benchmark.return_value
+        alpha = raw_return - benchmark_return if benchmark_return is not None else None
+
+        neutral_band = self._neutral_band(horizon)
+        actual = (1.0, 0.0, 0.0) if raw_return > neutral_band else (0.0, 0.0, 1.0)
+        if -neutral_band <= raw_return <= neutral_band:
             actual = (0.0, 1.0, 0.0)
         predicted = (
             recommendation.bull_probability,
@@ -61,49 +226,67 @@ class OutcomeService:
             for forecast, realized in zip(predicted, actual, strict=True)
         ) / 3
         if abs(recommendation.score) < 20:
-            direction_correct = abs(raw_return) <= 0.02
+            direction_correct = abs(raw_return) <= neutral_band
+        elif recommendation.score > 0:
+            direction_correct = raw_return > neutral_band
         else:
-            direction_correct = (recommendation.score > 0 and raw_return > 0) or (
-                recommendation.score < 0 and raw_return < 0
-            )
-        peak = closes[0]
+            direction_correct = raw_return < -neutral_band
+
+        peak = entry.close
         max_drawdown = 0.0
-        for close in closes:
-            peak = max(peak, close)
-            if peak:
-                max_drawdown = min(max_drawdown, close / peak - 1)
+        for point in window:
+            peak = max(peak, point.close)
+            max_drawdown = min(max_drawdown, point.close / peak - 1)
         return Outcome(
             recommendation_id=recommendation.id,
             horizon_days=horizon,
+            entry_at=entry.observed_at,
+            exit_at=exit_point.observed_at,
+            entry_price=entry.close,
+            exit_price=exit_point.close,
             raw_return=raw_return,
-            benchmark_return=benchmark,
-            alpha=raw_return - benchmark,
+            benchmark_status=benchmark.status,
+            benchmark_return=benchmark_return,
+            alpha=alpha,
             direction_correct=direction_correct,
             brier_score=brier,
             max_drawdown=max_drawdown,
+            observed_at=observed_at,
         )
 
-    def _benchmark_return(self, recommendation: Recommendation, horizon: int) -> float:
-        # Benchmark hooks are explicit; zero is returned when a provider cannot supply the index.
-        benchmark_symbol = {
-            Market.US: "SPY",
-            Market.CN: "000300",
-            Market.HK: "HSI",
-            Market.CRYPTO: "BTC",
-        }[recommendation.asset.market]
-        if (
-            recommendation.asset.asset_class is AssetClass.CRYPTO
-            and recommendation.asset.symbol == "BTC"
-        ):
-            return 0.0
+    @staticmethod
+    def _neutral_band(horizon: int) -> float:
+        """Scale the old 2%/20-day neutral band by square-root time."""
+
+        return min(0.10, max(0.005, 0.02 * sqrt(horizon / 20)))
+
+    def _benchmark_return(
+        self,
+        recommendation: Recommendation,
+        *,
+        entry_at: datetime,
+        exit_at: datetime,
+        observed_at: datetime,
+    ) -> BenchmarkResult:
+        benchmark_symbol = self.benchmark_symbols[recommendation.asset.market]
         matches = self.registry.resolve_assets(benchmark_symbol)
-        if not matches:
-            return 0.0
-        asset = matches[0]
+        exact_matches = [asset for asset in matches if asset.symbol.upper() == benchmark_symbol]
+        if not exact_matches:
+            return BenchmarkResult(status="missing")
+        asset = exact_matches[0]
+        if asset.asset_id == recommendation.asset.asset_id:
+            return BenchmarkResult(status="self_benchmark")
+
         prices = self.registry.provider_for(asset).get_prices(
             asset,
-            start=recommendation.as_of,
-            end=recommendation.as_of + timedelta(days=horizon + 7),
+            start=entry_at,
+            end=observed_at,
         )
-        closes = [value for item in prices if (value := self._close(item)) is not None]
-        return closes[-1] / closes[0] - 1 if len(closes) >= 2 and closes[0] else 0.0
+        points = self._price_points(prices, not_after=observed_at)
+        window = self._window(points, start=entry_at, target=exit_at)
+        if len(window) < 2:
+            return BenchmarkResult(status="missing")
+        return BenchmarkResult(
+            status="available",
+            return_value=window[-1].close / window[0].close - 1,
+        )

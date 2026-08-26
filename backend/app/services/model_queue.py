@@ -1087,7 +1087,11 @@ def build_model_queue_overview(
             queue_id="code",
             model=active_settings.ollama_code_model,
             purpose="代码演进",
-            binding="失败案例驱动的代码演进",
+            binding=(
+                "失败案例驱动的代码演进 · 自动合并开启"
+                if active_settings.evolution_auto_merge
+                else "失败案例驱动的代码演进 · 自动合并关闭"
+            ),
             enabled=active_settings.evolution_enabled,
             threads=threads.get("code", 0),
             capacity=int(code_inference.get("capacity") or 0),

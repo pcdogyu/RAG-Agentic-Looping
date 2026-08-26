@@ -40,8 +40,10 @@ class TelegramNotifier:
     def recommendation(self, value: Recommendation) -> bool:
         return self.send(
             f"研究完成：{value.asset.name} ({value.asset.symbol})\n"
-            f"评级：{value.rating.value}｜分数：{value.score}｜置信度：{value.confidence:.0%}\n"
-            f"证据完整：{'是' if value.evidence_complete else '否'}\n"
+            f"状态：{value.signal_status.value}｜评级：{value.rating.value}"
+            f"｜程序分：{value.score}｜置信度：{value.confidence:.0%}\n"
+            f"资料覆盖：{'完整' if value.evidence_complete else '不足'}"
+            f"｜方向门禁：{'通过' if value.directional_evidence_complete else '未通过'}\n"
             f"{value.thesis.summary[:800]}\n\n仅用于研究与模拟。"
         )
 

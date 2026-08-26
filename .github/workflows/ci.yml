@@ -20,6 +20,10 @@ jobs:
       - run: pip install -e ".[dev]"
       - run: ruff check .
       - run: python -m pytest --cov=backend.app --cov-report=term-missing
+      - run: python -m backend.app.evaluation fixed-evidence
+      - run: python -m backend.app.evaluation walk-forward
+      - run: python -m backend.app.evaluation probability-calibration
+      - run: python -m backend.app.evaluation compare-models
 
   frontend:
     runs-on: ubuntu-latest

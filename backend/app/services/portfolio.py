@@ -132,7 +132,11 @@ class PortfolioService:
             raise PortfolioError(
                 "only bullish, evidence-complete recommendations can open a position"
             )
-        if not recommendation.evidence_complete or recommendation.confidence < 0.55:
+        if (
+            not recommendation.direction_verified
+            or not recommendation.directional_evidence_complete
+            or recommendation.confidence < 0.55
+        ):
             raise PortfolioError("recommendation does not meet the evidence threshold")
         if price <= 0:
             raise PortfolioError("price must be positive")

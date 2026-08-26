@@ -19,12 +19,15 @@ from backend.app.domain import (
     AnalysisStep,
     AssetClass,
     AssetRef,
+    ClaimEvidenceAssessment,
+    ClaimVerdict,
     Evidence,
     NewsEvent,
     NewsItem,
     Recommendation,
     ResearchRun,
     RunStatus,
+    SignalStatus,
     SourceQuality,
     Thesis,
     as_utc,
@@ -33,8 +36,19 @@ from backend.app.domain import (
 )
 from backend.app.llm import LlmGateway, gateway
 from backend.app.providers.registry import ProviderRegistry
+from backend.app.services.directional_scoring import (
+    blocked_probabilities,
+    calibrate_probabilities,
+    deterministic_direction_score,
+    gated_score,
+    probabilities_for_score,
+)
 from backend.app.services.mcp_registry import SearchRequest, search_enabled_sources_sync
 from backend.app.services.prompt_budget import compact_evidence, compact_json_records
+from backend.app.services.research_factors import (
+    FactorSource,
+    build_research_factor_evidence,
+)
 from backend.app.services.retrieval import RetrievalService
 from backend.app.services.source_lineage import (
     canonicalize_url,
@@ -66,6 +80,7 @@ DIRECTION_SCORE_INSTRUCTION = (
     "score 必须由给定证据推导，并与核心观点、催化剂、风险、置信度及"
     " bull_probability/base_probability/bear_probability 保持一致；证据越弱，"
     "分数应越接近 0 且置信度越低。不得省略 score，不得为追求非零分数编造事实。"
+    "该 score 只作为模型意见留档，最终分数由程序依据概率、事件映射、市场因子和证据门禁计算。"
 )
 
 
@@ -90,10 +105,43 @@ class DraftOutput(BaseModel):
 
 
 class VerificationOutput(BaseModel):
+    # Historical name retained for API compatibility: this is the structural
+    # source/citation gate, not proof of a directional conclusion.
     evidence_complete: bool
+    semantic_evidence_complete: bool = False
+    direction_supported: bool = False
+    semantic_status: Literal["not_run", "completed", "failed"] = "not_run"
+    evidence_strength: float = Field(default=0, ge=0, le=1)
+    claim_assessments: list[ClaimEvidenceAssessment] = Field(default_factory=list)
     missing_requirements: list[str] = Field(default_factory=list)
     contradictions: list[str] = Field(default_factory=list)
     unsupported_claims: list[str] = Field(default_factory=list)
+
+
+class SemanticClaimOutput(BaseModel):
+    claim: str
+    claim_kind: Literal[
+        "summary",
+        "historical_context",
+        "financials_and_growth",
+        "products_or_protocol",
+        "competition",
+        "valuation_or_tokenomics",
+        "catalyst",
+        "risk",
+        "invalidation_condition",
+    ]
+    stance: int = Field(default=0, ge=-1, le=1)
+    verdict: ClaimVerdict
+    evidence_ids: list[str] = Field(default_factory=list)
+    confidence: float = Field(default=0, ge=0, le=1)
+    reason: str = ""
+
+
+class SemanticVerificationOutput(BaseModel):
+    claims: list[SemanticClaimOutput] = Field(default_factory=list)
+    direction_supported: bool = False
+    contradictions: list[str] = Field(default_factory=list)
 
 
 class CloudVerification(BaseModel):
@@ -107,6 +155,7 @@ class ResearchState(TypedDict, total=False):
     event: dict[str, Any] | None
     events: list[dict[str, Any]]
     research_data: dict[str, Any]
+    factor_summary: dict[str, Any]
     evidence: list[dict[str, Any]]
     retrieved_context: list[dict[str, Any]]
     draft: dict[str, Any]
@@ -264,6 +313,59 @@ class ResearchService:
             research_data,
             state.get("events"),
         )
+        events = [NewsEvent.model_validate(item) for item in state.get("events", [])]
+        if not events and state.get("event"):
+            events = [NewsEvent.model_validate(state["event"])]
+        primary_event = next(
+            (item for item in events if item.id == run.event_id),
+            events[0] if events else None,
+        )
+        factor_sources: dict[str, Any] = dict(research_data.get("factor_sources", {}))
+        event_evidence = [
+            item
+            for item in evidence
+            if primary_event and item.claim == primary_event.headline
+        ]
+        if event_evidence and "event" not in factor_sources:
+            source = max(event_evidence, key=lambda item: self._source_weight(item.source_quality))
+            factor_sources["event"] = FactorSource(
+                name=source.source_name,
+                url=source.source_url,
+                quality=source.source_quality,
+                independent_group=source.independent_group,
+                published_at=source.published_at,
+            )
+        factor_result = build_research_factor_evidence(
+            run_id=run.id,
+            asset=run.asset,
+            as_of=run.as_of,
+            event_at=primary_event.published_at if primary_event else None,
+            horizon_days=primary_event.horizon_days if primary_event else None,
+            event_type=primary_event.event_type.value if primary_event else None,
+            event_texts=(
+                [f"{primary_event.headline} {primary_event.direct_impact}"]
+                if primary_event
+                else []
+            ),
+            event_details=research_data.get("event_details", {}),
+            fundamentals=research_data.get("fundamentals", {}),
+            expectations=research_data.get("expectations", {}),
+            expectations_at=research_data.get("expectations_at"),
+            asset_prices=research_data.get("prices", []),
+            benchmark_prices=research_data.get("benchmark_prices", []),
+            industry_prices=research_data.get("industry_prices", []),
+            sources=factor_sources,
+        )
+        evidence.extend(factor_result.evidence)
+        factor_summary = {
+            "signal": factor_result.aggregate_signal,
+            "reliability": factor_result.reliability,
+            "event_families": factor_result.event_families,
+            "categories": factor_result.category_signals,
+            "category_reliability": factor_result.category_reliability,
+            "missing": factor_result.missing_requirements,
+            "factors": [item.model_dump(mode="json") for item in factor_result.factors],
+        }
         run.evidence = evidence
         save_run(self.db, run)
         event = NewsEvent.model_validate(state["event"]) if state.get("event") else None
@@ -320,6 +422,9 @@ class ResearchService:
                     "independent_sources": len(independent_sources),
                     "retrieved_context_count": len(retrieved_context),
                     "provider_groups": sorted(research_data.keys()),
+                    "research_factor_count": len(factor_result.factors),
+                    "research_factor_reliability": factor_result.reliability,
+                    "research_factor_missing": factor_result.missing_requirements,
                 },
             )
         )
@@ -327,6 +432,7 @@ class ResearchService:
         return {
             "run": run.model_dump(mode="json"),
             "research_data": research_data,
+            "factor_summary": factor_summary,
             "evidence": [item.model_dump(mode="json") for item in evidence],
             "retrieved_context": retrieved_context,
         }
@@ -653,6 +759,30 @@ class ResearchService:
             independent_group=source_group(item),
         )
 
+    @staticmethod
+    def _event_prompt_context(event_payload: dict[str, Any] | None) -> dict[str, Any]:
+        if not event_payload:
+            return {}
+        event = NewsEvent.model_validate(event_payload)
+        return {
+            "headline": event.headline,
+            "event_type": event.event_type.value,
+            "direct_impact": event.direct_impact,
+            "horizon_days": event.horizon_days,
+            "published_at": event.published_at.isoformat(),
+            "candidates": [
+                {
+                    "asset_id": item.asset.asset_id,
+                    "relationship": item.relationship,
+                    "impact_direction": item.impact_direction,
+                    "relevance": item.relevance,
+                    "mapping_confidence": item.mapping_confidence,
+                    "rationale": item.rationale,
+                }
+                for item in event.candidates
+            ],
+        }
+
     def _draft(self, state: ResearchState) -> dict[str, Any]:
         run = ResearchRun.model_validate(state["run"])
         evidence = state.get("evidence", [])
@@ -663,12 +793,16 @@ class ResearchService:
         )
         prompt = (
             f"研究对象：{run.asset.model_dump_json()}\n研究截止：{run.as_of.isoformat()}\n"
+            "触发事件："
+            f"{json.dumps(self._event_prompt_context(state.get('event')), ensure_ascii=False)}\n"
+            f"程序研究因子：{json.dumps(state.get('factor_summary', {}), ensure_ascii=False, default=str)}\n"
             f"报告模板：{asset_template}\n"
             "证据："
             f"{compact_evidence(evidence, self.settings.research_prompt_evidence_chars)}\n"
             "混合检索上下文："
             f"{compact_json_records(state.get('retrieved_context', []), self.settings.research_prompt_context_chars)}\n"
             "只能引用 evidence_ids 中存在的证据。证据不足时降低 confidence 和 score，不得编造。"
+            "区分事件事实、市场反应和收益方向；不要把公告完整误写成方向证据充分。"
         )
         draft_error: str | None = None
         try:
@@ -725,11 +859,60 @@ class ResearchService:
             confidence=min(0.45, len(evidence) * 0.1),
         )
 
+    @staticmethod
+    def _claim_specs(draft: DraftOutput) -> list[tuple[str, str]]:
+        claims: list[tuple[str, str]] = [
+            ("summary", draft.summary),
+            ("historical_context", draft.historical_context),
+            ("financials_and_growth", draft.financials_and_growth),
+            ("products_or_protocol", draft.products_or_protocol),
+            ("competition", draft.competition),
+            ("valuation_or_tokenomics", draft.valuation_or_tokenomics),
+        ]
+        claims.extend(("catalyst", item) for item in draft.catalysts)
+        claims.extend(("risk", item) for item in draft.risks)
+        claims.extend(
+            ("invalidation_condition", item) for item in draft.invalidation_conditions
+        )
+        return [(kind, claim.strip()) for kind, claim in claims if claim.strip()]
+
+    @staticmethod
+    def _claim_key(kind: str, claim: str) -> tuple[str, str]:
+        return (kind, normalize_text(claim))
+
+    @staticmethod
+    def _mapping_inputs(
+        run: ResearchRun, event_payload: dict[str, Any] | None
+    ) -> tuple[int | None, float, float]:
+        if not event_payload:
+            return None, 0.0, 1.0
+        event = NewsEvent.model_validate(event_payload)
+        candidates = [
+            item for item in event.candidates if item.asset.asset_id == run.asset.asset_id
+        ]
+        if not candidates:
+            return None, 0.0, 0.0
+        candidate = max(candidates, key=lambda item: item.relevance)
+        direction = candidate.impact_direction if candidate.impact_direction else None
+        confidence = min(candidate.relevance, candidate.mapping_confidence)
+        return direction, candidate.relevance, confidence
+
+    @staticmethod
+    def _source_weight(quality: SourceQuality) -> float:
+        return {
+            SourceQuality.OFFICIAL: 1.0,
+            SourceQuality.PRIMARY: 0.9,
+            SourceQuality.PROFESSIONAL: 0.82,
+            SourceQuality.AGGREGATOR: 0.65,
+            SourceQuality.SOCIAL: 0.4,
+        }[quality]
+
     def _verify(self, state: ResearchState) -> dict[str, Any]:
         run = ResearchRun.model_validate(state["run"])
         draft = DraftOutput.model_validate(state["draft"])
         evidence = [Evidence.model_validate(item) for item in state.get("evidence", [])]
-        available_ids = {str(item.id) for item in evidence}
+        evidence_by_id = {str(item.id): item for item in evidence}
+        available_ids = set(evidence_by_id)
         cited_ids = {str(item) for item in draft.evidence_ids}
         missing: list[str] = []
         unsupported: list[str] = []
@@ -765,9 +948,162 @@ class ResearchService:
         if not corroborated:
             missing.append(SOURCE_GATE)
 
-        complete = not missing and not unsupported and not contradictions
+        structural_complete = not missing and not unsupported and not contradictions
+        structural_missing = list(missing)
+        structural_unsupported = list(unsupported)
+        structural_contradictions = list(contradictions)
+        semantic_complete = False
+        direction_supported = False
+        semantic_status: Literal["not_run", "completed", "failed"] = "not_run"
+        evidence_strength = 0.0
+        assessments: list[ClaimEvidenceAssessment] = []
+        semantic_missing: list[str] = []
+
+        event_direction, event_relevance, _ = self._mapping_inputs(run, state.get("event"))
+        factor_summary = state.get("factor_summary", {})
+        preview = deterministic_direction_score(
+            bull_probability=draft.bull_probability,
+            base_probability=draft.base_probability,
+            bear_probability=draft.bear_probability,
+            event_direction=event_direction,
+            event_relevance=event_relevance,
+            factor_signal=factor_summary.get("signal"),
+            factor_reliability=float(factor_summary.get("reliability", 0) or 0),
+        )
+
+        if structural_complete and not run.retryable_reason:
+            claim_specs = self._claim_specs(draft)
+            requested_claims = [
+                {"claim_kind": kind, "claim": claim} for kind, claim in claim_specs
+            ]
+            try:
+                semantic_payload = self.llm.generate_json(
+                    model=self.settings.ollama_assist_model,
+                    system=(
+                        "你是独立的逐观点证据复核员，不负责写报告或打投资分。"
+                        "逐条判断观点是否被给定证据语义支持；claim 必须原样返回，"
+                        "只能引用实际存在的 evidence id。事实存在不等于收益方向成立。"
+                        "supported 表示证据直接支持，contradicted 表示冲突，"
+                        "unrelated 表示证据与观点无关，insufficient 表示无法证明。"
+                    ),
+                    prompt=(
+                        f"程序待验证方向分：{preview.raw_score}。\n"
+                        f"待验证观点：{json.dumps(requested_claims, ensure_ascii=False)}\n"
+                        "证据："
+                        f"{compact_evidence(state.get('evidence', []), self.settings.research_prompt_evidence_chars)}\n"
+                        "只有每个观点都逐条绑定证据，且证据支持程序方向时，"
+                        "direction_supported 才能为 true。不要补充外部事实。"
+                    ),
+                    schema=SemanticVerificationOutput,
+                    temperature=0,
+                    operation="direction_verification",
+                    entity_type="research_run",
+                    entity_id=run.id,
+                )
+                semantic = SemanticVerificationOutput.model_validate(semantic_payload)
+                semantic_status = "completed"
+                contradictions.extend(semantic.contradictions)
+                expected = {
+                    self._claim_key(kind, claim): (kind, claim) for kind, claim in claim_specs
+                }
+                returned: dict[tuple[str, str], SemanticClaimOutput] = {}
+                for item in semantic.claims:
+                    key = self._claim_key(item.claim_kind, item.claim)
+                    if key not in expected:
+                        unsupported.append(
+                            f"semantic verifier returned unexpected claim: {item.claim[:120]}"
+                        )
+                        continue
+                    returned[key] = item
+
+                supported_scores: list[float] = []
+                stance_numerator = 0.0
+                stance_denominator = 0.0
+                for key, (kind, claim) in expected.items():
+                    item = returned.get(key)
+                    if item is None:
+                        semantic_missing.append(f"claim evidence: {kind}: {claim[:120]}")
+                        continue
+                    unknown_ids = sorted(set(item.evidence_ids) - available_ids)
+                    valid_ids = [value for value in item.evidence_ids if value in available_ids]
+                    if unknown_ids:
+                        unsupported.append(
+                            f"unknown claim evidence ids for {kind}: {unknown_ids}"
+                        )
+                    assessment = ClaimEvidenceAssessment(
+                        claim=claim,
+                        claim_kind=kind,
+                        stance=item.stance,
+                        verdict=item.verdict,
+                        evidence_ids=[evidence_by_id[value].id for value in valid_ids],
+                        confidence=item.confidence,
+                        reason=item.reason,
+                    )
+                    assessments.append(assessment)
+                    if item.verdict is ClaimVerdict.CONTRADICTED:
+                        contradictions.append(f"contradicted claim: {claim[:160]}")
+                    if item.verdict is not ClaimVerdict.SUPPORTED or not valid_ids:
+                        semantic_missing.append(f"unsupported claim: {kind}: {claim[:120]}")
+                        continue
+                    quality = max(
+                        self._source_weight(evidence_by_id[value].source_quality)
+                        for value in valid_ids
+                    )
+                    support_score = item.confidence * quality
+                    supported_scores.append(support_score)
+                    if item.stance:
+                        stance_numerator += item.stance * support_score
+                        stance_denominator += support_score
+
+                coverage = len(supported_scores) / max(1, len(expected))
+                evidence_strength = round(
+                    coverage
+                    * (sum(supported_scores) / max(1, len(supported_scores))),
+                    4,
+                )
+                stance_signal = (
+                    stance_numerator / stance_denominator if stance_denominator else 0.0
+                )
+                preview_direction = (
+                    1 if preview.raw_score >= 20 else (-1 if preview.raw_score <= -20 else 0)
+                )
+                stance_aligned = bool(
+                    preview_direction == 0
+                    or preview_direction * stance_signal >= 0.2
+                )
+                direction_supported = bool(
+                    preview_direction == 0
+                    or (semantic.direction_supported and stance_aligned)
+                )
+                if abs(preview.raw_score) >= 20 and not direction_supported:
+                    semantic_missing.append(
+                        "claim stances do not support the deterministic direction"
+                    )
+                if evidence_strength < self.settings.minimum_directional_confidence:
+                    semantic_missing.append(
+                        "claim-level evidence strength is below the publication threshold"
+                    )
+                semantic_complete = bool(
+                    expected
+                    and not semantic_missing
+                    and not unsupported
+                    and not contradictions
+                    and direction_supported
+                )
+                run.retryable_reason = None
+            except Exception as exc:
+                semantic_status = "failed"
+                run.retryable_reason = f"semantic_verifier_{type(exc).__name__}"
+                semantic_missing.append("semantic evidence verifier unavailable")
+
+        missing.extend(semantic_missing)
         verification = VerificationOutput(
-            evidence_complete=complete,
+            evidence_complete=structural_complete,
+            semantic_evidence_complete=semantic_complete,
+            direction_supported=direction_supported,
+            semantic_status=semantic_status,
+            evidence_strength=evidence_strength,
+            claim_assessments=assessments,
             missing_requirements=missing,
             contradictions=contradictions,
             unsupported_claims=unsupported,
@@ -780,22 +1116,47 @@ class ResearchService:
         run.analysis_steps.append(
             AnalysisStep(
                 phase="verification",
-                status="completed" if complete else "incomplete",
+                status="completed" if structural_complete else "incomplete",
                 executor="evidence-gate",
                 model="evidence-gate:v1",
                 summary=(
-                    f"第 {round_number} 轮校验{'通过' if complete else '未通过'}："
-                    f"缺失 {len(missing)} 项、矛盾 {len(contradictions)} 项、无效引用 {len(unsupported)} 项。"
+                    f"第 {round_number} 轮资料结构校验{'通过' if structural_complete else '未通过'}："
+                    f"缺失 {len(structural_missing)} 项、矛盾 {len(structural_contradictions)} 项、"
+                    f"无效引用 {len(structural_unsupported)} 项。"
                 ),
                 metrics={
                     "round": round_number,
-                    "evidence_complete": complete,
-                    "missing_requirements": missing,
-                    "contradictions": contradictions,
-                    "unsupported_claims": unsupported,
+                    "evidence_complete": structural_complete,
+                    "missing_requirements": structural_missing,
+                    "contradictions": structural_contradictions,
+                    "unsupported_claims": structural_unsupported,
                 },
             )
         )
+        if structural_complete:
+            run.analysis_steps.append(
+                AnalysisStep(
+                    phase="semantic_evidence_gate",
+                    status=(
+                        "failed"
+                        if semantic_status == "failed"
+                        else ("completed" if semantic_complete else "incomplete")
+                    ),
+                    executor="ollama-independent-verifier",
+                    model=self.settings.ollama_assist_model,
+                    summary=(
+                        f"逐观点语义门禁{'通过' if semantic_complete else '未通过'}："
+                        f"验证 {len(assessments)} 个观点，证据强度 {evidence_strength:.0%}。"
+                    ),
+                    metrics={
+                        "semantic_status": semantic_status,
+                        "semantic_evidence_complete": semantic_complete,
+                        "direction_supported": direction_supported,
+                        "claim_count": len(assessments),
+                        "evidence_strength": evidence_strength,
+                    },
+                )
+            )
         save_run(self.db, run)
         return {
             "run": run.model_dump(mode="json"),
@@ -810,7 +1171,6 @@ class ResearchService:
         if run.retryable_reason:
             return "finalize"
         verification = VerificationOutput.model_validate(state["verification"])
-        draft = DraftOutput.model_validate(state["draft"])
         can_retry = state["verification_round"] < self.settings.max_verification_rounds
         if (
             not state.get("historical_replay")
@@ -819,7 +1179,10 @@ class ResearchService:
             and can_retry
         ):
             return "acquire_evidence"
-        if (not verification.evidence_complete or abs(draft.score) >= 60) and can_retry:
+        if (
+            not verification.evidence_complete
+            or not verification.semantic_evidence_complete
+        ) and can_retry:
             return "revise"
         return "finalize"
 
@@ -1090,6 +1453,9 @@ class ResearchService:
         verification = VerificationOutput.model_validate(state["verification"])
         prompt = (
             f"当前报告：{current.model_dump_json()}\n验证结果：{verification.model_dump_json()}\n"
+            "触发事件："
+            f"{json.dumps(self._event_prompt_context(state.get('event')), ensure_ascii=False)}\n"
+            f"程序研究因子：{json.dumps(state.get('factor_summary', {}), ensure_ascii=False, default=str)}\n"
             "可用证据："
             f"{compact_evidence(state.get('evidence', []), self.settings.research_prompt_evidence_chars)}\n"
             "修订报告。不能通过编造来补足缺失来源；无法补足时保持低置信度和中性分数。"
@@ -1146,20 +1512,87 @@ class ResearchService:
         run = ResearchRun.model_validate(state["run"])
         draft = DraftOutput.model_validate(state["draft"])
         verification = VerificationOutput.model_validate(state["verification"])
-        complete = verification.evidence_complete
-        confidence = draft.confidence if complete else min(draft.confidence, 0.54)
-        score = draft.score if complete else 0
-        high_impact = abs(score) >= 60
-        cloud_approved = False
-        if (
-            high_impact
-            and state.get("verification_round", 0) >= 2
-            and self.settings.cloud_verifier_enabled
-        ):
+        event = NewsEvent.model_validate(state["event"]) if state.get("event") else None
+        event_direction, event_relevance, mapping_confidence = self._mapping_inputs(
+            run, state.get("event")
+        )
+        factor_summary = state.get("factor_summary", {})
+        calibration_reliability = (
+            verification.evidence_strength * mapping_confidence
+            if verification.semantic_evidence_complete
+            else 0.0
+        )
+        normalized_probabilities = calibrate_probabilities(
+            draft.bull_probability,
+            draft.base_probability,
+            draft.bear_probability,
+            reliability=calibration_reliability,
+        )
+        direction_score = deterministic_direction_score(
+            bull_probability=normalized_probabilities[0],
+            base_probability=normalized_probabilities[1],
+            bear_probability=normalized_probabilities[2],
+            event_direction=event_direction,
+            event_relevance=event_relevance,
+            factor_signal=factor_summary.get("signal"),
+            factor_reliability=float(factor_summary.get("reliability", 0) or 0),
+        )
+        structural_complete = verification.evidence_complete
+        semantic_complete = verification.semantic_evidence_complete
+        mapping_complete = mapping_confidence >= 0.65
+        evidence_strength_complete = (
+            verification.evidence_strength
+            >= self.settings.minimum_directional_confidence
+        )
+        base_local_gate = (
+            structural_complete
+            and semantic_complete
+            and mapping_complete
+            and evidence_strength_complete
+        )
+        candidate_score = (
+            gated_score(
+                direction_score.raw_score,
+                verification.evidence_strength,
+                mapping_confidence,
+            )
+            if base_local_gate
+            else 0
+        )
+        direction_strength_complete = bool(
+            abs(direction_score.raw_score) < 20 or abs(candidate_score) >= 20
+        )
+        local_gate = base_local_gate and direction_strength_complete
+        high_impact = abs(candidate_score) >= 60
+        cloud_required = high_impact and self.settings.cloud_verifier_enabled
+        cloud_approved: bool | None = None
+        cloud_gate = True
+        gate_reasons = list(
+            dict.fromkeys(
+                [
+                    *verification.missing_requirements,
+                    *verification.unsupported_claims,
+                    *verification.contradictions,
+                ]
+            )
+        )
+        if not mapping_complete:
+            gate_reasons.append(
+                f"asset mapping confidence {mapping_confidence:.0%} is below 65%"
+            )
+        if not evidence_strength_complete:
+            gate_reasons.append(
+                "claim-level evidence strength is below the publication threshold"
+            )
+        if not direction_strength_complete:
+            gate_reasons.append(
+                "direction weakened below the publication threshold after evidence gating"
+            )
+        if cloud_required:
             try:
                 cloud = self.llm.cloud_verify(
                     (
-                        f"复核高影响研究结论：{draft.model_dump_json()}\n"
+                        f"复核高影响程序评分 {candidate_score}：{draft.model_dump_json()}\n"
                         f"验证结果：{verification.model_dump_json()}\n"
                         "证据："
                         f"{compact_evidence(state.get('evidence', []), self.settings.research_prompt_evidence_chars)}\n"
@@ -1174,6 +1607,11 @@ class ResearchService:
                     and cloud_result.confidence >= self.settings.minimum_directional_confidence
                     and not cloud_result.contradictions
                 )
+                cloud_gate = cloud_approved
+                if not cloud_approved:
+                    gate_reasons.append("high-impact independent cloud review rejected")
+                    if cloud_result:
+                        gate_reasons.extend(cloud_result.contradictions)
                 run.analysis_steps.append(
                     AnalysisStep(
                         phase="cloud_verification",
@@ -1190,6 +1628,9 @@ class ResearchService:
                 )
             except Exception as exc:
                 cloud_approved = False
+                cloud_gate = False
+                run.retryable_reason = f"cloud_verifier_{type(exc).__name__}"
+                gate_reasons.append("high-impact cloud verifier unavailable")
                 run.analysis_steps.append(
                     AnalysisStep(
                         phase="cloud_verification",
@@ -1199,14 +1640,48 @@ class ResearchService:
                         summary=f"高影响结论云复核不可用（{type(exc).__name__}），方向评级已被门控。",
                     )
                 )
-        directional_gate = complete and (not high_impact or cloud_approved)
-        probabilities = [draft.bull_probability, draft.base_probability, draft.bear_probability]
-        total = sum(probabilities)
-        if total <= 0:
-            probabilities = [0.33, 0.34, 0.33]
+
+        technical_failure = bool(run.retryable_reason)
+        final_gate = local_gate and cloud_gate and not technical_failure
+        score = candidate_score if final_gate else 0
+        if technical_failure:
+            signal_status = SignalStatus.TECHNICAL_FAILURE
+            probabilities = blocked_probabilities(technical_failure=True)
+        elif not final_gate:
+            signal_status = SignalStatus.INSUFFICIENT_EVIDENCE
+            probabilities = blocked_probabilities()
+        elif abs(score) < 20:
+            signal_status = SignalStatus.NEUTRAL
+            probabilities = probabilities_for_score(
+                score,
+                base_probability=normalized_probabilities[1],
+            )
         else:
-            probabilities = [value / total for value in probabilities]
+            signal_status = SignalStatus.DIRECTIONAL
+            probabilities = probabilities_for_score(
+                score,
+                base_probability=normalized_probabilities[1],
+            )
+
+        if technical_failure and run.retryable_reason:
+            gate_reasons.insert(0, run.retryable_reason)
+        gate_reasons = list(dict.fromkeys(gate_reasons))
+        confidence_ceiling = min(
+            draft.confidence,
+            verification.evidence_strength,
+            mapping_confidence,
+        )
+        confidence = round(
+            confidence_ceiling if final_gate else min(confidence_ceiling, 0.54), 4
+        )
         valid_evidence_ids = {str(item.id): item.id for item in run.evidence}
+        thesis_evidence_ids = [
+            valid_evidence_ids[item]
+            for item in draft.evidence_ids
+            if item in valid_evidence_ids
+        ]
+        for assessment in verification.claim_assessments:
+            thesis_evidence_ids.extend(assessment.evidence_ids)
         thesis = Thesis(
             summary=draft.summary,
             historical_context=draft.historical_context,
@@ -1217,47 +1692,82 @@ class ResearchService:
             catalysts=draft.catalysts,
             risks=draft.risks,
             invalidation_conditions=draft.invalidation_conditions,
-            evidence_ids=[
-                valid_evidence_ids[item]
-                for item in draft.evidence_ids
-                if item in valid_evidence_ids
-            ],
+            evidence_ids=list(dict.fromkeys(thesis_evidence_ids)),
         )
         recommendation = Recommendation(
             run_id=run.id,
             asset=run.asset,
             score=score,
-            rating=rating_for(score, confidence, directional_gate),
+            model_score=draft.score,
+            raw_score=direction_score.raw_score,
+            rating=rating_for(
+                score,
+                confidence,
+                signal_status is SignalStatus.DIRECTIONAL,
+            ),
             confidence=confidence,
             bull_probability=probabilities[0],
             base_probability=probabilities[1],
             bear_probability=probabilities[2],
-            horizon_days=90,
+            horizon_days=event.horizon_days if event else 90,
             valuation_low=draft.valuation_low,
             valuation_high=draft.valuation_high,
             thesis=thesis,
             as_of=run.as_of,
-            evidence_complete=complete,
+            evidence_complete=structural_complete,
+            directional_evidence_complete=structural_complete and semantic_complete,
+            direction_verified=final_gate,
+            signal_status=signal_status,
+            evidence_strength=verification.evidence_strength,
+            mapping_confidence=mapping_confidence,
+            claim_assessments=verification.claim_assessments,
+            gate_reasons=gate_reasons,
+            scoring_version="deterministic-event-factor-v1",
+            calibration_version="evidence-shrinkage-score-aligned-v2",
         )
         run.recommendation = recommendation
-        run.status = RunStatus.COMPLETED if complete else RunStatus.INSUFFICIENT_EVIDENCE
+        if signal_status is SignalStatus.TECHNICAL_FAILURE:
+            run.status = RunStatus.FAILED
+            run.error = f"研究依赖不可用：{run.retryable_reason}"
+        elif signal_status is SignalStatus.INSUFFICIENT_EVIDENCE:
+            run.status = RunStatus.INSUFFICIENT_EVIDENCE
+        else:
+            run.status = RunStatus.COMPLETED
         run.completed_at = utc_now()
         run.analysis_steps.append(
             AnalysisStep(
                 phase="finalization",
-                status="completed" if complete else "incomplete",
+                status=(
+                    "failed"
+                    if technical_failure
+                    else ("completed" if final_gate else "incomplete")
+                ),
                 executor="rating-engine",
-                model="rating-gate:v1",
+                model="deterministic-rating-gate:v2",
                 summary=(
-                    f"最终评级 {recommendation.rating.value}，方向分数 {score}，"
-                    f"置信度 {confidence:.0%}，证据{'完整' if complete else '不足'}。"
+                    f"最终状态 {signal_status.value}，程序原始分 {direction_score.raw_score}，"
+                    f"发布分 {score}，置信度 {confidence:.0%}。"
                 ),
                 metrics={
                     "rating": recommendation.rating.value,
+                    "signal_status": signal_status.value,
+                    "model_score": draft.score,
+                    "raw_score": direction_score.raw_score,
                     "score": score,
                     "confidence": confidence,
-                    "evidence_complete": complete,
+                    "evidence_complete": structural_complete,
+                    "semantic_evidence_complete": semantic_complete,
+                    "evidence_strength": verification.evidence_strength,
+                    "mapping_confidence": mapping_confidence,
+                    "calibration_reliability": calibration_reliability,
                     "cloud_approved": cloud_approved,
+                    "cloud_required": cloud_required,
+                    "gate_reasons": gate_reasons,
+                    "score_components": {
+                        "probability": direction_score.probability_score,
+                        "event": direction_score.event_score,
+                        "factor": direction_score.factor_score,
+                    },
                 },
             )
         )
@@ -1274,13 +1784,21 @@ class ResearchService:
         citations = "\n".join(
             f"- [{item.source_name}]({item.source_url}) — {item.claim}" for item in run.evidence
         )
+        claim_checks = "\n".join(
+            f"- [{item.verdict.value}] {item.claim_kind}: {item.claim} "
+            f"(置信度 {item.confidence:.0%})"
+            for item in recommendation.claim_assessments
+        )
         content = (
             f"# {run.asset.name} ({run.asset.symbol})\n\n"
             f"- 评级：{recommendation.rating.value}\n"
-            f"- 分数：{recommendation.score}\n"
+            f"- 信号状态：{recommendation.signal_status.value}\n"
+            f"- 程序原始分 / 发布分：{recommendation.raw_score} / {recommendation.score}\n"
+            f"- 模型意见分（仅审计）：{recommendation.model_score}\n"
             f"- 置信度：{recommendation.confidence:.0%}\n"
             f"- 截止时间：{run.as_of.isoformat()}\n"
-            f"- 证据完整：{'是' if recommendation.evidence_complete else '否'}\n\n"
+            f"- 资料覆盖：{'完整' if recommendation.evidence_complete else '不足'}\n"
+            f"- 方向证据门禁：{'通过' if recommendation.directional_evidence_complete else '未通过'}\n\n"
             f"## 核心观点\n\n{recommendation.thesis.summary}\n\n"
             f"## 财务/协议\n\n{recommendation.thesis.financials_and_growth}\n\n"
             f"## 产品与竞争\n\n{recommendation.thesis.products_or_protocol}\n\n"
@@ -1292,6 +1810,7 @@ class ResearchService:
             + "\n".join(f"- {item}" for item in recommendation.thesis.risks)
             + "\n\n## 失效条件\n\n"
             + "\n".join(f"- {item}" for item in recommendation.thesis.invalidation_conditions)
+            + f"\n\n## 逐观点证据门禁\n\n{claim_checks or '- 未完成'}"
             + f"\n\n## 证据\n\n{citations}\n\n> 仅用于研究与模拟，不构成投资建议。\n"
         )
         path.write_text(content, encoding="utf-8")

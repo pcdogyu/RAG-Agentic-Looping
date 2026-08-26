@@ -7,7 +7,20 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import JSON, Boolean, DateTime, Float, Integer, String, Text, create_engine
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    Float,
+    Integer,
+    String,
+    Text,
+    create_engine,
+    inspect,
+    text,
+)
+from sqlalchemy.engine import Engine
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 from sqlalchemy.types import TypeDecorator
 
@@ -43,6 +56,10 @@ class AssetRow(Base):
     aliases: Mapped[list[str]] = mapped_column(JSON, default=list)
     products: Mapped[list[str]] = mapped_column(JSON, default=list)
     competitors: Mapped[list[str]] = mapped_column(JSON, default=list)
+    issuer_id: Mapped[str | None] = mapped_column(String(240), nullable=True)
+    primary_listing_asset_id: Mapped[str | None] = mapped_column(
+        String(160), nullable=True
+    )
     lot_size: Mapped[int] = mapped_column(Integer, default=1)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
 
@@ -276,8 +293,48 @@ engine = _make_engine()
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 
 
+_ASSET_IDENTITY_COLUMNS = {
+    "issuer_id": "VARCHAR(240)",
+    "primary_listing_asset_id": "VARCHAR(160)",
+}
+
+
+def _asset_column_names(bind: Engine) -> set[str]:
+    inspector = inspect(bind)
+    if "assets" not in inspector.get_table_names():
+        return set()
+    return {str(column["name"]) for column in inspector.get_columns("assets")}
+
+
+def ensure_asset_identity_columns(bind: Engine) -> None:
+    """Idempotently upgrade legacy asset tables without requiring a migration service."""
+
+    existing = _asset_column_names(bind)
+    if not existing:
+        return
+    for column_name, column_type in _ASSET_IDENTITY_COLUMNS.items():
+        if column_name in existing:
+            continue
+        if bind.dialect.name == "postgresql":
+            statement = text(
+                f"ALTER TABLE assets ADD COLUMN IF NOT EXISTS {column_name} {column_type}"
+            )
+        else:
+            statement = text(f"ALTER TABLE assets ADD COLUMN {column_name} {column_type}")
+        try:
+            with bind.begin() as connection:
+                connection.execute(statement)
+        except SQLAlchemyError:
+            # SQLite has no portable ADD COLUMN IF NOT EXISTS. Another process
+            # may have won the race between inspection and ALTER TABLE.
+            if column_name not in _asset_column_names(bind):
+                raise
+        existing.add(column_name)
+
+
 def init_db() -> None:
     Base.metadata.create_all(bind=engine)
+    ensure_asset_identity_columns(engine)
 
 
 def get_db() -> Generator[Session, None, None]:

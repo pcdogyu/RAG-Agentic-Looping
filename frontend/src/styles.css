@@ -420,6 +420,14 @@ h1 span { color: var(--mint); font-weight: 400; }
 .probability-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 16px 0; }
 .probability-grid span { display: grid; gap: 4px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; color: var(--muted); }
 .probability-grid strong { color: var(--mint); font: 500 18px "DM Mono", monospace; }
+.research-gate-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 12px 0 18px; }
+.research-gate-grid span { display: grid; gap: 5px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; color: var(--muted); font-size: 10px; }
+.research-gate-grid strong { color: var(--text); font: 500 15px "DM Mono", monospace; }
+.gate-reasons { color: var(--amber); }
+.claim-assessments { display: grid; gap: 8px; }
+.claim-assessments article { display: grid; gap: 5px; padding: 11px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--soft-hover); }
+.claim-assessments span, .claim-assessments small { color: var(--muted); font-size: 10px; }
+.claim-assessments strong { color: var(--secondary); font-size: 12px; line-height: 1.55; }
 .evidence-links { display: grid; gap: 7px; }
 .evidence-links a { display: grid; gap: 3px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 7px; color: var(--link); text-decoration: none; }
 .evidence-links a:hover { border-color: var(--mint); }
@@ -616,6 +624,7 @@ h1 span { color: var(--mint); font-weight: 400; }
   .native-config-fields { grid-template-columns: 1fr; }
   .conclusion-card { grid-template-columns: 1fr; }
   .conclusion-score { text-align: left; }
+  .research-gate-grid { grid-template-columns: repeat(2, 1fr); }
   .failed-research-item { grid-template-columns: 1fr; }
   .failed-research-item > button { justify-self: start; }
   .source-card-main { flex-direction: column; }

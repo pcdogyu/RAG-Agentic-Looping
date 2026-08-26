@@ -68,6 +68,27 @@ class Rating(StrEnum):
     STRONGLY_BEARISH = "strongly_bearish"
 
 
+class SignalStatus(StrEnum):
+    """Final state of the directional research pipeline.
+
+    A zero score is intentionally not enough to describe why no direction was
+    published.  Consumers can distinguish an infrastructure/model failure,
+    an evidence-gate rejection, and a genuinely neutral conclusion.
+    """
+
+    TECHNICAL_FAILURE = "technical_failure"
+    INSUFFICIENT_EVIDENCE = "insufficient_evidence"
+    NEUTRAL = "neutral"
+    DIRECTIONAL = "directional"
+
+
+class ClaimVerdict(StrEnum):
+    SUPPORTED = "supported"
+    CONTRADICTED = "contradicted"
+    UNRELATED = "unrelated"
+    INSUFFICIENT = "insufficient"
+
+
 class OrderSide(StrEnum):
     BUY = "buy"
     SELL = "sell"
@@ -94,6 +115,10 @@ class AssetRef(BaseModel):
     aliases: list[str] = Field(default_factory=list)
     products: list[str] = Field(default_factory=list)
     competitors: list[str] = Field(default_factory=list)
+    # Multiple listings/ADRs may point at the same issuer without being treated
+    # as interchangeable instruments.  Existing asset payloads remain valid.
+    issuer_id: str | None = None
+    primary_listing_asset_id: str | None = None
     lot_size: int = Field(default=1, ge=1)
     active: bool = True
 
@@ -122,6 +147,8 @@ class CandidateAsset(BaseModel):
     impact_direction: int = Field(default=0, ge=-1, le=1)
     relevance: float = Field(ge=0, le=1)
     rationale: str
+    mapping_confidence: float = Field(default=1, ge=0, le=1)
+    identity_basis: list[str] = Field(default_factory=list)
 
 
 class AnalysisStep(BaseModel):
@@ -191,29 +218,76 @@ class Thesis(BaseModel):
     evidence_ids: list[UUID] = Field(default_factory=list)
 
 
+class ClaimEvidenceAssessment(BaseModel):
+    """Auditable, claim-level semantic evidence decision."""
+
+    claim: str
+    claim_kind: str
+    stance: int = Field(default=0, ge=-1, le=1)
+    verdict: ClaimVerdict
+    evidence_ids: list[UUID] = Field(default_factory=list)
+    confidence: float = Field(default=0, ge=0, le=1)
+    reason: str = ""
+
+
 class Recommendation(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     run_id: UUID
     asset: AssetRef
     score: int = Field(ge=-100, le=100)
+    # `model_score` is retained only for audit. `raw_score` and `score` are
+    # calculated by deterministic program logic.
+    model_score: int | None = Field(default=None, ge=-100, le=100)
+    raw_score: int = Field(default=0, ge=-100, le=100)
     rating: Rating
     confidence: float = Field(ge=0, le=1)
     bull_probability: float = Field(ge=0, le=1)
     base_probability: float = Field(ge=0, le=1)
     bear_probability: float = Field(ge=0, le=1)
-    horizon_days: int = Field(default=90, ge=30, le=180)
+    horizon_days: int = Field(default=90, ge=1, le=730)
     valuation_low: float | None = None
     valuation_high: float | None = None
     thesis: Thesis
     generated_at: datetime = Field(default_factory=utc_now)
     as_of: datetime
     evidence_complete: bool = False
+    directional_evidence_complete: bool = False
+    direction_verified: bool = False
+    signal_status: SignalStatus | None = None
+    evidence_strength: float = Field(default=1, ge=0, le=1)
+    mapping_confidence: float = Field(default=1, ge=0, le=1)
+    claim_assessments: list[ClaimEvidenceAssessment] = Field(default_factory=list)
+    gate_reasons: list[str] = Field(default_factory=list)
+    scoring_version: str = "deterministic-v1"
+    calibration_version: str = "uncalibrated-v1"
 
     @model_validator(mode="after")
     def probabilities_sum_to_one(self) -> Recommendation:
         total = self.bull_probability + self.base_probability + self.bear_probability
         if abs(total - 1.0) > 0.02:
             raise ValueError("bull/base/bear probabilities must sum to 1")
+        if self.signal_status is None:
+            if not self.evidence_complete:
+                self.signal_status = SignalStatus.INSUFFICIENT_EVIDENCE
+            elif abs(self.score) < 20:
+                self.signal_status = SignalStatus.NEUTRAL
+            else:
+                self.signal_status = SignalStatus.DIRECTIONAL
+        if self.raw_score == 0 and self.score != 0:
+            # Backward-compatible read of recommendations stored before raw
+            # and final scores were separated.
+            self.raw_score = self.score
+        if (
+            self.evidence_complete
+            and not self.claim_assessments
+            and not self.gate_reasons
+            and self.model_score is None
+        ):
+            # Legacy/manual recommendations predate the semantic gate. Keep
+            # their established portfolio behavior while new research always
+            # writes explicit gate metadata.
+            self.directional_evidence_complete = True
+            self.direction_verified = True
         return self
 
 
@@ -316,8 +390,13 @@ class Outcome(BaseModel):
     recommendation_id: UUID
     horizon_days: int
     raw_return: float
-    benchmark_return: float
-    alpha: float
+    benchmark_return: float | None = None
+    alpha: float | None = None
+    benchmark_status: str = "available"
+    entry_at: datetime | None = None
+    exit_at: datetime | None = None
+    entry_price: float | None = None
+    exit_price: float | None = None
     direction_correct: bool
     brier_score: float
     max_drawdown: float = 0

@@ -330,8 +330,9 @@ def health() -> dict:
     if latest_news and latest_news.tzinfo is None:
         latest_news = latest_news.replace(tzinfo=utc_now().tzinfo)
     news_age_seconds = (utc_now() - latest_news).total_seconds() if latest_news else None
-    data_fresh = (
-        news_age_seconds is None or news_age_seconds <= settings.scan_interval_minutes * 180
+    data_fresh = bool(
+        news_age_seconds is not None
+        and news_age_seconds <= settings.scan_interval_minutes * 180
     )
     ollama_instances: list[dict] = []
     models: list[str] = []
@@ -396,7 +397,9 @@ def health() -> dict:
     except Exception:
         pass
     return {
-        "status": "ok" if database and data_fresh else "degraded",
+        "status": (
+            "ok" if database and redis_ok and ollama and data_fresh else "degraded"
+        ),
         "database": database,
         "redis": redis_ok,
         "task_failure_rate": task_failure_rate,
@@ -410,6 +413,7 @@ def health() -> dict:
         "data_fresh": data_fresh,
         "telegram_configured": bool(settings.telegram_bot_token and settings.telegram_chat_id),
         "evolution_enabled": settings.evolution_enabled,
+        "evolution_auto_merge": settings.evolution_auto_merge,
         "as_of": utc_now(),
     }
 
@@ -560,7 +564,11 @@ def model_inference_queues():
         {
             "model": settings.ollama_code_model,
             "purpose": "代码演进",
-            "binding": "代码演进任务",
+            "binding": (
+                "代码演进任务 · 自动合并开启"
+                if settings.evolution_auto_merge
+                else "代码演进任务 · 自动合并关闭"
+            ),
             "task_enabled": settings.evolution_enabled,
         },
     )
@@ -935,8 +943,13 @@ def _analysis_logs(db: Session, limit: int) -> list[dict]:
                     "kind": "asset_recommendation",
                     "rating": recommendation.rating.value,
                     "score": recommendation.score,
+                    "raw_score": recommendation.raw_score,
                     "confidence": recommendation.confidence,
                     "evidence_complete": recommendation.evidence_complete,
+                    "directional_evidence_complete": (
+                        recommendation.directional_evidence_complete
+                    ),
+                    "signal_status": recommendation.signal_status.value,
                     "summary": recommendation.thesis.summary,
                 }
                 if recommendation

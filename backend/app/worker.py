@@ -60,8 +60,11 @@ from backend.app.storage import (
     get_run,
     get_run_for_event_asset,
     list_assets,
+    list_events,
     list_evolutions,
     list_outcomes,
+    list_recommendations,
+    list_runs,
     save_event,
     save_event_research_run,
     save_news,
@@ -118,6 +121,11 @@ celery_app.conf.update(
         },
         "evaluate-outcomes": {
             "task": "market_loop.evaluate_outcomes",
+            "schedule": 24 * 60 * 60,
+            "options": {"queue": "io"},
+        },
+        "refresh-event-market-factors": {
+            "task": "market_loop.refresh_event_market_factors",
             "schedule": 24 * 60 * 60,
             "options": {"queue": "io"},
         },
@@ -766,10 +774,16 @@ def enqueue_research(
     historical_replay: bool = False,
     retry_of_run_id: UUID | None = None,
     retry_attempt: int = 0,
+    market_factor_refresh_days: int | None = None,
 ) -> tuple[str, ResearchRun]:
     """Persist a visible queued run before handing work to the LLM worker."""
 
-    if event and not historical_replay and retry_of_run_id is None:
+    if (
+        event
+        and not historical_replay
+        and retry_of_run_id is None
+        and market_factor_refresh_days is None
+    ):
         canonical = get_mergeable_queued_run(
             db,
             asset.asset_id,
@@ -820,6 +834,24 @@ def enqueue_research(
         celery_task_id=task_id,
         analysis_steps=[
             *(event.analysis_steps if event else []),
+            *(
+                [
+                    AnalysisStep(
+                        phase="market_factor_refresh_queue",
+                        executor="celery",
+                        summary=(
+                            f"事件后 {market_factor_refresh_days} 日市场反应窗口已成熟，"
+                            "已创建一次因子重评。"
+                        ),
+                        metrics={
+                            "event_id": str(event.id) if event else None,
+                            "target_session_days": market_factor_refresh_days,
+                        },
+                    )
+                ]
+                if market_factor_refresh_days is not None
+                else []
+            ),
             AnalysisStep(
                 phase="research_retry_queue" if retry_of_run_id else "research_queue",
                 executor="celery",
@@ -858,6 +890,22 @@ def enqueue_research(
         save_run(db, run)
         raise
     return str(task.id), run
+
+
+MARKET_FACTOR_REFRESH_AGES = ((20, 30), (5, 8), (1, 2))
+MARKET_FACTOR_REFRESH_EVENT_DAYS = 45
+MARKET_FACTOR_REFRESH_BATCH_SIZE = 20
+
+
+def _due_market_factor_refresh_session(
+    *, age_days: float, completed_session: int = 0
+) -> int | None:
+    """Choose the largest newly matured 1/5/20-session approximation."""
+
+    for session, minimum_age in MARKET_FACTOR_REFRESH_AGES:
+        if age_days >= minimum_age and completed_session < session:
+            return session
+    return None
 
 
 def enqueue_event_researches(
@@ -1809,6 +1857,72 @@ def evaluate_outcomes() -> dict:
     return {"outcomes": len(outcomes)}
 
 
+@celery_app.task(name="market_loop.refresh_event_market_factors")
+def refresh_event_market_factors() -> dict[str, int]:
+    """Re-run a bounded set of events after 1/5/20-day market windows mature."""
+
+    init_db()
+    now = utc_now()
+    completed: dict[tuple[str, str], int] = {}
+    active: set[tuple[str, str]] = set()
+    queued = failed = 0
+    with SessionLocal() as db:
+        for run in list_runs(db, limit=50_000):
+            for step in run.analysis_steps:
+                if step.phase != "market_factor_refresh_queue":
+                    continue
+                event_id = str(step.metrics.get("event_id") or run.event_id or "")
+                session = int(step.metrics.get("target_session_days") or 0)
+                if not event_id or session not in {1, 5, 20}:
+                    continue
+                key = (event_id, run.asset.asset_id)
+                if run.status in {RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.VERIFYING}:
+                    active.add(key)
+                elif run.status in {
+                    RunStatus.COMPLETED,
+                    RunStatus.INSUFFICIENT_EVIDENCE,
+                }:
+                    completed[key] = max(completed.get(key, 0), session)
+
+        for event in list_events(db, limit=5000):
+            if queued >= MARKET_FACTOR_REFRESH_BATCH_SIZE:
+                break
+            event_at = as_utc(event.published_at)
+            age_days = (now - event_at).total_seconds() / 86_400
+            if age_days < 0 or age_days > MARKET_FACTOR_REFRESH_EVENT_DAYS:
+                continue
+            if not event.candidates:
+                continue
+            candidate = max(
+                event.candidates,
+                key=lambda item: (item.relevance, item.mapping_confidence),
+            )
+            if min(candidate.relevance, candidate.mapping_confidence) < 0.65:
+                continue
+            key = (str(event.id), candidate.asset.asset_id)
+            if key in active:
+                continue
+            target = _due_market_factor_refresh_session(
+                age_days=age_days,
+                completed_session=completed.get(key, 0),
+            )
+            if target is None:
+                continue
+            try:
+                enqueue_research(
+                    db,
+                    candidate.asset,
+                    event,
+                    as_of=now,
+                    market_factor_refresh_days=target,
+                )
+                queued += 1
+                active.add(key)
+            except Exception:
+                failed += 1
+    return {"queued": queued, "failed": failed}
+
+
 @celery_app.task(name="market_loop.seed_assets")
 def seed_assets() -> dict:
     init_db()
@@ -1888,6 +2002,133 @@ def _run_evolution_failures(
         raise
 
 
+def _evolution_failure_cases(db) -> list[dict[str, Any]]:
+    """Join outcomes to the mapping, evidence and scoring context needed to fix code."""
+
+    recommendations = {
+        item.id: item for item in list_recommendations(db, limit=50_000)
+    }
+    runs = list_runs(db, limit=50_000)
+    runs_by_id = {item.id: item for item in runs}
+    events = {item.id: item for item in list_events(db, limit=5000)}
+
+    def context_for(recommendation, run, failure_type: str, outcome=None) -> dict[str, Any]:
+        event = events.get(run.event_id) if run and run.event_id else None
+        raw_factor_metrics = next(
+            (
+                step.metrics
+                for step in reversed(run.analysis_steps if run else [])
+                if step.phase == "evidence_gathering"
+            ),
+            {},
+        )
+        factor_metrics = {
+            key: (value[:10] if isinstance(value, list) else value)
+            for key, value in raw_factor_metrics.items()
+            if key
+            in {
+                "provider_groups",
+                "research_factor_count",
+                "research_factor_reliability",
+                "research_factor_missing",
+            }
+        }
+        return {
+            "failure_type": failure_type,
+            "outcome": outcome.model_dump(mode="json") if outcome else None,
+            "recommendation": (
+                {
+                    "id": str(recommendation.id),
+                    "asset": recommendation.asset.model_dump(mode="json"),
+                    "score": recommendation.score,
+                    "raw_score": recommendation.raw_score,
+                    "model_score": recommendation.model_score,
+                    "probabilities": [
+                        recommendation.bull_probability,
+                        recommendation.base_probability,
+                        recommendation.bear_probability,
+                    ],
+                    "signal_status": recommendation.signal_status.value,
+                    "evidence_strength": recommendation.evidence_strength,
+                    "mapping_confidence": recommendation.mapping_confidence,
+                    "gate_reasons": recommendation.gate_reasons[:10],
+                    "horizon_days": recommendation.horizon_days,
+                    "scoring_version": recommendation.scoring_version,
+                    "calibration_version": recommendation.calibration_version,
+                }
+                if recommendation
+                else None
+            ),
+            "research": (
+                {
+                    "run_id": str(run.id),
+                    "status": run.status.value,
+                    "error": run.error,
+                    "retryable_reason": run.retryable_reason,
+                    "missing_requirements": run.missing_requirements[:10],
+                    "contradictions": run.contradictions[:10],
+                    "evidence_count": len(run.evidence),
+                    "source_qualities": sorted(
+                        {item.source_quality.value for item in run.evidence}
+                    ),
+                    "factor_metrics": factor_metrics,
+                }
+                if run
+                else None
+            ),
+            "event": (
+                {
+                    "id": str(event.id),
+                    "headline": event.headline,
+                    "event_type": event.event_type.value,
+                    "published_at": event.published_at.isoformat(),
+                    "candidates": [
+                        {
+                            "asset_id": item.asset.asset_id,
+                            "relationship": item.relationship,
+                            "relevance": item.relevance,
+                            "mapping_confidence": item.mapping_confidence,
+                            "identity_basis": item.identity_basis,
+                        }
+                        for item in event.candidates[:3]
+                    ],
+                }
+                if event
+                else None
+            ),
+        }
+
+    failures: list[dict[str, Any]] = []
+    covered_runs: set[UUID] = set()
+    for outcome in list_outcomes(db):
+        if outcome.direction_correct and (outcome.alpha is None or outcome.alpha >= 0):
+            continue
+        recommendation = recommendations.get(outcome.recommendation_id)
+        run = runs_by_id.get(recommendation.run_id) if recommendation else None
+        if run:
+            covered_runs.add(run.id)
+        failures.append(context_for(recommendation, run, "outcome_miss", outcome))
+        if len(failures) >= 30:
+            break
+
+    for run in runs:
+        if run.id in covered_runs or run.status not in {
+            RunStatus.FAILED,
+            RunStatus.INSUFFICIENT_EVIDENCE,
+        }:
+            continue
+        recommendation = run.recommendation
+        failure_type = (
+            "technical_failure"
+            if run.status is RunStatus.FAILED or run.retryable_reason
+            else "evidence_gap"
+        )
+        failures.append(context_for(recommendation, run, failure_type))
+        if len(failures) >= 50:
+            break
+    return failures
+
+
 @celery_app.task(bind=True, name="market_loop.evolve_from_outcomes")
 def evolve_from_outcomes(self) -> dict:
     task_id = str(self.request.id or uuid4())
@@ -1908,11 +2149,7 @@ def evolve_from_outcomes(self) -> dict:
         return {"status": "disabled"}
     init_db()
     with SessionLocal() as db:
-        failures = [
-            item.model_dump(mode="json")
-            for item in list_outcomes(db)
-            if not item.direction_correct or item.alpha < 0
-        ][:50]
+        failures = _evolution_failure_cases(db)
         if not failures:
             update_model_task(
                 "code", task_id, status="completed", source="automatic"

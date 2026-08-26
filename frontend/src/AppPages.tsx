@@ -773,6 +773,26 @@ type Recommendation = {
   score: number;
   confidence: number;
   evidence_complete: boolean;
+  directional_evidence_complete?: boolean;
+  direction_verified?: boolean;
+  signal_status?: "technical_failure" | "insufficient_evidence" | "neutral" | "directional";
+  model_score?: number | null;
+  raw_score?: number;
+  evidence_strength?: number;
+  mapping_confidence?: number;
+  gate_reasons?: string[];
+  horizon_days?: number;
+  scoring_version?: string;
+  calibration_version?: string;
+  claim_assessments?: Array<{
+    claim: string;
+    claim_kind: string;
+    stance: number;
+    verdict: "supported" | "contradicted" | "unrelated" | "insufficient";
+    evidence_ids: string[];
+    confidence: number;
+    reason: string;
+  }>;
   as_of: string;
   bull_probability: number;
   base_probability: number;
@@ -867,15 +887,33 @@ const ratingLabels: Record<string, string> = {
   strongly_bullish: "强烈看多", bullish: "看多", watch: "观察", bearish: "看空", strongly_bearish: "强烈看空",
 };
 
+const signalStatusLabels: Record<string, string> = {
+  technical_failure: "技术失败",
+  insufficient_evidence: "方向证据不足",
+  neutral: "中性",
+  directional: "方向信号",
+};
+
 export function ConclusionScore({
-  score, rating, confidence, evidenceComplete,
+  score, rating, confidence, evidenceComplete, directionalEvidenceComplete, signalStatus,
 }: {
-  score: number; rating: string; confidence: number; evidenceComplete: boolean;
+  score: number;
+  rating: string;
+  confidence: number;
+  evidenceComplete: boolean;
+  directionalEvidenceComplete?: boolean;
+  signalStatus?: string;
 }) {
+  const resolvedStatus = signalStatus || (
+    !evidenceComplete ? "insufficient_evidence" : (Math.abs(score) < 20 ? "neutral" : "directional")
+  );
   return <div className="conclusion-score">
-    <strong>方向评分：{score > 0 ? "+" : ""}{score}</strong>
-    <span>评级：{ratingLabels[rating] || rating}</span>
-    <small>置信度 {Math.round(confidence * 100)}% · {evidenceComplete ? "证据完整" : "证据不足"}</small>
+    <strong>发布分：{score > 0 ? "+" : ""}{score}</strong>
+    <span>{signalStatusLabels[resolvedStatus] || resolvedStatus} · 评级：{ratingLabels[rating] || rating}</span>
+    <small>
+      置信度 {Math.round(confidence * 100)}% · 资料覆盖{evidenceComplete ? "完整" : "不足"}
+      {directionalEvidenceComplete !== undefined && ` · 方向证据${directionalEvidenceComplete ? "通过" : "未通过"}`}
+    </small>
   </div>;
 }
 
@@ -935,7 +973,7 @@ export function ConclusionsPage({ apiBase }: { apiBase: string }) {
         <input aria-label="搜索结论" placeholder="标的、代码或核心观点" value={filters.q} onChange={(e) => setFilters({ ...filters, q: e.target.value })} />
         <select aria-label="市场" value={filters.market} onChange={(e) => setFilters({ ...filters, market: e.target.value })}><option value="">全部市场</option><option value="US">美股</option><option value="CN">A股</option><option value="HK">港股</option><option value="CRYPTO">加密</option></select>
         <select aria-label="评级" value={filters.rating} onChange={(e) => setFilters({ ...filters, rating: e.target.value })}><option value="">全部评级</option>{Object.entries(ratingLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>
-        <select aria-label="证据状态" value={filters.evidence_status} onChange={(e) => setFilters({ ...filters, evidence_status: e.target.value })}><option value="">全部证据</option><option value="complete">证据完整</option><option value="incomplete">证据不足</option></select>
+        <select aria-label="证据状态" value={filters.evidence_status} onChange={(e) => setFilters({ ...filters, evidence_status: e.target.value })}><option value="">全部资料覆盖</option><option value="complete">资料覆盖完整</option><option value="incomplete">资料覆盖不足</option></select>
         <button>筛选</button>
       </form>
       {error && <div className="page-error">{error}</div>}
@@ -957,7 +995,7 @@ export function ConclusionsPage({ apiBase }: { apiBase: string }) {
       <div className="conclusion-list">
         {items.map((item) => <button type="button" className="conclusion-card" key={item.id} onClick={() => open(item)}>
           <div><span>{item.asset.market} · {new Date(item.as_of).toLocaleString("zh-CN")}</span><strong>{item.asset.symbol} · {item.asset.name}</strong><p>{item.thesis.summary}</p></div>
-          <ConclusionScore score={item.score} rating={item.rating} confidence={item.confidence} evidenceComplete={item.evidence_complete} />
+          <ConclusionScore score={item.score} rating={item.rating} confidence={item.confidence} evidenceComplete={item.evidence_complete} directionalEvidenceComplete={item.directional_evidence_complete} signalStatus={item.signal_status} />
         </button>)}
         {!items.length && !error && <div className="page-empty">当前筛选范围内没有最终标的建议。</div>}
       </div>
@@ -965,12 +1003,21 @@ export function ConclusionsPage({ apiBase }: { apiBase: string }) {
       {selected && <div className="modal-backdrop" onClick={() => setSelected(null)}><article className="modal conclusion-modal" onClick={(e) => e.stopPropagation()}>
         <button className="close" onClick={() => setSelected(null)}>×</button>
         <p className="eyebrow">{selected.recommendation.asset.market} · {selected.recommendation.asset.symbol}</p><h2>{selected.recommendation.asset.name}</h2>
+        <ConclusionScore score={selected.recommendation.score} rating={selected.recommendation.rating} confidence={selected.recommendation.confidence} evidenceComplete={selected.recommendation.evidence_complete} directionalEvidenceComplete={selected.recommendation.directional_evidence_complete} signalStatus={selected.recommendation.signal_status} />
         <div className="probability-grid"><span>看多 <strong>{Math.round(selected.recommendation.bull_probability * 100)}%</strong></span><span>基准 <strong>{Math.round(selected.recommendation.base_probability * 100)}%</strong></span><span>看空 <strong>{Math.round(selected.recommendation.bear_probability * 100)}%</strong></span></div>
+        <div className="research-gate-grid">
+          <span>程序原始分<strong>{(selected.recommendation.raw_score ?? selected.recommendation.score) > 0 ? "+" : ""}{selected.recommendation.raw_score ?? selected.recommendation.score}</strong></span>
+          <span>证据强度<strong>{Math.round((selected.recommendation.evidence_strength ?? (selected.recommendation.evidence_complete ? 1 : 0)) * 100)}%</strong></span>
+          <span>映射可信度<strong>{Math.round((selected.recommendation.mapping_confidence ?? 1) * 100)}%</strong></span>
+          <span>研究期限<strong>{selected.recommendation.horizon_days ?? 90} 天</strong></span>
+        </div>
+        {!!selected.recommendation.gate_reasons?.length && <><h3>门禁原因</h3><ul className="gate-reasons">{selected.recommendation.gate_reasons.map((item) => <li key={item}>{item}</li>)}</ul></>}
         <h3>核心观点</h3><p>{selected.recommendation.thesis.summary}</p>
         {selected.recommendation.thesis.historical_context && <><h3>历史背景</h3><p>{selected.recommendation.thesis.historical_context}</p></>}
         <h3>催化剂</h3><ul>{selected.recommendation.thesis.catalysts.map((item) => <li key={item}>{item}</li>)}</ul>
         <h3>风险</h3><ul>{selected.recommendation.thesis.risks.map((item) => <li key={item}>{item}</li>)}</ul>
         <h3>失效条件</h3><ul>{selected.recommendation.thesis.invalidation_conditions.map((item) => <li key={item}>{item}</li>)}</ul>
+        {!!selected.recommendation.claim_assessments?.length && <><h3>逐观点证据门禁</h3><div className="claim-assessments">{selected.recommendation.claim_assessments.map((item, index) => <article key={`${item.claim_kind}-${index}`}><span>{item.claim_kind} · {item.verdict}</span><strong>{item.claim}</strong><small>复核置信度 {Math.round(item.confidence * 100)}%{item.reason ? ` · ${item.reason}` : ""}</small></article>)}</div></>}
         {selected.event && <><h3>关联事件</h3><p>{selected.event.headline}</p></>}
         <h3>新闻与证据</h3><div className="evidence-links">{conclusionReferences(selected).map((item) => <a key={`${item.url}-${item.label}`} href={item.url} target="_blank" rel="noreferrer"><strong>{item.label}</strong><span>{item.source}</span></a>)}</div>
       </article></div>}

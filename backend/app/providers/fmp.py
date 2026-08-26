@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 from datetime import UTC, datetime, timedelta
@@ -256,22 +257,113 @@ class FmpProvider:
             payload = payload.get("data", payload.get("results", []))
         output = []
         for item in payload if isinstance(payload, list) else []:
-            symbol = item.get("symbol", "")
-            exchange = item.get("exchangeShortName") or item.get("exchange") or "US"
+            symbol = str(item.get("symbol") or "").strip()
+            exchange = str(
+                item.get("exchangeShortName") or item.get("exchange") or "US"
+            ).strip()
             if not symbol:
                 continue
+            name = str(item.get("name") or item.get("companyName") or symbol).strip()
+            aliases = {
+                str(value).strip()
+                for value in (
+                    item.get("companyName"),
+                    item.get("shortName"),
+                    item.get("underlyingName"),
+                    self._underlying_issuer_name(name),
+                )
+                if value and str(value).strip() not in {name, symbol}
+            }
+            market = self._legacy_market_for_exchange(exchange)
             output.append(
                 AssetRef(
                     asset_id=f"equity:{exchange}:{symbol}",
                     asset_class=AssetClass.EQUITY,
-                    market=Market.US,
+                    market=market,
                     symbol=symbol,
-                    name=item.get("name") or symbol,
+                    name=name,
                     exchange_or_provider=exchange,
-                    currency="USD",
+                    currency=str(item.get("currency") or "USD").strip().upper(),
+                    aliases=sorted(aliases),
+                    issuer_id=self._explicit_issuer_id(item),
+                    primary_listing_asset_id=self._explicit_primary_listing_id(
+                        item, symbol=symbol, exchange=exchange
+                    ),
                 )
             )
         return output
+
+    @staticmethod
+    def _explicit_issuer_id(item: dict[str, Any]) -> str | None:
+        for key, namespace in (
+            ("issuerId", "fmp"),
+            ("issuer_id", "fmp"),
+            ("cik", "sec-cik"),
+        ):
+            value = str(item.get(key) or "").strip()
+            if value:
+                return f"{namespace}:{value.casefold()}"
+        return None
+
+    @staticmethod
+    def _explicit_primary_listing_id(
+        item: dict[str, Any], *, symbol: str, exchange: str
+    ) -> str | None:
+        provided_id = str(
+            item.get("primaryListingAssetId") or item.get("primary_listing_asset_id") or ""
+        ).strip()
+        if provided_id:
+            return provided_id
+
+        primary_symbol = str(
+            item.get("underlyingSymbol") or item.get("primarySymbol") or ""
+        ).strip()
+        primary_exchange = str(
+            item.get("underlyingExchangeShortName")
+            or item.get("underlyingExchange")
+            or item.get("primaryExchangeShortName")
+            or item.get("primaryExchange")
+            or ""
+        ).strip()
+        if not primary_symbol or not primary_exchange:
+            return None
+        if (
+            primary_symbol.casefold() == symbol.casefold()
+            and primary_exchange.casefold() == exchange.casefold()
+        ):
+            return None
+        return f"equity:{primary_exchange}:{primary_symbol}"
+
+    @staticmethod
+    def _underlying_issuer_name(name: str) -> str:
+        """Remove listing wrappers while retaining the issuer's legal name."""
+
+        cleaned = re.sub(
+            r"\b(?:sponsored|unsponsored)\s+(?:adr|ads)\b",
+            "",
+            name,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(
+            r"\bamerican\s+de(?:positary|pository)\s+(?:receipt|receipts|share|shares)\b",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        return re.sub(r"\s{2,}", " ", cleaned).strip(" -(),")
+
+    @staticmethod
+    def _legacy_market_for_exchange(exchange: str) -> Market:
+        """Map supported markets without changing the persisted Market enum."""
+
+        normalized = exchange.casefold()
+        if normalized in {"hkse", "hkg", "xhongkong"}:
+            return Market.HK
+        if normalized in {"shh", "shanghai", "shz", "shenzhen"}:
+            return Market.CN
+        # Existing rows model all other FMP listings as US.  Preserve that
+        # representation; exchange_or_provider still distinguishes OTC/ASX.
+        return Market.US
 
     def get_prices(
         self, asset: AssetRef, *, start: datetime | None = None, end: datetime | None = None

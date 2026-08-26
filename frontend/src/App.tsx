@@ -38,6 +38,10 @@ type Recommendation = {
   rating: string;
   confidence: number;
   evidence_complete: boolean;
+  directional_evidence_complete?: boolean;
+  signal_status?: "technical_failure" | "insufficient_evidence" | "neutral" | "directional";
+  raw_score?: number;
+  gate_reasons?: string[];
   thesis: { summary: string; catalysts: string[]; risks: string[] };
   generated_at: string;
 };
@@ -171,6 +175,9 @@ const labels: Record<string, string> = {
   mapping_running: "标的映射中",
   mapping_retrying: "标的映射重试中",
   mapping_failed: "标的映射失败",
+  technical_failure: "技术失败",
+  neutral: "中性",
+  directional: "方向信号",
 };
 
 function isScanning(state: string) {
@@ -521,7 +528,7 @@ export default function App() {
                   <span className="muted">置信度 {Math.round(item.confidence * 100)}%</span>
                 </div>
                 <span className={`evidence ${item.evidence_complete ? "verified" : "limited"}`}>
-                  {item.evidence_complete ? "已验证" : "证据有限"}
+                  {labels[item.signal_status || ""] || (item.evidence_complete ? "资料覆盖完整" : "资料覆盖不足")}
                 </span>
               </button>
             ))}
@@ -536,6 +543,10 @@ export default function App() {
             <p className="eyebrow">{selected.asset.market} · {selected.asset.symbol}</p>
             <h2>{selected.asset.name}</h2>
             <div className="modal-score"><strong>{selected.score}</strong><span>{labels[selected.rating]}</span></div>
+            <p className="muted">
+              {labels[selected.signal_status || ""] || "旧版结论"} · 程序原始分 {selected.raw_score ?? selected.score}
+              {selected.directional_evidence_complete !== undefined && ` · 方向证据${selected.directional_evidence_complete ? "通过" : "未通过"}`}
+            </p>
             <p>{selected.thesis.summary}</p>
             <h3>催化剂</h3>
             <ul>{selected.thesis.catalysts.map((item) => <li key={item}>{item}</li>)}</ul>
