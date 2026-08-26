@@ -299,8 +299,9 @@ h1 span { color: var(--mint); font-weight: 400; }
 .conclusion-card > div:first-child { display: grid; gap: 7px; }
 .conclusion-card span, .conclusion-card small { color: var(--muted); font-size: 10px; }
 .conclusion-card p { max-width: 900px; margin: 0; color: var(--secondary); line-height: 1.65; }
-.conclusion-score { display: grid; align-content: center; min-width: 150px; text-align: right; }
-.conclusion-score > strong { color: var(--mint); font: 500 31px "DM Mono", monospace; }
+.conclusion-score { display: grid; align-content: center; min-width: 240px; text-align: right; }
+.conclusion-score > strong { color: var(--mint); font: 500 34px "DM Mono", monospace; }
+.conclusion-score > span, .conclusion-score > small { font-size: 13px; }
 .conclusion-modal { width: min(900px, calc(100vw - 32px)); max-height: calc(100vh - 40px); overflow-y: auto; }
 .probability-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 16px 0; }
 .probability-grid span { display: grid; gap: 4px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; color: var(--muted); }

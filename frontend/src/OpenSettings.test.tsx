@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import {
+  ConclusionScore,
   ConclusionsPage,
   conclusionReferences,
   factSourceGroupOptions,
@@ -18,6 +19,19 @@ import {
 } from "./AppPages";
 
 describe("open source and search settings", () => {
+  it("labels the conclusion direction score and rating explicitly", () => {
+    const markup = renderToStaticMarkup(createElement(ConclusionScore, {
+      score: 0,
+      rating: "watch",
+      confidence: 0.95,
+      evidenceComplete: true,
+    }));
+
+    expect(markup).toContain("方向评分：0");
+    expect(markup).toContain("评级：观察");
+    expect(markup).toContain("置信度 95% · 证据完整");
+  });
+
   it("deduplicates a news item repeated as evidence", () => {
     const references = conclusionReferences({
       news: [{

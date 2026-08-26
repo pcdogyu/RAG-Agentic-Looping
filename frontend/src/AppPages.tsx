@@ -286,8 +286,20 @@ export function conclusionReferences(
 }
 
 const ratingLabels: Record<string, string> = {
-  strongly_bullish: "强烈看多", bullish: "看多", watch: "中性", bearish: "看空", strongly_bearish: "强烈看空",
+  strongly_bullish: "强烈看多", bullish: "看多", watch: "观察", bearish: "看空", strongly_bearish: "强烈看空",
 };
+
+export function ConclusionScore({
+  score, rating, confidence, evidenceComplete,
+}: {
+  score: number; rating: string; confidence: number; evidenceComplete: boolean;
+}) {
+  return <div className="conclusion-score">
+    <strong>方向评分：{score > 0 ? "+" : ""}{score}</strong>
+    <span>评级：{ratingLabels[rating] || rating}</span>
+    <small>置信度 {Math.round(confidence * 100)}% · {evidenceComplete ? "证据完整" : "证据不足"}</small>
+  </div>;
+}
 
 export function ConclusionsPage({ apiBase }: { apiBase: string }) {
   const [filters, setFilters] = useState({ q: "", market: "", rating: "", evidence_status: "" });
@@ -367,7 +379,7 @@ export function ConclusionsPage({ apiBase }: { apiBase: string }) {
       <div className="conclusion-list">
         {items.map((item) => <button type="button" className="conclusion-card" key={item.id} onClick={() => open(item)}>
           <div><span>{item.asset.market} · {new Date(item.as_of).toLocaleString("zh-CN")}</span><strong>{item.asset.symbol} · {item.asset.name}</strong><p>{item.thesis.summary}</p></div>
-          <div className="conclusion-score"><strong>{item.score > 0 ? "+" : ""}{item.score}</strong><span>{ratingLabels[item.rating] || item.rating}</span><small>置信度 {Math.round(item.confidence * 100)}% · {item.evidence_complete ? "证据完整" : "证据不足"}</small></div>
+          <ConclusionScore score={item.score} rating={item.rating} confidence={item.confidence} evidenceComplete={item.evidence_complete} />
         </button>)}
         {!items.length && !error && <div className="page-empty">当前筛选范围内没有最终标的建议。</div>}
       </div>
