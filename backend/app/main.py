@@ -6,7 +6,7 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
-from threading import Lock, Thread
+from threading import Condition, Lock, Thread
 from time import monotonic
 from uuid import UUID, uuid4
 
@@ -15,6 +15,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from redis import Redis
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
@@ -95,9 +96,11 @@ logger = logging.getLogger(__name__)
 
 MODEL_QUEUE_SNAPSHOT_LIMIT = 500
 MODEL_QUEUE_SNAPSHOT_TTL_SECONDS = 5.0
+MODEL_QUEUE_SNAPSHOT_REDIS_KEY = "market-loop:model-queue-overview:snapshot:v1"
 _model_queue_snapshot: tuple[float, ModelQueueOverviewResponse] | None = None
 _model_queue_refreshing = False
 _model_queue_snapshot_lock = Lock()
+_model_queue_snapshot_ready = Condition(_model_queue_snapshot_lock)
 
 
 def _build_model_queue_snapshot() -> ModelQueueOverviewResponse:
@@ -129,12 +132,22 @@ def _refresh_model_queue_snapshot() -> ModelQueueOverviewResponse:
     global _model_queue_refreshing, _model_queue_snapshot
     try:
         snapshot = _build_model_queue_snapshot()
-        with _model_queue_snapshot_lock:
+        with _model_queue_snapshot_ready:
             _model_queue_snapshot = (monotonic(), snapshot)
+        if not settings.database_url.startswith("sqlite"):
+            try:
+                Redis.from_url(
+                    settings.redis_url,
+                    socket_connect_timeout=0.5,
+                    socket_timeout=1,
+                ).set(MODEL_QUEUE_SNAPSHOT_REDIS_KEY, snapshot.model_dump_json())
+            except Exception:
+                logger.warning("model queue snapshot persistence failed", exc_info=True)
         return snapshot
     finally:
-        with _model_queue_snapshot_lock:
+        with _model_queue_snapshot_ready:
             _model_queue_refreshing = False
+            _model_queue_snapshot_ready.notify_all()
 
 
 def _refresh_model_queue_snapshot_in_background() -> None:
@@ -146,13 +159,19 @@ def _refresh_model_queue_snapshot_in_background() -> None:
 
 def _cached_model_queue_snapshot() -> ModelQueueOverviewResponse:
     global _model_queue_refreshing
-    with _model_queue_snapshot_lock:
+    with _model_queue_snapshot_ready:
         cached = _model_queue_snapshot
+        if cached is None and _model_queue_refreshing:
+            _model_queue_snapshot_ready.wait(timeout=5)
+            cached = _model_queue_snapshot
+        warming = cached is None and _model_queue_refreshing
         stale = cached is None or monotonic() - cached[0] >= MODEL_QUEUE_SNAPSHOT_TTL_SECONDS
         should_refresh = stale and not _model_queue_refreshing
         if should_refresh:
             _model_queue_refreshing = True
     if cached is None:
+        if warming:
+            raise HTTPException(503, "model queue snapshot is warming up")
         return _refresh_model_queue_snapshot()
     if should_refresh:
         Thread(
@@ -189,6 +208,35 @@ def _reset_model_queue_snapshot() -> None:
         _model_queue_refreshing = False
 
 
+def _load_persisted_model_queue_snapshot() -> None:
+    global _model_queue_snapshot
+    try:
+        raw = Redis.from_url(
+            settings.redis_url,
+            socket_connect_timeout=0.5,
+            socket_timeout=1,
+        ).get(MODEL_QUEUE_SNAPSHOT_REDIS_KEY)
+        if raw:
+            snapshot = ModelQueueOverviewResponse.model_validate_json(raw)
+            with _model_queue_snapshot_lock:
+                _model_queue_snapshot = (0.0, snapshot)
+    except Exception:
+        logger.warning("persisted model queue snapshot load failed", exc_info=True)
+
+
+def _start_model_queue_snapshot_refresh() -> None:
+    global _model_queue_refreshing
+    with _model_queue_snapshot_lock:
+        if _model_queue_refreshing:
+            return
+        _model_queue_refreshing = True
+    Thread(
+        target=_refresh_model_queue_snapshot_in_background,
+        name="model-queue-snapshot",
+        daemon=True,
+    ).start()
+
+
 def _provider_registry(db: Session | None = None) -> ProviderRegistry:
     active = ProviderRegistry()
     if db is not None:
@@ -206,10 +254,9 @@ async def lifespan(app: FastAPI):
         startup_registry = _provider_registry(db)
         for asset in startup_registry.all_assets():
             upsert_asset(db, asset)
-    try:
-        _refresh_model_queue_snapshot()
-    except Exception:
-        logger.exception("initial model queue snapshot build failed")
+    if not settings.database_url.startswith("sqlite"):
+        _load_persisted_model_queue_snapshot()
+        _start_model_queue_snapshot_refresh()
     try:
         yield
     finally:
