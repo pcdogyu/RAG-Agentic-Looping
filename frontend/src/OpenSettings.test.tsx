@@ -162,7 +162,9 @@ describe("open source and search settings", () => {
     expect(markup).toContain("白名单关键字");
     expect(markup).toContain("黑名单关键字");
     expect(markup).toContain("天气");
-    expect(markup).toContain("白名单优先");
+    expect(markup).toContain("命中才允许进入 3B");
+    expect(markup).toContain("命中即禁止进入 3B");
+    expect(markup).toContain("黑名单拥有否决权");
     expect(markup).not.toContain("管理员令牌");
   });
 

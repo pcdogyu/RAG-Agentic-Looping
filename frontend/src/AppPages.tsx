@@ -944,7 +944,7 @@ export function SourceFilterPage({ apiBase }: { apiBase: string }) {
     setMessage("过滤规则已保存，将从下一轮新闻扫描开始生效。");
   }
   async function reset() {
-    if (!window.confirm("恢复默认过滤规则？白名单将清空，黑名单恢复为“天气”。")) return;
+    if (!window.confirm("恢复默认过滤规则？白名单将清空，过滤保持启用，因此所有新新闻都会被忽略；黑名单恢复为“天气”。")) return;
     const response = await fetch(`${apiBase}/api/v1/source-filter`, { method: "DELETE" });
     if (!response.ok) { setMessage("恢复默认失败。"); return; }
     applyConfig(await response.json() as SourceFilterConfig);
@@ -956,17 +956,18 @@ export function SourceFilterPage({ apiBase }: { apiBase: string }) {
     <PageHeading eyebrow="PRE-RESEARCH GATE" title="数据源过滤" copy="在新闻进入事件提取和研究队列前检查标题，减少与投资无关的模型调用。" />
     <div className="filter-metrics">
       <div><span>过滤状态</span><strong className={enabled ? "enabled" : "disabled"}>{enabled ? "已启用" : "已关闭"}</strong></div>
-      <div><span>白名单</span><strong>{whitelistCount}</strong><small>优先放行</small></div>
-      <div><span>黑名单</span><strong>{blacklistCount}</strong><small>命中忽略</small></div>
+      <div><span>白名单</span><strong>{whitelistCount}</strong><small>命中才准入</small></div>
+      <div><span>黑名单</span><strong>{blacklistCount}</strong><small>命中即否决</small></div>
       <div><span>保留记录</span><strong>{config.retained_log_count}</strong><small>最近 30 天</small></div>
     </div>
     <form className="source-filter-form" onSubmit={save}>
       <label className="filter-master-switch"><input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} /><span><strong>启用新闻标题过滤</strong><small>关闭后所有新标题均进入原有流程。</small></span></label>
       <div className="keyword-panels">
-        <label><span><strong>白名单关键字</strong><small>{whitelistCount} / 200 · 命中后优先放行</small></span><textarea aria-label="白名单关键字" value={whitelist} placeholder="例如：苹果供应链" onChange={(e) => setWhitelist(e.target.value)} /></label>
-        <label><span><strong>黑名单关键字</strong><small>{blacklistCount} / 200 · 命中后忽略</small></span><textarea aria-label="黑名单关键字" value={blacklist} placeholder="例如：天气" onChange={(e) => setBlacklist(e.target.value)} /></label>
+        <label><span><strong>白名单关键字</strong><small>{whitelistCount} / 200 · 命中才允许进入 3B</small></span><textarea aria-label="白名单关键字" value={whitelist} placeholder="例如：苹果供应链" onChange={(e) => setWhitelist(e.target.value)} /></label>
+        <label><span><strong>黑名单关键字</strong><small>{blacklistCount} / 200 · 命中即禁止进入 3B</small></span><textarea aria-label="黑名单关键字" value={blacklist} placeholder="例如：天气" onChange={(e) => setBlacklist(e.target.value)} /></label>
       </div>
-      <p className="filter-note">每行或逗号分隔一个关键字；忽略英文大小写，仅匹配新闻扫描标题。白名单和黑名单同时命中时，白名单优先。</p>
+      <p className="filter-note">每行或逗号分隔一个关键字；忽略英文大小写，仅匹配新闻扫描标题。启用后必须命中白名单且不能命中黑名单，黑名单拥有否决权。</p>
+      {!loading && enabled && whitelistCount === 0 && <div className="page-error">白名单为空：所有新新闻都会被忽略，不会进入 3B。</div>}
       <div className="card-actions"><button type="submit">保存规则</button><button type="button" onClick={load}>刷新</button><button type="button" className="danger" onClick={reset}>恢复默认</button></div>
     </form>
     {message && <div className={message.includes("失败") ? "page-error" : "page-message"}>{message}</div>}
@@ -974,7 +975,7 @@ export function SourceFilterPage({ apiBase }: { apiBase: string }) {
       <div className="filter-audit-heading"><div><p className="eyebrow">FILTER AUDIT</p><h3 id="filter-audit-title">最近过滤记录</h3></div><span>{loading ? "读取中…" : `${logs.length} 条`}</span></div>
       <div className="filter-log-list">{logs.map((item) => <article key={item.id}>
         <div><span>{item.source} · {new Date(item.last_filtered_at).toLocaleString("zh-CN")}</span><h4><a href={item.url} target="_blank" rel="noreferrer">{item.title}</a></h4></div>
-        <div><strong>命中：{item.matched_keyword}</strong><small>累计 {item.hit_count} 次</small></div>
+        <div><strong>过滤原因：{item.matched_keyword}</strong><small>累计 {item.hit_count} 次</small></div>
       </article>)}</div>
       {!loading && logs.length === 0 && <div className="page-empty">还没有新闻标题被过滤。</div>}
     </section>

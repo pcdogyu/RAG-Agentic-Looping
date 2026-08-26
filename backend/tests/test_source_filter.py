@@ -10,10 +10,12 @@ from backend.app.providers.registry import ProviderRegistry
 from backend.app.services.events import EventService, ExtractedEvent
 from backend.app.services.mcp_registry import normalize_news_feed_page
 from backend.app.services.source_filter import (
+    WHITELIST_MISS_REASON,
     SourceFilterConfig,
     evaluate_title,
     filter_news_items,
     list_filter_logs,
+    save_source_filter,
 )
 from backend.app.storage import get_news, list_events
 
@@ -33,14 +35,35 @@ def news(title: str, *, summary: str = "Market update", suffix: str = "item") ->
     )
 
 
-def test_default_blacklist_matches_title_only_and_filter_can_be_disabled():
-    config = SourceFilterConfig()
-    assert evaluate_title("今日天气预报", config).allowed is False
+def test_enabled_filter_requires_a_whitelist_match_and_empty_whitelist_blocks_all():
+    empty = SourceFilterConfig()
+    decision = evaluate_title("Apple earnings", empty)
+    assert decision.allowed is False
+    assert decision.matched_keyword == WHITELIST_MISS_REASON
+
+    config = SourceFilterConfig(whitelist_keywords=["Apple"], blacklist_keywords=[])
     assert evaluate_title("Apple earnings", config).allowed is True
+    assert evaluate_title("Microsoft earnings", config).allowed is False
     assert evaluate_title("今日天气预报", SourceFilterConfig(enabled=False)).allowed is True
 
 
-def test_whitelist_overrides_blacklist_and_keywords_are_normalized():
+def test_whitelist_miss_is_recorded_as_a_filter_reason(db):
+    save_source_filter(
+        db,
+        SourceFilterConfig(whitelist_keywords=["Apple"], blacklist_keywords=["天气"]),
+    )
+
+    accepted, filtered = filter_news_items(
+        db,
+        [news("Microsoft earnings", suffix="whitelist-miss")],
+    )
+
+    assert accepted == []
+    assert filtered == 1
+    assert list_filter_logs(db)[0]["matched_keyword"] == WHITELIST_MISS_REASON
+
+
+def test_blacklist_vetoes_whitelist_and_keywords_are_normalized():
     config = SourceFilterConfig(
         whitelist_keywords=[" Apple ", "ＡＰＰＬＥ", ""],
         blacklist_keywords=["WEATHER", "weather"],
@@ -48,11 +71,19 @@ def test_whitelist_overrides_blacklist_and_keywords_are_normalized():
     assert config.whitelist_keywords == ["Apple"]
     assert config.blacklist_keywords == ["WEATHER"]
     decision = evaluate_title("APPLE WEATHER supply-chain disruption", config)
-    assert decision.allowed is True
-    assert decision.matched_keyword == "Apple"
+    assert decision.allowed is False
+    assert decision.matched_keyword == "WEATHER"
+
+    allowed = evaluate_title("ＡＰＰＬＥ supply-chain disruption", config)
+    assert allowed.allowed is True
+    assert allowed.matched_keyword == "Apple"
 
 
 def test_filtered_news_is_audited_but_never_enters_news_or_event_tables(db):
+    save_source_filter(
+        db,
+        SourceFilterConfig(whitelist_keywords=["Apple"], blacklist_keywords=["天气"]),
+    )
     blocked = news("城市天气预报", suffix="weather")
     allowed = news("Apple earnings growth", summary="天气改善", suffix="earnings")
     accepted, filtered = filter_news_items(db, [blocked, allowed])
@@ -81,6 +112,10 @@ def test_filtered_news_is_audited_but_never_enters_news_or_event_tables(db):
 
 
 def test_jin10_synthesized_flash_title_uses_the_existing_filter_chain(db):
+    save_source_filter(
+        db,
+        SourceFilterConfig(whitelist_keywords=["股票"], blacklist_keywords=["天气"]),
+    )
     now = utc_now().replace(microsecond=0)
     items, _, _, _ = normalize_news_feed_page(
         {
@@ -112,6 +147,10 @@ def test_filter_log_retention_removes_old_and_overflow_rows(db, monkeypatch):
     import backend.app.services.source_filter as source_filter
 
     monkeypatch.setattr(source_filter, "FILTER_LOG_MAX_ROWS", 2)
+    save_source_filter(
+        db,
+        SourceFilterConfig(whitelist_keywords=["市场"], blacklist_keywords=["天气"]),
+    )
     old = utc_now() - timedelta(days=31)
     db.add(
         NewsFilterLogRow(

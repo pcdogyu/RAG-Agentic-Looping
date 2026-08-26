@@ -18,7 +18,12 @@ from backend.app.domain import (
 from backend.app.main import _analysis_logs
 from backend.app.providers.registry import SEED_ASSETS
 from backend.app.services.asset_mapping import AssetMappingResult
-from backend.app.storage import get_event, list_runs, save_event, save_news, save_run
+from backend.app.services.source_filter import (
+    SourceFilterConfig,
+    filter_news_items,
+    save_source_filter,
+)
+from backend.app.storage import get_event, get_news, list_runs, save_event, save_news, save_run
 
 
 class FakeRedis:
@@ -197,6 +202,54 @@ def test_news_extraction_workflow_routes_header_and_callback_to_extract(monkeypa
     assert captured["header"][0].options["queue"] == "extract"
     assert captured["callback"].options["queue"] == "extract"
     assert worker._read_news_extraction_queue(redis)["items"][0]["status"] == "queued"
+
+
+def test_background_extraction_queue_only_receives_hard_gate_matches(db, monkeypatch):
+    redis = FakeRedis()
+    captured = {}
+    observed = datetime(2026, 8, 26, 8, 0, tzinfo=UTC)
+    items = [
+        NewsItem(
+            source="test",
+            title=title,
+            url=f"https://example.com/{suffix}",
+            published_at=observed,
+            content_hash=sha256(suffix.encode()).hexdigest(),
+        )
+        for title, suffix in [
+            ("Apple earnings", "hard-gate-allowed"),
+            ("Microsoft earnings", "hard-gate-whitelist-miss"),
+            ("Apple weather warning", "hard-gate-blacklist-veto"),
+        ]
+    ]
+    save_source_filter(
+        db,
+        SourceFilterConfig(whitelist_keywords=["Apple"], blacklist_keywords=["weather"]),
+    )
+
+    class ChordStub:
+        def __init__(self, header, callback):
+            captured["header"] = header
+            captured["callback"] = callback
+
+    monkeypatch.setattr(worker, "chord", ChordStub)
+    accepted, filtered = filter_news_items(db, items)
+    pending = worker._persist_news_for_extraction(db, accepted)
+    task_ids, _workflow = worker._build_news_extraction_workflow(
+        redis,
+        "scan-hard-gate",
+        pending,
+        {"discovered": 3, "accepted": len(accepted), "filtered": filtered},
+    )
+
+    assert [item.title for item in accepted] == ["Apple earnings"]
+    assert filtered == 2
+    assert len(task_ids) == 1
+    assert len(captured["header"]) == 1
+    assert worker._read_news_extraction_queue(redis)["items"][0]["title"] == "Apple earnings"
+    assert get_news(db, items[0].id) is not None
+    assert get_news(db, items[1].id) is None
+    assert get_news(db, items[2].id) is None
 
 
 def test_single_news_extraction_updates_registry_and_returns_event(db, monkeypatch):

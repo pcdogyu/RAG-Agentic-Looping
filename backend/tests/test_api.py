@@ -129,8 +129,17 @@ def test_synchronous_scan_applies_title_filter_before_event_ingest(monkeypatch):
     monkeypatch.setattr("backend.app.main.EventService", EventServiceStub)
 
     with TestClient(app) as client:
+        configured = client.put(
+            "/api/v1/source-filter",
+            json={
+                "enabled": True,
+                "whitelist_keywords": ["业绩"],
+                "blacklist_keywords": ["天气"],
+            },
+        )
         response = client.post("/api/v1/scan", json={"background": False})
 
+    assert configured.status_code == 200
     assert response.status_code == 200
     assert response.json() == {"news": 2, "accepted": 1, "filtered": 1, "events": 0}
     assert [item.title for item in ingested] == ["上市公司发布业绩公告"]

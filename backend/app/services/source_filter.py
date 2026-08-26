@@ -14,6 +14,7 @@ from backend.app.domain import NewsItem, as_utc, utc_now
 
 SOURCE_FILTER_KEY = "source-filter"
 DEFAULT_BLACKLIST = ["天气"]
+WHITELIST_MISS_REASON = "未命中白名单"
 FILTER_LOG_RETENTION_DAYS = 30
 FILTER_LOG_MAX_ROWS = 5000
 
@@ -92,13 +93,17 @@ def evaluate_title(title: str, config: SourceFilterConfig) -> FilterDecision:
     if not config.enabled:
         return FilterDecision(allowed=True)
     candidate = _match_text(title)
+    whitelist_match: str | None = None
     for keyword in config.whitelist_keywords:
         if _match_text(keyword) in candidate:
-            return FilterDecision(allowed=True, matched_keyword=keyword)
+            whitelist_match = keyword
+            break
     for keyword in config.blacklist_keywords:
         if _match_text(keyword) in candidate:
             return FilterDecision(allowed=False, matched_keyword=keyword)
-    return FilterDecision(allowed=True)
+    if whitelist_match is not None:
+        return FilterDecision(allowed=True, matched_keyword=whitelist_match)
+    return FilterDecision(allowed=False, matched_keyword=WHITELIST_MISS_REASON)
 
 
 def _record_filtered(db: Session, item: NewsItem, matched_keyword: str) -> None:
