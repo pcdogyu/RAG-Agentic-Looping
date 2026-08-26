@@ -57,7 +57,7 @@ def test_health_and_asset_endpoints():
     assert assets.status_code == 200
     assert any(item["asset_id"] == "crypto:coingecko:bitcoin" for item in assets.json())
     assert scan.status_code == 200
-    assert scan.json()["interval_seconds"] == 600
+    assert scan.json()["interval_seconds"] == 1200
     assert "server_time" in scan.json()
     assert analysis_logs.status_code == 200
     assert analysis_logs.json() == []

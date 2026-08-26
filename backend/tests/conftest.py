@@ -7,6 +7,7 @@ os.environ["OLLAMA_RESEARCH_BASE_URLS"] = ""
 os.environ["FMP_ACCESS_TOKEN"] = ""
 os.environ["FMP_MCP_URL"] = ""
 os.environ["AKSHARE_ASSET_MASTER_ENABLED"] = "false"
+os.environ["SCAN_INTERVAL_MINUTES"] = "20"
 os.environ["ADMIN_API_TOKEN"] = "test-admin-token"
 os.environ["MCP_SECRET_KEY"] = "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA="
 

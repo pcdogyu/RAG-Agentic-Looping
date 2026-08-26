@@ -493,7 +493,7 @@ def test_scan_queue_is_idempotent_and_completion_anchors_countdown(monkeypatch):
         completed_at,
     )
     next_scan = datetime.fromisoformat(status["next_scan_at"])
-    assert next_scan - completed_at == timedelta(minutes=10)
+    assert next_scan - completed_at == timedelta(minutes=20)
     assert status["state"] == "idle"
     assert redis.get(worker.SCAN_GATE_KEY) is None
 

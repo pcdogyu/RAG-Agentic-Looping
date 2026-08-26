@@ -49,18 +49,18 @@ const baseStatus = {
   total: 2,
   started_at: "2026-08-22T00:00:00Z",
   last_completed_at: "2026-08-22T00:01:00Z",
-  next_scan_at: "2026-08-22T00:11:00Z",
+  next_scan_at: "2026-08-22T00:21:00Z",
   last_result: null,
   last_error: null,
-  interval_seconds: 600,
+  interval_seconds: 1200,
   server_time: "2026-08-22T00:01:00Z",
 };
 
 describe("scan status presentation", () => {
   it("formats a completion-anchored countdown", () => {
-    expect(formatCountdown(600)).toBe("10分00秒");
+    expect(formatCountdown(1200)).toBe("20分00秒");
     expect(scanButtonText(baseStatus, Date.parse("2026-08-22T00:01:01Z"))).toBe(
-      "距离下一次扫描 09分59秒",
+      "距离下一次扫描 19分59秒",
     );
   });
 

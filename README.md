@@ -432,7 +432,7 @@ curl http://localhost:8000/health
 
 | 变量 | 默认值 | 说明 |
 |---|---:|---|
-| `SCAN_INTERVAL_MINUTES` | `10` | 新闻发现周期，允许范围 5–1440 分钟 |
+| `SCAN_INTERVAL_MINUTES` | `20` | 新闻发现周期，允许范围 5–1440 分钟 |
 | `SCAN_BATCH_SIZE` | `40` | 单次最多处理新闻数，允许范围 1–200 |
 | `AUTO_RESEARCH` | `true` | 为高优先级、高相关候选自动排队深研 |
 | `AUTO_PAPER_TRADE` | `false` | 是否依据已验证看多建议自动创建模拟订单 |
