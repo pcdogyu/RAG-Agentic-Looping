@@ -58,6 +58,15 @@ from backend.app.storage import (
 _checkpoint_setup_lock = threading.Lock()
 _checkpoint_setup_done = False
 SOURCE_GATE = "one official source or two independent sources"
+DIRECTION_SCORE_INSTRUCTION = (
+    "必须输出 score 字段，且必须是 -100 到 100 的整数方向评分："
+    "-100 至 -60 表示强烈看空，-59 至 -20 表示看空，-19 至 19 表示中性，"
+    "20 至 59 表示看多，60 至 100 表示强烈看多。"
+    "正数表示上涨方向，负数表示下跌方向；只有多空证据基本相抵时才使用 0。"
+    "score 必须由给定证据推导，并与核心观点、催化剂、风险、置信度及"
+    " bull_probability/base_probability/bear_probability 保持一致；证据越弱，"
+    "分数应越接近 0 且置信度越低。不得省略 score，不得为追求非零分数编造事实。"
+)
 
 
 class DraftOutput(BaseModel):
@@ -71,7 +80,7 @@ class DraftOutput(BaseModel):
     risks: list[str] = Field(default_factory=list)
     invalidation_conditions: list[str] = Field(default_factory=list)
     evidence_ids: list[str] = Field(default_factory=list)
-    score: int = Field(default=0, ge=-100, le=100)
+    score: int = Field(ge=-100, le=100)
     confidence: float = Field(default=0.3, ge=0, le=1)
     bull_probability: float = Field(default=0.33, ge=0, le=1)
     base_probability: float = Field(default=0.34, ge=0, le=1)
@@ -665,7 +674,10 @@ class ResearchService:
         try:
             draft = self.llm.generate_json(
                 model=self.settings.ollama_research_model,
-                system="你是证据优先的投资研究员。区分事实、推断和未知，不给实盘指令。",
+                system=(
+                    "你是证据优先的投资研究员。区分事实、推断和未知，不给实盘指令。"
+                    f"{DIRECTION_SCORE_INSTRUCTION}"
+                ),
                 prompt=prompt,
                 schema=DraftOutput,
                 operation="report_drafting",
@@ -1086,7 +1098,11 @@ class ResearchService:
         try:
             revised = self.llm.generate_json(
                 model=self.settings.ollama_research_model,
-                system="你是投资研究报告修订器，只能使用给定证据。",
+                system=(
+                    "你是投资研究报告修订器，只能使用给定证据。"
+                    "修订时必须重新评估方向分数，不能机械沿用当前报告的 score。"
+                    f"{DIRECTION_SCORE_INSTRUCTION}"
+                ),
                 prompt=prompt,
                 schema=DraftOutput,
                 operation="report_revision",

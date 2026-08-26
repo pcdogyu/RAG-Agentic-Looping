@@ -78,9 +78,11 @@ class FakeStrongResearchLlm(FakeResearchLlm):
 class CapturingResearchLlm(FakeResearchLlm):
     def __init__(self):
         self.prompts = []
+        self.systems = []
 
-    def generate_json(self, *, prompt, **kwargs):
+    def generate_json(self, *, prompt, system, **kwargs):
         self.prompts.append(prompt)
+        self.systems.append(system)
         return super().generate_json(prompt=prompt, **kwargs)
 
 
@@ -113,7 +115,7 @@ def test_model_fallback_skips_automatic_research_revision(db, tmp_path):
     route = service._route_after_verification(
         {
             "run": run.model_dump(mode="json"),
-            "draft": DraftOutput(summary="保守回退结果").model_dump(mode="json"),
+            "draft": DraftOutput(summary="保守回退结果", score=0).model_dump(mode="json"),
             "verification": VerificationOutput(
                 evidence_complete=False,
                 missing_requirements=["one official source or two independent sources"],
@@ -221,8 +223,38 @@ def test_research_draft_respects_cpu_prompt_budgets(db, tmp_path):
     )
 
     assert len(llm.prompts) == 1
+    assert "必须输出 score 字段" in llm.systems[0]
+    assert "-100 到 100" in llm.systems[0]
     assert llm.prompts[0].count("x") <= settings.research_prompt_evidence_chars
     assert llm.prompts[0].count("y") <= settings.research_prompt_context_chars
+
+
+def test_research_revision_recalculates_required_direction_score(db, tmp_path):
+    settings = Settings(
+        database_url="sqlite:///./data/test_agent.db",
+        reports_dir=tmp_path,
+        fmp_access_token="",
+        fmp_mcp_url="",
+    )
+    llm = CapturingResearchLlm()
+    service = ResearchService(FakeRegistry(), db, settings, llm)
+    run = ResearchRun(asset=SEED_ASSETS[0])
+
+    service._revise(
+        {
+            "run": run.model_dump(mode="json"),
+            "draft": DraftOutput(summary="Current report", score=0).model_dump(mode="json"),
+            "verification": VerificationOutput(
+                evidence_complete=False,
+                missing_requirements=["risks"],
+            ).model_dump(mode="json"),
+            "evidence": [],
+        }
+    )
+
+    assert "必须重新评估方向分数" in llm.systems[0]
+    assert "不得省略 score" in llm.systems[0]
+    assert "score" in DraftOutput.model_json_schema()["required"]
 
 
 def test_a_share_structured_data_becomes_business_financial_and_valuation_evidence(
