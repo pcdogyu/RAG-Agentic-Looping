@@ -244,6 +244,12 @@ h1 span { color: var(--mint); font-weight: 400; }
 .model-queue-state.completed, .model-queue-state.completed_with_errors { border-color: rgba(99,242,186,.35); color: var(--mint); }
 .model-queue-panel .queue-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); flex: 0 0 auto; margin-bottom: 12px; }
 .model-queue-panel .queue-metrics > span { min-width: 0; }
+.inference-queue-panel { height: auto; min-height: 235px; }
+.inference-queue-panel .inference-queue-metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.inference-queue-panel .page-empty { flex: 1; min-height: 84px; }
+.inference-queue-activity { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.inference-queue-activity span { padding: 14px; border: 1px solid rgba(88,214,255,.25); border-radius: 8px; color: var(--cyan); background: rgba(88,214,255,.05); font-size: 11px; }
+.model-inference-error, .model-inference-loading { grid-column: 1 / -1; }
 .queue-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); align-content: start; gap: 10px; min-height: 0; overflow-y: auto; }
 .queue-card { display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto auto auto; gap: 6px; min-width: 0; aspect-ratio: 1; padding: 11px; overflow: hidden; border: 1px solid var(--line); border-radius: 9px; background: var(--panel); }
 .queue-card.running { border-color: rgba(88,214,255,.4); }

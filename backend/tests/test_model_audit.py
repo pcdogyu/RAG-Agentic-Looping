@@ -111,6 +111,7 @@ def test_gateway_records_exact_redacted_input_output(monkeypatch):
     ("model", "expected_threads", "expected_capacity"),
     [
         ("qwen2.5:3b", 8, 1),
+        ("qwen2.5:7b", 10, 1),
         ("qwen2.5:14b", 16, 2),
         ("qwen2.5-coder:7b", 6, 1),
         ("custom:latest", 4, 1),
@@ -122,9 +123,11 @@ def test_gateway_uses_model_specific_threads_and_capacity(
     settings = Settings(
         ollama_num_threads=4,
         ollama_extract_num_threads=8,
+        ollama_assist_num_threads=10,
         ollama_research_num_threads=16,
         ollama_code_num_threads=6,
         ollama_extract_max_concurrency=1,
+        ollama_assist_max_concurrency=1,
         ollama_research_max_concurrency=2,
         ollama_code_max_concurrency=1,
     )
@@ -132,6 +135,30 @@ def test_gateway_uses_model_specific_threads_and_capacity(
 
     assert gateway._num_threads_for(model) == expected_threads
     assert gateway.gpu.capacity_for(model) == expected_capacity
+
+
+def test_model_queue_status_counts_waiters_and_running_slots():
+    class FakeRedis:
+        def zremrangebyscore(self, *_args):
+            return 0
+
+        def zcard(self, _key):
+            return 2
+
+        def exists(self, key):
+            return key.endswith(":0")
+
+    semaphore = GpuSemaphore(Settings(ollama_assist_max_concurrency=2))
+    semaphore._redis = FakeRedis()
+
+    assert semaphore.queue_status("qwen2.5:7b") == {
+        "lane": "assist",
+        "capacity": 2,
+        "queued": 2,
+        "running": 1,
+        "available": 1,
+        "observable": True,
+    }
 
 
 def test_model_semaphore_enforces_independent_local_capacities():

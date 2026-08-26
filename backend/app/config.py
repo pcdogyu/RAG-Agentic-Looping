@@ -20,14 +20,17 @@ class Settings(BaseSettings):
 
     ollama_base_url: str = "http://localhost:11434"
     ollama_extract_model: str = "qwen2.5:3b"
+    ollama_assist_model: str = "qwen2.5:7b"
     ollama_research_model: str = "qwen2.5:14b"
     ollama_code_model: str = "qwen2.5-coder:7b"
     ollama_timeout_seconds: int = 240
     ollama_num_threads: int = Field(default=0, ge=0, le=256)
     ollama_extract_num_threads: int = Field(default=0, ge=0, le=256)
+    ollama_assist_num_threads: int = Field(default=0, ge=0, le=256)
     ollama_research_num_threads: int = Field(default=0, ge=0, le=256)
     ollama_code_num_threads: int = Field(default=0, ge=0, le=256)
     ollama_extract_max_concurrency: int = Field(default=1, ge=1, le=16)
+    ollama_assist_max_concurrency: int = Field(default=1, ge=1, le=16)
     ollama_research_max_concurrency: int = Field(default=2, ge=1, le=16)
     ollama_code_max_concurrency: int = Field(default=1, ge=1, le=16)
     ollama_max_output_tokens: int = Field(default=1024, ge=64, le=8192)

@@ -5,7 +5,7 @@ import re
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
-from time import monotonic, sleep
+from time import monotonic, sleep, time
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -50,6 +50,8 @@ class GpuSemaphore:
     def _lane(self, model: str) -> tuple[str, int]:
         if model == self.settings.ollama_extract_model:
             return "extract", self.settings.ollama_extract_max_concurrency
+        if model == self.settings.ollama_assist_model:
+            return "assist", self.settings.ollama_assist_max_concurrency
         if model == self.settings.ollama_research_model:
             return "research", self.settings.ollama_research_max_concurrency
         if model == self.settings.ollama_code_model:
@@ -59,6 +61,48 @@ class GpuSemaphore:
 
     def capacity_for(self, model: str) -> int:
         return self._lane(model)[1]
+
+    @staticmethod
+    def _waiting_key(lane: str) -> str:
+        return f"market-loop:llm:{lane}:waiting"
+
+    def queue_status(self, model: str) -> dict[str, int | str | bool]:
+        """Return the cross-process waiting/running state for one model lane."""
+        lane, capacity = self._lane(model)
+        if self._redis is None:
+            return {
+                "lane": lane,
+                "capacity": capacity,
+                "queued": 0,
+                "running": 0,
+                "available": capacity,
+                "observable": False,
+            }
+        try:
+            waiting_key = self._waiting_key(lane)
+            self._redis.zremrangebyscore(waiting_key, "-inf", time())
+            queued = int(self._redis.zcard(waiting_key))
+            running = sum(
+                int(bool(self._redis.exists(f"market-loop:llm:{lane}:{slot}")))
+                for slot in range(capacity)
+            )
+        except Exception:
+            return {
+                "lane": lane,
+                "capacity": capacity,
+                "queued": 0,
+                "running": 0,
+                "available": capacity,
+                "observable": False,
+            }
+        return {
+            "lane": lane,
+            "capacity": capacity,
+            "queued": queued,
+            "running": running,
+            "available": max(0, capacity - running),
+            "observable": True,
+        }
 
     def _local_semaphore(self, lane: str, capacity: int) -> threading.BoundedSemaphore:
         with self._local_guard:
@@ -70,26 +114,33 @@ class GpuSemaphore:
         if self._redis:
             deadline = monotonic() + timeout
             lock = None
-            while lock is None:
-                for slot in range(capacity):
-                    candidate = self._redis.lock(
-                        f"market-loop:llm:{lane}:{slot}",
-                        timeout=timeout + 30,
-                        blocking_timeout=0,
-                    )
-                    if candidate.acquire(blocking=False):
-                        lock = candidate
-                        break
-                if lock is not None:
-                    break
-                if monotonic() >= deadline:
-                    raise LlmError(f"timed out waiting for the {lane} inference slot")
-                sleep(min(0.1, max(0.0, deadline - monotonic())))
+            waiter_id = uuid4().hex
+            waiting_key = self._waiting_key(lane)
             try:
-                yield
+                self._redis.zadd(waiting_key, {waiter_id: time() + timeout + 30})
+                while lock is None:
+                    for slot in range(capacity):
+                        candidate = self._redis.lock(
+                            f"market-loop:llm:{lane}:{slot}",
+                            timeout=timeout + 30,
+                            blocking_timeout=0,
+                        )
+                        if candidate.acquire(blocking=False):
+                            lock = candidate
+                            break
+                    if lock is not None:
+                        break
+                    if monotonic() >= deadline:
+                        raise LlmError(f"timed out waiting for the {lane} inference slot")
+                    sleep(min(0.1, max(0.0, deadline - monotonic())))
+                self._redis.zrem(waiting_key, waiter_id)
+                try:
+                    yield
+                finally:
+                    if lock.owned():
+                        lock.release()
             finally:
-                if lock.owned():
-                    lock.release()
+                self._redis.zrem(waiting_key, waiter_id)
             return
         semaphore = self._local_semaphore(lane, capacity)
         acquired = semaphore.acquire(timeout=timeout)
@@ -110,11 +161,16 @@ class LlmGateway:
     def _num_threads_for(self, model: str) -> int:
         if model == self.settings.ollama_extract_model:
             return self.settings.ollama_extract_num_threads or self.settings.ollama_num_threads
+        if model == self.settings.ollama_assist_model:
+            return self.settings.ollama_assist_num_threads or self.settings.ollama_num_threads
         if model == self.settings.ollama_research_model:
             return self.settings.ollama_research_num_threads or self.settings.ollama_num_threads
         if model == self.settings.ollama_code_model:
             return self.settings.ollama_code_num_threads or self.settings.ollama_num_threads
         return self.settings.ollama_num_threads
+
+    def num_threads_for(self, model: str) -> int:
+        return self._num_threads_for(model)
 
     def generate_json(
         self,

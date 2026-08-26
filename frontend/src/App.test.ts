@@ -18,6 +18,7 @@ import BuildFooter, { buildInfo } from "./BuildFooter";
 import {
   factSourceGroupDefinitions,
   formatQueueDuration,
+  ModelInferenceQueuePanel,
   navigationGroups,
   queueDesktopColumns,
   QueueGrid,
@@ -470,6 +471,44 @@ describe("research queue page", () => {
     expect(formatQueueDuration(48000)).toBe("48秒");
     expect(formatQueueDuration(135000)).toBe("2分15秒");
     expect(formatQueueDuration(3720000)).toBe("1时2分");
+  });
+
+  it("renders 7B and coder 7B inference queue capacity", () => {
+    const assist = renderToStaticMarkup(createElement(ModelInferenceQueuePanel, { item: {
+      lane: "assist",
+      model: "qwen2.5:7b",
+      purpose: "通用分析",
+      binding: "尚未绑定自动业务任务",
+      task_enabled: false,
+      threads: 8,
+      capacity: 1,
+      queued: 0,
+      running: 0,
+      available: 1,
+      observable: true,
+      state: "idle",
+    } }));
+    const code = renderToStaticMarkup(createElement(ModelInferenceQueuePanel, { item: {
+      lane: "code",
+      model: "qwen2.5-coder:7b",
+      purpose: "代码演进",
+      binding: "代码演进任务",
+      task_enabled: true,
+      threads: 8,
+      capacity: 1,
+      queued: 1,
+      running: 1,
+      available: 0,
+      observable: true,
+      state: "queued",
+    } }));
+
+    expect(assist).toContain("qwen2.5:7b 通用分析队列");
+    expect(assist).toContain("CPU 线程<strong>8</strong>");
+    expect(assist).toContain("尚未绑定自动业务任务；推理通道已就绪");
+    expect(code).toContain("qwen2.5-coder:7b 代码演进队列");
+    expect(code).toContain("有请求排队");
+    expect(code).toContain("等待进入模型 1 个请求");
   });
 });
 

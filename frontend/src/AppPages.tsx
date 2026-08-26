@@ -170,6 +170,26 @@ type NewsExtractionQueueResponse = {
   error: string | null;
 };
 
+export type ModelInferenceQueueItem = {
+  lane: string;
+  model: string;
+  purpose: string;
+  binding: string;
+  task_enabled: boolean;
+  threads: number;
+  capacity: number;
+  queued: number;
+  running: number;
+  available: number;
+  observable: boolean;
+  state: "idle" | "queued" | "running" | "unavailable";
+};
+
+type ModelInferenceQueuesResponse = {
+  generated_at: string;
+  items: ModelInferenceQueueItem[];
+};
+
 const queueStatusLabels: Record<ResearchQueueItem["status"], string> = {
   queued: "排队中",
   running: "研究中",
@@ -239,13 +259,47 @@ export function QueueGrid({ items }: { items: ResearchQueueItem[] }) {
   ))}</div>;
 }
 
+const inferenceStateLabels: Record<ModelInferenceQueueItem["state"], string> = {
+  idle: "空闲",
+  queued: "有请求排队",
+  running: "推理中",
+  unavailable: "状态不可用",
+};
+
+export function ModelInferenceQueuePanel({ item }: { item: ModelInferenceQueueItem }) {
+  const emptyMessage = item.task_enabled
+    ? "当前没有等待或运行中的模型请求。"
+    : `${item.binding}；推理通道已就绪。`;
+  return <section className="model-queue-panel inference-queue-panel">
+    <header>
+      <div><p className="eyebrow">MODEL INFERENCE</p><h3>{item.model} {item.purpose}队列</h3></div>
+      <span className={`model-queue-state ${item.state}`}>{inferenceStateLabels[item.state]}</span>
+    </header>
+    <div className="queue-metrics inference-queue-metrics" aria-live="polite">
+      <span>排队<strong>{item.queued}</strong></span>
+      <span>运行<strong>{item.running}</strong></span>
+      <span>可用槽位<strong>{item.available}/{item.capacity}</strong></span>
+      <span>CPU 线程<strong>{item.threads}</strong></span>
+    </div>
+    {!item.observable && <div className="page-error">Redis 队列状态暂时不可用。</div>}
+    {item.observable && item.queued === 0 && item.running === 0 && <div className="page-empty">{emptyMessage}</div>}
+    {item.observable && (item.queued > 0 || item.running > 0) && <div className="inference-queue-activity">
+      <span>正在占用 {item.running} 个推理槽位</span>
+      <span>等待进入模型 {item.queued} 个请求</span>
+    </div>}
+  </section>;
+}
+
 export function QueuePage({ apiBase }: { apiBase: string }) {
   const [extractionQueue, setExtractionQueue] = useState<NewsExtractionQueueResponse | null>(null);
   const [researchQueue, setResearchQueue] = useState<ResearchQueueResponse | null>(null);
+  const [inferenceQueues, setInferenceQueues] = useState<ModelInferenceQueueItem[]>([]);
   const [extractionLoading, setExtractionLoading] = useState(true);
   const [researchLoading, setResearchLoading] = useState(true);
+  const [inferenceLoading, setInferenceLoading] = useState(true);
   const [extractionError, setExtractionError] = useState("");
   const [researchError, setResearchError] = useState("");
+  const [inferenceError, setInferenceError] = useState("");
 
   const loadExtractionQueue = useCallback(async (signal?: AbortSignal, showLoading = false) => {
     if (showLoading) setExtractionLoading(true);
@@ -277,10 +331,27 @@ export function QueuePage({ apiBase }: { apiBase: string }) {
     }
   }, [apiBase]);
 
+  const loadInferenceQueues = useCallback(async (signal?: AbortSignal, showLoading = false) => {
+    if (showLoading) setInferenceLoading(true);
+    try {
+      const response = await fetch(`${apiBase}/api/v1/model-inference-queues`, { signal });
+      if (!response.ok) throw new Error(`模型推理队列请求失败（HTTP ${response.status}）`);
+      const payload = await response.json() as ModelInferenceQueuesResponse;
+      setInferenceQueues(payload.items);
+      setInferenceError("");
+    } catch (reason) {
+      if (signal?.aborted) return;
+      setInferenceError(reason instanceof Error ? reason.message : "模型推理队列请求失败");
+    } finally {
+      if (!signal?.aborted) setInferenceLoading(false);
+    }
+  }, [apiBase]);
+
   const loadQueues = useCallback((signal?: AbortSignal, showLoading = false) => {
     void loadExtractionQueue(signal, showLoading);
     void loadResearchQueue(signal, showLoading);
-  }, [loadExtractionQueue, loadResearchQueue]);
+    void loadInferenceQueues(signal, showLoading);
+  }, [loadExtractionQueue, loadInferenceQueues, loadResearchQueue]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -296,15 +367,15 @@ export function QueuePage({ apiBase }: { apiBase: string }) {
   }, [loadQueues]);
 
   return <section className="app-page queue-page">
-    <PageHeading eyebrow="ACTIVE MODEL PIPELINES" title="队列" copy="分别查看新闻抽取与标的研究任务；页面每 5 秒自动更新。" />
+    <PageHeading eyebrow="ACTIVE MODEL PIPELINES" title="队列" copy="分别查看四个本地模型的业务任务与推理通道；页面每 5 秒自动更新。" />
     <div className="queue-toolbar">
-      <span>两个队列独立加载；任一服务异常不会遮挡另一栏。</span>
+      <span>四个模型队列独立加载；任一服务异常不会遮挡其他队列。</span>
       <button
         type="button"
-        disabled={extractionLoading || researchLoading}
+        disabled={extractionLoading || researchLoading || inferenceLoading}
         onClick={() => loadQueues(undefined, true)}
       >
-        {extractionLoading || researchLoading ? "刷新中…" : "立即刷新"}
+        {extractionLoading || researchLoading || inferenceLoading ? "刷新中…" : "立即刷新"}
       </button>
     </div>
     <div className="model-queue-columns">
@@ -346,6 +417,9 @@ export function QueuePage({ apiBase }: { apiBase: string }) {
         {!researchQueue && researchLoading && <div className="page-message">正在读取标的研究队列…</div>}
         {researchQueue && <QueueGrid items={researchQueue.items} />}
       </section>
+      {inferenceError && <div className="page-error model-inference-error">{inferenceError}</div>}
+      {!inferenceQueues.length && inferenceLoading && <div className="page-message model-inference-loading">正在读取 7B 模型队列…</div>}
+      {inferenceQueues.map((item) => <ModelInferenceQueuePanel item={item} key={item.lane} />)}
     </div>
   </section>;
 }

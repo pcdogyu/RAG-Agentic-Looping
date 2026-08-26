@@ -27,6 +27,7 @@ from backend.app.domain import (
     RunStatus,
     utc_now,
 )
+from backend.app.llm import gateway
 from backend.app.model_audit import audit_detail, list_model_audits, model_usage
 from backend.app.providers.registry import ProviderRegistry
 from backend.app.services.events import EventService
@@ -322,6 +323,45 @@ def research_queue(
 @app.get("/api/v1/news-extraction-queue", response_model=NewsExtractionQueueResponse)
 def news_extraction_queue(limit: int = Query(default=200, ge=1, le=200)):
     return get_news_extraction_queue(limit)
+
+
+@app.get("/api/v1/model-inference-queues")
+def model_inference_queues():
+    model_specs = (
+        {
+            "model": settings.ollama_assist_model,
+            "purpose": "通用分析",
+            "binding": "尚未绑定自动业务任务",
+            "task_enabled": False,
+        },
+        {
+            "model": settings.ollama_code_model,
+            "purpose": "代码演进",
+            "binding": "代码演进任务",
+            "task_enabled": settings.evolution_enabled,
+        },
+    )
+    items = []
+    for spec in model_specs:
+        model = str(spec["model"])
+        status = gateway.gpu.queue_status(model)
+        if not status["observable"]:
+            state = "unavailable"
+        elif status["queued"]:
+            state = "queued"
+        elif status["running"]:
+            state = "running"
+        else:
+            state = "idle"
+        items.append(
+            {
+                **spec,
+                **status,
+                "threads": gateway.num_threads_for(model),
+                "state": state,
+            }
+        )
+    return {"generated_at": utc_now(), "items": items}
 
 
 @app.get("/api/v1/research-runs/{run_id}")

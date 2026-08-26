@@ -328,6 +328,43 @@ def test_news_extraction_queue_is_public_and_preserves_model_and_counts(monkeypa
     assert response.json()["items"][0]["title"] == "测试新闻"
 
 
+def test_additional_model_inference_queues_are_public(monkeypatch):
+    def queue_status(model):
+        if model == "qwen2.5:7b":
+            return {
+                "lane": "assist",
+                "capacity": 1,
+                "queued": 2,
+                "running": 1,
+                "available": 0,
+                "observable": True,
+            }
+        return {
+            "lane": "code",
+            "capacity": 1,
+            "queued": 0,
+            "running": 0,
+            "available": 1,
+            "observable": True,
+        }
+
+    monkeypatch.setattr("backend.app.main.gateway.gpu.queue_status", queue_status)
+    monkeypatch.setattr("backend.app.main.gateway.num_threads_for", lambda _model: 8)
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/model-inference-queues")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert [item["model"] for item in payload["items"]] == [
+        "qwen2.5:7b",
+        "qwen2.5-coder:7b",
+    ]
+    assert payload["items"][0]["state"] == "queued"
+    assert payload["items"][0]["threads"] == 8
+    assert payload["items"][1]["state"] == "idle"
+
+
 def test_research_queue_orders_waiting_assets_oldest_first_and_can_be_empty(db):
     now = utc_now()
     newer = SEED_ASSETS[0].model_copy(
