@@ -24,6 +24,11 @@ class Settings(BaseSettings):
     ollama_research_model: str = "qwen2.5:14b"
     ollama_code_model: str = "qwen2.5-coder:7b"
     ollama_timeout_seconds: int = 240
+    ollama_context_length: int = Field(default=8192, ge=512, le=262144)
+    ollama_num_parallel: int = Field(default=2, ge=1, le=16)
+    ollama_max_loaded_models: int = Field(default=4, ge=1, le=16)
+    ollama_max_queue: int = Field(default=256, ge=1, le=65536)
+    ollama_load_timeout: str = "10m"
     ollama_num_threads: int = Field(default=0, ge=0, le=256)
     ollama_extract_num_threads: int = Field(default=0, ge=0, le=256)
     ollama_assist_num_threads: int = Field(default=0, ge=0, le=256)

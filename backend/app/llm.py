@@ -202,7 +202,7 @@ class LlmGateway:
             try:
                 options: dict[str, int | float] = {
                     "temperature": temperature,
-                    "num_ctx": 8192,
+                    "num_ctx": self.settings.ollama_context_length,
                     "num_predict": self.settings.ollama_max_output_tokens,
                 }
                 num_threads = self._num_threads_for(model)

@@ -59,6 +59,7 @@ def test_ollama_keep_alive_serialization(configured, serialized):
 def test_gateway_records_exact_redacted_input_output(monkeypatch):
     settings = Settings(
         ollama_base_url="http://ollama.invalid",
+        ollama_context_length=4096,
         ollama_num_threads=8,
         ollama_max_output_tokens=768,
         ollama_keep_alive="5m",
@@ -89,6 +90,7 @@ def test_gateway_records_exact_redacted_input_output(monkeypatch):
     request = gateway.client.last_request["kwargs"]["json"]
     assert request["keep_alive"] == "5m"
     assert request["options"]["num_thread"] == 8
+    assert request["options"]["num_ctx"] == 4096
     assert request["options"]["num_predict"] == 768
     assert request["format"] == AuditOutput.model_json_schema()
     assert '"properties"' not in request["messages"][-1]["content"]
