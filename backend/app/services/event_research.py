@@ -117,7 +117,11 @@ class EventResearchService:
                 )
             )
             save_event_research_run(self.db, run)
-            if added and self.settings.max_verification_rounds > 1:
+            if (
+                added
+                and self.settings.max_verification_rounds > 1
+                and run.retryable_reason is None
+            ):
                 try:
                     draft = self._generate_draft(event, run)
                     run.retryable_reason = None
@@ -133,6 +137,7 @@ class EventResearchService:
                 )
         if (
             not complete
+            and run.retryable_reason is None
             and run.verification_round < self.settings.max_verification_rounds
             and self._draft_can_be_repaired(missing, contradictions)
         ):

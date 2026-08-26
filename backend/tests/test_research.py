@@ -14,7 +14,7 @@ from backend.app.domain import (
 )
 from backend.app.providers.registry import SEED_ASSETS
 from backend.app.services.mcp_registry import SearchResult
-from backend.app.services.research import DraftOutput, ResearchService
+from backend.app.services.research import DraftOutput, ResearchService, VerificationOutput
 from backend.app.storage import get_event, save_event, save_news
 
 
@@ -97,6 +97,35 @@ class TargetedRegistry:
     def discover_news(self, **kwargs):
         self.discovery_calls += 1
         return [self.corroborating_news]
+
+
+def test_model_fallback_skips_automatic_research_revision(db, tmp_path):
+    service = ResearchService(
+        FakeRegistry(),
+        db,
+        Settings(_env_file=None, reports_dir=tmp_path),
+        FakeResearchLlm(),
+    )
+    run = ResearchRun(
+        asset=SEED_ASSETS[0],
+        retryable_reason="model_TimeoutError",
+    )
+    route = service._route_after_verification(
+        {
+            "run": run.model_dump(mode="json"),
+            "draft": DraftOutput(summary="保守回退结果").model_dump(mode="json"),
+            "verification": VerificationOutput(
+                evidence_complete=False,
+                missing_requirements=["one official source or two independent sources"],
+            ).model_dump(mode="json"),
+            "verification_round": 1,
+            "acquisition_attempts": 0,
+            "historical_replay": False,
+        }
+    )
+    service._close_checkpointer()
+
+    assert route == "finalize"
 
 
 def test_research_graph_produces_verified_recommendation(db, tmp_path):

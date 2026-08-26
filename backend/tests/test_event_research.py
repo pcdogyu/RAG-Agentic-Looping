@@ -49,7 +49,11 @@ class EvidenceOnlyEventResearchLlm(EventResearchLlm):
 
 
 class FailingEventResearchLlm:
+    def __init__(self):
+        self.calls = 0
+
     def generate_json(self, **kwargs):
+        self.calls += 1
         raise TimeoutError("research model timeout")
 
 
@@ -127,10 +131,11 @@ def test_event_model_timeout_returns_retryable_conservative_report(db, tmp_path)
     save_news(db, news)
     save_event(db, event)
 
+    llm = FailingEventResearchLlm()
     result = EventResearchService(
         db,
         Settings(_env_file=None, reports_dir=tmp_path),
-        FailingEventResearchLlm(),
+        llm,
     ).run(event, EventResearchRun(event_id=event.id, as_of=observed))
 
     assert result.status.value == "insufficient_evidence"
@@ -138,6 +143,7 @@ def test_event_model_timeout_returns_retryable_conservative_report(db, tmp_path)
     assert result.report is not None
     assert result.report.confidence <= 0.45
     assert any(step.status == "fallback" for step in result.analysis_steps)
+    assert llm.calls == 1
 
 
 def test_syndicated_reprints_count_as_one_independent_source(db, tmp_path):

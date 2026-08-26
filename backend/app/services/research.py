@@ -794,6 +794,9 @@ class ResearchService:
     def _route_after_verification(
         self, state: ResearchState
     ) -> Literal["acquire_evidence", "revise", "finalize"]:
+        run = ResearchRun.model_validate(state["run"])
+        if run.retryable_reason:
+            return "finalize"
         verification = VerificationOutput.model_validate(state["verification"])
         draft = DraftOutput.model_validate(state["draft"])
         can_retry = state["verification_round"] < self.settings.max_verification_rounds
