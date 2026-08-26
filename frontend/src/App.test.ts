@@ -19,6 +19,8 @@ import {
   factSourceGroupDefinitions,
   formatQueueDuration,
   ModelInferenceQueuePanel,
+  ModelQueueTaskGrid,
+  type ModelQueueOverviewItem,
   navigationGroups,
   newsBoardRefreshIntervalMs,
   newsBoardStatusLabels,
@@ -30,6 +32,7 @@ import {
   queueRefreshIntervalMs,
   routeFromHash,
   TopNavigation,
+  UnifiedModelQueuePanel,
 } from "./AppPages";
 import ModelLogsPage, {
   buildModelLogQuery,
@@ -445,6 +448,43 @@ describe("news board page", () => {
 });
 
 describe("research queue page", () => {
+  const overviewQueue = (
+    overrides: Partial<ModelQueueOverviewItem> = {},
+  ): ModelQueueOverviewItem => ({
+    id: "assist",
+    model: "qwen2.5:7b",
+    purpose: "股票映射",
+    binding: "新闻事件二次股票映射",
+    enabled: true,
+    state: "running",
+    threads: 4,
+    capacity: 1,
+    available: 0,
+    observable: true,
+    counts: {
+      queued: 2,
+      running: 1,
+      retrying: 1,
+      verifying: 0,
+      waiting_for_model: 1,
+      completed: 8,
+      failed: 2,
+    },
+    metrics: {
+      average_queue_duration_ms: 90_000,
+      average_execution_duration_ms: 180_000,
+      longest_wait_ms: 240_000,
+      estimated_clear_ms: 720_000,
+      queue_duration_sample_count: 4,
+      execution_duration_sample_count: 3,
+    },
+    total_tasks: 14,
+    truncated: false,
+    tasks: [],
+    error: null,
+    ...overrides,
+  });
+
   it("renders square asset cards with status and merged task count", () => {
     const markup = renderToStaticMarkup(createElement(QueueGrid, { items: [{
       asset_id: "cn:600519",
@@ -569,6 +609,91 @@ describe("research queue page", () => {
     expect(code).toContain("qwen2.5-coder:7b 代码演进队列");
     expect(code).toContain("有请求排队");
     expect(code).toContain("等待进入模型 1 个请求");
+  });
+
+  it("renders concrete 7B mapping cards and business result counts", () => {
+    const markup = renderToStaticMarkup(createElement(ModelQueueTaskGrid, {
+      queue: overviewQueue({
+        tasks: [{
+          task_id: "mapping-1",
+          kind: "asset_mapping",
+          entity_id: "event-1",
+          title: "沪电股份发布半年报",
+          subtitle: "earnings",
+          source: "automatic",
+          status: "retrying",
+          attempt: 2,
+          task_count: 1,
+          queued_at: "2026-08-26T01:00:00Z",
+          started_at: "2026-08-26T01:01:00Z",
+          completed_at: null,
+          updated_at: "2026-08-26T01:03:00Z",
+          queue_duration_ms: 60_000,
+          execution_duration_ms: 120_000,
+          error: "模型响应暂时不可解析",
+          metrics: { proposed_count: 3, verified_count: 1, rejected_count: 2 },
+        }],
+      }),
+    }));
+
+    expect(markup).toContain("沪电股份发布半年报");
+    expect(markup).toContain("重试中");
+    expect(markup).toContain("提出<strong>3</strong>");
+    expect(markup).toContain("通过<strong>1</strong>");
+    expect(markup).toContain("拒绝<strong>2</strong>");
+    expect(markup).toContain("最近错误");
+    expect(markup).toContain("排队 1分0秒");
+  });
+
+  it("renders coder 7B evolution stage, target branch and disabled state", () => {
+    const codeQueue = overviewQueue({
+      id: "code",
+      model: "qwen2.5-coder:7b",
+      purpose: "代码演进",
+      binding: "失败案例驱动的代码演进",
+      tasks: [{
+        task_id: "evolve-1",
+        kind: "code_evolution",
+        entity_id: "candidate-1",
+        title: "减少无效重试",
+        subtitle: "failure_rate",
+        source: "manual",
+        status: "testing",
+        attempt: 1,
+        task_count: 1,
+        queued_at: "2026-08-26T01:00:00Z",
+        started_at: "2026-08-26T01:00:30Z",
+        completed_at: null,
+        updated_at: "2026-08-26T01:02:00Z",
+        queue_duration_ms: 30_000,
+        execution_duration_ms: 90_000,
+        error: null,
+        metrics: { target_metric: "failure_rate", branch: "evolve/retry-policy" },
+      }],
+    });
+    const markup = renderToStaticMarkup(createElement(ModelQueueTaskGrid, { queue: codeQueue }));
+    const disabled = renderToStaticMarkup(createElement(ModelQueueTaskGrid, {
+      queue: { ...codeQueue, enabled: false, tasks: [] },
+    }));
+
+    expect(markup).toContain("减少无效重试");
+    expect(markup).toContain("测试中");
+    expect(markup).toContain("目标：failure_rate");
+    expect(markup).toContain("分支：evolve/retry-policy");
+    expect(disabled).toContain("代码演进未启用（EVOLUTION_ENABLED=false）");
+  });
+
+  it("renders unified queue metrics and truncation without hiding local errors", () => {
+    const markup = renderToStaticMarkup(createElement(UnifiedModelQueuePanel, {
+      queue: overviewQueue({ truncated: true, error: "映射记录暂时不可用" }),
+    }));
+
+    expect(markup).toContain("qwen2.5:7b 股票映射队列");
+    expect(markup).toContain("完成/失败<strong>8/2</strong>");
+    expect(markup).toContain("最长等待<strong>4分0秒</strong>");
+    expect(markup).toContain("预计清空<strong>12分0秒</strong>");
+    expect(markup).toContain("映射记录暂时不可用");
+    expect(markup).toContain("当前显示前 500 张任务卡");
   });
 });
 

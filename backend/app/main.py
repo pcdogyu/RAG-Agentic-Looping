@@ -5,7 +5,7 @@ import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Query
@@ -34,6 +34,12 @@ from backend.app.services.events import EventService
 from backend.app.services.evolution import EvolutionError, EvolutionService
 from backend.app.services.fact_sources import get_effective_settings
 from backend.app.services.mcp_registry import seed_integrations
+from backend.app.services.model_queue import (
+    ModelQueueOverviewResponse,
+    build_model_queue_overview,
+    record_model_task,
+    update_model_task,
+)
 from backend.app.services.news_board import NewsBoardResponse, build_news_board
 from backend.app.services.notifications import notifier
 from backend.app.services.portfolio import PortfolioError, PortfolioService
@@ -376,6 +382,33 @@ def model_inference_queues():
             }
         )
     return {"generated_at": utc_now(), "items": items}
+
+
+@app.get("/api/v1/model-queue-overview", response_model=ModelQueueOverviewResponse)
+def model_queue_overview(
+    limit: int = Query(default=500, ge=1, le=500),
+    db: Session = Depends(get_db),
+):
+    models = {
+        "extract": settings.ollama_extract_model,
+        "research": settings.ollama_research_model,
+        "assist": settings.ollama_assist_model,
+        "code": settings.ollama_code_model,
+    }
+    inference_statuses = {
+        lane: gateway.gpu.queue_status(model) for lane, model in models.items()
+    }
+    threads = {
+        lane: gateway.num_threads_for(model) for lane, model in models.items()
+    }
+    return build_model_queue_overview(
+        db,
+        extraction_queue=get_news_extraction_queue(min(limit, 200)),
+        inference_statuses=inference_statuses,
+        threads=threads,
+        limit=limit,
+        settings=settings,
+    )
 
 
 @app.get("/api/v1/research-runs/{run_id}")
@@ -767,7 +800,30 @@ def propose_evolution(request: EvolutionRequest, db: Session = Depends(get_db)):
     if request.background:
         if not settings.evolution_enabled:
             raise HTTPException(409, "EVOLUTION_ENABLED is false")
-        task = evolve_failures.apply_async(args=[request.failures], queue="evolution")
+        task_id = str(uuid4())
+        record_model_task(
+            "code",
+            task_id=task_id,
+            kind="code_evolution",
+            title=f"失败案例代码演进（{len(request.failures)} 条）",
+            subtitle="等待生成改进方案",
+            source="manual",
+        )
+        try:
+            task = evolve_failures.apply_async(
+                args=[request.failures],
+                queue="evolution",
+                task_id=task_id,
+            )
+        except Exception as exc:
+            update_model_task(
+                "code",
+                task_id,
+                status="failed",
+                source="manual",
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            raise
         return {"task_id": task.id, "status": "queued"}
     try:
         return EvolutionService().propose(db, request.failures)
@@ -781,7 +837,32 @@ def execute_evolution(candidate_id: UUID, background: bool = True, db: Session =
     if not candidate:
         raise HTTPException(404, "evolution candidate not found")
     if background:
-        task = execute_evolution_task.apply_async(args=[str(candidate_id)], queue="evolution")
+        task_id = str(uuid4())
+        record_model_task(
+            "code",
+            task_id=task_id,
+            kind="code_evolution",
+            entity_id=str(candidate.id),
+            title=candidate.hypothesis,
+            subtitle=candidate.target_metric,
+            source="manual",
+        )
+        try:
+            task = execute_evolution_task.apply_async(
+                args=[str(candidate_id)],
+                queue="evolution",
+                task_id=task_id,
+            )
+        except Exception as exc:
+            update_model_task(
+                "code",
+                task_id,
+                status="failed",
+                entity_id=str(candidate.id),
+                source="manual",
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            raise
         return {"task_id": task.id, "status": "queued"}
     try:
         result = EvolutionService().execute(db, candidate)

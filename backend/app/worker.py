@@ -32,6 +32,7 @@ from backend.app.services.asset_mapping import AssetMappingService
 from backend.app.services.event_research import EventResearchService
 from backend.app.services.events import EventService
 from backend.app.services.evolution import EvolutionService
+from backend.app.services.model_queue import record_model_task, update_model_task
 from backend.app.services.notifications import notifier
 from backend.app.services.outcomes import OutcomeService
 from backend.app.services.portfolio import PortfolioService
@@ -795,9 +796,29 @@ def enqueue_asset_mapping(db, event: NewsEvent) -> str | None:
         ),
     )
     save_event(db, event)
+    task_id = str(uuid4())
+    record_model_task(
+        "assist",
+        task_id=task_id,
+        kind="asset_mapping",
+        entity_id=str(event.id),
+        title=event.headline,
+        subtitle=event.event_type.value,
+        source="automatic",
+    )
     try:
-        task = resolve_event_assets.apply_async(args=[str(event.id)], queue="mapping")
+        task = resolve_event_assets.apply_async(
+            args=[str(event.id)],
+            queue="mapping",
+            task_id=task_id,
+        )
     except Exception as exc:
+        update_model_task(
+            "assist",
+            task_id,
+            status="failed",
+            error=f"{type(exc).__name__}: {exc}",
+        )
         _replace_event_step(
             event,
             AnalysisStep(
@@ -1326,11 +1347,34 @@ def finalize_news_extraction(
 
 @celery_app.task(bind=True, name="market_loop.resolve_event_assets", max_retries=2)
 def resolve_event_assets(self, event_id: str) -> dict:
+    task_id = str(self.request.id or f"event:{event_id}")
+    update_model_task(
+        "assist",
+        task_id,
+        status="running",
+        attempt=self.request.retries + 1,
+        entity_id=event_id,
+        title="股票映射任务",
+    )
     init_db()
     with SessionLocal() as db:
         event = get_event(db, UUID(event_id))
         if not event:
+            update_model_task(
+                "assist",
+                task_id,
+                status="failed",
+                error=f"unknown event: {event_id}",
+            )
             raise ValueError(f"unknown event: {event_id}")
+        update_model_task(
+            "assist",
+            task_id,
+            status="running",
+            entity_id=event_id,
+            title=event.headline,
+            subtitle=event.event_type.value,
+        )
         registry = ProviderRegistry(assets=list_assets(db))
         try:
             mapping_result = None
@@ -1394,6 +1438,24 @@ def resolve_event_assets(self, event_id: str) -> dict:
 
             if event.candidates:
                 queued = enqueue_event_researches(db, event, 3)
+                update_model_task(
+                    "assist",
+                    task_id,
+                    status="completed",
+                    metrics={
+                        "proposed_count": (
+                            mapping_result.proposed_count
+                            if mapping_result is not None
+                            else len(event.candidates)
+                        ),
+                        "verified_count": len(event.candidates),
+                        "rejected_count": (
+                            mapping_result.rejected_count
+                            if mapping_result is not None
+                            else 0
+                        ),
+                    },
+                )
                 return {
                     "status": "mapped",
                     "event_id": event_id,
@@ -1402,6 +1464,20 @@ def resolve_event_assets(self, event_id: str) -> dict:
                 }
 
             task_id, run = enqueue_event_report(db, event)
+            update_model_task(
+                "assist",
+                str(self.request.id or f"event:{event_id}"),
+                status="completed",
+                metrics={
+                    "proposed_count": (
+                        mapping_result.proposed_count if mapping_result is not None else 0
+                    ),
+                    "verified_count": 0,
+                    "rejected_count": (
+                        mapping_result.rejected_count if mapping_result is not None else 0
+                    ),
+                },
+            )
             return {
                 "status": "event_research_queued",
                 "event_id": event_id,
@@ -1427,6 +1503,13 @@ def resolve_event_assets(self, event_id: str) -> dict:
                 ),
             )
             save_event(db, event)
+            update_model_task(
+                "assist",
+                str(self.request.id or f"event:{event_id}"),
+                status="retrying" if retrying else "failed",
+                attempt=self.request.retries + 1,
+                error=f"{type(exc).__name__}: {exc}",
+            )
             if retrying:
                 raise self.retry(
                     exc=exc,
@@ -1552,9 +1635,89 @@ def seed_assets() -> dict:
     return {"assets": count}
 
 
-@celery_app.task(name="market_loop.evolve_from_outcomes")
-def evolve_from_outcomes() -> dict:
+def _run_evolution_failures(
+    failures: list[dict], *, task_id: str, source: str
+) -> dict:
+    update_model_task(
+        "code",
+        task_id,
+        status="generating",
+        title=f"失败案例代码演进（{len(failures)} 条）",
+        subtitle="正在生成改进方案",
+        source=source,
+    )
+    try:
+        init_db()
+        with SessionLocal() as db:
+            service = EvolutionService()
+            candidate = service.propose(db, failures)
+            update_model_task(
+                "code",
+                task_id,
+                status="testing",
+                entity_id=str(candidate.id),
+                title=candidate.hypothesis,
+                subtitle=candidate.target_metric,
+                source=source,
+                metrics={
+                    "target_metric": candidate.target_metric,
+                    "branch": candidate.branch,
+                    "expected_improvement": candidate.expected_improvement,
+                },
+            )
+            result = service.execute(db, candidate)
+            update_model_task(
+                "code",
+                task_id,
+                status=result.status.value,
+                entity_id=str(result.id),
+                title=result.hypothesis,
+                subtitle=result.target_metric,
+                source=source,
+                metrics={
+                    "target_metric": result.target_metric,
+                    "branch": result.branch,
+                    "expected_improvement": result.expected_improvement,
+                    "baseline_score": result.baseline_score,
+                    "candidate_score": result.candidate_score,
+                },
+                error=(
+                    "代码演进候选被拒绝或回滚。"
+                    if result.status.value in {"rejected", "rolled_back"}
+                    else None
+                ),
+            )
+            notifier.send(
+                f"演进结果：{result.status.value}\n分支：{result.branch}"
+                f"\n假设：{result.hypothesis}"
+            )
+            return result.model_dump(mode="json")
+    except Exception as exc:
+        update_model_task(
+            "code",
+            task_id,
+            status="failed",
+            source=source,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        raise
+
+
+@celery_app.task(bind=True, name="market_loop.evolve_from_outcomes")
+def evolve_from_outcomes(self) -> dict:
+    task_id = str(self.request.id or uuid4())
+    record_model_task(
+        "code",
+        task_id=task_id,
+        kind="code_evolution",
+        title="定期失败案例代码演进",
+        subtitle="根据历史研究结果生成改进方案",
+        source="automatic",
+    )
     if not settings.evolution_enabled:
+        update_model_task(
+            "code", task_id, status="completed", source="automatic"
+        )
         return {"status": "disabled"}
     init_db()
     with SessionLocal() as db:
@@ -1564,35 +1727,102 @@ def evolve_from_outcomes() -> dict:
             if not item.direction_correct or item.alpha < 0
         ][:50]
         if not failures:
+            update_model_task(
+                "code", task_id, status="completed", source="automatic"
+            )
             return {"status": "no-failures"}
-    return evolve_failures.run(failures)
+    return _run_evolution_failures(failures, task_id=task_id, source="automatic")
 
 
-@celery_app.task(name="market_loop.evolve_failures")
-def evolve_failures(failures: list[dict]) -> dict:
+@celery_app.task(bind=True, name="market_loop.evolve_failures")
+def evolve_failures(self, failures: list[dict]) -> dict:
+    task_id = str(self.request.id or uuid4())
     if not settings.evolution_enabled:
+        update_model_task(
+            "code",
+            task_id,
+            status="failed",
+            source="manual",
+            error="EVOLUTION_ENABLED is false",
+        )
         return {"status": "disabled"}
-    init_db()
-    with SessionLocal() as db:
-        service = EvolutionService()
-        candidate = service.propose(db, failures)
-        result = service.execute(db, candidate)
-        notifier.send(f"演进结果：{result.status.value}\n分支：{result.branch}\n假设：{result.hypothesis}")
-        return result.model_dump(mode="json")
+    update_model_task(
+        "code",
+        task_id,
+        status="generating",
+        title=f"失败案例代码演进（{len(failures)} 条）",
+        subtitle="正在生成改进方案",
+        source="manual",
+    )
+    return _run_evolution_failures(failures, task_id=task_id, source="manual")
 
 
-@celery_app.task(name="market_loop.execute_evolution")
-def execute_evolution(candidate_id: str) -> dict:
+@celery_app.task(bind=True, name="market_loop.execute_evolution")
+def execute_evolution(self, candidate_id: str) -> dict:
+    task_id = str(self.request.id or uuid4())
     init_db()
     with SessionLocal() as db:
         candidate = next(
             (item for item in list_evolutions(db) if str(item.id) == candidate_id), None
         )
         if not candidate:
+            update_model_task(
+                "code",
+                task_id,
+                status="failed",
+                entity_id=candidate_id,
+                error=f"unknown evolution candidate: {candidate_id}",
+            )
             raise ValueError(f"unknown evolution candidate: {candidate_id}")
-        result = EvolutionService().execute(db, candidate)
-        notifier.send(f"演进结果：{result.status.value}\n分支：{result.branch}")
-        return result.model_dump(mode="json")
+        update_model_task(
+            "code",
+            task_id,
+            status="testing",
+            entity_id=candidate_id,
+            title=candidate.hypothesis,
+            subtitle=candidate.target_metric,
+            source="manual",
+            metrics={
+                "target_metric": candidate.target_metric,
+                "branch": candidate.branch,
+                "expected_improvement": candidate.expected_improvement,
+            },
+        )
+        try:
+            result = EvolutionService().execute(db, candidate)
+            update_model_task(
+                "code",
+                task_id,
+                status=result.status.value,
+                entity_id=str(result.id),
+                title=result.hypothesis,
+                subtitle=result.target_metric,
+                source="manual",
+                metrics={
+                    "target_metric": result.target_metric,
+                    "branch": result.branch,
+                    "expected_improvement": result.expected_improvement,
+                    "baseline_score": result.baseline_score,
+                    "candidate_score": result.candidate_score,
+                },
+                error=(
+                    "代码演进候选被拒绝或回滚。"
+                    if result.status.value in {"rejected", "rolled_back"}
+                    else None
+                ),
+            )
+            notifier.send(f"演进结果：{result.status.value}\n分支：{result.branch}")
+            return result.model_dump(mode="json")
+        except Exception as exc:
+            update_model_task(
+                "code",
+                task_id,
+                status="failed",
+                entity_id=candidate_id,
+                source="manual",
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            raise
 
 
 @celery_app.task(name="market_loop.monitor_health")

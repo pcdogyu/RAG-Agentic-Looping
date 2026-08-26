@@ -120,20 +120,6 @@ export type ResearchQueueItem = {
   updated_at: string;
 };
 
-type ResearchQueueResponse = {
-  generated_at: string;
-  model: string;
-  total_assets: number;
-  total_runs: number;
-  counts: { queued: number; running: number; verifying: number };
-  average_queue_duration_ms: number | null;
-  average_execution_duration_ms: number | null;
-  queue_duration_sample_count: number;
-  execution_duration_sample_count: number;
-  truncated: boolean;
-  items: ResearchQueueItem[];
-};
-
 export type NewsExtractionQueueItem = {
   task_id: string;
   news_id: string;
@@ -148,28 +134,6 @@ export type NewsExtractionQueueItem = {
   queue_duration_ms: number | null;
   execution_duration_ms: number | null;
   updated_at: string;
-  error: string | null;
-};
-
-type NewsExtractionQueueResponse = {
-  generated_at: string;
-  model: string;
-  scan_task_id: string | null;
-  state: string;
-  total_items: number;
-  counts: {
-    queued: number;
-    running: number;
-    retrying: number;
-    completed: number;
-    failed: number;
-  };
-  average_queue_duration_ms: number | null;
-  average_execution_duration_ms: number | null;
-  queue_duration_sample_count: number;
-  execution_duration_sample_count: number;
-  truncated: boolean;
-  items: NewsExtractionQueueItem[];
   error: string | null;
 };
 
@@ -188,9 +152,63 @@ export type ModelInferenceQueueItem = {
   state: "idle" | "queued" | "running" | "unavailable";
 };
 
-type ModelInferenceQueuesResponse = {
+export type ModelQueueTask = {
+  task_id: string;
+  kind: string;
+  entity_id: string | null;
+  title: string;
+  subtitle: string;
+  source: string | null;
+  status: string;
+  attempt: number;
+  task_count: number;
+  queued_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  updated_at: string;
+  queue_duration_ms: number | null;
+  execution_duration_ms: number | null;
+  error: string | null;
+  metrics: Record<string, unknown>;
+};
+
+export type ModelQueueOverviewItem = {
+  id: "extract" | "research" | "assist" | "code";
+  model: string;
+  purpose: string;
+  binding: string;
+  enabled: boolean;
+  state: string;
+  threads: number;
+  capacity: number;
+  available: number;
+  observable: boolean;
+  counts: {
+    queued: number;
+    running: number;
+    retrying: number;
+    verifying: number;
+    waiting_for_model: number;
+    completed: number;
+    failed: number;
+  };
+  metrics: {
+    average_queue_duration_ms: number | null;
+    average_execution_duration_ms: number | null;
+    longest_wait_ms: number | null;
+    estimated_clear_ms: number | null;
+    queue_duration_sample_count: number;
+    execution_duration_sample_count: number;
+  };
+  total_tasks: number;
+  truncated: boolean;
+  tasks: ModelQueueTask[];
+  error: string | null;
+};
+
+type ModelQueueOverviewResponse = {
   generated_at: string;
-  items: ModelInferenceQueueItem[];
+  queues: ModelQueueOverviewItem[];
 };
 
 const queueStatusLabels: Record<ResearchQueueItem["status"], string> = {
@@ -204,16 +222,6 @@ const extractionStatusLabels: Record<NewsExtractionQueueItem["status"], string> 
   running: "抽取中",
   retrying: "重试中",
   failed: "失败",
-};
-
-const extractionBatchLabels: Record<string, string> = {
-  idle: "空闲",
-  queued: "已排队",
-  running: "处理中",
-  completed: "已完成",
-  completed_with_errors: "部分失败",
-  failed: "失败",
-  unavailable: "不可用",
 };
 
 export function NewsExtractionList({ items }: { items: NewsExtractionQueueItem[] }) {
@@ -293,74 +301,150 @@ export function ModelInferenceQueuePanel({ item }: { item: ModelInferenceQueueIt
   </section>;
 }
 
+const modelQueueStateLabels: Record<string, string> = {
+  idle: "空闲",
+  queued: "排队中",
+  running: "处理中",
+  failed: "有失败",
+  disabled: "未启用",
+  unavailable: "不可用",
+};
+
+const modelTaskStatusLabels: Record<string, string> = {
+  queued: "排队中",
+  proposed: "待执行",
+  running: "处理中",
+  generating: "生成方案",
+  retrying: "重试中",
+  verifying: "验证中",
+  testing: "测试中",
+  merging: "合并中",
+  failed: "失败",
+  rejected: "已拒绝",
+  rolled_back: "已回滚",
+  completed: "已完成",
+  merged: "已合并",
+  insufficient_evidence: "证据不足",
+};
+
+const modelQueueEyebrows: Record<ModelQueueOverviewItem["id"], string> = {
+  extract: "NEWS EXTRACTION",
+  research: "ASSET RESEARCH",
+  assist: "ASSET MAPPING",
+  code: "CODE EVOLUTION",
+};
+
+function queueMetricValue(value: unknown) {
+  return typeof value === "number" || typeof value === "string" ? String(value) : "—";
+}
+
+function taskSourceLabel(source: string | null) {
+  if (source === "automatic") return "自动任务";
+  if (source === "manual") return "手动任务";
+  if (source === "candidate") return "演进候选";
+  return source || "业务任务";
+}
+
+export function ModelQueueTaskGrid({ queue }: { queue: ModelQueueOverviewItem }) {
+  if (!queue.enabled && queue.id === "code") {
+    return <div className="page-empty">代码演进未启用（EVOLUTION_ENABLED=false）。</div>;
+  }
+  if (!queue.tasks.length) {
+    return <div className="page-empty">当前没有等待、运行或最近失败的{queue.purpose}任务。</div>;
+  }
+  return <div className="model-task-grid" data-queue={queue.id}>{queue.tasks.map((task) => {
+    const isMapping = task.kind === "asset_mapping";
+    const isEvolution = task.kind === "code_evolution";
+    const branch = queueMetricValue(task.metrics.branch);
+    return <article className={`model-task-card ${task.status}`} key={task.task_id} title={task.title}>
+      <div className="model-task-heading">
+        <span className="model-task-status"><i />{modelTaskStatusLabels[task.status] ?? task.status}</span>
+        <small>{taskSourceLabel(task.source)}</small>
+      </div>
+      <h4>{task.title}</h4>
+      <p>{task.subtitle || task.kind}</p>
+      {task.task_count > 1 && <div className="model-task-count">合并 {task.task_count} 个任务</div>}
+      {isMapping && <div className="model-task-results mapping-results">
+        <span>提出<strong>{queueMetricValue(task.metrics.proposed_count)}</strong></span>
+        <span>通过<strong>{queueMetricValue(task.metrics.verified_count)}</strong></span>
+        <span>拒绝<strong>{queueMetricValue(task.metrics.rejected_count)}</strong></span>
+      </div>}
+      {isEvolution && <div className="model-task-evolution">
+        <span>目标：{queueMetricValue(task.metrics.target_metric)}</span>
+        <span title={branch}>分支：{branch}</span>
+      </div>}
+      <div className="model-task-meta">
+        <span>第 {Math.max(1, task.attempt)} 次尝试</span>
+        <span>排队 {formatQueueDuration(task.queue_duration_ms)}</span>
+        <span>执行 {formatQueueDuration(task.execution_duration_ms)}</span>
+      </div>
+      {task.error && <details className="model-task-error">
+        <summary>最近错误</summary>
+        <p>{task.error}</p>
+      </details>}
+      <time dateTime={task.updated_at}>{new Date(task.updated_at).toLocaleString("zh-CN")}</time>
+    </article>;
+  })}</div>;
+}
+
+export function UnifiedModelQueuePanel({ queue }: { queue: ModelQueueOverviewItem }) {
+  const secondary = queue.counts.retrying + queue.counts.verifying;
+  return <section className={`model-queue-panel unified-model-queue-panel ${queue.id}`}>
+    <header>
+      <div>
+        <p className="eyebrow">{modelQueueEyebrows[queue.id]}</p>
+        <h3>{queue.model} {queue.purpose}队列</h3>
+        <small>{queue.binding}</small>
+      </div>
+      <span className={`model-queue-state ${queue.state}`}>{modelQueueStateLabels[queue.state] ?? queue.state}</span>
+    </header>
+    <div className="queue-metrics unified-queue-metrics" aria-live="polite">
+      <span>待处理<strong>{queue.counts.queued}</strong></span>
+      <span>运行<strong>{queue.counts.running}</strong></span>
+      <span>重试/验证<strong>{secondary}</strong></span>
+      <span>完成/失败<strong>{queue.counts.completed}/{queue.counts.failed}</strong></span>
+      <span title={`样本 ${queue.metrics.queue_duration_sample_count}`}>平均排队<strong>{formatQueueDuration(queue.metrics.average_queue_duration_ms)}</strong></span>
+      <span title={`样本 ${queue.metrics.execution_duration_sample_count}`}>平均执行<strong>{formatQueueDuration(queue.metrics.average_execution_duration_ms)}</strong></span>
+    </div>
+    <div className="model-queue-runtime">
+      <span>模型等待<strong>{queue.counts.waiting_for_model}</strong></span>
+      <span>槽位<strong>{queue.available}/{queue.capacity}</strong></span>
+      <span>CPU<strong>{queue.threads} 线程</strong></span>
+      <span>最长等待<strong>{formatQueueDuration(queue.metrics.longest_wait_ms)}</strong></span>
+      <span>预计清空<strong>{formatQueueDuration(queue.metrics.estimated_clear_ms)}</strong></span>
+    </div>
+    {!queue.observable && <div className="page-error">模型推理槽位状态暂时不可用。</div>}
+    {queue.error && <div className="page-error">{queue.error}</div>}
+    {queue.truncated && <div className="page-message">队列过长，当前显示前 500 张任务卡。</div>}
+    <ModelQueueTaskGrid queue={queue} />
+  </section>;
+}
+
 export function QueuePage({ apiBase }: { apiBase: string }) {
-  const [extractionQueue, setExtractionQueue] = useState<NewsExtractionQueueResponse | null>(null);
-  const [researchQueue, setResearchQueue] = useState<ResearchQueueResponse | null>(null);
-  const [inferenceQueues, setInferenceQueues] = useState<ModelInferenceQueueItem[]>([]);
-  const [extractionLoading, setExtractionLoading] = useState(true);
-  const [researchLoading, setResearchLoading] = useState(true);
-  const [inferenceLoading, setInferenceLoading] = useState(true);
-  const [extractionError, setExtractionError] = useState("");
-  const [researchError, setResearchError] = useState("");
-  const [inferenceError, setInferenceError] = useState("");
+  const [overview, setOverview] = useState<ModelQueueOverviewResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
 
-  const loadExtractionQueue = useCallback(async (signal?: AbortSignal, showLoading = false) => {
-    if (showLoading) setExtractionLoading(true);
+  const loadQueues = useCallback(async (signal?: AbortSignal, showLoading = false) => {
+    if (showLoading) setLoading(true);
     try {
-      const response = await fetch(`${apiBase}/api/v1/news-extraction-queue?limit=200`, { signal });
-      if (!response.ok) throw new Error(`新闻抽取队列请求失败（HTTP ${response.status}）`);
-      setExtractionQueue(await response.json() as NewsExtractionQueueResponse);
-      setExtractionError("");
+      const response = await fetch(`${apiBase}/api/v1/model-queue-overview?limit=500`, { signal });
+      if (!response.ok) throw new Error(`模型队列请求失败（HTTP ${response.status}）`);
+      setOverview(await response.json() as ModelQueueOverviewResponse);
+      setError("");
     } catch (reason) {
       if (signal?.aborted) return;
-      setExtractionError(reason instanceof Error ? reason.message : "新闻抽取队列请求失败");
+      setError(reason instanceof Error ? reason.message : "模型队列请求失败");
     } finally {
-      if (!signal?.aborted) setExtractionLoading(false);
+      if (!signal?.aborted) setLoading(false);
     }
   }, [apiBase]);
-
-  const loadResearchQueue = useCallback(async (signal?: AbortSignal, showLoading = false) => {
-    if (showLoading) setResearchLoading(true);
-    try {
-      const response = await fetch(`${apiBase}/api/v1/research-queue?limit=500`, { signal });
-      if (!response.ok) throw new Error(`标的研究队列请求失败（HTTP ${response.status}）`);
-      setResearchQueue(await response.json() as ResearchQueueResponse);
-      setResearchError("");
-    } catch (reason) {
-      if (signal?.aborted) return;
-      setResearchError(reason instanceof Error ? reason.message : "标的研究队列请求失败");
-    } finally {
-      if (!signal?.aborted) setResearchLoading(false);
-    }
-  }, [apiBase]);
-
-  const loadInferenceQueues = useCallback(async (signal?: AbortSignal, showLoading = false) => {
-    if (showLoading) setInferenceLoading(true);
-    try {
-      const response = await fetch(`${apiBase}/api/v1/model-inference-queues`, { signal });
-      if (!response.ok) throw new Error(`模型推理队列请求失败（HTTP ${response.status}）`);
-      const payload = await response.json() as ModelInferenceQueuesResponse;
-      setInferenceQueues(payload.items);
-      setInferenceError("");
-    } catch (reason) {
-      if (signal?.aborted) return;
-      setInferenceError(reason instanceof Error ? reason.message : "模型推理队列请求失败");
-    } finally {
-      if (!signal?.aborted) setInferenceLoading(false);
-    }
-  }, [apiBase]);
-
-  const loadQueues = useCallback((signal?: AbortSignal, showLoading = false) => {
-    void loadExtractionQueue(signal, showLoading);
-    void loadResearchQueue(signal, showLoading);
-    void loadInferenceQueues(signal, showLoading);
-  }, [loadExtractionQueue, loadInferenceQueues, loadResearchQueue]);
 
   useEffect(() => {
     const controller = new AbortController();
-    loadQueues(controller.signal, true);
+    void loadQueues(controller.signal, true);
     const timer = window.setInterval(
-      () => loadQueues(controller.signal),
+      () => void loadQueues(controller.signal),
       queueRefreshIntervalMs,
     );
     return () => {
@@ -375,54 +459,16 @@ export function QueuePage({ apiBase }: { apiBase: string }) {
       <span>四个模型队列独立加载；任一服务异常不会遮挡其他队列。</span>
       <button
         type="button"
-        disabled={extractionLoading || researchLoading || inferenceLoading}
-        onClick={() => loadQueues(undefined, true)}
+        disabled={loading}
+        onClick={() => void loadQueues(undefined, true)}
       >
-        {extractionLoading || researchLoading || inferenceLoading ? "刷新中…" : "立即刷新"}
+        {loading ? "刷新中…" : "立即刷新"}
       </button>
     </div>
+    {error && <div className="page-error">{error}</div>}
+    {!overview && loading && <div className="page-message">正在读取四个模型队列…</div>}
     <div className="model-queue-columns">
-      <section className="model-queue-panel extraction-queue-panel">
-        <header>
-          <div><p className="eyebrow">NEWS EXTRACTION</p><h3>{extractionQueue?.model ?? "—"} 新闻抽取队列</h3></div>
-          <span className={`model-queue-state ${extractionQueue?.state ?? "idle"}`}>
-            {extractionQueue ? (extractionBatchLabels[extractionQueue.state] ?? extractionQueue.state) : "读取中"}
-          </span>
-        </header>
-        <div className="queue-metrics" aria-live="polite">
-          <span>总数<strong>{extractionQueue?.total_items ?? 0}</strong></span>
-          <span>排队<strong>{extractionQueue?.counts.queued ?? 0}</strong></span>
-          <span>抽取/重试<strong>{(extractionQueue?.counts.running ?? 0) + (extractionQueue?.counts.retrying ?? 0)}</strong></span>
-          <span>完成/失败<strong>{extractionQueue?.counts.completed ?? 0}/{extractionQueue?.counts.failed ?? 0}</strong></span>
-          <span title={`样本 ${extractionQueue?.queue_duration_sample_count ?? 0}`}>平均排队<strong>{formatQueueDuration(extractionQueue?.average_queue_duration_ms)}</strong></span>
-          <span title={`样本 ${extractionQueue?.execution_duration_sample_count ?? 0}`}>平均执行<strong>{formatQueueDuration(extractionQueue?.average_execution_duration_ms)}</strong></span>
-        </div>
-        {extractionError && <div className="page-error">{extractionError}</div>}
-        {extractionQueue?.error && <div className="page-error">{extractionQueue.error}</div>}
-        {extractionQueue?.truncated && <div className="page-message">新闻队列过长，当前显示前 200 条。</div>}
-        {!extractionQueue && extractionLoading && <div className="page-message">正在读取新闻抽取队列…</div>}
-        {extractionQueue && <NewsExtractionList items={extractionQueue.items} />}
-      </section>
-      <section className="model-queue-panel research-queue-panel">
-        <header>
-          <div><p className="eyebrow">ASSET RESEARCH</p><h3>{researchQueue?.model ?? "—"} 标的研究队列</h3></div>
-        </header>
-        <div className="queue-metrics" aria-live="polite">
-          <span>标的<strong>{researchQueue?.total_assets ?? 0}</strong></span>
-          <span>排队任务<strong>{researchQueue?.counts.queued ?? 0}</strong></span>
-          <span>研究中<strong>{researchQueue?.counts.running ?? 0}</strong></span>
-          <span>验证中<strong>{researchQueue?.counts.verifying ?? 0}</strong></span>
-          <span title={`样本 ${researchQueue?.queue_duration_sample_count ?? 0}`}>平均排队<strong>{formatQueueDuration(researchQueue?.average_queue_duration_ms)}</strong></span>
-          <span title={`样本 ${researchQueue?.execution_duration_sample_count ?? 0}`}>平均执行<strong>{formatQueueDuration(researchQueue?.average_execution_duration_ms)}</strong></span>
-        </div>
-        {researchError && <div className="page-error">{researchError}</div>}
-        {researchQueue?.truncated && <div className="page-message">队列过长，当前显示前 500 个标的。</div>}
-        {!researchQueue && researchLoading && <div className="page-message">正在读取标的研究队列…</div>}
-        {researchQueue && <QueueGrid items={researchQueue.items} />}
-      </section>
-      {inferenceError && <div className="page-error model-inference-error">{inferenceError}</div>}
-      {!inferenceQueues.length && inferenceLoading && <div className="page-message model-inference-loading">正在读取 7B 模型队列…</div>}
-      {inferenceQueues.map((item) => <ModelInferenceQueuePanel item={item} key={item.lane} />)}
+      {overview?.queues.map((queue) => <UnifiedModelQueuePanel queue={queue} key={queue.id} />)}
     </div>
   </section>;
 }

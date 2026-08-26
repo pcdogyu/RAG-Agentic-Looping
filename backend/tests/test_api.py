@@ -368,6 +368,72 @@ def test_additional_model_inference_queues_are_public(monkeypatch):
     assert payload["items"][1]["state"] == "idle"
 
 
+def test_unified_model_queue_overview_is_public_and_ordered(monkeypatch):
+    now = utc_now().isoformat()
+
+    def queue(queue_id, model):
+        return {
+            "id": queue_id,
+            "model": model,
+            "purpose": "test",
+            "binding": "test binding",
+            "enabled": queue_id != "code",
+            "state": "disabled" if queue_id == "code" else "idle",
+            "threads": 4,
+            "capacity": 1,
+            "available": 1,
+            "observable": True,
+            "counts": {
+                "queued": 0,
+                "running": 0,
+                "retrying": 0,
+                "verifying": 0,
+                "waiting_for_model": 0,
+                "completed": 0,
+                "failed": 0,
+            },
+            "metrics": {
+                "average_queue_duration_ms": None,
+                "average_execution_duration_ms": None,
+                "longest_wait_ms": None,
+                "estimated_clear_ms": None,
+                "queue_duration_sample_count": 0,
+                "execution_duration_sample_count": 0,
+            },
+            "total_tasks": 0,
+            "truncated": False,
+            "tasks": [],
+            "error": None,
+        }
+
+    monkeypatch.setattr(
+        "backend.app.main.build_model_queue_overview",
+        lambda *_args, **_kwargs: {
+            "generated_at": now,
+            "queues": [
+                queue("extract", "qwen2.5:3b"),
+                queue("research", "qwen2.5:14b"),
+                queue("assist", "qwen2.5:7b"),
+                queue("code", "qwen2.5-coder:7b"),
+            ],
+        },
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/model-queue-overview?limit=500")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert [item["id"] for item in payload["queues"]] == [
+        "extract",
+        "research",
+        "assist",
+        "code",
+    ]
+    assert payload["queues"][2]["model"] == "qwen2.5:7b"
+    assert payload["queues"][3]["enabled"] is False
+
+
 def test_research_queue_orders_waiting_assets_oldest_first_and_can_be_empty(db):
     now = utc_now()
     newer = SEED_ASSETS[0].model_copy(
