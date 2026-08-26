@@ -41,6 +41,7 @@ class ResearchQueueItem(BaseModel):
 
 class ResearchQueueResponse(BaseModel):
     generated_at: datetime
+    model: str
     total_assets: int
     total_runs: int
     counts: ResearchQueueCounts
@@ -49,7 +50,10 @@ class ResearchQueueResponse(BaseModel):
 
 
 def build_research_queue(
-    runs: list[ResearchRun], limit: int, generated_at: datetime | None = None
+    runs: list[ResearchRun],
+    limit: int,
+    model: str,
+    generated_at: datetime | None = None,
 ) -> ResearchQueueResponse:
     active_runs = [run for run in runs if run.status in ACTIVE_RUN_STATUSES]
     counts = ResearchQueueCounts()
@@ -86,9 +90,43 @@ def build_research_queue(
     all_items = sorted(grouped.values(), key=sort_key)
     return ResearchQueueResponse(
         generated_at=generated_at or utc_now(),
+        model=model,
         total_assets=len(all_items),
         total_runs=len(active_runs),
         counts=counts,
         truncated=len(all_items) > limit,
         items=all_items[:limit],
     )
+
+
+class NewsExtractionQueueCounts(BaseModel):
+    queued: int = 0
+    running: int = 0
+    retrying: int = 0
+    completed: int = 0
+    failed: int = 0
+
+
+class NewsExtractionQueueItem(BaseModel):
+    task_id: str
+    news_id: str
+    title: str
+    source: str
+    published_at: datetime
+    status: str
+    attempt: int = Field(default=0, ge=0)
+    queued_at: datetime
+    updated_at: datetime
+    error: str | None = None
+
+
+class NewsExtractionQueueResponse(BaseModel):
+    generated_at: datetime
+    model: str
+    scan_task_id: str | None = None
+    state: str
+    total_items: int
+    counts: NewsExtractionQueueCounts
+    truncated: bool
+    items: list[NewsExtractionQueueItem]
+    error: str | None = None

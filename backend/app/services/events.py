@@ -76,7 +76,14 @@ class EventService:
         total = len(items)
         for index, discovered_item in enumerate(items, start=1):
             item = enrich_news_lineage(discovered_item)
-            if not save_news(db, item):
+            stored_item = get_news_by_content_hash(db, item.content_hash)
+            if stored_item is not None:
+                if stored_item.id in processed_ids:
+                    if progress:
+                        progress(index, total)
+                    continue
+                item = stored_item
+            elif not save_news(db, item):
                 stored_item = get_news_by_content_hash(db, item.content_hash)
                 if not stored_item or stored_item.id in processed_ids:
                     if progress:
@@ -276,7 +283,10 @@ class EventService:
                 summary=(
                     f"确定性证券映射找到 {len(candidates)} 个候选。"
                     if candidates
-                    else "确定性证券映射未找到可验证候选，将按配置进入 7B 二次发现。"
+                    else (
+                        "确定性证券映射未找到可验证候选，将按配置进入 "
+                        f"{self.settings.ollama_research_model} 二次发现。"
+                    )
                 ),
                 metrics={
                     "candidate_count": len(candidates),

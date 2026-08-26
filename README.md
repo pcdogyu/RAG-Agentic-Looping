@@ -62,8 +62,9 @@ flowchart LR
     API --> REDIS
     API --> PG[(PostgreSQL + pgvector<br/>业务数据、证据、checkpoint)]
 
-    REDIS --> IO[I/O Worker<br/>新闻、数据源、事件抽取]
-    REDIS --> LLM[LLM Worker<br/>单并发深研]
+    REDIS --> IO[I/O Worker<br/>新闻发现、过滤、持久化]
+    REDIS --> EXTRACT[Extract Worker<br/>逐篇新闻抽取]
+    REDIS --> LLM[Research Worker<br/>标的映射与深研]
 
     IO --> PROVIDERS[数据提供器]
     PROVIDERS --> FMP[FMP MCP / REST]
@@ -71,9 +72,9 @@ flowchart LR
     PROVIDERS --> CN[AkShare / CNInfo / RSS]
     PROVIDERS --> CRYPTO[CoinGecko / DefiLlama / CCXT]
 
-    IO -->|qwen2.5:3b| OLLAMA[宿主机 Ollama<br/>Redis GPU 全局锁]
+    EXTRACT -->|qwen2.5:3b| OLLAMA[宿主机 Ollama<br/>Redis GPU 全局锁]
     LLM --> GRAPH[LangGraph<br/>研究与两轮验证]
-    GRAPH -->|qwen2.5:7b| OLLAMA
+    GRAPH -->|qwen2.5:14b| OLLAMA
     GRAPH --> PG
     GRAPH --> REPORTS[Markdown 报告<br/>./reports]
 
@@ -91,7 +92,7 @@ flowchart LR
 - **可恢复**：任务结果存入 Redis，研究状态由 LangGraph checkpoint 保存到 PostgreSQL；扫描任务防重复，并能恢复“新闻已保存但事件尚未生成”的记录。
 - **证据优先**：重要结论绑定证据 ID、来源 URL 和时间边界；官方披露优先于聚合内容。
 - **时间安全**：数据携带 `published_at`、`observed_at`、`as_of`，历史回放不得读取当时尚未观察到的内容。
-- **GPU 单并发**：所有 Ollama 请求共用 Redis 分布式锁；研究 Worker 本身并发为 1，避免三个模型同时占用显存。
+- **GPU 单并发**：所有 Ollama 请求共用 Redis 分布式锁；不同 Worker 可独立排队，但不会让多个模型同时占用显存。
 - **安全降级**：数据源故障时使用缓存或备用 Provider；证据不足、低置信度或未完成高影响复核时输出“观察”。
 
 ## 组件说明
@@ -103,8 +104,9 @@ flowchart LR
 | `web` | React + Vite + Nginx | `80` | 核心 | 展示事件、建议、研究轨迹、模拟组合和健康状态 |
 | `api` | FastAPI + SSE | `8000` | 核心 | REST 接口、任务提交、健康检查和实时快照流 |
 | `scheduler` | Celery Beat | 无 | 核心 | 每 10 分钟扫描新闻、每 6 小时刷新加密资产、每日评估结果 |
-| `io-worker` | Celery，I/O 并发 4 | 无 | 核心 | 新闻发现、去重、事件抽取、资产映射和外部数据请求 |
-| `llm-worker` | Celery，LLM 并发 1 | 无 | 核心 | LangGraph 深研、证据验证、报告和建议生成 |
+| `io-worker` | Celery，I/O 并发 4 | 无 | 核心 | 新闻发现、标题过滤、去重和持久化 |
+| `extract-worker` | Celery，抽取并发 1 | 无 | 核心 | 逐篇执行 3B 新闻事件抽取，并按批次汇合结果 |
+| `research-worker` | Celery，研究并发 2 | 无 | 核心 | 消费 `research,llm`，执行标的映射、深研、验证和报告；兼容旧积压 |
 | `postgres` | PostgreSQL 16 + pgvector | `5432` | 核心 | 结构化数据、全文/向量投影、证据、组合和 checkpoint |
 | `redis` | Redis 7 | `6379` | 核心 | Celery broker/result、Provider 缓存、扫描单例锁和 GPU 锁 |
 | `fmp-mcp` | Node.js MCP Server | `8081` → 容器 `8080` | `mcp` | 暴露受白名单约束的 FMP 工具；失败时后端回退到 REST |
@@ -154,10 +156,11 @@ RAG-Agentic-Looping/
 
 1. Scheduler 默认每 10 分钟提交 `market_loop.scan_news`。
 2. FMP 使用独立的 12 小时回看窗口；RSS 和 AkShare 使用扫描周期的双倍窗口（默认 20 分钟），结果统一按内容哈希去重。
-3. `qwen2.5:3b` 抽取事件类型、主体、影响方向、时间范围和搜索词。
-4. 新事件与最近 72 小时的持久化事件簇比对；同一故事跨扫描批次合并新闻、实体、候选资产和来源血缘。
-5. 系统结合证券主数据、别名、产品和 Provider 搜索结果生成候选资产。
-6. 重复点击扫描会复用同一个任务 ID；页面通过任务接口展示抽取进度。
+3. IO Worker 持久化每篇新新闻并逐条投递到单并发 `extract` 队列。
+4. `qwen2.5:3b` 抽取事件类型、主体、影响方向、时间范围和搜索词；单篇最终失败不会阻塞同批其他新闻。
+5. 新事件与最近 72 小时的持久化事件簇比对；同一故事跨扫描批次合并新闻、实体、候选资产和来源血缘。
+6. 批次汇合后统一发送通知并把标的映射和研究任务投递到 `research` 队列。
+7. 重复点击扫描会复用同一个任务 ID；页面分别展示新闻抽取和标的研究进度。
 
 ### 2. 股票与加密资产深研
 
@@ -204,7 +207,7 @@ stateDiagram-v2
 | 模型 | 默认配置变量 | 作用 | 本机 Ollama 显示大小 | 是否必需 |
 |---|---|---|---:|---|
 | `qwen2.5:3b` | `OLLAMA_EXTRACT_MODEL` | 新闻抽取、分类、实体识别和初筛 | 约 1.9 GB | 是 |
-| `qwen2.5:7b` | `OLLAMA_RESEARCH_MODEL` | 研究综合、矛盾检查、两轮验证和中文报告 | 约 4.7 GB | 是 |
+| `qwen2.5:14b` | `OLLAMA_RESEARCH_MODEL` | 标的映射、研究综合、矛盾检查、两轮验证和中文报告 | 约 9 GB | 是 |
 | `qwen2.5-coder:7b` | `OLLAMA_CODE_MODEL` | 演进假设、补丁和测试生成 | 约 4.7 GB | 仅启用演进时 |
 | `intfloat/multilingual-e5-small` | `EMBEDDING_MODEL` | CPU 多语言向量检索，384 维 | 首次研究自动下载 | 是 |
 
@@ -217,8 +220,8 @@ stateDiagram-v2
 - `OLLAMA_NUM_THREADS` 默认 `0` 由 Ollama 自动选择；虚拟化或多 NUMA 主机应按实测设置，避免线程过多反而拖慢推理。
 - `OLLAMA_MAX_OUTPUT_TOKENS` 限制单次结构化输出，避免异常生成长期占用推理槽。
 - Redis 锁 `market-loop:gpu` 将 API 和所有 Worker 的 Ollama 调用限制为全局单并发。
-- `llm-worker` 并发固定为 1；`io-worker` 可并发处理网络 I/O，但事件抽取仍受同一 GPU 锁约束。
-- CPU 推理可以运行，但完整扫描与 7B 深研会明显变慢，不作为性能目标。
+- `extract-worker` 并发和预取均固定为 1，保证逐篇抽取与事件聚类顺序；`research-worker` 并发为 2、预取为 1。
+- CPU 推理可以运行，但完整扫描与 14B 深研会明显变慢，不作为性能目标。
 
 ### 推荐运行环境
 
@@ -283,11 +286,11 @@ docker context use desktop-linux
 
 ### 2. 准备 Ollama 模型
 
-核心研究需要 3B 和通用 7B；Coder 7B 只在自动演进时使用：
+核心研究需要 3B 和通用 14B；Coder 7B 只在自动演进时使用：
 
 ```powershell
 ollama pull qwen2.5:3b
-ollama pull qwen2.5:7b
+ollama pull qwen2.5:14b
 ollama pull qwen2.5-coder:7b
 ollama list
 ```
@@ -383,7 +386,7 @@ Invoke-RestMethod "http://localhost:8000/api/v1/tasks/$($scan.task_id)"
 ```bash
 cp .env.example .env
 ollama pull qwen2.5:3b
-ollama pull qwen2.5:7b
+ollama pull qwen2.5:14b
 docker compose --profile mcp up --build -d
 curl http://localhost:8000/health
 ```
@@ -417,7 +420,7 @@ curl http://localhost:8000/health
 | `REDIS_URL` | `redis://redis:6379/0` | Celery、缓存和锁 |
 | `OLLAMA_BASE_URL` | `http://host.docker.internal:11434` | 容器访问宿主机 Ollama 的地址 |
 | `OLLAMA_EXTRACT_MODEL` | `qwen2.5:3b` | 新闻事件抽取模型 |
-| `OLLAMA_RESEARCH_MODEL` | `qwen2.5:7b` | 深研和验证模型 |
+| `OLLAMA_RESEARCH_MODEL` | `qwen2.5:14b` | 标的映射、深研和验证模型 |
 | `OLLAMA_CODE_MODEL` | `qwen2.5-coder:7b` | 自动演进模型 |
 | `OLLAMA_NUM_THREADS` | `0` | 单次推理线程数；`0` 表示由 Ollama 自动选择 |
 | `OLLAMA_MAX_OUTPUT_TOKENS` | `1024` | 单次结构化输出 token 上限 |
@@ -486,13 +489,13 @@ Invoke-RestMethod "http://localhost:8000/api/v1/tasks/$($research.task_id)"
 
 ```powershell
 # 实时查看核心任务
-docker compose logs -f io-worker llm-worker scheduler
+docker compose logs -f io-worker extract-worker research-worker scheduler
 
 # 数据源与 MCP
 docker compose logs -f api fmp-mcp
 
 # 最近 200 行
-docker compose logs --tail 200 api io-worker llm-worker
+docker compose logs --tail 200 api io-worker extract-worker research-worker
 ```
 
 日志和 Telegram 通知只包含任务状态、报告摘要和已脱敏错误，不应包含 API Key、完整受版权保护正文或模型内部思维过程。
@@ -676,8 +679,8 @@ docker compose exec api python -c "import httpx; print(httpx.get('http://host.do
 1. 查看 <http://localhost:8000/health>，确认数据库、Redis 和 Ollama 正常。
 2. 点击“立即扫描”或调用 `/api/v1/scan`。
 3. 使用返回的 `task_id` 查询 `/api/v1/tasks/{task_id}`。
-4. 查看 `docker compose logs -f io-worker llm-worker`。
-5. 首次扫描和首次嵌入模型下载较慢；事件先出现，建议会在 7B 深研完成后逐步增加。
+4. 查看 `docker compose logs -f io-worker extract-worker research-worker`。
+5. 首次扫描和首次嵌入模型下载较慢；新闻会先进入抽取队列，建议在 14B 深研完成后逐步增加。
 
 ### FMP 返回 403、429 或 MCP 调用失败
 
@@ -692,7 +695,7 @@ docker compose exec api python -c "import httpx; print(httpx.get('http://host.do
 ```powershell
 # 查看服务状态和最近错误
 docker compose ps
-docker compose logs --tail 200 api io-worker llm-worker fmp-mcp
+docker compose logs --tail 200 api io-worker extract-worker research-worker fmp-mcp
 
 # 保留数据库并重启应用
 docker compose --profile mcp up -d

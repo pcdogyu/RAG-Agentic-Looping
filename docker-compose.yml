@@ -129,9 +129,13 @@ services:
     <<: *backend
     command: celery -A backend.app.worker:celery_app worker -Q io,default --concurrency=4 --loglevel=INFO
 
-  llm-worker:
+  extract-worker:
     <<: *backend
-    command: celery -A backend.app.worker:celery_app worker -Q llm --concurrency=2 --prefetch-multiplier=1 --loglevel=INFO
+    command: celery -A backend.app.worker:celery_app worker -Q extract --concurrency=1 --prefetch-multiplier=1 --loglevel=INFO
+
+  research-worker:
+    <<: *backend
+    command: celery -A backend.app.worker:celery_app worker -Q research,llm --concurrency=2 --prefetch-multiplier=1 --loglevel=INFO
 
   evolution-worker:
     <<: *backend

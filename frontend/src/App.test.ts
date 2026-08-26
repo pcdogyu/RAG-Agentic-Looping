@@ -20,6 +20,7 @@ import {
   navigationGroups,
   queueDesktopColumns,
   QueueGrid,
+  NewsExtractionList,
   queueRefreshIntervalMs,
   routeFromHash,
   TopNavigation,
@@ -160,7 +161,7 @@ describe("build footer", () => {
 });
 
 describe("analysis mapping states", () => {
-  it("explains active and failed 7B mapping without implying deep research started", () => {
+  it("explains active and failed mapping without implying deep research started", () => {
     expect(analysisPendingText("mapping_queued")).toContain("正在识别并验证");
     expect(analysisPendingText("mapping_failed")).toContain("未生成或猜测证券代码");
   });
@@ -402,9 +403,9 @@ describe("research queue page", () => {
     expect(markup).toContain("3 个任务");
   });
 
-  it("uses a five-second refresh and a ten-column desktop grid", () => {
+  it("uses a five-second refresh and a five-column half-width grid", () => {
     expect(queueRefreshIntervalMs).toBe(5000);
-    expect(queueDesktopColumns).toBe(10);
+    expect(queueDesktopColumns).toBe(5);
     const markup = renderToStaticMarkup(createElement(QueueGrid, { items: [{
       asset_id: "us:test",
       symbol: "TEST",
@@ -416,12 +417,31 @@ describe("research queue page", () => {
       queued_at: "2026-08-25T01:00:00Z",
       updated_at: "2026-08-25T01:00:00Z",
     }] }));
-    expect(markup).toContain('data-columns="10"');
+    expect(markup).toContain('data-columns="5"');
   });
 
   it("renders an explicit empty state", () => {
     const markup = renderToStaticMarkup(createElement(QueueGrid, { items: [] }));
     expect(markup).toContain("当前没有排队或处理中的标的");
+  });
+
+  it("renders news extraction titles, status, source and retry attempt", () => {
+    const markup = renderToStaticMarkup(createElement(NewsExtractionList, { items: [{
+      task_id: "extract-1",
+      news_id: "news-1",
+      title: "上市公司发布半年度业绩公告",
+      source: "金十",
+      published_at: "2026-08-25T01:00:00Z",
+      status: "retrying",
+      attempt: 2,
+      queued_at: "2026-08-25T01:01:00Z",
+      updated_at: "2026-08-25T01:02:00Z",
+      error: "RuntimeError: temporary failure",
+    }] }));
+    expect(markup).toContain("上市公司发布半年度业绩公告");
+    expect(markup).toContain("金十");
+    expect(markup).toContain("重试中");
+    expect(markup).toContain("第 2 次尝试");
   });
 });
 

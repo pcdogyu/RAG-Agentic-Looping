@@ -36,7 +36,11 @@ from backend.app.services.mcp_registry import seed_integrations
 from backend.app.services.notifications import notifier
 from backend.app.services.portfolio import PortfolioError, PortfolioService
 from backend.app.services.research import ResearchService
-from backend.app.services.research_queue import ResearchQueueResponse, build_research_queue
+from backend.app.services.research_queue import (
+    NewsExtractionQueueResponse,
+    ResearchQueueResponse,
+    build_research_queue,
+)
 from backend.app.services.source_filter import filter_news_items
 from backend.app.storage import (
     get_asset,
@@ -68,6 +72,7 @@ from backend.app.worker import (
     enqueue_research,
     enqueue_scan,
     evolve_failures,
+    get_news_extraction_queue,
     get_scan_status,
     request_scan_pause,
     resume_scan,
@@ -311,7 +316,12 @@ def research_runs(limit: int = Query(default=100, ge=1, le=500), db: Session = D
 def research_queue(
     limit: int = Query(default=500, ge=1, le=1000), db: Session = Depends(get_db)
 ):
-    return build_research_queue(list_active_runs(db), limit)
+    return build_research_queue(list_active_runs(db), limit, settings.ollama_research_model)
+
+
+@app.get("/api/v1/news-extraction-queue", response_model=NewsExtractionQueueResponse)
+def news_extraction_queue(limit: int = Query(default=200, ge=1, le=200)):
+    return get_news_extraction_queue(limit)
 
 
 @app.get("/api/v1/research-runs/{run_id}")

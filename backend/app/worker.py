@@ -6,7 +6,8 @@ from time import sleep
 from typing import Any
 from uuid import UUID, uuid4
 
-from celery import Celery
+from celery import Celery, chord
+from celery.exceptions import Ignore
 from celery.signals import task_failure, task_success
 from redis import Redis
 from sqlalchemy import func, select
@@ -18,6 +19,7 @@ from backend.app.domain import (
     AssetRef,
     EventResearchRun,
     NewsEvent,
+    NewsItem,
     Rating,
     ResearchRun,
     RunStatus,
@@ -35,13 +37,15 @@ from backend.app.services.outcomes import OutcomeService
 from backend.app.services.portfolio import PortfolioService
 from backend.app.services.research import ResearchService
 from backend.app.services.source_filter import filter_news_items
-from backend.app.services.source_lineage import canonicalize_url
+from backend.app.services.source_lineage import canonicalize_url, enrich_news_lineage
 from backend.app.storage import (
+    event_news_item_ids,
     get_asset,
     get_event,
     get_event_research_for_event,
     get_event_research_run,
     get_news,
+    get_news_by_content_hash,
     get_run,
     get_run_for_event_asset,
     list_assets,
@@ -49,6 +53,7 @@ from backend.app.storage import (
     list_outcomes,
     save_event,
     save_event_research_run,
+    save_news,
     save_run,
     upsert_asset,
 )
@@ -58,8 +63,10 @@ SCAN_GATE_KEY = "market-loop:scan:active"
 SCAN_LOCK_KEY = "market-loop:scan:lock"
 SCAN_PAUSE_KEY = "market-loop:scan:pause"
 SCAN_STATUS_KEY = "market-loop:scan:status"
+NEWS_EXTRACTION_QUEUE_KEY = "market-loop:scan:news-extraction-queue"
+NEWS_EXTRACTION_QUEUE_TTL_SECONDS = 12 * 60 * 60
 SCAN_VISIBILITY_TIMEOUT_SECONDS = max(
-    12 * 60 * 60,
+    NEWS_EXTRACTION_QUEUE_TTL_SECONDS,
     settings.scan_interval_minutes * 180,
 )
 SCAN_GATE_TTL_SECONDS = SCAN_VISIBILITY_TIMEOUT_SECONDS
@@ -73,6 +80,13 @@ celery_app.conf.update(
     task_track_started=True,
     task_acks_late=True,
     worker_prefetch_multiplier=1,
+    task_routes={
+        "market_loop.extract_news_item": {"queue": "extract"},
+        "market_loop.finalize_news_extraction": {"queue": "extract"},
+        "market_loop.resolve_event_assets": {"queue": "research"},
+        "market_loop.research_event": {"queue": "research"},
+        "market_loop.research_asset": {"queue": "research"},
+    },
     broker_transport_options={
         "visibility_timeout": SCAN_VISIBILITY_TIMEOUT_SECONDS,
     },
@@ -162,6 +176,18 @@ def _default_scan_status() -> dict[str, Any]:
     }
 
 
+def _default_news_extraction_queue() -> dict[str, Any]:
+    return {
+        "model": settings.ollama_extract_model,
+        "scan_task_id": None,
+        "state": "idle",
+        "total_items": 0,
+        "metadata": {},
+        "items": [],
+        "error": None,
+    }
+
+
 def _decode(value: bytes | str | None) -> str | None:
     if value is None:
         return None
@@ -181,10 +207,158 @@ def _read_scan_status(client: Redis) -> dict[str, Any]:
     return payload
 
 
+def _read_news_extraction_queue(client: Redis) -> dict[str, Any]:
+    payload = _default_news_extraction_queue()
+    raw = _decode(client.get(NEWS_EXTRACTION_QUEUE_KEY))
+    if raw:
+        try:
+            stored = json.loads(raw)
+            if isinstance(stored, dict):
+                payload.update(stored)
+        except (TypeError, json.JSONDecodeError):
+            pass
+    return payload
+
+
+def _write_news_extraction_queue(client: Redis, payload: dict[str, Any]) -> None:
+    client.set(
+        NEWS_EXTRACTION_QUEUE_KEY,
+        json.dumps(payload, ensure_ascii=False, default=str),
+        ex=NEWS_EXTRACTION_QUEUE_TTL_SECONDS,
+    )
+
+
+def _news_extraction_counts(payload: dict[str, Any]) -> dict[str, int]:
+    counts = {key: 0 for key in ("queued", "running", "retrying", "completed", "failed")}
+    for item in payload.get("items", []):
+        status = item.get("status")
+        if status in counts:
+            counts[status] += 1
+    return counts
+
+
+def get_news_extraction_queue(limit: int = 200) -> dict[str, Any]:
+    """Return the current per-news 3B work list without exposing Celery payloads."""
+
+    try:
+        payload = _read_news_extraction_queue(_redis_client())
+        counts = _news_extraction_counts(payload)
+        status_rank = {"running": 0, "retrying": 1, "queued": 2, "failed": 3}
+        visible = [
+            item
+            for item in payload.get("items", [])
+            if item.get("status") in status_rank
+        ]
+        visible.sort(
+            key=lambda item: (
+                status_rank[item["status"]],
+                item.get("queued_at") or "",
+            )
+        )
+        return {
+            "generated_at": utc_now(),
+            "model": payload.get("model") or settings.ollama_extract_model,
+            "scan_task_id": payload.get("scan_task_id"),
+            "state": payload.get("state") or "idle",
+            "total_items": int(payload.get("total_items") or 0),
+            "counts": counts,
+            "truncated": len(visible) > limit,
+            "items": visible[:limit],
+            "error": payload.get("error"),
+        }
+    except Exception as exc:
+        return {
+            "generated_at": utc_now(),
+            "model": settings.ollama_extract_model,
+            "scan_task_id": None,
+            "state": "unavailable",
+            "total_items": 0,
+            "counts": _news_extraction_counts({}),
+            "truncated": False,
+            "items": [],
+            "error": f"queue state unavailable: {type(exc).__name__}",
+        }
+
+
 def _update_scan_status(client: Redis, **updates: Any) -> dict[str, Any]:
     payload = _read_scan_status(client)
     payload.update(updates)
     client.set(SCAN_STATUS_KEY, json.dumps(payload, ensure_ascii=False, default=str))
+    return payload
+
+
+def _initialize_news_extraction_queue(
+    client: Redis,
+    scan_task_id: str,
+    entries: list[dict[str, Any]],
+    metadata: dict[str, int],
+) -> dict[str, Any]:
+    payload = {
+        "model": settings.ollama_extract_model,
+        "scan_task_id": scan_task_id,
+        "state": "queued" if entries else "completed",
+        "total_items": len(entries),
+        "metadata": metadata,
+        "items": entries,
+        "error": None,
+    }
+    _write_news_extraction_queue(client, payload)
+    return payload
+
+
+def _update_news_extraction_item(
+    client: Redis,
+    scan_task_id: str,
+    news_id: str,
+    status: str,
+    *,
+    attempt: int | None = None,
+    error: str | None = None,
+) -> dict[str, Any] | None:
+    payload = _read_news_extraction_queue(client)
+    if payload.get("scan_task_id") != scan_task_id:
+        return None
+    changed = False
+    for item in payload.get("items", []):
+        if item.get("news_id") != news_id:
+            continue
+        item["status"] = status
+        item["updated_at"] = utc_now().isoformat()
+        item["error"] = error
+        if attempt is not None:
+            item["attempt"] = attempt
+        changed = True
+        break
+    if not changed:
+        return None
+    counts = _news_extraction_counts(payload)
+    payload["state"] = (
+        "running"
+        if counts["running"]
+        else "retrying"
+        if counts["retrying"]
+        else "queued"
+        if counts["queued"]
+        else "completed_with_errors"
+        if counts["failed"]
+        else "completed"
+    )
+    _write_news_extraction_queue(client, payload)
+    return payload
+
+
+def _finish_news_extraction_queue(
+    client: Redis, scan_task_id: str, *, error: str | None = None
+) -> dict[str, Any] | None:
+    payload = _read_news_extraction_queue(client)
+    if payload.get("scan_task_id") != scan_task_id:
+        return None
+    counts = _news_extraction_counts(payload)
+    payload["state"] = "failed" if error else (
+        "completed_with_errors" if counts["failed"] else "completed"
+    )
+    payload["error"] = error
+    _write_news_extraction_queue(client, payload)
     return payload
 
 
@@ -446,7 +620,7 @@ def enqueue_research(
     try:
         task = research_asset.apply_async(
             args=[asset.asset_id, str(event.id) if event else None, str(run.id)],
-            queue="llm",
+            queue="research",
         )
     except Exception as exc:
         run.status = RunStatus.FAILED
@@ -508,7 +682,7 @@ def _replace_event_step(event: NewsEvent, step: AnalysisStep) -> None:
 
 
 def enqueue_asset_mapping(db, event: NewsEvent) -> str | None:
-    """Queue one visible 7B mapping attempt for an otherwise unmapped event."""
+    """Queue one visible research-model mapping attempt for an unmapped event."""
 
     if event.candidates or any(
         step.phase == "asset_mapping_queue" and step.status in {"queued", "completed"}
@@ -522,12 +696,15 @@ def enqueue_asset_mapping(db, event: NewsEvent) -> str | None:
             status="queued",
             executor="celery",
             model=settings.ollama_research_model,
-            summary="确定性映射未找到标的，已创建 7B 二次标的发现任务。",
+            summary=(
+                f"确定性映射未找到标的，已创建 {settings.ollama_research_model} "
+                "二次标的发现任务。"
+            ),
         ),
     )
     save_event(db, event)
     try:
-        task = resolve_event_assets.apply_async(args=[str(event.id)], queue="llm")
+        task = resolve_event_assets.apply_async(args=[str(event.id)], queue="research")
     except Exception as exc:
         _replace_event_step(
             event,
@@ -536,7 +713,10 @@ def enqueue_asset_mapping(db, event: NewsEvent) -> str | None:
                 status="failed",
                 executor="celery",
                 model=settings.ollama_research_model,
-                summary=f"7B 标的发现任务入队失败（{type(exc).__name__}）。",
+                summary=(
+                    f"{settings.ollama_research_model} 标的发现任务入队失败"
+                    f"（{type(exc).__name__}）。"
+                ),
             ),
         )
         save_event(db, event)
@@ -568,7 +748,7 @@ def enqueue_event_report(db, event: NewsEvent) -> tuple[str | None, EventResearc
     try:
         task = research_event.apply_async(
             args=[str(event.id), str(run.id)],
-            queue="llm",
+            queue="research",
         )
     except Exception as exc:
         run.status = RunStatus.FAILED
@@ -614,7 +794,7 @@ def enqueue_event_research_retry(
     try:
         task = research_event.apply_async(
             args=[str(event.id), str(run.id)],
-            queue="llm",
+            queue="research",
         )
     except Exception as exc:
         run.status = RunStatus.FAILED
@@ -646,6 +826,60 @@ def ensure_scan_loop() -> dict:
         return {"status": "waiting", "next_scan_at": next_scan_at.isoformat()}
     task_id, enqueue_status = enqueue_scan()
     return {"status": enqueue_status, "task_id": task_id}
+
+
+def _persist_news_for_extraction(db, items: list[NewsItem]) -> list[NewsItem]:
+    processed_ids = event_news_item_ids(db)
+    pending: list[NewsItem] = []
+    seen_ids: set[UUID] = set()
+    for discovered in items:
+        item = enrich_news_lineage(discovered)
+        if not save_news(db, item):
+            stored = get_news_by_content_hash(db, item.content_hash)
+            if stored is None:
+                continue
+            item = stored
+        if item.id in processed_ids or item.id in seen_ids:
+            continue
+        seen_ids.add(item.id)
+        pending.append(item)
+    return pending
+
+
+def _build_news_extraction_workflow(
+    client: Redis,
+    scan_task_id: str,
+    items: list[NewsItem],
+    metadata: dict[str, Any],
+) -> tuple[list[str], Any | None]:
+    now = utc_now().isoformat()
+    task_ids = [str(uuid4()) for _ in items]
+    entries = [
+        {
+            "task_id": task_id,
+            "news_id": str(item.id),
+            "title": item.title,
+            "source": item.source,
+            "published_at": item.published_at.isoformat(),
+            "status": "queued",
+            "attempt": 0,
+            "queued_at": now,
+            "updated_at": now,
+            "error": None,
+        }
+        for task_id, item in zip(task_ids, items, strict=True)
+    ]
+    _initialize_news_extraction_queue(client, scan_task_id, entries, metadata)
+    if not items:
+        return [], None
+    header = [
+        extract_news_item.s(scan_task_id, str(item.id)).set(
+            queue="extract", task_id=task_id
+        )
+        for task_id, item in zip(task_ids, items, strict=True)
+    ]
+    callback = finalize_news_extraction.s(scan_task_id).set(queue="extract")
+    return task_ids, chord(header, callback)
 
 
 @task_success.connect
@@ -697,95 +931,60 @@ def scan_news(self) -> dict:
         items = registry.discover_news(since=since, limit=settings.scan_batch_size)
         with SessionLocal() as db:
             accepted_items, filtered_count = filter_news_items(db, items)
+        with SessionLocal() as db:
+            pending_items = _persist_news_for_extraction(db, accepted_items)
+        for error in registry.last_errors:
+            notifier.send(f"数据源故障：{error}")
         _require_scan_gate(client, task_id)
+        metadata = {
+            "discovered": len(items),
+            "accepted": len(accepted_items),
+            "filtered": filtered_count,
+        }
         self.update_state(
             state="PROGRESS",
-            meta={"phase": "extracting", "current": 0, "total": len(accepted_items)},
+            meta={
+                "phase": "extraction_queued",
+                "current": 0,
+                "total": len(pending_items),
+            },
         )
         _update_scan_status(
             client,
             state="running",
-            phase="extracting",
+            phase="extraction_queued",
             current=0,
-            total=len(accepted_items),
+            total=len(pending_items),
         )
         _wait_if_scan_paused(
             client,
             task_id,
-            phase="extracting",
+            phase="extraction_queued",
             current=0,
-            total=len(accepted_items),
+            total=len(pending_items),
         )
-
-        def update_progress(current: int, total: int) -> None:
-            _require_scan_gate(client, task_id)
-            self.update_state(
-                state="PROGRESS",
-                meta={"phase": "extracting", "current": current, "total": total},
-            )
-            _update_scan_status(
-                client,
-                state="running",
-                phase="extracting",
-                current=current,
-                total=total,
-            )
-            _wait_if_scan_paused(
-                client,
-                task_id,
-                phase="extracting",
-                current=current,
-                total=total,
-            )
-
-        with SessionLocal() as db:
-            registry.add_assets(list_assets(db))
-            service = EventService(registry)
-            events = service.ingest(db, accepted_items, progress=update_progress)
-            for error in registry.last_errors:
-                notifier.send(f"数据源故障：{error}")
-            for event in events:
-                if event.priority >= 0.75:
-                    notifier.send(
-                        f"高优先级事件：{event.headline}\n类型：{event.event_type.value}\n"
-                        f"候选标的：{', '.join(item.asset.symbol for item in event.candidates[:5]) or '待解析'}"
-                    )
-            queued = 0
-            mapping_queued = 0
-            if settings.auto_research:
-                for event_index, event in enumerate(events):
-                    _wait_if_scan_paused(
-                        client,
-                        task_id,
-                        phase="queuing",
-                        current=event_index,
-                        total=len(events),
-                    )
-                    if event.candidates:
-                        try:
-                            queued += int(enqueue_event_research(db, event) is not None)
-                        except Exception as exc:
-                            notifier.send(
-                                f"研究任务入队失败：{event.headline}\n错误：{type(exc).__name__}"
-                            )
-                    else:
-                        try:
-                            mapping_queued += int(enqueue_asset_mapping(db, event) is not None)
-                        except Exception as exc:
-                            notifier.send(
-                                f"标的发现任务入队失败：{event.headline}\n错误：{type(exc).__name__}"
-                            )
+        task_ids, extraction_workflow = _build_news_extraction_workflow(
+            client,
+            task_id,
+            pending_items,
+            metadata,
+        )
+        if task_ids and extraction_workflow is not None:
+            return self.replace(extraction_workflow)
         result = {
             "status": "completed",
-            "discovered": len(items),
-            "accepted": len(accepted_items),
-            "filtered": filtered_count,
-            "events": len(events),
-            "research_queued": queued,
-            "asset_mapping_queued": mapping_queued,
+            **metadata,
+            "events": 0,
+            "extraction_completed": 0,
+            "extraction_failed": 0,
+            "research_queued": 0,
+            "asset_mapping_queued": 0,
         }
+        _finish_news_extraction_queue(client, task_id)
         _complete_scan(client, task_id, result)
         return result
+    except Ignore:
+        raise
     except ScanLeaseLost:
         return {"status": "superseded", "discovered": 0, "events": 0}
     except Exception as exc:
@@ -813,10 +1012,224 @@ def scan_news(self) -> dict:
         )
         _clear_scan_gate(client, task_id)
         _clear_scan_pause(client, task_id)
+        _finish_news_extraction_queue(
+            client,
+            task_id,
+            error=f"{type(exc).__name__}",
+        )
         raise
     finally:
         if lock.owned():
             lock.release()
+
+
+@celery_app.task(bind=True, name="market_loop.extract_news_item", max_retries=2)
+def extract_news_item(self, scan_task_id: str, news_id: str) -> dict[str, Any]:
+    """Extract and cluster one durable news item on the serial 3B queue."""
+
+    client = _redis_client()
+    try:
+        _require_scan_gate(client, scan_task_id)
+        payload = _read_news_extraction_queue(client)
+        counts = _news_extraction_counts(payload)
+        done = counts["completed"] + counts["failed"]
+        _wait_if_scan_paused(
+            client,
+            scan_task_id,
+            phase="extracting",
+            current=done,
+            total=int(payload.get("total_items") or 0),
+        )
+        attempt = self.request.retries + 1
+        _update_news_extraction_item(
+            client,
+            scan_task_id,
+            news_id,
+            "running",
+            attempt=attempt,
+        )
+        _update_scan_status(
+            client,
+            state="running",
+            phase="extracting",
+            current=done,
+            total=int(payload.get("total_items") or 0),
+        )
+        init_db()
+        with SessionLocal() as db:
+            news = get_news(db, UUID(news_id))
+            if news is None:
+                raise ValueError(f"unknown news item: {news_id}")
+            registry = ProviderRegistry(assets=list_assets(db))
+            events = EventService(registry).ingest(db, [news])
+            provider_errors = list(registry.last_errors)
+        updated = _update_news_extraction_item(
+            client,
+            scan_task_id,
+            news_id,
+            "completed",
+            attempt=attempt,
+        )
+        counts = _news_extraction_counts(updated or payload)
+        _update_scan_status(
+            client,
+            state="running",
+            phase="extracting",
+            current=counts["completed"] + counts["failed"],
+            total=int((updated or payload).get("total_items") or 0),
+        )
+        return {
+            "status": "completed",
+            "news_id": news_id,
+            "event_ids": [str(event.id) for event in events],
+            "provider_errors": provider_errors,
+        }
+    except ScanLeaseLost:
+        return {"status": "superseded", "news_id": news_id, "event_ids": []}
+    except Exception as exc:
+        retrying = self.request.retries < self.max_retries
+        _update_news_extraction_item(
+            client,
+            scan_task_id,
+            news_id,
+            "retrying" if retrying else "failed",
+            attempt=self.request.retries + 1,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        if retrying:
+            raise self.retry(
+                exc=exc,
+                countdown=min(60, 2 ** (self.request.retries + 1)),
+            ) from exc
+        return {
+            "status": "failed",
+            "news_id": news_id,
+            "event_ids": [],
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
+@celery_app.task(bind=True, name="market_loop.finalize_news_extraction", max_retries=2)
+def finalize_news_extraction(
+    self,
+    extraction_results: list[dict[str, Any]],
+    scan_task_id: str,
+) -> dict[str, Any]:
+    """Join one scan batch and enqueue downstream research exactly once."""
+
+    client = _redis_client()
+    try:
+        _require_scan_gate(client, scan_task_id)
+        payload = _read_news_extraction_queue(client)
+        if payload.get("scan_task_id") != scan_task_id:
+            raise ScanLeaseLost(f"stale extraction batch: {scan_task_id}")
+        event_ids = list(
+            dict.fromkeys(
+                event_id
+                for result in extraction_results
+                if isinstance(result, dict)
+                for event_id in result.get("event_ids", [])
+            )
+        )
+        provider_errors = list(
+            dict.fromkeys(
+                error
+                for result in extraction_results
+                if isinstance(result, dict)
+                for error in result.get("provider_errors", [])
+            )
+        )
+        for error in provider_errors:
+            notifier.send(f"数据源故障：{error}")
+        _update_scan_status(
+            client,
+            state="running",
+            phase="queuing",
+            current=0,
+            total=len(event_ids),
+        )
+        queued = 0
+        mapping_queued = 0
+        with SessionLocal() as db:
+            events = [
+                event
+                for event_id in event_ids
+                if (event := get_event(db, UUID(event_id))) is not None
+            ]
+            for event_index, event in enumerate(events):
+                _wait_if_scan_paused(
+                    client,
+                    scan_task_id,
+                    phase="queuing",
+                    current=event_index,
+                    total=len(events),
+                )
+                if event.priority >= 0.75:
+                    notifier.send(
+                        f"高优先级事件：{event.headline}\n类型：{event.event_type.value}\n"
+                        f"候选标的：{', '.join(item.asset.symbol for item in event.candidates[:5]) or '待解析'}"
+                    )
+                if not settings.auto_research:
+                    continue
+                try:
+                    if event.candidates:
+                        queued += int(enqueue_event_research(db, event) is not None)
+                    else:
+                        mapping_queued += int(enqueue_asset_mapping(db, event) is not None)
+                except Exception as exc:
+                    notifier.send(
+                        f"下游研究任务入队失败：{event.headline}\n错误：{type(exc).__name__}"
+                    )
+        counts = _news_extraction_counts(payload)
+        metadata = payload.get("metadata") or {}
+        result = {
+            "status": "completed_with_errors" if counts["failed"] else "completed",
+            "discovered": int(metadata.get("discovered") or 0),
+            "accepted": int(metadata.get("accepted") or 0),
+            "filtered": int(metadata.get("filtered") or 0),
+            "events": len(event_ids),
+            "extraction_completed": counts["completed"],
+            "extraction_failed": counts["failed"],
+            "research_queued": queued,
+            "asset_mapping_queued": mapping_queued,
+        }
+        _finish_news_extraction_queue(client, scan_task_id)
+        _complete_scan(client, scan_task_id, result)
+        return result
+    except ScanLeaseLost:
+        return {"status": "superseded", "events": 0}
+    except Exception as exc:
+        if self.request.retries < self.max_retries:
+            _update_scan_status(
+                client,
+                state="retrying",
+                task_id=scan_task_id,
+                phase="finalizing",
+                last_error=f"{type(exc).__name__}",
+            )
+            raise self.retry(
+                exc=exc,
+                countdown=min(60, 2 ** (self.request.retries + 1)),
+            ) from exc
+        failed_at = utc_now()
+        _update_scan_status(
+            client,
+            state="failed",
+            task_id=scan_task_id,
+            phase="failed",
+            next_scan_at=(
+                failed_at + timedelta(minutes=settings.scan_interval_minutes)
+            ).isoformat(),
+            last_error=f"{type(exc).__name__}",
+        )
+        _finish_news_extraction_queue(
+            client,
+            scan_task_id,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        _clear_scan_gate(client, scan_task_id)
+        _clear_scan_pause(client, scan_task_id)
+        raise
 
 
 @celery_app.task(bind=True, name="market_loop.resolve_event_assets", max_retries=2)
@@ -837,7 +1250,10 @@ def resolve_event_assets(self, event_id: str) -> dict:
                         status="running",
                         executor="ollama+provider-registry",
                         model=settings.ollama_research_model,
-                        summary="7B 正在从原文提及中识别证券，并通过主数据验证代码。",
+                        summary=(
+                            f"{settings.ollama_research_model} 正在从原文提及中识别证券，"
+                            "并通过主数据验证代码。"
+                        ),
                     ),
                 )
                 save_event(db, event)
@@ -858,7 +1274,8 @@ def resolve_event_assets(self, event_id: str) -> dict:
                         executor="ollama+provider-registry",
                         model=settings.ollama_research_model,
                         summary=(
-                            f"7B 提出 {mapping_result.proposed_count} 个候选，"
+                            f"{settings.ollama_research_model} 提出 "
+                            f"{mapping_result.proposed_count} 个候选，"
                             f"主数据验证通过 {len(event.candidates)} 个、拒绝 "
                             f"{mapping_result.rejected_count} 个。"
                         ),
@@ -878,7 +1295,7 @@ def resolve_event_assets(self, event_id: str) -> dict:
                         status="completed",
                         executor="celery",
                         model=settings.ollama_research_model,
-                        summary="7B 二次标的发现任务已完成。",
+                        summary=f"{settings.ollama_research_model} 二次标的发现任务已完成。",
                     ),
                 )
                 save_event(db, event)
@@ -911,7 +1328,8 @@ def resolve_event_assets(self, event_id: str) -> dict:
                     executor="ollama+provider-registry",
                     model=settings.ollama_research_model,
                     summary=(
-                        f"7B 标的发现{'暂时失败，等待重试' if retrying else '最终失败'}"
+                        f"{settings.ollama_research_model} 标的发现"
+                        f"{'暂时失败，等待重试' if retrying else '最终失败'}"
                         f"（{type(exc).__name__}）。"
                     ),
                 ),

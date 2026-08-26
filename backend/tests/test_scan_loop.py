@@ -64,6 +64,260 @@ def test_scan_visibility_and_gate_cover_long_running_tasks():
         == expected
     )
     assert worker.celery_app.conf.visibility_timeout == expected
+    assert worker.NEWS_EXTRACTION_QUEUE_TTL_SECONDS == 12 * 60 * 60
+    assert worker.celery_app.conf.task_routes["market_loop.extract_news_item"] == {
+        "queue": "extract"
+    }
+    assert worker.celery_app.conf.task_routes["market_loop.research_asset"] == {
+        "queue": "research"
+    }
+
+
+def test_news_extraction_registry_sorts_active_items_and_keeps_failed(monkeypatch):
+    redis = FakeRedis()
+    monkeypatch.setattr(worker, "_redis_client", lambda: redis)
+    now = datetime(2026, 8, 26, 8, 0, tzinfo=UTC).isoformat()
+    entries = [
+        {
+            "task_id": f"task-{status}",
+            "news_id": f"00000000-0000-0000-0000-00000000000{index}",
+            "title": status,
+            "source": "test",
+            "published_at": now,
+            "status": status,
+            "attempt": 1,
+            "queued_at": now,
+            "updated_at": now,
+            "error": "failed" if status == "failed" else None,
+        }
+        for index, status in enumerate(
+            ["completed", "queued", "failed", "retrying", "running"], start=1
+        )
+    ]
+    worker._initialize_news_extraction_queue(
+        redis,
+        "scan-1",
+        entries,
+        {"discovered": 5, "accepted": 5, "filtered": 0},
+    )
+
+    payload = worker.get_news_extraction_queue(limit=3)
+
+    assert payload["model"] == "qwen2.5:3b"
+    assert payload["counts"] == {
+        "queued": 1,
+        "running": 1,
+        "retrying": 1,
+        "completed": 1,
+        "failed": 1,
+    }
+    assert [item["status"] for item in payload["items"]] == [
+        "running",
+        "retrying",
+        "queued",
+    ]
+    assert payload["truncated"] is True
+
+
+def test_news_extraction_workflow_routes_header_and_callback_to_extract(monkeypatch):
+    redis = FakeRedis()
+    captured = {}
+    now = datetime(2026, 8, 26, 8, 0, tzinfo=UTC)
+    news = NewsItem(
+        source="test",
+        title="逐条抽取新闻",
+        url="https://example.com/extract-one",
+        published_at=now,
+        content_hash=sha256(b"extract-one").hexdigest(),
+    )
+
+    class ChordStub:
+        def __init__(self, header, callback):
+            captured["header"] = header
+            captured["callback"] = callback
+
+    monkeypatch.setattr(worker, "chord", ChordStub)
+
+    task_ids, workflow = worker._build_news_extraction_workflow(
+        redis,
+        "scan-1",
+        [news],
+        {"discovered": 1, "accepted": 1, "filtered": 0},
+    )
+
+    assert len(task_ids) == 1
+    assert isinstance(workflow, ChordStub)
+    assert captured["header"][0].options["queue"] == "extract"
+    assert captured["callback"].options["queue"] == "extract"
+    assert worker._read_news_extraction_queue(redis)["items"][0]["status"] == "queued"
+
+
+def test_single_news_extraction_updates_registry_and_returns_event(db, monkeypatch):
+    redis = FakeRedis()
+    monkeypatch.setattr(worker, "_redis_client", lambda: redis)
+    now = datetime(2026, 8, 26, 8, 0, tzinfo=UTC)
+    news = NewsItem(
+        source="test",
+        title="单篇新闻抽取",
+        url="https://example.com/single-extraction",
+        published_at=now,
+        content_hash=sha256(b"single-extraction").hexdigest(),
+    )
+    save_news(db, news)
+    event = NewsEvent(
+        news_item_ids=[news.id],
+        headline=news.title,
+        event_type="other",
+        direct_impact="测试",
+        source_quality=SourceQuality.PROFESSIONAL,
+        published_at=now,
+        observed_at=now,
+        as_of=now,
+    )
+
+    class EventServiceStub:
+        def __init__(self, _registry):
+            pass
+
+        def ingest(self, _db, items):
+            assert [item.id for item in items] == [news.id]
+            return [event]
+
+    monkeypatch.setattr(worker, "EventService", EventServiceStub)
+    redis.set(worker.SCAN_GATE_KEY, "scan-1")
+    worker._initialize_news_extraction_queue(
+        redis,
+        "scan-1",
+        [
+            {
+                "task_id": "extract-1",
+                "news_id": str(news.id),
+                "title": news.title,
+                "source": news.source,
+                "published_at": now.isoformat(),
+                "status": "queued",
+                "attempt": 0,
+                "queued_at": now.isoformat(),
+                "updated_at": now.isoformat(),
+                "error": None,
+            }
+        ],
+        {"discovered": 1, "accepted": 1, "filtered": 0},
+    )
+
+    result = worker.extract_news_item.run("scan-1", str(news.id))
+
+    assert result["status"] == "completed"
+    assert result["event_ids"] == [str(event.id)]
+    payload = worker._read_news_extraction_queue(redis)
+    assert payload["items"][0]["status"] == "completed"
+    assert payload["items"][0]["attempt"] == 1
+
+
+def test_terminal_news_extraction_failure_returns_structured_result(monkeypatch):
+    redis = FakeRedis()
+    monkeypatch.setattr(worker, "_redis_client", lambda: redis)
+    monkeypatch.setattr(worker.extract_news_item, "max_retries", 0)
+    now = datetime(2026, 8, 26, 8, 0, tzinfo=UTC).isoformat()
+    news_id = "00000000-0000-0000-0000-000000000099"
+    redis.set(worker.SCAN_GATE_KEY, "scan-1")
+    worker._initialize_news_extraction_queue(
+        redis,
+        "scan-1",
+        [
+            {
+                "task_id": "extract-failed",
+                "news_id": news_id,
+                "title": "不存在的新闻",
+                "source": "test",
+                "published_at": now,
+                "status": "queued",
+                "attempt": 0,
+                "queued_at": now,
+                "updated_at": now,
+                "error": None,
+            }
+        ],
+        {"discovered": 1, "accepted": 1, "filtered": 0},
+    )
+
+    result = worker.extract_news_item.run("scan-1", news_id)
+
+    assert result["status"] == "failed"
+    assert result["event_ids"] == []
+    assert "ValueError" in result["error"]
+    payload = worker._read_news_extraction_queue(redis)
+    assert payload["state"] == "completed_with_errors"
+    assert payload["items"][0]["status"] == "failed"
+
+
+def test_failed_extraction_does_not_block_batch_finalization(db, monkeypatch):
+    redis = FakeRedis()
+    monkeypatch.setattr(worker, "_redis_client", lambda: redis)
+    monkeypatch.setattr(worker.notifier, "send", lambda *_args, **_kwargs: None)
+    now = datetime(2026, 8, 26, 8, 0, tzinfo=UTC)
+    event = NewsEvent(
+        news_item_ids=[],
+        headline="已成功抽取的事件",
+        event_type="other",
+        direct_impact="测试",
+        source_quality=SourceQuality.PROFESSIONAL,
+        published_at=now,
+        observed_at=now,
+        as_of=now,
+        candidates=[
+            CandidateAsset(
+                asset=SEED_ASSETS[0],
+                relationship="direct",
+                relevance=1,
+                rationale="test",
+            )
+        ],
+    )
+    save_event(db, event)
+    redis.set(worker.SCAN_GATE_KEY, "scan-1")
+    entries = [
+        {
+            "task_id": f"extract-{index}",
+            "news_id": f"00000000-0000-0000-0000-00000000000{index}",
+            "title": f"news-{index}",
+            "source": "test",
+            "published_at": now.isoformat(),
+            "status": status,
+            "attempt": 1,
+            "queued_at": now.isoformat(),
+            "updated_at": now.isoformat(),
+            "error": "failed" if status == "failed" else None,
+        }
+        for index, status in enumerate(["completed", "failed"], start=1)
+    ]
+    worker._initialize_news_extraction_queue(
+        redis,
+        "scan-1",
+        entries,
+        {"discovered": 3, "accepted": 2, "filtered": 1},
+    )
+    queued = []
+    monkeypatch.setattr(
+        worker,
+        "enqueue_event_research",
+        lambda _db, queued_event: queued.append(queued_event.id) or ("task", object()),
+    )
+
+    result = worker.finalize_news_extraction.run(
+        [
+            {"status": "completed", "event_ids": [str(event.id)]},
+            {"status": "failed", "event_ids": [], "error": "RuntimeError"},
+        ],
+        "scan-1",
+    )
+
+    assert result["status"] == "completed_with_errors"
+    assert result["extraction_completed"] == 1
+    assert result["extraction_failed"] == 1
+    assert result["research_queued"] == 1
+    assert queued == [event.id]
+    assert redis.get(worker.SCAN_GATE_KEY) is None
 
 
 def test_scan_gate_claim_never_replaces_another_task():
@@ -409,6 +663,7 @@ def test_insufficient_run_requeues_when_persistent_cluster_gets_new_evidence(db,
 
     assert second_task is not None
     assert len(queued_tasks) == 2
+    assert all(task["queue"] == "research" for task in queued_tasks)
     assert len(list_runs(db)) == 2
 
 
@@ -437,6 +692,7 @@ def test_unmapped_event_queues_only_one_visible_7b_mapping_task(db, monkeypatch)
     assert first == "mapping-task"
     assert repeated is None
     assert len(queued) == 1
+    assert queued[0]["queue"] == "research"
     assert event.analysis_steps[-1].phase == "asset_mapping_queue"
     assert event.analysis_steps[-1].status == "queued"
 

@@ -87,7 +87,7 @@ function PageHeading({ eyebrow, title, copy }: { eyebrow: string; title: string;
 }
 
 export const queueRefreshIntervalMs = 5000;
-export const queueDesktopColumns = 10;
+export const queueDesktopColumns = 5;
 
 export type ResearchQueueItem = {
   asset_id: string;
@@ -103,6 +103,7 @@ export type ResearchQueueItem = {
 
 type ResearchQueueResponse = {
   generated_at: string;
+  model: string;
   total_assets: number;
   total_runs: number;
   counts: { queued: number; running: number; verifying: number };
@@ -110,11 +111,77 @@ type ResearchQueueResponse = {
   items: ResearchQueueItem[];
 };
 
+export type NewsExtractionQueueItem = {
+  task_id: string;
+  news_id: string;
+  title: string;
+  source: string;
+  published_at: string;
+  status: "queued" | "running" | "retrying" | "failed";
+  attempt: number;
+  queued_at: string;
+  updated_at: string;
+  error: string | null;
+};
+
+type NewsExtractionQueueResponse = {
+  generated_at: string;
+  model: string;
+  scan_task_id: string | null;
+  state: string;
+  total_items: number;
+  counts: {
+    queued: number;
+    running: number;
+    retrying: number;
+    completed: number;
+    failed: number;
+  };
+  truncated: boolean;
+  items: NewsExtractionQueueItem[];
+  error: string | null;
+};
+
 const queueStatusLabels: Record<ResearchQueueItem["status"], string> = {
   queued: "排队中",
   running: "研究中",
   verifying: "验证中",
 };
+
+const extractionStatusLabels: Record<NewsExtractionQueueItem["status"], string> = {
+  queued: "排队中",
+  running: "抽取中",
+  retrying: "重试中",
+  failed: "失败",
+};
+
+const extractionBatchLabels: Record<string, string> = {
+  idle: "空闲",
+  queued: "已排队",
+  running: "处理中",
+  completed: "已完成",
+  completed_with_errors: "部分失败",
+  failed: "失败",
+  unavailable: "不可用",
+};
+
+export function NewsExtractionList({ items }: { items: NewsExtractionQueueItem[] }) {
+  if (!items.length) return <div className="page-empty">当前没有待抽取或失败的新闻。</div>;
+  return <div className="extraction-list">{items.map((item) => (
+    <article className={`extraction-item ${item.status}`} key={item.task_id}>
+      <div className="extraction-item-heading">
+        <strong>{item.title}</strong>
+        <span className="extraction-status"><i />{extractionStatusLabels[item.status]}</span>
+      </div>
+      <div className="extraction-item-meta">
+        <span>{item.source}</span>
+        <time dateTime={item.published_at}>{new Date(item.published_at).toLocaleString("zh-CN")}</time>
+        {item.attempt > 1 && <span>第 {item.attempt} 次尝试</span>}
+      </div>
+      {item.error && <small title={item.error}>{item.error}</small>}
+    </article>
+  ))}</div>;
+}
 
 export function QueueGrid({ items }: { items: ResearchQueueItem[] }) {
   if (!items.length) return <div className="page-empty">当前没有排队或处理中的标的。</div>;
@@ -137,55 +204,109 @@ export function QueueGrid({ items }: { items: ResearchQueueItem[] }) {
 }
 
 export function QueuePage({ apiBase }: { apiBase: string }) {
-  const [queue, setQueue] = useState<ResearchQueueResponse | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
+  const [extractionQueue, setExtractionQueue] = useState<NewsExtractionQueueResponse | null>(null);
+  const [researchQueue, setResearchQueue] = useState<ResearchQueueResponse | null>(null);
+  const [extractionLoading, setExtractionLoading] = useState(true);
+  const [researchLoading, setResearchLoading] = useState(true);
+  const [extractionError, setExtractionError] = useState("");
+  const [researchError, setResearchError] = useState("");
 
-  const loadQueue = useCallback(async (signal?: AbortSignal, showLoading = false) => {
-    if (showLoading) setLoading(true);
+  const loadExtractionQueue = useCallback(async (signal?: AbortSignal, showLoading = false) => {
+    if (showLoading) setExtractionLoading(true);
     try {
-      const response = await fetch(`${apiBase}/api/v1/research-queue?limit=500`, { signal });
-      if (!response.ok) throw new Error(`队列请求失败（HTTP ${response.status}）`);
-      setQueue(await response.json() as ResearchQueueResponse);
-      setError("");
+      const response = await fetch(`${apiBase}/api/v1/news-extraction-queue?limit=200`, { signal });
+      if (!response.ok) throw new Error(`新闻抽取队列请求失败（HTTP ${response.status}）`);
+      setExtractionQueue(await response.json() as NewsExtractionQueueResponse);
+      setExtractionError("");
     } catch (reason) {
       if (signal?.aborted) return;
-      setError(reason instanceof Error ? reason.message : "队列请求失败");
+      setExtractionError(reason instanceof Error ? reason.message : "新闻抽取队列请求失败");
     } finally {
-      if (!signal?.aborted) setLoading(false);
+      if (!signal?.aborted) setExtractionLoading(false);
     }
   }, [apiBase]);
 
+  const loadResearchQueue = useCallback(async (signal?: AbortSignal, showLoading = false) => {
+    if (showLoading) setResearchLoading(true);
+    try {
+      const response = await fetch(`${apiBase}/api/v1/research-queue?limit=500`, { signal });
+      if (!response.ok) throw new Error(`标的研究队列请求失败（HTTP ${response.status}）`);
+      setResearchQueue(await response.json() as ResearchQueueResponse);
+      setResearchError("");
+    } catch (reason) {
+      if (signal?.aborted) return;
+      setResearchError(reason instanceof Error ? reason.message : "标的研究队列请求失败");
+    } finally {
+      if (!signal?.aborted) setResearchLoading(false);
+    }
+  }, [apiBase]);
+
+  const loadQueues = useCallback((signal?: AbortSignal, showLoading = false) => {
+    void loadExtractionQueue(signal, showLoading);
+    void loadResearchQueue(signal, showLoading);
+  }, [loadExtractionQueue, loadResearchQueue]);
+
   useEffect(() => {
     const controller = new AbortController();
-    void loadQueue(controller.signal, true);
+    loadQueues(controller.signal, true);
     const timer = window.setInterval(
-      () => void loadQueue(controller.signal),
+      () => loadQueues(controller.signal),
       queueRefreshIntervalMs,
     );
     return () => {
       controller.abort();
       window.clearInterval(timer);
     };
-  }, [loadQueue]);
+  }, [loadQueues]);
 
   return <section className="app-page queue-page">
-    <PageHeading eyebrow="ACTIVE RESEARCH PIPELINE" title="队列" copy="查看正在排队、研究和验证中的股票或标的；页面每 5 秒自动更新。" />
+    <PageHeading eyebrow="ACTIVE MODEL PIPELINES" title="队列" copy="分别查看新闻抽取与标的研究任务；页面每 5 秒自动更新。" />
     <div className="queue-toolbar">
-      <div className="queue-metrics" aria-live="polite">
-        <span>标的<strong>{queue?.total_assets ?? 0}</strong></span>
-        <span>排队任务<strong>{queue?.counts.queued ?? 0}</strong></span>
-        <span>研究中<strong>{queue?.counts.running ?? 0}</strong></span>
-        <span>验证中<strong>{queue?.counts.verifying ?? 0}</strong></span>
-      </div>
-      <button type="button" disabled={loading} onClick={() => void loadQueue(undefined, true)}>
-        {loading ? "刷新中…" : "立即刷新"}
+      <span>两个队列独立加载；任一服务异常不会遮挡另一栏。</span>
+      <button
+        type="button"
+        disabled={extractionLoading || researchLoading}
+        onClick={() => loadQueues(undefined, true)}
+      >
+        {extractionLoading || researchLoading ? "刷新中…" : "立即刷新"}
       </button>
     </div>
-    {error && <div className="page-error">{error}</div>}
-    {queue?.truncated && <div className="page-message">队列过长，当前显示前 500 个标的。</div>}
-    {!queue && loading && <div className="page-message">正在读取研究队列…</div>}
-    {queue && <QueueGrid items={queue.items} />}
+    <div className="model-queue-columns">
+      <section className="model-queue-panel extraction-queue-panel">
+        <header>
+          <div><p className="eyebrow">NEWS EXTRACTION</p><h3>{extractionQueue?.model ?? "—"} 新闻抽取队列</h3></div>
+          <span className={`model-queue-state ${extractionQueue?.state ?? "idle"}`}>
+            {extractionQueue ? (extractionBatchLabels[extractionQueue.state] ?? extractionQueue.state) : "读取中"}
+          </span>
+        </header>
+        <div className="queue-metrics" aria-live="polite">
+          <span>总数<strong>{extractionQueue?.total_items ?? 0}</strong></span>
+          <span>排队<strong>{extractionQueue?.counts.queued ?? 0}</strong></span>
+          <span>抽取/重试<strong>{(extractionQueue?.counts.running ?? 0) + (extractionQueue?.counts.retrying ?? 0)}</strong></span>
+          <span>完成/失败<strong>{extractionQueue?.counts.completed ?? 0}/{extractionQueue?.counts.failed ?? 0}</strong></span>
+        </div>
+        {extractionError && <div className="page-error">{extractionError}</div>}
+        {extractionQueue?.error && <div className="page-error">{extractionQueue.error}</div>}
+        {extractionQueue?.truncated && <div className="page-message">新闻队列过长，当前显示前 200 条。</div>}
+        {!extractionQueue && extractionLoading && <div className="page-message">正在读取新闻抽取队列…</div>}
+        {extractionQueue && <NewsExtractionList items={extractionQueue.items} />}
+      </section>
+      <section className="model-queue-panel research-queue-panel">
+        <header>
+          <div><p className="eyebrow">ASSET RESEARCH</p><h3>{researchQueue?.model ?? "—"} 标的研究队列</h3></div>
+        </header>
+        <div className="queue-metrics" aria-live="polite">
+          <span>标的<strong>{researchQueue?.total_assets ?? 0}</strong></span>
+          <span>排队任务<strong>{researchQueue?.counts.queued ?? 0}</strong></span>
+          <span>研究中<strong>{researchQueue?.counts.running ?? 0}</strong></span>
+          <span>验证中<strong>{researchQueue?.counts.verifying ?? 0}</strong></span>
+        </div>
+        {researchError && <div className="page-error">{researchError}</div>}
+        {researchQueue?.truncated && <div className="page-message">队列过长，当前显示前 500 个标的。</div>}
+        {!researchQueue && researchLoading && <div className="page-message">正在读取标的研究队列…</div>}
+        {researchQueue && <QueueGrid items={researchQueue.items} />}
+      </section>
+    </div>
   </section>;
 }
 

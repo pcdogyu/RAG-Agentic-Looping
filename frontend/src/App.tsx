@@ -191,6 +191,9 @@ export function scanButtonText(status: ScanStatus | null, serverNowMs: number) {
     return "继续扫描 · 已暂停";
   }
   if (isScanning(status.state)) {
+    if (status.phase === "extraction_queued" && status.total > 0) {
+      return `暂停 · 新闻抽取排队 0/${status.total}`;
+    }
     if (status.phase === "extracting" && status.total > 0) {
       return `暂停 · 事件归纳 ${status.current}/${status.total}`;
     }

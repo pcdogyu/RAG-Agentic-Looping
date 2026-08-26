@@ -272,6 +272,7 @@ def test_research_queue_aggregates_active_runs_and_applies_status_priority(db):
 
     assert response.status_code == 200
     payload = response.json()
+    assert payload["model"] == "qwen2.5:14b"
     assert payload["total_assets"] == 3
     assert payload["total_runs"] == 4
     assert payload["counts"] == {"queued": 2, "running": 1, "verifying": 1}
@@ -279,6 +280,51 @@ def test_research_queue_aggregates_active_runs_and_applies_status_priority(db):
     assert [item["status"] for item in payload["items"]] == ["verifying", "running"]
     assert payload["items"][0]["asset_id"] == shared_asset.asset_id
     assert payload["items"][0]["task_count"] == 2
+
+
+def test_news_extraction_queue_is_public_and_preserves_model_and_counts(monkeypatch):
+    now = utc_now().isoformat()
+    monkeypatch.setattr(
+        "backend.app.main.get_news_extraction_queue",
+        lambda limit: {
+            "generated_at": now,
+            "model": "qwen2.5:3b",
+            "scan_task_id": "scan-1",
+            "state": "running",
+            "total_items": 3,
+            "counts": {
+                "queued": 1,
+                "running": 1,
+                "retrying": 0,
+                "completed": 1,
+                "failed": 0,
+            },
+            "truncated": False,
+            "items": [
+                {
+                    "task_id": "extract-1",
+                    "news_id": "00000000-0000-0000-0000-000000000001",
+                    "title": "测试新闻",
+                    "source": "金十",
+                    "published_at": now,
+                    "status": "running",
+                    "attempt": 1,
+                    "queued_at": now,
+                    "updated_at": now,
+                    "error": None,
+                }
+            ],
+            "error": None,
+        },
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/news-extraction-queue?limit=25")
+
+    assert response.status_code == 200
+    assert response.json()["model"] == "qwen2.5:3b"
+    assert response.json()["counts"]["completed"] == 1
+    assert response.json()["items"][0]["title"] == "测试新闻"
 
 
 def test_research_queue_orders_waiting_assets_oldest_first_and_can_be_empty(db):
