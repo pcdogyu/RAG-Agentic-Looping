@@ -2,14 +2,18 @@ import { describe, expect, it } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import {
-  analysisPendingText,
+import App, {
   createInitialHealthTracking,
   formatCountdown,
   normalizeTheme,
   scanButtonText,
   updateHealthTracking,
 } from "./App";
+import AnalysisPage, {
+  analysisPendingText,
+  AnalysisTraceList,
+  type AnalysisLog,
+} from "./AnalysisPage";
 import BuildFooter, { buildInfo } from "./BuildFooter";
 import {
   factSourceGroupDefinitions,
@@ -164,6 +168,120 @@ describe("analysis mapping states", () => {
   it("keeps genuinely unmapped events explicit", () => {
     expect(analysisPendingText("unmapped")).toBe("该新闻尚未映射到可研究标的。");
   });
+
+  it("renders mapping progress and failure explanations inside the analysis page", () => {
+    const createMappingLog = (status: "mapping_running" | "mapping_failed"): AnalysisLog => ({
+      id: status,
+      event_id: "event-mapping",
+      run_id: null,
+      event_research_run_id: null,
+      status,
+      updated_at: "2026-08-26T01:00:00Z",
+      news: [],
+      event: { headline: "待映射新闻", event_type: "earnings", direct_impact: "待确认", priority: 0.5 },
+      asset: null,
+      models: ["qwen2.5:14b"],
+      steps: [],
+      result: null,
+    });
+
+    const runningMarkup = renderToStaticMarkup(createElement(AnalysisTraceList, {
+      logs: [createMappingLog("mapping_running")],
+    }));
+    const failedMarkup = renderToStaticMarkup(createElement(AnalysisTraceList, {
+      logs: [createMappingLog("mapping_failed")],
+    }));
+
+    expect(runningMarkup).toContain("正在识别并验证");
+    expect(failedMarkup).toContain("未生成或猜测证券代码");
+  });
+
+  it("renders an empty standalone analysis page without restoring the home panel", () => {
+    const pageMarkup = renderToStaticMarkup(createElement(AnalysisPage, { logs: [] }));
+    const homeMarkup = renderToStaticMarkup(createElement(App));
+
+    expect(pageMarkup).toContain("ANALYSIS AUDIT TRAIL");
+    expect(pageMarkup).toContain("完成新闻扫描后");
+    expect(homeMarkup).not.toContain('class="panel trace-panel"');
+  });
+
+  it("renders the latest asset analysis expanded with sources, steps, and result", () => {
+    const log = {
+      id: "asset-log",
+      event_id: "event-1",
+      run_id: "run-1",
+      event_research_run_id: null,
+      status: "completed",
+      updated_at: "2026-08-26T01:00:00Z",
+      news: [{
+        id: "news-1",
+        title: "测试公司发布业绩公告",
+        source: "官方公告",
+        url: "https://example.com/news-1",
+        published_at: "2026-08-26T00:30:00Z",
+      }],
+      event: { headline: "测试事件", event_type: "earnings", direct_impact: "利润增长", priority: 0.8 },
+      asset: { symbol: "600000", name: "测试公司", market: "CN" },
+      models: ["qwen2.5:14b"],
+      steps: [{
+        phase: "report_drafting",
+        status: "completed",
+        executor: "ollama",
+        model: "qwen2.5:14b",
+        summary: "研究报告已生成。",
+        metrics: {},
+        occurred_at: "2026-08-26T00:45:00Z",
+      }],
+      result: {
+        kind: "asset_recommendation",
+        rating: "bullish",
+        score: 42,
+        confidence: 0.8,
+        evidence_complete: true,
+        summary: "证据支持看多结论。",
+      },
+    } satisfies AnalysisLog;
+    const markup = renderToStaticMarkup(createElement(AnalysisTraceList, { logs: [log] }));
+
+    expect(markup).toContain('aria-expanded="true"');
+    expect(markup).toContain("测试公司发布业绩公告");
+    expect(markup).toContain("研究报告生成");
+    expect(markup).toContain("+42");
+    expect(markup).toContain("证据支持看多结论");
+  });
+
+  it("renders a completed neutral event report and its affected scope", () => {
+    const log = {
+      id: "event-log",
+      event_id: "event-2",
+      run_id: null,
+      event_research_run_id: "event-run-2",
+      status: "completed",
+      updated_at: "2026-08-26T01:00:00Z",
+      news: [],
+      event: { headline: "行业政策更新", event_type: "policy", direct_impact: "影响行业预期", priority: 0.7 },
+      asset: null,
+      models: ["qwen2.5:14b"],
+      steps: [],
+      result: {
+        kind: "event_report",
+        confidence: 0.72,
+        evidence_complete: true,
+        summary: "政策影响仍待观察。",
+        affected_markets: ["CN"],
+        affected_sectors: ["智能制造"],
+        scenarios: [],
+        catalysts: [],
+        risks: [],
+        unresolved_questions: [],
+      },
+    } satisfies AnalysisLog;
+    const markup = renderToStaticMarkup(createElement(AnalysisTraceList, { logs: [log] }));
+
+    expect(markup).toContain("中性事件研报");
+    expect(markup).toContain("CN · 智能制造");
+    expect(markup).toContain("政策影响仍待观察");
+  });
 });
 
 describe("model log navigation and filters", () => {
@@ -231,6 +349,7 @@ describe("shared hash navigation", () => {
     expect(routeFromHash("#/conclusions")).toBe("conclusions");
     expect(routeFromHash("#/sources")).toBe("sources");
     expect(routeFromHash("#/queue")).toBe("queue");
+    expect(routeFromHash("#/analysis")).toBe("analysis");
     expect(routeFromHash("#/model-logs")).toBe("model-logs");
     expect(routeFromHash("#/search")).toBe("search");
     expect(routeFromHash("#/weknora")).toBe("weknora");
@@ -240,19 +359,22 @@ describe("shared hash navigation", () => {
 
   it("renders grouped menu links in order and exposes the current page accessibly", () => {
     expect(navigationGroups.left.map((item) => item.route)).toEqual([
-      "home", "source-filter", "sources", "queue", "conclusions",
+      "home", "source-filter", "sources", "queue", "analysis", "conclusions",
     ]);
     expect(navigationGroups.right.map((item) => item.route)).toEqual([
       "model-logs", "search", "weknora",
     ]);
     const markup = renderToStaticMarkup(createElement(TopNavigation, { current: "source-filter" }));
     const queueMarkup = renderToStaticMarkup(createElement(TopNavigation, { current: "queue" }));
-    expect((markup.match(/<a /g) || []).length).toBe(8);
+    const analysisMarkup = renderToStaticMarkup(createElement(TopNavigation, { current: "analysis" }));
+    expect((markup.match(/<a /g) || []).length).toBe(9);
     expect(markup).toContain('href="#/source-filter" aria-current="page"');
     expect(queueMarkup).toContain('href="#/queue" aria-current="page"');
+    expect(analysisMarkup).toContain('href="#/analysis" aria-current="page"');
     expect(markup.indexOf("数据源过滤")).toBeLessThan(markup.indexOf(">数据源<"));
     expect(markup.indexOf(">数据源<")).toBeLessThan(markup.indexOf(">队列<"));
-    expect(markup.indexOf(">队列<")).toBeLessThan(markup.indexOf("结论"));
+    expect(markup.indexOf(">队列<")).toBeLessThan(markup.indexOf("分析链路"));
+    expect(markup.indexOf("分析链路")).toBeLessThan(markup.indexOf("结论"));
     expect(markup.indexOf("结论")).toBeLessThan(markup.indexOf("模型日志"));
     expect(markup).toContain("搜索引擎");
     expect(markup).toContain("WeKnora");

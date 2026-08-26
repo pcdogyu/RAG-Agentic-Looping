@@ -1,8 +1,9 @@
 import { FormEvent, useCallback, useEffect, useState } from "react";
 
+import AnalysisPage, { type AnalysisLog } from "./AnalysisPage";
 import ModelLogsPage from "./ModelLogs";
 
-export type AppRoute = "home" | "source-filter" | "sources" | "queue" | "conclusions" | "model-logs" | "search" | "weknora";
+export type AppRoute = "home" | "source-filter" | "sources" | "queue" | "analysis" | "conclusions" | "model-logs" | "search" | "weknora";
 
 export const navigationGroups: Record<"left" | "right", Array<{ route: AppRoute; label: string }>> = {
   left: [
@@ -10,6 +11,7 @@ export const navigationGroups: Record<"left" | "right", Array<{ route: AppRoute;
     { route: "source-filter", label: "数据源过滤" },
     { route: "sources", label: "数据源" },
     { route: "queue", label: "队列" },
+    { route: "analysis", label: "分析链路" },
     { route: "conclusions", label: "结论" },
   ],
   right: [
@@ -822,12 +824,17 @@ export function WeknoraPage({ apiBase }: { apiBase: string }) {
   return <section className="app-page weknora-page"><PageHeading eyebrow="LOCAL KNOWLEDGE WORKBENCH" title="WeKnora" copy="内嵌本地知识库工作台；若服务禁止 iframe，可在新窗口中继续。" /><div className="weknora-toolbar"><a href={url} target="_blank" rel="noreferrer">新窗口打开</a><span>{failed ? "内嵌加载失败，请使用“新窗口打开”。" : "若下方为空白或提示拒绝连接，请使用“新窗口打开”。"}</span></div><div className="weknora-frame"><iframe title="WeKnora 本地知识库" src={url} onError={() => setFailed(true)} /></div><AdminUnlock token={token} onToken={setToken} />{token && <div className="integration-editor"><label>WeKnora URL<input type="url" value={draft} onChange={(e) => setDraft(e.target.value)} /></label><button type="button" onClick={test}>连接测试</button><button type="button" onClick={save}>保存</button></div>}{message && <div className="page-message">{message}</div>}</section>;
 }
 
-export function RoutedPage({ route, apiBase }: { route: Exclude<AppRoute, "home">; apiBase: string }) {
+export function RoutedPage({
+  route, apiBase, analysisLogs,
+}: {
+  route: Exclude<AppRoute, "home">; apiBase: string; analysisLogs: AnalysisLog[];
+}) {
   if (route === "model-logs") return <ModelLogsPage apiBase={apiBase} onBack={() => { window.location.hash = "/home"; }} embedded />;
   if (route === "source-filter") return <SourceFilterPage apiBase={apiBase} />;
   if (route === "conclusions") return <ConclusionsPage apiBase={apiBase} />;
   if (route === "sources") return <SourcesPage apiBase={apiBase} />;
   if (route === "queue") return <QueuePage apiBase={apiBase} />;
+  if (route === "analysis") return <AnalysisPage logs={analysisLogs} />;
   if (route === "search") return <SearchPage apiBase={apiBase} />;
   return <WeknoraPage apiBase={apiBase} />;
 }
