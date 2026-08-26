@@ -232,6 +232,8 @@ class ResearchRun(BaseModel):
     error: str | None = None
     analysis_steps: list[AnalysisStep] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utc_now)
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
     updated_at: datetime = Field(default_factory=utc_now)
 
 

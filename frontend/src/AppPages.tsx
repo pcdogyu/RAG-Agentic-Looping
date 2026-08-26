@@ -89,6 +89,17 @@ function PageHeading({ eyebrow, title, copy }: { eyebrow: string; title: string;
 export const queueRefreshIntervalMs = 5000;
 export const queueDesktopColumns = 5;
 
+export function formatQueueDuration(value: number | null | undefined) {
+  if (value == null) return "—";
+  const totalSeconds = Math.max(0, Math.floor(value / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `${hours}时${minutes}分`;
+  if (minutes > 0) return `${minutes}分${seconds}秒`;
+  return `${seconds}秒`;
+}
+
 export type ResearchQueueItem = {
   asset_id: string;
   symbol: string;
@@ -98,6 +109,11 @@ export type ResearchQueueItem = {
   status: "queued" | "running" | "verifying";
   task_count: number;
   queued_at: string;
+  representative_queued_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  queue_duration_ms: number | null;
+  execution_duration_ms: number | null;
   updated_at: string;
 };
 
@@ -107,6 +123,10 @@ type ResearchQueueResponse = {
   total_assets: number;
   total_runs: number;
   counts: { queued: number; running: number; verifying: number };
+  average_queue_duration_ms: number | null;
+  average_execution_duration_ms: number | null;
+  queue_duration_sample_count: number;
+  execution_duration_sample_count: number;
   truncated: boolean;
   items: ResearchQueueItem[];
 };
@@ -120,6 +140,10 @@ export type NewsExtractionQueueItem = {
   status: "queued" | "running" | "retrying" | "failed";
   attempt: number;
   queued_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  queue_duration_ms: number | null;
+  execution_duration_ms: number | null;
   updated_at: string;
   error: string | null;
 };
@@ -137,6 +161,10 @@ type NewsExtractionQueueResponse = {
     completed: number;
     failed: number;
   };
+  average_queue_duration_ms: number | null;
+  average_execution_duration_ms: number | null;
+  queue_duration_sample_count: number;
+  execution_duration_sample_count: number;
   truncated: boolean;
   items: NewsExtractionQueueItem[];
   error: string | null;
@@ -167,18 +195,22 @@ const extractionBatchLabels: Record<string, string> = {
 
 export function NewsExtractionList({ items }: { items: NewsExtractionQueueItem[] }) {
   if (!items.length) return <div className="page-empty">当前没有待抽取或失败的新闻。</div>;
-  return <div className="extraction-list">{items.map((item) => (
-    <article className={`extraction-item ${item.status}`} key={item.task_id}>
+  return <div className="extraction-list" data-columns={queueDesktopColumns}>{items.map((item) => (
+    <article className={`extraction-item ${item.status}`} key={item.task_id} title={item.title}>
       <div className="extraction-item-heading">
-        <strong>{item.title}</strong>
         <span className="extraction-status"><i />{extractionStatusLabels[item.status]}</span>
+        {item.attempt > 1 && <small>第 {item.attempt} 次尝试</small>}
       </div>
+      <strong>{item.title}</strong>
       <div className="extraction-item-meta">
         <span>{item.source}</span>
         <time dateTime={item.published_at}>{new Date(item.published_at).toLocaleString("zh-CN")}</time>
-        {item.attempt > 1 && <span>第 {item.attempt} 次尝试</span>}
       </div>
-      {item.error && <small title={item.error}>{item.error}</small>}
+      <div className="queue-card-timing">
+        <span>排队 {formatQueueDuration(item.queue_duration_ms)}</span>
+        <span>执行 {formatQueueDuration(item.execution_duration_ms)}</span>
+      </div>
+      {item.error && <small className="extraction-error" title={item.error}>{item.error}</small>}
     </article>
   ))}</div>;
 }
@@ -194,9 +226,13 @@ export function QueueGrid({ items }: { items: ResearchQueueItem[] }) {
       <span className="queue-card-market">{item.market} · {item.asset_class}</span>
       <strong>{item.symbol}</strong>
       <p>{item.name}</p>
-      <div>
+      <div className="queue-card-state-row">
         <span className="queue-card-status"><i />{queueStatusLabels[item.status]}</span>
         {item.task_count > 1 && <small>{item.task_count} 个任务</small>}
+      </div>
+      <div className="queue-card-timing">
+        <span>排队 {formatQueueDuration(item.queue_duration_ms)}</span>
+        <span>执行 {formatQueueDuration(item.execution_duration_ms)}</span>
       </div>
       <time dateTime={item.queued_at}>{new Date(item.queued_at).toLocaleString("zh-CN")}</time>
     </article>
@@ -284,6 +320,8 @@ export function QueuePage({ apiBase }: { apiBase: string }) {
           <span>排队<strong>{extractionQueue?.counts.queued ?? 0}</strong></span>
           <span>抽取/重试<strong>{(extractionQueue?.counts.running ?? 0) + (extractionQueue?.counts.retrying ?? 0)}</strong></span>
           <span>完成/失败<strong>{extractionQueue?.counts.completed ?? 0}/{extractionQueue?.counts.failed ?? 0}</strong></span>
+          <span title={`样本 ${extractionQueue?.queue_duration_sample_count ?? 0}`}>平均排队<strong>{formatQueueDuration(extractionQueue?.average_queue_duration_ms)}</strong></span>
+          <span title={`样本 ${extractionQueue?.execution_duration_sample_count ?? 0}`}>平均执行<strong>{formatQueueDuration(extractionQueue?.average_execution_duration_ms)}</strong></span>
         </div>
         {extractionError && <div className="page-error">{extractionError}</div>}
         {extractionQueue?.error && <div className="page-error">{extractionQueue.error}</div>}
@@ -300,6 +338,8 @@ export function QueuePage({ apiBase }: { apiBase: string }) {
           <span>排队任务<strong>{researchQueue?.counts.queued ?? 0}</strong></span>
           <span>研究中<strong>{researchQueue?.counts.running ?? 0}</strong></span>
           <span>验证中<strong>{researchQueue?.counts.verifying ?? 0}</strong></span>
+          <span title={`样本 ${researchQueue?.queue_duration_sample_count ?? 0}`}>平均排队<strong>{formatQueueDuration(researchQueue?.average_queue_duration_ms)}</strong></span>
+          <span title={`样本 ${researchQueue?.execution_duration_sample_count ?? 0}`}>平均执行<strong>{formatQueueDuration(researchQueue?.average_execution_duration_ms)}</strong></span>
         </div>
         {researchError && <div className="page-error">{researchError}</div>}
         {researchQueue?.truncated && <div className="page-message">队列过长，当前显示前 500 个标的。</div>}

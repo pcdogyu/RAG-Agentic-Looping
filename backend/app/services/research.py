@@ -194,6 +194,9 @@ class ResearchService:
         )
         if historical_replay is not None:
             run.historical_replay = historical_replay
+        if run.started_at is None:
+            run.started_at = utc_now()
+        run.status = RunStatus.RUNNING
         save_run(self.db, run)
         state: ResearchState = {
             "run": run.model_dump(mode="json"),
@@ -214,7 +217,7 @@ class ResearchService:
             failed = get_run(self.db, run.id) or ResearchRun.model_validate(state["run"])
             failed.status = RunStatus.FAILED
             failed.error = f"{type(exc).__name__}: {exc}"
-            failed.updated_at = utc_now()
+            failed.completed_at = utc_now()
             failed.analysis_steps.append(
                 AnalysisStep(
                     phase="research_failed",
@@ -1192,7 +1195,7 @@ class ResearchService:
         )
         run.recommendation = recommendation
         run.status = RunStatus.COMPLETED if complete else RunStatus.INSUFFICIENT_EVIDENCE
-        run.updated_at = utc_now()
+        run.completed_at = utc_now()
         run.analysis_steps.append(
             AnalysisStep(
                 phase="finalization",

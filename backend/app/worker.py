@@ -237,18 +237,69 @@ def _news_extraction_counts(payload: dict[str, Any]) -> dict[str, int]:
     return counts
 
 
+def _registry_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return as_utc(value)
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return as_utc(datetime.fromisoformat(value.replace("Z", "+00:00")))
+    except ValueError:
+        return None
+
+
+def _elapsed_ms(start: Any, end: datetime) -> int | None:
+    started_at = _registry_datetime(start)
+    if started_at is None:
+        return None
+    return max(0, int((as_utc(end) - started_at).total_seconds() * 1000))
+
+
+def _news_extraction_item_durations(
+    item: dict[str, Any], generated_at: datetime
+) -> tuple[int | None, int | None]:
+    queue_duration = item.get("queue_duration_ms")
+    if queue_duration is None:
+        queue_end = _registry_datetime(item.get("started_at"))
+        if queue_end is None and item.get("status") == "queued":
+            queue_end = generated_at
+        if queue_end is not None:
+            queue_duration = _elapsed_ms(item.get("queued_at"), queue_end)
+
+    execution_duration = max(0, int(item.get("execution_duration_ms") or 0))
+    active_attempt = _elapsed_ms(item.get("attempt_started_at"), generated_at)
+    if active_attempt is not None:
+        execution_duration += active_attempt
+    if not item.get("started_at") and execution_duration == 0:
+        return queue_duration, None
+    return queue_duration, execution_duration
+
+
 def get_news_extraction_queue(limit: int = 200) -> dict[str, Any]:
     """Return the current per-news 3B work list without exposing Celery payloads."""
 
     try:
         payload = _read_news_extraction_queue(_redis_client())
+        generated_at = utc_now()
         counts = _news_extraction_counts(payload)
         status_rank = {"running": 0, "retrying": 1, "queued": 2, "failed": 3}
-        visible = [
-            item
-            for item in payload.get("items", [])
-            if item.get("status") in status_rank
-        ]
+        queue_durations: list[int] = []
+        execution_durations: list[int] = []
+        public_items: list[dict[str, Any]] = []
+        for stored_item in payload.get("items", []):
+            item = dict(stored_item)
+            queue_duration, execution_duration = _news_extraction_item_durations(
+                item, generated_at
+            )
+            item["queue_duration_ms"] = queue_duration
+            item["execution_duration_ms"] = execution_duration
+            item.pop("attempt_started_at", None)
+            if queue_duration is not None:
+                queue_durations.append(queue_duration)
+            if execution_duration is not None:
+                execution_durations.append(execution_duration)
+            public_items.append(item)
+        visible = [item for item in public_items if item.get("status") in status_rank]
         visible.sort(
             key=lambda item: (
                 status_rank[item["status"]],
@@ -256,12 +307,22 @@ def get_news_extraction_queue(limit: int = 200) -> dict[str, Any]:
             )
         )
         return {
-            "generated_at": utc_now(),
+            "generated_at": generated_at,
             "model": payload.get("model") or settings.ollama_extract_model,
             "scan_task_id": payload.get("scan_task_id"),
             "state": payload.get("state") or "idle",
             "total_items": int(payload.get("total_items") or 0),
             "counts": counts,
+            "average_queue_duration_ms": (
+                sum(queue_durations) // len(queue_durations) if queue_durations else None
+            ),
+            "average_execution_duration_ms": (
+                sum(execution_durations) // len(execution_durations)
+                if execution_durations
+                else None
+            ),
+            "queue_duration_sample_count": len(queue_durations),
+            "execution_duration_sample_count": len(execution_durations),
             "truncated": len(visible) > limit,
             "items": visible[:limit],
             "error": payload.get("error"),
@@ -274,6 +335,10 @@ def get_news_extraction_queue(limit: int = 200) -> dict[str, Any]:
             "state": "unavailable",
             "total_items": 0,
             "counts": _news_extraction_counts({}),
+            "average_queue_duration_ms": None,
+            "average_execution_duration_ms": None,
+            "queue_duration_sample_count": 0,
+            "execution_duration_sample_count": 0,
             "truncated": False,
             "items": [],
             "error": f"queue state unavailable: {type(exc).__name__}",
@@ -293,13 +358,22 @@ def _initialize_news_extraction_queue(
     entries: list[dict[str, Any]],
     metadata: dict[str, int],
 ) -> dict[str, Any]:
+    normalized_entries = []
+    for entry in entries:
+        normalized = dict(entry)
+        normalized.setdefault("started_at", None)
+        normalized.setdefault("completed_at", None)
+        normalized.setdefault("attempt_started_at", None)
+        normalized.setdefault("queue_duration_ms", None)
+        normalized.setdefault("execution_duration_ms", 0)
+        normalized_entries.append(normalized)
     payload = {
         "model": settings.ollama_extract_model,
         "scan_task_id": scan_task_id,
         "state": "queued" if entries else "completed",
-        "total_items": len(entries),
+        "total_items": len(normalized_entries),
         "metadata": metadata,
-        "items": entries,
+        "items": normalized_entries,
         "error": None,
     }
     _write_news_extraction_queue(client, payload)
@@ -318,12 +392,30 @@ def _update_news_extraction_item(
     payload = _read_news_extraction_queue(client)
     if payload.get("scan_task_id") != scan_task_id:
         return None
+    now = utc_now()
     changed = False
     for item in payload.get("items", []):
         if item.get("news_id") != news_id:
             continue
+        previous_status = item.get("status")
+        if status == "running":
+            if not item.get("started_at"):
+                item["started_at"] = now.isoformat()
+                item["queue_duration_ms"] = _elapsed_ms(item.get("queued_at"), now)
+            if previous_status != "running" or not item.get("attempt_started_at"):
+                item["attempt_started_at"] = now.isoformat()
+            item["completed_at"] = None
+        elif status in {"retrying", "completed", "failed"}:
+            active_attempt = _elapsed_ms(item.get("attempt_started_at"), now)
+            if active_attempt is not None:
+                item["execution_duration_ms"] = max(
+                    0, int(item.get("execution_duration_ms") or 0)
+                ) + active_attempt
+            item["attempt_started_at"] = None
+            if status in {"completed", "failed"}:
+                item["completed_at"] = now.isoformat()
         item["status"] = status
-        item["updated_at"] = utc_now().isoformat()
+        item["updated_at"] = now.isoformat()
         item["error"] = error
         if attempt is not None:
             item["attempt"] = attempt
@@ -625,7 +717,7 @@ def enqueue_research(
     except Exception as exc:
         run.status = RunStatus.FAILED
         run.error = f"{type(exc).__name__}: research queue failed"
-        run.updated_at = utc_now()
+        run.completed_at = utc_now()
         run.analysis_steps.append(
             AnalysisStep(
                 phase="research_queue",

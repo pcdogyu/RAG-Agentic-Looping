@@ -145,6 +145,9 @@ def test_research_graph_produces_verified_recommendation(db, tmp_path):
     assert registry.research_calls == 1
     assert any(item.source_name == "FMP standardized financials" for item in run.evidence)
     assert run.historical_replay is False
+    assert run.started_at is not None
+    assert run.completed_at is not None
+    assert run.completed_at >= run.started_at
     assert run.recommendation is not None
     assert run.recommendation.evidence_complete is True
     assert run.recommendation.rating is Rating.BULLISH

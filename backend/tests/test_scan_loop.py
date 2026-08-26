@@ -119,6 +119,53 @@ def test_news_extraction_registry_sorts_active_items_and_keeps_failed(monkeypatc
     assert payload["truncated"] is True
 
 
+def test_news_extraction_timing_accumulates_attempts_without_retry_wait(monkeypatch):
+    redis = FakeRedis()
+    monkeypatch.setattr(worker, "_redis_client", lambda: redis)
+    current = {"now": datetime(2026, 8, 26, 8, 0, tzinfo=UTC)}
+    monkeypatch.setattr(worker, "utc_now", lambda: current["now"])
+    queued_at = current["now"]
+    worker._initialize_news_extraction_queue(
+        redis,
+        "scan-1",
+        [
+            {
+                "task_id": "extract-timed",
+                "news_id": "00000000-0000-0000-0000-000000000001",
+                "title": "计时新闻",
+                "source": "test",
+                "published_at": queued_at.isoformat(),
+                "status": "queued",
+                "attempt": 0,
+                "queued_at": queued_at.isoformat(),
+                "updated_at": queued_at.isoformat(),
+                "error": None,
+            }
+        ],
+        {"discovered": 1, "accepted": 1, "filtered": 0},
+    )
+
+    current["now"] = queued_at + timedelta(seconds=10)
+    worker._update_news_extraction_item(redis, "scan-1", "00000000-0000-0000-0000-000000000001", "running", attempt=1)
+    current["now"] = queued_at + timedelta(seconds=30)
+    worker._update_news_extraction_item(redis, "scan-1", "00000000-0000-0000-0000-000000000001", "retrying", attempt=1, error="temporary")
+    current["now"] = queued_at + timedelta(seconds=50)
+    worker._update_news_extraction_item(redis, "scan-1", "00000000-0000-0000-0000-000000000001", "running", attempt=2)
+    current["now"] = queued_at + timedelta(seconds=80)
+    worker._update_news_extraction_item(redis, "scan-1", "00000000-0000-0000-0000-000000000001", "completed", attempt=2)
+
+    stored = worker._read_news_extraction_queue(redis)["items"][0]
+    assert stored["queue_duration_ms"] == 10000
+    assert stored["execution_duration_ms"] == 50000
+    assert stored["completed_at"] == current["now"].isoformat()
+    payload = worker.get_news_extraction_queue()
+    assert payload["items"] == []
+    assert payload["average_queue_duration_ms"] == 10000
+    assert payload["average_execution_duration_ms"] == 50000
+    assert payload["queue_duration_sample_count"] == 1
+    assert payload["execution_duration_sample_count"] == 1
+
+
 def test_news_extraction_workflow_routes_header_and_callback_to_extract(monkeypatch):
     redis = FakeRedis()
     captured = {}

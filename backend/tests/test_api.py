@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 
 from fastapi.testclient import TestClient
@@ -18,6 +18,7 @@ from backend.app.domain import (
 )
 from backend.app.main import app
 from backend.app.providers.registry import SEED_ASSETS
+from backend.app.services.research_queue import build_research_queue
 from backend.app.storage import (
     list_recommendations,
     save_event,
@@ -362,6 +363,57 @@ def test_research_queue_orders_waiting_assets_oldest_first_and_can_be_empty(db):
         response = client.get("/api/v1/research-queue")
 
     assert [item["symbol"] for item in response.json()["items"]] == ["OLD", "NEW"]
+
+
+def test_research_queue_reports_task_timing_and_uses_current_status_representative():
+    now = datetime(2026, 8, 26, 8, 0, tzinfo=UTC)
+    asset = SEED_ASSETS[0]
+    older_verifying = ResearchRun(
+        asset=asset,
+        status=RunStatus.VERIFYING,
+        created_at=now - timedelta(minutes=20),
+        started_at=now - timedelta(minutes=15),
+        updated_at=now - timedelta(minutes=5),
+    )
+    current_verifying = ResearchRun(
+        asset=asset,
+        status=RunStatus.VERIFYING,
+        created_at=now - timedelta(minutes=12),
+        started_at=now - timedelta(minutes=10),
+        updated_at=now - timedelta(minutes=1),
+    )
+    waiting = ResearchRun(
+        asset=SEED_ASSETS[1],
+        status=RunStatus.QUEUED,
+        created_at=now - timedelta(minutes=6),
+        updated_at=now - timedelta(minutes=6),
+    )
+    legacy_running = ResearchRun(
+        asset=SEED_ASSETS[2],
+        status=RunStatus.RUNNING,
+        created_at=now - timedelta(minutes=30),
+        updated_at=now - timedelta(minutes=2),
+    )
+
+    payload = build_research_queue(
+        [older_verifying, current_verifying, waiting, legacy_running],
+        500,
+        "qwen2.5:14b",
+        generated_at=now,
+    )
+
+    shared = next(item for item in payload.items if item.asset_id == asset.asset_id)
+    assert shared.task_count == 2
+    assert shared.representative_queued_at == current_verifying.created_at
+    assert shared.queue_duration_ms == 2 * 60 * 1000
+    assert shared.execution_duration_ms == 10 * 60 * 1000
+    assert payload.queue_duration_sample_count == 3
+    assert payload.execution_duration_sample_count == 2
+    assert payload.average_queue_duration_ms == (300000 + 120000 + 360000) // 3
+    assert payload.average_execution_duration_ms == (900000 + 600000) // 2
+    legacy = next(item for item in payload.items if item.asset_id == legacy_running.asset.asset_id)
+    assert legacy.queue_duration_ms is None
+    assert legacy.execution_duration_ms is None
 
 
 def test_failed_event_research_can_be_requeued(db, monkeypatch):

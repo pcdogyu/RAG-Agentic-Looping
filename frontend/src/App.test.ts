@@ -17,6 +17,7 @@ import AnalysisPage, {
 import BuildFooter, { buildInfo } from "./BuildFooter";
 import {
   factSourceGroupDefinitions,
+  formatQueueDuration,
   navigationGroups,
   queueDesktopColumns,
   QueueGrid,
@@ -393,6 +394,11 @@ describe("research queue page", () => {
       status: "verifying",
       task_count: 3,
       queued_at: "2026-08-25T01:00:00Z",
+      representative_queued_at: "2026-08-25T01:00:00Z",
+      started_at: "2026-08-25T01:02:00Z",
+      completed_at: null,
+      queue_duration_ms: 120000,
+      execution_duration_ms: 180000,
       updated_at: "2026-08-25T01:05:00Z",
     }] }));
     expect(markup).toContain('class="queue-grid"');
@@ -401,6 +407,8 @@ describe("research queue page", () => {
     expect(markup).toContain("贵州茅台");
     expect(markup).toContain("验证中");
     expect(markup).toContain("3 个任务");
+    expect(markup).toContain("排队 2分0秒");
+    expect(markup).toContain("执行 3分0秒");
   });
 
   it("uses a five-second refresh and a five-column half-width grid", () => {
@@ -415,6 +423,11 @@ describe("research queue page", () => {
       status: "queued",
       task_count: 1,
       queued_at: "2026-08-25T01:00:00Z",
+      representative_queued_at: "2026-08-25T01:00:00Z",
+      started_at: null,
+      completed_at: null,
+      queue_duration_ms: 30000,
+      execution_duration_ms: null,
       updated_at: "2026-08-25T01:00:00Z",
     }] }));
     expect(markup).toContain('data-columns="5"');
@@ -435,6 +448,10 @@ describe("research queue page", () => {
       status: "retrying",
       attempt: 2,
       queued_at: "2026-08-25T01:01:00Z",
+      started_at: "2026-08-25T01:01:30Z",
+      completed_at: null,
+      queue_duration_ms: 30000,
+      execution_duration_ms: 90000,
       updated_at: "2026-08-25T01:02:00Z",
       error: "RuntimeError: temporary failure",
     }] }));
@@ -442,6 +459,17 @@ describe("research queue page", () => {
     expect(markup).toContain("金十");
     expect(markup).toContain("重试中");
     expect(markup).toContain("第 2 次尝试");
+    expect(markup).toContain('class="extraction-list" data-columns="5"');
+    expect(markup).toContain("排队 30秒");
+    expect(markup).toContain("执行 1分30秒");
+    expect(markup).toContain('title="上市公司发布半年度业绩公告"');
+  });
+
+  it("formats queue durations compactly", () => {
+    expect(formatQueueDuration(null)).toBe("—");
+    expect(formatQueueDuration(48000)).toBe("48秒");
+    expect(formatQueueDuration(135000)).toBe("2分15秒");
+    expect(formatQueueDuration(3720000)).toBe("1时2分");
   });
 });
 
