@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 
 import AnalysisPage, { type AnalysisLog } from "./AnalysisPage";
 import ModelLogsPage from "./ModelLogs";
@@ -424,8 +424,11 @@ export function QueuePage({ apiBase }: { apiBase: string }) {
   const [overview, setOverview] = useState<ModelQueueOverviewResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const requestInFlight = useRef(false);
 
   const loadQueues = useCallback(async (signal?: AbortSignal, showLoading = false) => {
+    if (requestInFlight.current) return;
+    requestInFlight.current = true;
     if (showLoading) setLoading(true);
     try {
       const response = await fetch(`${apiBase}/api/v1/model-queue-overview?limit=500`, { signal });
@@ -436,6 +439,7 @@ export function QueuePage({ apiBase }: { apiBase: string }) {
       if (signal?.aborted) return;
       setError(reason instanceof Error ? reason.message : "模型队列请求失败");
     } finally {
+      requestInFlight.current = false;
       if (!signal?.aborted) setLoading(false);
     }
   }, [apiBase]);
