@@ -379,6 +379,7 @@ def test_additional_model_inference_queues_are_public(monkeypatch):
 
 def test_unified_model_queue_overview_is_public_and_ordered(monkeypatch):
     now = utc_now().isoformat()
+    build_calls = 0
 
     def queue(queue_id, model):
         return {
@@ -415,9 +416,10 @@ def test_unified_model_queue_overview_is_public_and_ordered(monkeypatch):
             "error": None,
         }
 
-    monkeypatch.setattr(
-        "backend.app.main.build_model_queue_overview",
-        lambda *_args, **_kwargs: {
+    def build_overview(*_args, **_kwargs):
+        nonlocal build_calls
+        build_calls += 1
+        return {
             "generated_at": now,
             "queues": [
                 queue("extract", "qwen2.5:3b"),
@@ -425,13 +427,17 @@ def test_unified_model_queue_overview_is_public_and_ordered(monkeypatch):
                 queue("assist", "qwen2.5:7b"),
                 queue("code", "qwen2.5-coder:7b"),
             ],
-        },
-    )
+        }
+
+    monkeypatch.setattr("backend.app.main.build_model_queue_overview", build_overview)
 
     with TestClient(app) as client:
         response = client.get("/api/v1/model-queue-overview?limit=500")
+        cached_response = client.get("/api/v1/model-queue-overview?limit=1")
 
     assert response.status_code == 200
+    assert cached_response.status_code == 200
+    assert build_calls == 1
     payload = response.json()
     assert [item["id"] for item in payload["queues"]] == [
         "extract",

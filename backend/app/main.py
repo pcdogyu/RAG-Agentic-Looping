@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
+from threading import Lock, Thread
+from time import monotonic
 from uuid import UUID, uuid4
 
 import httpx
@@ -88,6 +91,102 @@ from backend.app.worker import (
 from backend.app.worker import execute_evolution as execute_evolution_task
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
+
+MODEL_QUEUE_SNAPSHOT_LIMIT = 500
+MODEL_QUEUE_SNAPSHOT_TTL_SECONDS = 5.0
+_model_queue_snapshot: tuple[float, ModelQueueOverviewResponse] | None = None
+_model_queue_refreshing = False
+_model_queue_snapshot_lock = Lock()
+
+
+def _build_model_queue_snapshot() -> ModelQueueOverviewResponse:
+    models = {
+        "extract": settings.ollama_extract_model,
+        "research": settings.ollama_research_model,
+        "assist": settings.ollama_assist_model,
+        "code": settings.ollama_code_model,
+    }
+    inference_statuses = {
+        lane: gateway.queue_status(model) for lane, model in models.items()
+    }
+    threads = {
+        lane: gateway.num_threads_for(model) for lane, model in models.items()
+    }
+    with SessionLocal() as db:
+        result = build_model_queue_overview(
+            db,
+            extraction_queue=get_news_extraction_queue(200),
+            inference_statuses=inference_statuses,
+            threads=threads,
+            limit=MODEL_QUEUE_SNAPSHOT_LIMIT,
+            settings=settings,
+        )
+    return ModelQueueOverviewResponse.model_validate(result)
+
+
+def _refresh_model_queue_snapshot() -> ModelQueueOverviewResponse:
+    global _model_queue_refreshing, _model_queue_snapshot
+    try:
+        snapshot = _build_model_queue_snapshot()
+        with _model_queue_snapshot_lock:
+            _model_queue_snapshot = (monotonic(), snapshot)
+        return snapshot
+    finally:
+        with _model_queue_snapshot_lock:
+            _model_queue_refreshing = False
+
+
+def _refresh_model_queue_snapshot_in_background() -> None:
+    try:
+        _refresh_model_queue_snapshot()
+    except Exception:
+        logger.exception("model queue snapshot refresh failed")
+
+
+def _cached_model_queue_snapshot() -> ModelQueueOverviewResponse:
+    global _model_queue_refreshing
+    with _model_queue_snapshot_lock:
+        cached = _model_queue_snapshot
+        stale = cached is None or monotonic() - cached[0] >= MODEL_QUEUE_SNAPSHOT_TTL_SECONDS
+        should_refresh = stale and not _model_queue_refreshing
+        if should_refresh:
+            _model_queue_refreshing = True
+    if cached is None:
+        return _refresh_model_queue_snapshot()
+    if should_refresh:
+        Thread(
+            target=_refresh_model_queue_snapshot_in_background,
+            name="model-queue-snapshot",
+            daemon=True,
+        ).start()
+    return cached[1]
+
+
+def _model_queue_snapshot_for_limit(
+    snapshot: ModelQueueOverviewResponse, limit: int
+) -> ModelQueueOverviewResponse:
+    if limit >= MODEL_QUEUE_SNAPSHOT_LIMIT:
+        return snapshot
+    queues = []
+    for queue in snapshot.queues:
+        visible_limit = min(limit, 200) if queue.id == "extract" else limit
+        queues.append(
+            queue.model_copy(
+                update={
+                    "tasks": queue.tasks[:visible_limit],
+                    "truncated": queue.truncated or len(queue.tasks) > visible_limit,
+                }
+            )
+        )
+    return snapshot.model_copy(update={"queues": queues})
+
+
+def _reset_model_queue_snapshot() -> None:
+    global _model_queue_refreshing, _model_queue_snapshot
+    with _model_queue_snapshot_lock:
+        _model_queue_snapshot = None
+        _model_queue_refreshing = False
 
 
 def _provider_registry(db: Session | None = None) -> ProviderRegistry:
@@ -99,6 +198,7 @@ def _provider_registry(db: Session | None = None) -> ProviderRegistry:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _reset_model_queue_snapshot()
     init_db()
     with SessionLocal() as db:
         normalize_legacy_akshare_timestamps(db)
@@ -106,7 +206,14 @@ async def lifespan(app: FastAPI):
         startup_registry = _provider_registry(db)
         for asset in startup_registry.all_assets():
             upsert_asset(db, asset)
-    yield
+    try:
+        _refresh_model_queue_snapshot()
+    except Exception:
+        logger.exception("initial model queue snapshot build failed")
+    try:
+        yield
+    finally:
+        _reset_model_queue_snapshot()
 
 
 app = FastAPI(
@@ -427,28 +534,8 @@ def model_inference_queues():
 @app.get("/api/v1/model-queue-overview", response_model=ModelQueueOverviewResponse)
 def model_queue_overview(
     limit: int = Query(default=500, ge=1, le=500),
-    db: Session = Depends(get_db),
 ):
-    models = {
-        "extract": settings.ollama_extract_model,
-        "research": settings.ollama_research_model,
-        "assist": settings.ollama_assist_model,
-        "code": settings.ollama_code_model,
-    }
-    inference_statuses = {
-        lane: gateway.queue_status(model) for lane, model in models.items()
-    }
-    threads = {
-        lane: gateway.num_threads_for(model) for lane, model in models.items()
-    }
-    return build_model_queue_overview(
-        db,
-        extraction_queue=get_news_extraction_queue(min(limit, 200)),
-        inference_statuses=inference_statuses,
-        threads=threads,
-        limit=limit,
-        settings=settings,
-    )
+    return _model_queue_snapshot_for_limit(_cached_model_queue_snapshot(), limit)
 
 
 @app.get("/api/v1/research-runs/{run_id}")
