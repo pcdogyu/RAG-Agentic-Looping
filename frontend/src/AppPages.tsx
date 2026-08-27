@@ -3,7 +3,7 @@ import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import AnalysisPage, { type AnalysisLog } from "./AnalysisPage";
 import ModelLogsPage from "./ModelLogs";
 
-export type AppRoute = "home" | "source-filter" | "sources" | "news" | "queue" | "analysis" | "conclusions" | "model-logs" | "search" | "weknora";
+export type AppRoute = "home" | "source-filter" | "sources" | "news" | "queue" | "analysis" | "conclusions" | "targets" | "model-logs" | "search" | "weknora";
 
 export const navigationGroups: Record<"left" | "right", Array<{ route: AppRoute; label: string }>> = {
   left: [
@@ -14,6 +14,7 @@ export const navigationGroups: Record<"left" | "right", Array<{ route: AppRoute;
     { route: "queue", label: "队列" },
     { route: "analysis", label: "分析链路" },
     { route: "conclusions", label: "结论" },
+    { route: "targets", label: "标的" },
   ],
   right: [
     { route: "model-logs", label: "模型日志" },
@@ -1077,6 +1078,21 @@ type Recommendation = {
   };
 };
 
+export type ChangedTarget = {
+  asset: {
+    asset_id: string;
+    symbol: string;
+    name: string;
+    market: string;
+  };
+  recommendation_id: string;
+  changed_at: string;
+  previous: { signal_status: string; rating: string };
+  current: { signal_status: string; rating: string };
+  status_changed: boolean;
+  rating_changed: boolean;
+};
+
 type ConclusionDetail = {
   recommendation: Recommendation;
   event: { headline: string } | null;
@@ -1185,6 +1201,95 @@ export function ConclusionScore({
       {directionalEvidenceComplete !== undefined && ` · 方向证据${directionalEvidenceComplete ? "通过" : "未通过"}`}
     </small>
   </div>;
+}
+
+export const changedTargetDesktopColumns = 5;
+
+function changedTargetLabel(kind: "signal_status" | "rating", value: string) {
+  return kind === "signal_status"
+    ? signalStatusLabels[value] || value
+    : ratingLabels[value] || value;
+}
+
+export function ChangedTargetGrid({ items }: { items: ChangedTarget[] }) {
+  return <div className="target-change-grid" data-columns={changedTargetDesktopColumns}>
+    {items.map((item) => <article className="target-change-card" key={item.asset.asset_id}>
+      <header>
+        <span>{item.asset.market} · {new Date(item.changed_at).toLocaleString("zh-CN")}</span>
+        <strong>{item.asset.symbol}</strong>
+        <small>{item.asset.name}</small>
+      </header>
+      <div className={`target-change-field ${item.status_changed ? "changed" : "unchanged"}`}>
+        <span>结论状态</span>
+        {item.status_changed
+          ? <strong>{changedTargetLabel("signal_status", item.previous.signal_status)} → {changedTargetLabel("signal_status", item.current.signal_status)}</strong>
+          : <strong>{changedTargetLabel("signal_status", item.current.signal_status)}（未变）</strong>}
+      </div>
+      <div className={`target-change-field ${item.rating_changed ? "changed" : "unchanged"}`}>
+        <span>评级</span>
+        {item.rating_changed
+          ? <strong>{changedTargetLabel("rating", item.previous.rating)} → {changedTargetLabel("rating", item.current.rating)}</strong>
+          : <strong>{changedTargetLabel("rating", item.current.rating)}（未变）</strong>}
+      </div>
+    </article>)}
+  </div>;
+}
+
+export function ChangedTargetsContent({
+  items, loading, error, onRetry,
+}: {
+  items: ChangedTarget[];
+  loading: boolean;
+  error: string;
+  onRetry: () => void;
+}) {
+  return <>
+    {error && <div className="page-error target-change-error"><span>{error}</span><button type="button" onClick={onRetry}>重试</button></div>}
+    {!items.length && !error && (loading
+      ? <div className="page-message">正在加载标的变化…</div>
+      : <div className="page-empty">当前没有状态或评级发生变化的标的。</div>)}
+    {!!items.length && <ChangedTargetGrid items={items} />}
+  </>;
+}
+
+export function ChangedTargetsPage({ apiBase }: { apiBase: string }) {
+  const [items, setItems] = useState<ChangedTarget[]>([]);
+  const [cursor, setCursor] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [error, setError] = useState("");
+
+  async function load(append = false) {
+    const params = new URLSearchParams({ limit: "50" });
+    if (append && cursor) params.set("cursor", cursor);
+    if (append) setLoadingMore(true); else setLoading(true);
+    setError("");
+    try {
+      const response = await fetch(`${apiBase}/api/v1/changed-targets?${params}`);
+      if (!response.ok) throw new Error("标的变化请求失败");
+      const payload = await response.json() as {
+        items: ChangedTarget[];
+        next_cursor: string | null;
+      };
+      setItems((current) => append ? [...current, ...payload.items] : payload.items);
+      setCursor(payload.next_cursor);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "标的变化请求失败");
+    } finally {
+      if (append) setLoadingMore(false); else setLoading(false);
+    }
+  }
+
+  useEffect(() => { void load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  return <section className="app-page targets-page">
+    <PageHeading eyebrow="TARGET CHANGES" title="标的变化" copy="汇总历史结论中状态或评级发生变化的标的；每个标的只展示最新一次真实变化。" />
+    <div className="page-toolbar target-change-toolbar">
+      <button type="button" disabled={loading} onClick={() => load()}>{loading ? "刷新中…" : "刷新"}</button>
+    </div>
+    <ChangedTargetsContent items={items} loading={loading} error={error} onRetry={() => load()} />
+    {cursor && <button className="load-more" type="button" disabled={loadingMore} onClick={() => load(true)}>{loadingMore ? "正在加载…" : "加载更多"}</button>}
+  </section>;
 }
 
 export function ConclusionsPage({ apiBase }: { apiBase: string }) {
@@ -1742,6 +1847,7 @@ export function RoutedPage({
   if (route === "model-logs") return <ModelLogsPage apiBase={apiBase} onBack={() => { window.location.hash = "/home"; }} embedded />;
   if (route === "source-filter") return <SourceFilterPage apiBase={apiBase} />;
   if (route === "conclusions") return <ConclusionsPage apiBase={apiBase} />;
+  if (route === "targets") return <ChangedTargetsPage apiBase={apiBase} />;
   if (route === "sources") return <SourcesPage apiBase={apiBase} />;
   if (route === "news") return <NewsPage apiBase={apiBase} />;
   if (route === "queue") return <QueuePage apiBase={apiBase} />;

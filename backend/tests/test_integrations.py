@@ -817,3 +817,177 @@ def test_conclusions_omit_all_scores_when_evidence_is_insufficient(db):
         assert payload["score"] is None
         assert payload["model_score"] is None
         assert payload["raw_score"] is None
+
+
+def _save_target_history_item(
+    db,
+    asset: AssetRef,
+    *,
+    as_of,
+    rating: str,
+    signal_status: str,
+) -> Recommendation:
+    run = ResearchRun(asset=asset, as_of=as_of)
+    recommendation = Recommendation(
+        run_id=run.id,
+        asset=asset,
+        score=0,
+        rating=rating,
+        confidence=0.5,
+        bull_probability=0.25,
+        base_probability=0.5,
+        bear_probability=0.25,
+        thesis=Thesis(summary=f"{asset.symbol} target history"),
+        as_of=as_of,
+        evidence_complete=True,
+        signal_status=signal_status,
+    )
+    save_recommendation(db, recommendation)
+    return recommendation
+
+
+def test_changed_targets_include_only_latest_real_change_per_asset(db):
+    now = utc_now()
+    assets = {
+        symbol: AssetRef(
+            asset_id=f"equity:XNAS:{symbol}",
+            asset_class=AssetClass.EQUITY,
+            market=Market.US,
+            symbol=symbol,
+            name=f"{symbol} Corp",
+            exchange_or_provider="XNAS",
+        )
+        for symbol in ("STATUS", "RATING", "BOTH", "INITIAL")
+    }
+    _save_target_history_item(
+        db,
+        assets["STATUS"],
+        as_of=now - timedelta(minutes=8),
+        rating="watch",
+        signal_status="insufficient_evidence",
+    )
+    status_latest = _save_target_history_item(
+        db,
+        assets["STATUS"],
+        as_of=now - timedelta(minutes=3),
+        rating="watch",
+        signal_status="neutral",
+    )
+    _save_target_history_item(
+        db,
+        assets["RATING"],
+        as_of=now - timedelta(minutes=7),
+        rating="watch",
+        signal_status="directional",
+    )
+    rating_latest = _save_target_history_item(
+        db,
+        assets["RATING"],
+        as_of=now - timedelta(minutes=2),
+        rating="bearish",
+        signal_status="directional",
+    )
+    _save_target_history_item(
+        db,
+        assets["BOTH"],
+        as_of=now - timedelta(minutes=9),
+        rating="watch",
+        signal_status="insufficient_evidence",
+    )
+    _save_target_history_item(
+        db,
+        assets["BOTH"],
+        as_of=now - timedelta(minutes=6),
+        rating="bullish",
+        signal_status="directional",
+    )
+    both_latest = _save_target_history_item(
+        db,
+        assets["BOTH"],
+        as_of=now - timedelta(minutes=1),
+        rating="strongly_bearish",
+        signal_status="neutral",
+    )
+    _save_target_history_item(
+        db,
+        assets["INITIAL"],
+        as_of=now,
+        rating="bullish",
+        signal_status="directional",
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/changed-targets")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["next_cursor"] is None
+    assert [item["asset"]["symbol"] for item in body["items"]] == [
+        "BOTH",
+        "RATING",
+        "STATUS",
+    ]
+    items = {item["asset"]["symbol"]: item for item in body["items"]}
+    assert items["STATUS"] == {
+        "asset": status_latest.asset.model_dump(mode="json"),
+        "recommendation_id": str(status_latest.id),
+        "changed_at": status_latest.as_of.isoformat().replace("+00:00", "Z"),
+        "previous": {"signal_status": "insufficient_evidence", "rating": "watch"},
+        "current": {"signal_status": "neutral", "rating": "watch"},
+        "status_changed": True,
+        "rating_changed": False,
+    }
+    assert items["RATING"]["recommendation_id"] == str(rating_latest.id)
+    assert items["RATING"]["status_changed"] is False
+    assert items["RATING"]["rating_changed"] is True
+    assert items["BOTH"]["recommendation_id"] == str(both_latest.id)
+    assert items["BOTH"]["previous"] == {
+        "signal_status": "directional",
+        "rating": "bullish",
+    }
+    assert items["BOTH"]["status_changed"] is True
+    assert items["BOTH"]["rating_changed"] is True
+
+
+def test_changed_targets_cursor_paginates_unique_assets(db):
+    now = utc_now()
+    for index, symbol in enumerate(("PAGE1", "PAGE2", "PAGE3")):
+        asset = AssetRef(
+            asset_id=f"equity:XNAS:{symbol}",
+            asset_class=AssetClass.EQUITY,
+            market=Market.US,
+            symbol=symbol,
+            name=f"{symbol} Corp",
+            exchange_or_provider="XNAS",
+        )
+        _save_target_history_item(
+            db,
+            asset,
+            as_of=now - timedelta(hours=1, minutes=index),
+            rating="watch",
+            signal_status="insufficient_evidence",
+        )
+        _save_target_history_item(
+            db,
+            asset,
+            as_of=now - timedelta(minutes=index),
+            rating="bearish",
+            signal_status="directional",
+        )
+
+    with TestClient(app) as client:
+        first = client.get("/api/v1/changed-targets?limit=2")
+        second = client.get(
+            "/api/v1/changed-targets",
+            params={"limit": 2, "cursor": first.json()["next_cursor"]},
+        )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert [item["asset"]["symbol"] for item in first.json()["items"]] == [
+        "PAGE1",
+        "PAGE2",
+    ]
+    assert first.json()["next_cursor"]
+    assert [item["asset"]["symbol"] for item in second.json()["items"]] == ["PAGE3"]
+    assert second.json()["next_cursor"] is None

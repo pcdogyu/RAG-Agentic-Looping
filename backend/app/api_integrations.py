@@ -437,6 +437,74 @@ def _conclusion_detail(db: Session, recommendation: Recommendation) -> dict[str,
     }
 
 
+def _latest_changed_targets(db: Session) -> list[tuple[Recommendation, Recommendation]]:
+    rows = db.scalars(
+        select(RecommendationRow).order_by(
+            RecommendationRow.asset_id,
+            RecommendationRow.as_of,
+            RecommendationRow.id,
+        )
+    ).all()
+    previous_by_asset: dict[str, Recommendation] = {}
+    latest_change_by_asset: dict[str, tuple[Recommendation, Recommendation]] = {}
+    for row in rows:
+        current = Recommendation.model_validate(row.payload)
+        previous = previous_by_asset.get(row.asset_id)
+        if previous and (
+            previous.signal_status != current.signal_status
+            or previous.rating != current.rating
+        ):
+            latest_change_by_asset[row.asset_id] = (previous, current)
+        previous_by_asset[row.asset_id] = current
+    return sorted(
+        latest_change_by_asset.values(),
+        key=lambda pair: (pair[1].as_of, pair[1].id.int),
+        reverse=True,
+    )
+
+
+@router.get("/api/v1/changed-targets")
+def list_changed_targets(
+    db: Db,
+    cursor: str | None = None,
+    limit: int = Query(default=50, ge=1, le=100),
+) -> dict[str, Any]:
+    changes = _latest_changed_targets(db)
+    if cursor:
+        cursor_time, cursor_id = _decode_cursor(cursor)
+        changes = [
+            pair
+            for pair in changes
+            if pair[1].as_of < cursor_time
+            or (pair[1].as_of == cursor_time and pair[1].id.int < cursor_id.int)
+        ]
+    has_more = len(changes) > limit
+    visible = changes[:limit]
+    items = []
+    for previous, current in visible:
+        items.append(
+            {
+                "asset": current.asset.model_dump(mode="json"),
+                "recommendation_id": current.id,
+                "changed_at": current.as_of,
+                "previous": {
+                    "signal_status": previous.signal_status.value,
+                    "rating": previous.rating.value,
+                },
+                "current": {
+                    "signal_status": current.signal_status.value,
+                    "rating": current.rating.value,
+                },
+                "status_changed": previous.signal_status != current.signal_status,
+                "rating_changed": previous.rating != current.rating,
+            }
+        )
+    next_cursor = None
+    if has_more and visible:
+        next_cursor = _encode_cursor(visible[-1][1].as_of, visible[-1][1].id)
+    return {"items": items, "next_cursor": next_cursor}
+
+
 @router.get("/api/v1/conclusions")
 def list_conclusions(
     db: Db,

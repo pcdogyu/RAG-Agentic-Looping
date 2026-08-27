@@ -17,6 +17,9 @@ import AnalysisPage, {
 import BuildFooter, { buildInfo } from "./BuildFooter";
 import {
   applyCancelledTaskTombstone,
+  changedTargetDesktopColumns,
+  ChangedTargetGrid,
+  ChangedTargetsContent,
   factSourceGroupDefinitions,
   formatQueueDuration,
   ModelInferenceQueuePanel,
@@ -356,10 +359,11 @@ describe("model log navigation and filters", () => {
 });
 
 describe("shared hash navigation", () => {
-  it("recognizes all ten routes and falls back to home", () => {
+  it("recognizes all eleven routes and falls back to home", () => {
     expect(routeFromHash("#/home")).toBe("home");
     expect(routeFromHash("#/source-filter")).toBe("source-filter");
     expect(routeFromHash("#/conclusions")).toBe("conclusions");
+    expect(routeFromHash("#/targets")).toBe("targets");
     expect(routeFromHash("#/sources")).toBe("sources");
     expect(routeFromHash("#/news")).toBe("news");
     expect(routeFromHash("#/queue")).toBe("queue");
@@ -373,7 +377,7 @@ describe("shared hash navigation", () => {
 
   it("renders grouped menu links in order and exposes the current page accessibly", () => {
     expect(navigationGroups.left.map((item) => item.route)).toEqual([
-      "home", "source-filter", "sources", "news", "queue", "analysis", "conclusions",
+      "home", "source-filter", "sources", "news", "queue", "analysis", "conclusions", "targets",
     ]);
     expect(navigationGroups.right.map((item) => item.route)).toEqual([
       "model-logs", "search", "weknora",
@@ -382,19 +386,78 @@ describe("shared hash navigation", () => {
     const newsMarkup = renderToStaticMarkup(createElement(TopNavigation, { current: "news" }));
     const queueMarkup = renderToStaticMarkup(createElement(TopNavigation, { current: "queue" }));
     const analysisMarkup = renderToStaticMarkup(createElement(TopNavigation, { current: "analysis" }));
-    expect((markup.match(/<a /g) || []).length).toBe(10);
+    const targetsMarkup = renderToStaticMarkup(createElement(TopNavigation, { current: "targets" }));
+    expect((markup.match(/<a /g) || []).length).toBe(11);
     expect(markup).toContain('href="#/source-filter" aria-current="page"');
     expect(newsMarkup).toContain('href="#/news" aria-current="page"');
     expect(queueMarkup).toContain('href="#/queue" aria-current="page"');
     expect(analysisMarkup).toContain('href="#/analysis" aria-current="page"');
+    expect(targetsMarkup).toContain('href="#/targets" aria-current="page"');
     expect(markup.indexOf("数据源过滤")).toBeLessThan(markup.indexOf(">数据源<"));
     expect(markup.indexOf(">数据源<")).toBeLessThan(markup.indexOf(">新闻<"));
     expect(markup.indexOf(">新闻<")).toBeLessThan(markup.indexOf(">队列<"));
     expect(markup.indexOf(">队列<")).toBeLessThan(markup.indexOf("分析链路"));
     expect(markup.indexOf("分析链路")).toBeLessThan(markup.indexOf("结论"));
+    expect(markup.indexOf("结论")).toBeLessThan(markup.indexOf("标的"));
+    expect(markup.indexOf("标的")).toBeLessThan(markup.indexOf("模型日志"));
     expect(markup.indexOf("结论")).toBeLessThan(markup.indexOf("模型日志"));
     expect(markup).toContain("搜索引擎");
     expect(markup).toContain("WeKnora");
+  });
+});
+
+describe("changed targets page", () => {
+  it("renders five target cards with changed and unchanged fields", () => {
+    const items = Array.from({ length: 5 }, (_, index) => ({
+      asset: {
+        asset_id: `equity:XNAS:TARGET${index}`,
+        symbol: `TARGET${index}`,
+        name: `Target ${index} Corp`,
+        market: "US",
+      },
+      recommendation_id: `recommendation-${index}`,
+      changed_at: `2026-08-27T0${index}:00:00Z`,
+      previous: {
+        signal_status: index === 0 ? "insufficient_evidence" : "directional",
+        rating: "watch",
+      },
+      current: {
+        signal_status: "directional",
+        rating: index === 0 ? "watch" : "bearish",
+      },
+      status_changed: index === 0,
+      rating_changed: index !== 0,
+    }));
+
+    const markup = renderToStaticMarkup(createElement(ChangedTargetGrid, { items }));
+
+    expect(changedTargetDesktopColumns).toBe(5);
+    expect(markup).toContain('class="target-change-grid" data-columns="5"');
+    expect((markup.match(/class="target-change-card"/g) || []).length).toBe(5);
+    expect(markup).toContain("方向证据不足");
+    expect(markup).toContain("方向信号");
+    expect(markup).toContain("观察（未变）");
+    expect(markup).toContain("方向信号（未变）");
+    expect(markup).toContain("观察");
+    expect(markup).toContain("看空");
+  });
+
+  it("distinguishes loading, empty, and failed states", () => {
+    const render = (loading: boolean, error = "") => renderToStaticMarkup(createElement(
+      ChangedTargetsContent,
+      { items: [], loading, error, onRetry: () => undefined },
+    ));
+
+    const loading = render(true);
+    const empty = render(false);
+    const failed = render(false, "标的变化请求失败");
+
+    expect(loading).toContain("正在加载标的变化");
+    expect(loading).not.toContain("当前没有状态或评级发生变化的标的");
+    expect(empty).toContain("当前没有状态或评级发生变化的标的");
+    expect(failed).toContain("标的变化请求失败");
+    expect(failed).toContain("重试");
+    expect(failed).not.toContain("当前没有状态或评级发生变化的标的");
   });
 });
 
