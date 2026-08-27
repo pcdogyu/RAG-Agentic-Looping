@@ -264,6 +264,25 @@ export function modelQueueInstances(
   }));
 }
 
+export type ModelQueuePanelItem = {
+  queue: ModelQueueOverviewItem;
+  instance: ModelQueueInstanceItem;
+};
+
+export function modelQueuePanelColumns(
+  queues: ModelQueueOverviewItem[],
+): [ModelQueuePanelItem[], ModelQueuePanelItem[]] {
+  const buildColumn = (queueIds: ModelQueueOverviewItem["id"][]) => queueIds.flatMap(
+    (queueId) => queues
+      .filter((queue) => queue.id === queueId)
+      .flatMap((queue) => modelQueueInstances(queue).map((instance) => ({ queue, instance }))),
+  );
+  return [
+    buildColumn(["extract", "assist"]),
+    buildColumn(["research", "code"]),
+  ];
+}
+
 type ModelQueueOverviewResponse = {
   generated_at: string;
   queues: ModelQueueOverviewItem[];
@@ -867,22 +886,30 @@ export function QueuePage({ apiBase }: { apiBase: string }) {
     {actionMessage && <div className="page-message">{actionMessage}</div>}
     {!overview && loading && <div className="page-message">正在读取四条业务队列…</div>}
     <div className="model-queue-columns">
-      {overview?.queues.flatMap((queue) => modelQueueInstances(queue).map((instance) => {
-        const actionId = `${queue.id}:${instance.id}`;
-        return <UnifiedModelQueuePanel
-          queue={queue}
-          instance={instance}
-          key={actionId}
-          onCancelTask={(task) => void cancelModelTask(queue, task)}
-          onRetryTask={(task) => void retryModelTask(queue, task)}
-          onRetryAll={() => void retryModelQueue(queue, instance)}
-          onClear={() => void clearModelQueue(queue, instance)}
-          cancellingTaskId={cancellingTaskId}
-          retryingTaskId={retryingTaskId}
-          retryingAll={retryingQueueId === actionId}
-          clearing={clearingQueueId === actionId}
-        />;
-      }))}
+      {overview && modelQueuePanelColumns(overview.queues).map((column, columnIndex) => (
+        <div
+          className="model-queue-column"
+          data-queue-column={columnIndex === 0 ? "extract-assist" : "research-code"}
+          key={columnIndex === 0 ? "extract-assist" : "research-code"}
+        >
+          {column.map(({ queue, instance }) => {
+            const actionId = `${queue.id}:${instance.id}`;
+            return <UnifiedModelQueuePanel
+              queue={queue}
+              instance={instance}
+              key={actionId}
+              onCancelTask={(task) => void cancelModelTask(queue, task)}
+              onRetryTask={(task) => void retryModelTask(queue, task)}
+              onRetryAll={() => void retryModelQueue(queue, instance)}
+              onClear={() => void clearModelQueue(queue, instance)}
+              cancellingTaskId={cancellingTaskId}
+              retryingTaskId={retryingTaskId}
+              retryingAll={retryingQueueId === actionId}
+              clearing={clearingQueueId === actionId}
+            />;
+          })}
+        </div>
+      ))}
     </div>
   </section>;
 }

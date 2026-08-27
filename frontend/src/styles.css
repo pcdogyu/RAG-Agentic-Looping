@@ -234,7 +234,8 @@ h1 span { color: var(--mint); font-weight: 400; }
 .queue-metrics { display: flex; flex: 1; gap: 8px; }
 .queue-metrics > span { display: flex; align-items: center; gap: 8px; min-width: 110px; padding: 10px 13px; border: 1px solid var(--line); border-radius: 8px; color: var(--muted); background: var(--model-surface); font-size: 11px; }
 .queue-metrics strong { color: var(--mint); font: 500 18px "DM Mono", monospace; }
-.model-queue-columns { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 860px), 1fr)); gap: 14px; }
+.model-queue-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 14px; }
+.model-queue-column { display: grid; align-content: start; gap: 14px; min-width: 0; }
 .model-queue-panel { display: flex; flex-direction: column; min-width: 0; height: min(690px, 70vh); padding: 16px; overflow: hidden; border: 1px solid var(--line); border-radius: 11px; background: var(--model-surface); }
 .model-queue-panel > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
 .model-queue-panel > header .eyebrow { margin-bottom: 5px; }

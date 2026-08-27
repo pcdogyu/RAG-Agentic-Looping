@@ -23,6 +23,7 @@ import {
   factSourceGroupDefinitions,
   formatQueueDuration,
   ModelInferenceQueuePanel,
+  modelQueuePanelColumns,
   modelQueueInstances,
   ModelQueueTaskGrid,
   type ModelQueueOverviewItem,
@@ -817,6 +818,48 @@ describe("research queue page", () => {
     }));
     expect(assistMarkup).toContain("assist-0</h3>");
     expect(assistMarkup).toContain("实例可用");
+  });
+
+  it("keeps extract and mapping instances left, then research and code instances right", () => {
+    const queues = [
+      overviewQueue({
+        id: "code",
+        purpose: "代码演进",
+        instances: [{ id: "code-0", healthy: true, model_available: true }],
+      }),
+      overviewQueue({
+        id: "research",
+        purpose: "标的研究",
+        instances: [
+          { id: "research-0", healthy: true, model_available: true },
+          { id: "research-1", healthy: true, model_available: true },
+        ],
+      }),
+      overviewQueue({
+        id: "assist",
+        purpose: "股票映射",
+        instances: [
+          { id: "assist-0", healthy: true, model_available: true },
+          { id: "assist-1", healthy: true, model_available: true },
+        ],
+      }),
+      overviewQueue({
+        id: "extract",
+        purpose: "新闻抽取",
+        instances: [
+          { id: "extract-0", healthy: true, model_available: true },
+          { id: "extract-1", healthy: true, model_available: true },
+        ],
+      }),
+    ];
+
+    const [leftColumn, rightColumn] = modelQueuePanelColumns(queues);
+    expect(leftColumn.map(({ instance }) => instance.id)).toEqual([
+      "extract-0", "extract-1", "assist-0", "assist-1",
+    ]);
+    expect(rightColumn.map(({ instance }) => instance.id)).toEqual([
+      "research-0", "research-1", "code-0",
+    ]);
   });
 
   it("renders cancellation, retry and clear controls for supported model queues", () => {
