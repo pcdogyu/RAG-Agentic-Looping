@@ -99,7 +99,7 @@ logger = logging.getLogger(__name__)
 
 MODEL_QUEUE_SNAPSHOT_LIMIT = 500
 MODEL_QUEUE_SNAPSHOT_TTL_SECONDS = 5.0
-MODEL_QUEUE_SNAPSHOT_REDIS_KEY = "market-loop:model-queue-overview:snapshot:v1"
+MODEL_QUEUE_SNAPSHOT_REDIS_KEY = "market-loop:model-queue-overview:snapshot:v2"
 _model_queue_snapshot: tuple[float, ModelQueueOverviewResponse] | None = None
 _model_queue_refreshing = False
 _model_queue_snapshot_lock = Lock()
@@ -114,10 +114,10 @@ def _build_model_queue_snapshot() -> ModelQueueOverviewResponse:
         "code": settings.ollama_code_model,
     }
     inference_statuses = {
-        lane: gateway.queue_status(model) for lane, model in models.items()
+        lane: gateway.queue_status(model, lane=lane) for lane, model in models.items()
     }
     threads = {
-        lane: gateway.num_threads_for(model) for lane, model in models.items()
+        lane: gateway.num_threads_for(model, lane=lane) for lane, model in models.items()
     }
     with SessionLocal() as db:
         result = build_model_queue_overview(
@@ -338,13 +338,18 @@ def health() -> dict:
     models: list[str] = []
     endpoints = [
         ("main", settings.ollama_base_url.rstrip("/"), None),
+        ("assist-0", settings.ollama_assist_url, settings.ollama_assist_model),
         *[
             (f"research-{index}", url, settings.ollama_research_model)
             for index, url in enumerate(settings.ollama_research_urls)
             if url != settings.ollama_base_url.rstrip("/")
         ],
     ]
+    seen_endpoints: set[tuple[str, str]] = set()
     for instance_id, url, required_model in endpoints:
+        if (instance_id, url) in seen_endpoints:
+            continue
+        seen_endpoints.add((instance_id, url))
         healthy = False
         available_models: list[str] = []
         loaded_models: list[str] = []
@@ -556,12 +561,14 @@ def news_extraction_queue(limit: int = Query(default=200, ge=1, le=200)):
 def model_inference_queues():
     model_specs = (
         {
+            "lane": "assist",
             "model": settings.ollama_assist_model,
             "purpose": "股票映射",
             "binding": "新闻事件二次股票映射",
             "task_enabled": True,
         },
         {
+            "lane": "code",
             "model": settings.ollama_code_model,
             "purpose": "代码演进",
             "binding": (
@@ -574,8 +581,9 @@ def model_inference_queues():
     )
     items = []
     for spec in model_specs:
+        lane = str(spec["lane"])
         model = str(spec["model"])
-        status = gateway.queue_status(model)
+        status = gateway.queue_status(model, lane=lane)
         if not status["observable"]:
             state = "unavailable"
         elif status["queued"]:
@@ -588,7 +596,7 @@ def model_inference_queues():
             {
                 **spec,
                 **status,
-                "threads": gateway.num_threads_for(model),
+                "threads": gateway.num_threads_for(model, lane=lane),
                 "state": state,
             }
         )

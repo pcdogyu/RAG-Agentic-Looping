@@ -808,6 +808,7 @@ class ResearchService:
         try:
             draft = self.llm.generate_json(
                 model=self.settings.ollama_research_model,
+                lane="research",
                 system=(
                     "你是证据优先的投资研究员。区分事实、推断和未知，不给实盘指令。"
                     f"{DIRECTION_SCORE_INSTRUCTION}"
@@ -979,6 +980,7 @@ class ResearchService:
             try:
                 semantic_payload = self.llm.generate_json(
                     model=self.settings.ollama_assist_model,
+                    lane="assist",
                     system=(
                         "你是独立的逐观点证据复核员，不负责写报告或打投资分。"
                         "逐条判断观点是否被给定证据语义支持；claim 必须原样返回，"
@@ -1464,6 +1466,7 @@ class ResearchService:
         try:
             revised = self.llm.generate_json(
                 model=self.settings.ollama_research_model,
+                lane="research",
                 system=(
                     "你是投资研究报告修订器，只能使用给定证据。"
                     "修订时必须重新评估方向分数，不能机械沿用当前报告的 score。"

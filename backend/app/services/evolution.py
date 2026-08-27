@@ -80,6 +80,7 @@ class EvolutionService:
             raise EvolutionError("EVOLUTION_ENABLED is false")
         payload = self.llm.generate_json(
             model=self.settings.ollama_code_model,
+            lane="code",
             system=(
                 "你是代码演进代理。输出最小 unified diff，不读取或生成密钥，不添加实盘交易。"
                 "修改必须对应一个可测量失败模式。"

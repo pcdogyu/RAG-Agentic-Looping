@@ -1721,6 +1721,11 @@ def research_event(self, event_id: str, run_id: str) -> dict:
         run = get_event_research_run(db, UUID(run_id))
         if not event or not run:
             raise ValueError(f"unknown event research run: {run_id}")
+        if run.celery_task_id and str(self.request.id) != run.celery_task_id:
+            return {
+                **run.model_dump(mode="json"),
+                "superseded_task_id": str(self.request.id),
+            }
         if run.status in {
             RunStatus.COMPLETED,
             RunStatus.INSUFFICIENT_EVIDENCE,

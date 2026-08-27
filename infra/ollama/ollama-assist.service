@@ -1,0 +1,19 @@
+[Unit]
+Description=NUMA-bound Ollama assist model server
+Wants=network-online.target
+After=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=hyuser
+Group=hyuser
+Environment=HOME=/home/hyuser
+Environment=OLLAMA_MODELS=/home/hyuser/.ollama/models
+Environment=OLLAMA_PROJECT_ENV_FILE=/opt/RAG-Agentic-Looping/.env
+ExecStart=/bin/sh /opt/RAG-Agentic-Looping/infra/ollama/run-assist-from-env.sh
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

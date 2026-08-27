@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import threading
 from typing import Any
 
 from pydantic import BaseModel
+
+from backend.app.config import Settings
 
 QUALITY_PRIORITY = {
     "official": 0,
@@ -69,3 +72,89 @@ def compact_evidence(records: list[Any], char_limit: int) -> str:
         )
     )
     return compact_json_records(values, char_limit)
+
+
+class QwenPromptBudget:
+    """Count complete Qwen chat inputs and deterministically trim variable prompt text."""
+
+    _cache: dict[tuple[str, str], Any] = {}
+    _guard = threading.Lock()
+
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+
+    def _tokenizer(self):
+        key = (self.settings.ollama_7b_tokenizer, self.settings.ollama_7b_tokenizer_revision)
+        with self._guard:
+            tokenizer = self._cache.get(key)
+            if tokenizer is None:
+                from transformers import AutoTokenizer
+
+                tokenizer = AutoTokenizer.from_pretrained(
+                    key[0],
+                    revision=key[1],
+                )
+                self._cache[key] = tokenizer
+        return tokenizer
+
+    def count(self, messages: list[dict[str, str]], schema_payload: dict[str, Any]) -> int:
+        tokenizer = self._tokenizer()
+        chat_tokens = tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+        )
+        schema_tokens = tokenizer.encode(
+            json.dumps(schema_payload, ensure_ascii=False, separators=(",", ":")),
+            add_special_tokens=False,
+        )
+        # Ollama adds a small format wrapper around the JSON schema.
+        return len(chat_tokens) + len(schema_tokens) + 32
+
+    def fit(
+        self,
+        *,
+        system: str,
+        prompt: str,
+        schema_payload: dict[str, Any],
+        max_tokens: int,
+    ) -> tuple[list[dict[str, str]], int]:
+        suffix = "\n\n只返回符合请求中 format JSON Schema 的 JSON。"
+
+        def messages_for(value: str) -> list[dict[str, str]]:
+            return [
+                {"role": "system", "content": system},
+                {"role": "user", "content": f"{value}{suffix}"},
+            ]
+
+        messages = messages_for(prompt)
+        count = self.count(messages, schema_payload)
+        if count <= max_tokens:
+            return messages, count
+
+        tokenizer = self._tokenizer()
+        variable_tokens = tokenizer.encode(prompt, add_special_tokens=False)
+        fixed_count = self.count(messages_for(""), schema_payload)
+        available = max_tokens - fixed_count
+        if available < 64:
+            raise ValueError(
+                f"fixed system prompt and schema require {fixed_count} tokens, limit is {max_tokens}"
+            )
+        # Keep the task identity and final constraints while dropping the middle,
+        # where retrieval context and lower-priority evidence are placed.
+        head = max(1, int(available * 0.8))
+        tail = max(0, available - head)
+        selected = variable_tokens[:head]
+        if tail:
+            selected += variable_tokens[-tail:]
+        fitted_prompt = tokenizer.decode(selected, skip_special_tokens=True)
+        messages = messages_for(fitted_prompt)
+        count = self.count(messages, schema_payload)
+        while count > max_tokens and len(selected) > 64:
+            selected = selected[: max(1, len(selected) - (count - max_tokens) - 8)]
+            fitted_prompt = tokenizer.decode(selected, skip_special_tokens=True)
+            messages = messages_for(fitted_prompt)
+            count = self.count(messages, schema_payload)
+        if count > max_tokens:
+            raise ValueError(f"unable to fit Qwen prompt into {max_tokens} tokens")
+        return messages, count

@@ -65,6 +65,42 @@ def test_health_and_asset_endpoints():
     assert event_runs.json() == []
 
 
+def test_health_lists_dedicated_assist_and_research_instances(monkeypatch):
+    class Response:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self.payload
+
+    monkeypatch.setattr(
+        "backend.app.main.settings.ollama_assist_base_url", "http://assist.invalid"
+    )
+    monkeypatch.setattr(
+        "backend.app.main.settings.ollama_research_base_urls",
+        "http://research-0.invalid,http://research-1.invalid",
+    )
+    monkeypatch.setattr(
+        "backend.app.main.httpx.get",
+        lambda url, **_kwargs: Response(
+            {"models": [{"name": "qwen2.5:7b"}]}
+            if url.endswith("/api/tags")
+            else {"models": [{"name": "qwen2.5:7b"}]}
+        ),
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/health")
+
+    assert response.status_code == 200
+    instances = {item["id"]: item for item in response.json()["ollama_instances"]}
+    assert {"assist-0", "research-0", "research-1"}.issubset(instances)
+    assert all(instances[item]["model_available"] for item in instances if item != "main")
+
+
 def test_scan_pause_and_resume_endpoints(monkeypatch):
     status = {
         "state": "paused",
@@ -282,7 +318,7 @@ def test_research_queue_aggregates_active_runs_and_applies_status_priority(db):
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["model"] == "qwen2.5:14b"
+    assert payload["model"] == "qwen2.5:7b"
     assert payload["total_assets"] == 3
     assert payload["total_runs"] == 4
     assert payload["counts"] == {"queued": 2, "running": 1, "verifying": 1}
@@ -338,8 +374,8 @@ def test_news_extraction_queue_is_public_and_preserves_model_and_counts(monkeypa
 
 
 def test_additional_model_inference_queues_are_public(monkeypatch):
-    def queue_status(model):
-        if model == "qwen2.5:7b":
+    def queue_status(model, *_args, lane=None, **_kwargs):
+        if lane == "assist":
             return {
                 "lane": "assist",
                 "capacity": 1,
@@ -358,7 +394,9 @@ def test_additional_model_inference_queues_are_public(monkeypatch):
         }
 
     monkeypatch.setattr("backend.app.main.gateway.gpu.queue_status", queue_status)
-    monkeypatch.setattr("backend.app.main.gateway.num_threads_for", lambda _model: 8)
+    monkeypatch.setattr(
+        "backend.app.main.gateway.num_threads_for", lambda _model, **_kwargs: 8
+    )
 
     with TestClient(app) as client:
         response = client.get("/api/v1/model-inference-queues")
@@ -423,7 +461,7 @@ def test_unified_model_queue_overview_is_public_and_ordered(monkeypatch):
             "generated_at": now,
             "queues": [
                 queue("extract", "qwen2.5:3b"),
-                queue("research", "qwen2.5:14b"),
+                queue("research", "qwen2.5:7b"),
                 queue("assist", "qwen2.5:7b"),
                 queue("code", "qwen2.5-coder:7b"),
             ],
@@ -519,7 +557,7 @@ def test_research_queue_reports_task_timing_and_uses_current_status_representati
     payload = build_research_queue(
         [older_verifying, current_verifying, waiting, legacy_running],
         500,
-        "qwen2.5:14b",
+        "qwen2.5:7b",
         generated_at=now,
     )
 

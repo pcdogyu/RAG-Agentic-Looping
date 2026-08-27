@@ -7,7 +7,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from queue import Queue
 from time import monotonic, sleep, time
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 import httpx
@@ -16,6 +16,7 @@ from pydantic import BaseModel, ValidationError
 from backend.app.config import Settings, get_settings
 from backend.app.domain import utc_now
 from backend.app.model_audit import persist_model_audit
+from backend.app.services.prompt_budget import QwenPromptBudget
 
 
 class LlmError(RuntimeError):
@@ -28,6 +29,7 @@ class LlmResponseError(LlmError):
 
 INFERENCE_LOCK_LEASE_SECONDS = 120
 INFERENCE_LOCK_HEARTBEAT_SECONDS = 30
+LlmLane = Literal["extract", "assist", "research", "code"]
 
 
 def serialize_keep_alive(value: str) -> str | int:
@@ -56,7 +58,15 @@ class GpuSemaphore:
         except Exception:
             self._redis = None
 
-    def _lane(self, model: str) -> tuple[str, int]:
+    def _lane(self, model: str, lane: LlmLane | None = None) -> tuple[str, int]:
+        if lane == "extract":
+            return lane, self.settings.ollama_extract_max_concurrency
+        if lane == "assist":
+            return lane, self.settings.ollama_assist_max_concurrency
+        if lane == "research":
+            return lane, self.settings.ollama_research_max_concurrency
+        if lane == "code":
+            return lane, self.settings.ollama_code_max_concurrency
         if model == self.settings.ollama_extract_model:
             return "extract", self.settings.ollama_extract_max_concurrency
         if model == self.settings.ollama_assist_model:
@@ -68,18 +78,22 @@ class GpuSemaphore:
         lane = re.sub(r"[^a-z0-9]+", "-", model.casefold()).strip("-") or "unknown"
         return lane[:48], 1
 
-    def capacity_for(self, model: str) -> int:
-        return self._lane(model)[1]
+    def capacity_for(self, model: str, lane: LlmLane | None = None) -> int:
+        return self._lane(model, lane)[1]
 
     @staticmethod
     def _waiting_key(lane: str) -> str:
         return f"market-loop:llm:{lane}:waiting"
 
     def queue_status(
-        self, model: str, available_slots: set[int] | None = None
+        self,
+        model: str,
+        available_slots: set[int] | None = None,
+        *,
+        lane: LlmLane | None = None,
     ) -> dict[str, int | str | bool]:
         """Return the cross-process waiting/running state for one model lane."""
-        lane, configured_capacity = self._lane(model)
+        lane, configured_capacity = self._lane(model, lane)
         slots = tuple(
             sorted(
                 available_slots
@@ -140,8 +154,10 @@ class GpuSemaphore:
         model: str,
         timeout: float = 300,
         available_slots: set[int] | None = None,
+        *,
+        lane: LlmLane | None = None,
     ) -> Iterator[int]:
-        lane, capacity = self._lane(model)
+        lane, capacity = self._lane(model, lane)
         slots = tuple(
             sorted(
                 available_slots if available_slots is not None else range(capacity)
@@ -219,20 +235,26 @@ class LlmGateway:
         self.settings = settings or get_settings()
         self.client = httpx.Client(timeout=self.settings.ollama_timeout_seconds)
         self.gpu = GpuSemaphore(self.settings)
+        self.prompt_budget = QwenPromptBudget(self.settings)
         self._health_guard = threading.Lock()
         self._endpoint_health: dict[str, tuple[float, bool, bool]] = {}
 
-    def _model_urls(self, model: str) -> list[str]:
-        if model == self.settings.ollama_research_model:
+    def _model_urls(self, lane: LlmLane) -> list[str]:
+        if lane == "assist":
+            return [self.settings.ollama_assist_url]
+        if lane == "research":
             return self.settings.ollama_research_urls
         return [self.settings.ollama_base_url.rstrip("/")]
 
-    def _research_endpoint_status(self) -> list[dict[str, Any]]:
-        urls = self.settings.ollama_research_urls[
-            : self.settings.ollama_research_max_concurrency
-        ]
-        if len(urls) == 1:
-            return [{"id": "research-0", "healthy": True, "model_available": True}]
+    def _endpoint_status(self, lane: LlmLane, model: str) -> list[dict[str, Any]]:
+        if lane not in {"assist", "research"}:
+            return []
+        if lane == "assist" and not self.settings.ollama_assist_base_url:
+            return []
+        if lane == "research" and not self.settings.ollama_research_base_urls:
+            return []
+        capacity = self.gpu.capacity_for(model, lane)
+        urls = self._model_urls(lane)[:capacity]
         now = monotonic()
         result: list[dict[str, Any]] = []
         for index, url in enumerate(urls):
@@ -245,7 +267,7 @@ class LlmGateway:
                     response.raise_for_status()
                     names = {str(item.get("name")) for item in response.json().get("models", [])}
                     healthy = True
-                    model_available = self.settings.ollama_research_model in names
+                    model_available = model in names
                 except (httpx.HTTPError, ValueError, KeyError):
                     pass
                 with self._health_guard:
@@ -254,15 +276,16 @@ class LlmGateway:
                 _, healthy, model_available = cached
             result.append(
                 {
-                    "id": f"research-{index}",
+                    "id": "assist-0" if lane == "assist" else f"research-{index}",
                     "healthy": healthy,
                     "model_available": model_available,
                 }
             )
         return result
 
-    def queue_status(self, model: str) -> dict[str, Any]:
-        instances = self._research_endpoint_status() if model == self.settings.ollama_research_model else []
+    def queue_status(self, model: str, *, lane: LlmLane | None = None) -> dict[str, Any]:
+        resolved_lane = self._resolve_lane(model, lane)
+        instances = self._endpoint_status(resolved_lane, model)
         available_slots = (
             {
                 index
@@ -273,33 +296,57 @@ class LlmGateway:
             else None
         )
         status = (
-            self.gpu.queue_status(model, available_slots)
+            self.gpu.queue_status(model, available_slots, lane=resolved_lane)
             if available_slots is not None
-            else self.gpu.queue_status(model)
+            else self.gpu.queue_status(model, lane=resolved_lane)
         )
         return {**status, "instances": instances}
 
-    def _num_threads_for(self, model: str) -> int:
+    def _resolve_lane(self, model: str, lane: LlmLane | None = None) -> LlmLane:
+        if lane is not None:
+            return lane
         if model == self.settings.ollama_extract_model:
-            return self.settings.ollama_extract_num_threads or self.settings.ollama_num_threads
-        if model == self.settings.ollama_assist_model:
-            return self.settings.ollama_assist_num_threads or self.settings.ollama_num_threads
-        if model == self.settings.ollama_research_model:
-            return self.settings.ollama_research_num_threads or self.settings.ollama_num_threads
+            return "extract"
         if model == self.settings.ollama_code_model:
+            return "code"
+        if model == self.settings.ollama_assist_model:
+            return "assist"
+        if model == self.settings.ollama_research_model:
+            return "research"
+        raise LlmError(f"explicit inference lane required for model {model}")
+
+    def _num_threads_for(self, lane: LlmLane | str) -> int:
+        if lane not in {"extract", "assist", "research", "code"}:
+            lane = self._resolve_lane(lane)
+        if lane == "extract":
+            return self.settings.ollama_extract_num_threads or self.settings.ollama_num_threads
+        if lane == "assist":
+            return self.settings.ollama_assist_num_threads or self.settings.ollama_num_threads
+        if lane == "research":
+            return self.settings.ollama_research_num_threads or self.settings.ollama_num_threads
+        if lane == "code":
             return self.settings.ollama_code_num_threads or self.settings.ollama_num_threads
         return self.settings.ollama_num_threads
 
-    def num_threads_for(self, model: str) -> int:
-        return self._num_threads_for(model)
+    def num_threads_for(self, model: str, *, lane: LlmLane | None = None) -> int:
+        return self._num_threads_for(self._resolve_lane(model, lane))
 
-    def _max_output_tokens_for(self, model: str) -> int:
-        if model == self.settings.ollama_research_model:
+    def _max_output_tokens_for(self, lane: LlmLane) -> int:
+        if lane == "assist":
+            return self.settings.ollama_assist_max_output_tokens
+        if lane == "research":
             return self.settings.ollama_research_max_output_tokens
         return self.settings.ollama_max_output_tokens
 
-    def _timeout_for(self, model: str, attempt: int) -> int:
-        if model == self.settings.ollama_research_model:
+    def _context_length_for(self, lane: LlmLane) -> int:
+        if lane == "assist":
+            return self.settings.ollama_assist_context_length
+        if lane == "research":
+            return self.settings.ollama_research_context_length
+        return self.settings.ollama_context_length
+
+    def _timeout_for(self, lane: LlmLane, attempt: int) -> int:
+        if lane == "research":
             if attempt > 1:
                 return self.settings.ollama_research_validation_retry_timeout_seconds
             return self.settings.ollama_research_timeout_seconds
@@ -309,6 +356,7 @@ class LlmGateway:
         self,
         *,
         model: str,
+        lane: LlmLane | None = None,
         system: str,
         prompt: str,
         schema: type[BaseModel] | None = None,
@@ -317,14 +365,27 @@ class LlmGateway:
         entity_type: str | None = None,
         entity_id: UUID | str | None = None,
     ) -> dict[str, Any]:
+        resolved_lane = self._resolve_lane(model, lane)
         schema_hint = schema.model_json_schema() if schema else {"type": "object"}
-        messages = [
-            {"role": "system", "content": system},
-            {
-                "role": "user",
-                "content": f"{prompt}\n\n只返回符合请求中 format JSON Schema 的 JSON。",
-            },
-        ]
+        if resolved_lane in {"assist", "research"}:
+            try:
+                messages, estimated_prompt_tokens = self.prompt_budget.fit(
+                    system=system,
+                    prompt=prompt,
+                    schema_payload=schema_hint,
+                    max_tokens=self.settings.ollama_7b_max_input_tokens,
+                )
+            except Exception as exc:
+                raise LlmError(f"7B prompt budget enforcement failed: {exc}") from exc
+        else:
+            messages = [
+                {"role": "system", "content": system},
+                {
+                    "role": "user",
+                    "content": f"{prompt}\n\n只返回符合请求中 format JSON Schema 的 JSON。",
+                },
+            ]
+            estimated_prompt_tokens = None
         logical_call_id = uuid4()
         for attempt in (1, 2):
             started_at = utc_now()
@@ -335,18 +396,14 @@ class LlmGateway:
             try:
                 options: dict[str, int | float] = {
                     "temperature": temperature,
-                    "num_ctx": self.settings.ollama_context_length,
-                    "num_predict": self._max_output_tokens_for(model),
+                    "num_ctx": self._context_length_for(resolved_lane),
+                    "num_predict": self._max_output_tokens_for(resolved_lane),
                 }
-                num_threads = self._num_threads_for(model)
+                num_threads = self._num_threads_for(resolved_lane)
                 if num_threads:
                     options["num_thread"] = num_threads
-                model_urls = self._model_urls(model)
-                instances = (
-                    self._research_endpoint_status()
-                    if model == self.settings.ollama_research_model
-                    else []
-                )
+                model_urls = self._model_urls(resolved_lane)
+                instances = self._endpoint_status(resolved_lane, model)
                 available_slots = (
                     {
                         index
@@ -356,15 +413,20 @@ class LlmGateway:
                     if instances
                     else None
                 )
-                request_timeout = self._timeout_for(model, attempt)
+                request_timeout = self._timeout_for(resolved_lane, attempt)
                 with self.gpu.acquire(
                     model,
                     request_timeout + 30,
                     available_slots,
+                    lane=resolved_lane,
                 ) as slot:
                     slot_index = int(slot or 0)
                     endpoint_id = (
-                        f"research-{slot_index}" if len(model_urls) > 1 else "main"
+                        "assist-0"
+                        if resolved_lane == "assist"
+                        else f"research-{slot_index}"
+                        if resolved_lane == "research"
+                        else "main"
                     )
                     response = self.client.post(
                         f"{model_urls[slot_index % len(model_urls)]}/api/chat",
@@ -382,6 +444,16 @@ class LlmGateway:
                     )
                     response.raise_for_status()
                 response_data = response.json()
+                actual_prompt_tokens = response_data.get("prompt_eval_count")
+                if (
+                    resolved_lane in {"assist", "research"}
+                    and isinstance(actual_prompt_tokens, int)
+                    and actual_prompt_tokens > self.settings.ollama_7b_max_input_tokens
+                ):
+                    raise LlmError(
+                        f"Ollama evaluated {actual_prompt_tokens} prompt tokens; "
+                        f"limit is {self.settings.ollama_7b_max_input_tokens}"
+                    )
                 content = response_data.get("message", {}).get("content", "")
                 try:
                     parsed = json.loads(content)
@@ -418,6 +490,8 @@ class LlmGateway:
                             if key in response_data
                         },
                         "endpoint": endpoint_id,
+                        "lane": resolved_lane,
+                        "estimated_prompt_tokens": estimated_prompt_tokens,
                     },
                     entity_type=entity_type,
                     entity_id=str(entity_id) if entity_id is not None else None,
@@ -441,6 +515,11 @@ class LlmGateway:
                     error=f"{type(exc).__name__}: {exc}",
                     prompt_tokens=response_data.get("prompt_eval_count"),
                     completion_tokens=response_data.get("eval_count"),
+                    metrics={
+                        "endpoint": endpoint_id,
+                        "lane": resolved_lane,
+                        "estimated_prompt_tokens": estimated_prompt_tokens,
+                    },
                     entity_type=entity_type,
                     entity_id=str(entity_id) if entity_id is not None else None,
                     settings=self.settings,

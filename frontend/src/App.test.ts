@@ -113,12 +113,12 @@ describe("Ollama model availability", () => {
 
     tracking = updateHealthTracking(tracking, {
       ollama: true,
-      models: ["qwen2.5:3b", "qwen2.5:7b", "qwen2.5:14b", "qwen2.5-coder:7b"],
+      models: ["qwen2.5:3b", "qwen2.5:7b", "qwen2.5-coder:7b"],
     });
 
     expect(tracking.ollama).toEqual({ failures: 0, state: "available" });
     expect(tracking.models["qwen2.5:7b"]).toEqual({ failures: 0, state: "available" });
-    expect(tracking.models["qwen2.5:14b"]).toEqual({ failures: 0, state: "available" });
+    expect(tracking.models["qwen2.5-coder:7b"]).toEqual({ failures: 0, state: "available" });
   });
 
   it("tracks missing models independently from Ollama and installed models", () => {
@@ -133,16 +133,15 @@ describe("Ollama model availability", () => {
 
     expect(tracking.ollama.state).toBe("available");
     expect(tracking.models["qwen2.5:3b"].state).toBe("available");
-    expect(tracking.models["qwen2.5:14b"]).toEqual({ failures: 3, state: "missing" });
     expect(tracking.models["qwen2.5-coder:7b"]).toEqual({ failures: 3, state: "missing" });
   });
 
   it("matches Ollama model names case-insensitively", () => {
     const tracking = updateHealthTracking(
       createInitialHealthTracking(),
-      { ollama: true, models: ["QWEN2.5:14B"] },
+      { ollama: true, models: ["QWEN2.5:7B"] },
     );
-    expect(tracking.models["qwen2.5:14b"].state).toBe("available");
+    expect(tracking.models["qwen2.5:7b"].state).toBe("available");
   });
 });
 
@@ -190,7 +189,7 @@ describe("analysis mapping states", () => {
       news: [],
       event: { headline: "待映射新闻", event_type: "earnings", direct_impact: "待确认", priority: 0.5 },
       asset: null,
-      models: ["qwen2.5:14b"],
+      models: ["qwen2.5:7b"],
       steps: [],
       result: null,
     });
@@ -232,12 +231,12 @@ describe("analysis mapping states", () => {
       }],
       event: { headline: "测试事件", event_type: "earnings", direct_impact: "利润增长", priority: 0.8 },
       asset: { symbol: "600000", name: "测试公司", market: "CN" },
-      models: ["qwen2.5:14b"],
+      models: ["qwen2.5:7b"],
       steps: [{
         phase: "report_drafting",
         status: "completed",
         executor: "ollama",
-        model: "qwen2.5:14b",
+        model: "qwen2.5:7b",
         summary: "研究报告已生成。",
         metrics: {},
         occurred_at: "2026-08-26T00:45:00Z",
@@ -271,7 +270,7 @@ describe("analysis mapping states", () => {
       news: [],
       event: { headline: "行业政策更新", event_type: "policy", direct_impact: "影响行业预期", priority: 0.7 },
       asset: null,
-      models: ["qwen2.5:14b"],
+      models: ["qwen2.5:7b"],
       steps: [],
       result: {
         kind: "event_report",
@@ -704,7 +703,7 @@ describe("research queue page", () => {
     const markup = renderToStaticMarkup(createElement(UnifiedModelQueuePanel, {
       queue: overviewQueue({
         id: "research",
-        model: "qwen2.5:14b",
+        model: "qwen2.5:7b",
         purpose: "标的研究",
         instances: [
           { id: "research-0", healthy: true, model_available: true },
@@ -718,11 +717,21 @@ describe("research queue page", () => {
     expect(markup).toContain("近24h吞吐<strong>2.5/时</strong>");
     expect(markup).toContain("research-0 · 可用");
     expect(markup).toContain("research-1 · 离线");
+
+    const assistMarkup = renderToStaticMarkup(createElement(UnifiedModelQueuePanel, {
+      queue: overviewQueue({
+        id: "assist",
+        model: "qwen2.5:7b",
+        purpose: "股票映射",
+        instances: [{ id: "assist-0", healthy: true, model_available: true }],
+      }),
+    }));
+    expect(assistMarkup).toContain("assist-0 · 可用");
   });
 
   it("renders per-task cancellation for research and clear controls for every model", () => {
     const research = overviewQueue({
-      id: "research", model: "qwen2.5:14b", purpose: "标的研究",
+      id: "research", model: "qwen2.5:7b", purpose: "标的研究",
       tasks: [{
         task_id: "asset:cn:600519:queued-at", kind: "asset_research", entity_id: "cn:600519",
         title: "600519 · 贵州茅台", subtitle: "CN · equity", source: "business", status: "running",

@@ -1,7 +1,6 @@
 #!/bin/sh
 set -eu
 
-instance="${1:?research instance index is required}"
 project_env="${OLLAMA_PROJECT_ENV_FILE:-/opt/RAG-Agentic-Looping/.env}"
 
 read_project_value() {
@@ -26,29 +25,12 @@ read_project_value() {
   printf '%s' "$value"
 }
 
-case "$instance" in
-  0)
-    host="172.17.0.1:11435"
-    cpus="0-7"
-    node="0"
-    ;;
-  1)
-    host="172.17.0.1:11436"
-    cpus="20-27"
-    node="1"
-    ;;
-  *)
-    echo "unsupported research instance: $instance" >&2
-    exit 2
-    ;;
-esac
-
-export OLLAMA_HOST="$host"
+export OLLAMA_HOST="172.17.0.1:11437"
 export OLLAMA_KEEP_ALIVE="$(read_project_value OLLAMA_KEEP_ALIVE -1)"
 export OLLAMA_MAX_LOADED_MODELS=1
 export OLLAMA_NUM_PARALLEL=1
-export OLLAMA_CONTEXT_LENGTH="$(read_project_value OLLAMA_RESEARCH_CONTEXT_LENGTH 16384)"
+export OLLAMA_CONTEXT_LENGTH="$(read_project_value OLLAMA_ASSIST_CONTEXT_LENGTH 16384)"
 export OLLAMA_MAX_QUEUE="$(read_project_value OLLAMA_MAX_QUEUE 256)"
 export OLLAMA_LOAD_TIMEOUT="$(read_project_value OLLAMA_LOAD_TIMEOUT 10m)"
 
-exec numactl --physcpubind="$cpus" --membind="$node" /usr/local/bin/ollama serve
+exec numactl --physcpubind="8-15" --membind="0" /usr/local/bin/ollama serve

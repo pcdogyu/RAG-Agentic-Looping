@@ -88,6 +88,7 @@ class AssetMappingService:
         )
         payload = self.llm.generate_json(
             model=self.settings.ollama_assist_model,
+            lane="assist",
             system="你是谨慎的跨市场证券主数据映射器。宁可不映射，也不能创造证券或关系。",
             prompt=prompt,
             schema=AssetMappingOutput,

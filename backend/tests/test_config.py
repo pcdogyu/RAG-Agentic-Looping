@@ -21,10 +21,15 @@ def test_default_ollama_roles_keep_extract_and_research_models_resident(
 
     assert settings.ollama_extract_model == "qwen2.5:3b"
     assert settings.ollama_assist_model == "qwen2.5:7b"
-    assert settings.ollama_research_model == "qwen2.5:14b"
+    assert settings.ollama_research_model == "qwen2.5:7b"
     assert settings.ollama_context_length == 8192
     assert settings.ollama_num_parallel == 2
-    assert settings.ollama_max_loaded_models == 3
+    assert settings.ollama_max_loaded_models == 2
+    assert settings.ollama_assist_context_length == 16384
+    assert settings.ollama_research_context_length == 16384
+    assert settings.ollama_7b_max_input_tokens == 5000
+    assert settings.ollama_assist_max_output_tokens == 8192
+    assert settings.ollama_research_max_output_tokens == 8192
     assert settings.ollama_max_queue == 256
     assert settings.ollama_load_timeout == "10m"
     assert settings.ollama_keep_alive == "-1"

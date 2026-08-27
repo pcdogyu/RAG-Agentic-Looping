@@ -238,6 +238,7 @@ class EventService:
         try:
             payload = self.llm.generate_json(
                 model=self.settings.ollama_extract_model,
+                lane="extract",
                 system="你是谨慎的跨市场新闻结构化引擎。拒绝猜测，输出结构化事实。",
                 prompt=prompt,
                 schema=ExtractedEvent,

@@ -28,7 +28,7 @@ read_project_value() {
 }
 
 export OLLAMA_KEEP_ALIVE="$(read_project_value OLLAMA_KEEP_ALIVE -1)"
-export OLLAMA_MAX_LOADED_MODELS="$(read_project_value OLLAMA_MAX_LOADED_MODELS 3)"
+export OLLAMA_MAX_LOADED_MODELS="$(read_project_value OLLAMA_MAX_LOADED_MODELS 2)"
 export OLLAMA_NUM_PARALLEL="$(read_project_value OLLAMA_NUM_PARALLEL 2)"
 export OLLAMA_CONTEXT_LENGTH="$(read_project_value OLLAMA_CONTEXT_LENGTH 8192)"
 export OLLAMA_MAX_QUEUE="$(read_project_value OLLAMA_MAX_QUEUE 256)"

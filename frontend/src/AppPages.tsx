@@ -470,7 +470,7 @@ export function UnifiedModelQueuePanel({
         <span>近24h吞吐<strong>{queue.metrics.throughput_per_hour === null ? "—" : `${queue.metrics.throughput_per_hour.toFixed(1)}/时`}</strong></span>
       </>}
     </div>
-    {queue.id === "research" && !!queue.instances.length && <div className="research-instance-status" aria-label="14B 研究实例状态">
+    {(queue.id === "research" || queue.id === "assist") && !!queue.instances.length && <div className="research-instance-status" aria-label={`${queue.purpose}实例状态`}>
       {queue.instances.map((instance) => {
         const ready = instance.healthy && instance.model_available;
         return <span className={ready ? "healthy" : "unavailable"} key={instance.id}>
@@ -593,9 +593,9 @@ export function QueuePage({ apiBase }: { apiBase: string }) {
   }, [loadQueues]);
 
   return <section className="app-page queue-page">
-    <PageHeading eyebrow="ACTIVE MODEL PIPELINES" title="队列" copy="分别查看四个本地模型的业务任务与推理通道；页面每 5 秒自动更新。" />
+    <PageHeading eyebrow="ACTIVE MODEL PIPELINES" title="队列" copy="分别查看四条业务队列及其独立推理通道；页面每 5 秒自动更新。" />
     <div className="queue-toolbar">
-      <span>四个模型队列独立加载；任一服务异常不会遮挡其他队列。</span>
+      <span>四条业务队列独立加载；任一服务异常不会遮挡其他队列。</span>
       <button
         type="button"
         disabled={loading}
@@ -606,7 +606,7 @@ export function QueuePage({ apiBase }: { apiBase: string }) {
     </div>
     {error && <div className="page-error">{error}</div>}
     {actionMessage && <div className="page-message">{actionMessage}</div>}
-    {!overview && loading && <div className="page-message">正在读取四个模型队列…</div>}
+    {!overview && loading && <div className="page-message">正在读取四条业务队列…</div>}
     <div className="model-queue-columns">
       {overview?.queues.map((queue) => <UnifiedModelQueuePanel
         queue={queue}

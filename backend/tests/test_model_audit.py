@@ -111,17 +111,16 @@ def test_gateway_records_exact_redacted_input_output(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("model", "expected_threads", "expected_capacity"),
+    ("lane", "expected_threads", "expected_capacity"),
     [
-        ("qwen2.5:3b", 8, 1),
-        ("qwen2.5:7b", 10, 1),
-        ("qwen2.5:14b", 16, 2),
-        ("qwen2.5-coder:7b", 6, 1),
-        ("custom:latest", 4, 1),
+        ("extract", 8, 1),
+        ("assist", 10, 1),
+        ("research", 16, 2),
+        ("code", 6, 1),
     ],
 )
 def test_gateway_uses_model_specific_threads_and_capacity(
-    model, expected_threads, expected_capacity
+    lane, expected_threads, expected_capacity
 ):
     settings = Settings(
         ollama_num_threads=4,
@@ -136,8 +135,9 @@ def test_gateway_uses_model_specific_threads_and_capacity(
     )
     gateway = LlmGateway(settings)
 
-    assert gateway._num_threads_for(model) == expected_threads
-    assert gateway.gpu.capacity_for(model) == expected_capacity
+    model = getattr(settings, f"ollama_{lane}_model")
+    assert gateway.num_threads_for(model, lane=lane) == expected_threads
+    assert gateway.gpu.capacity_for(model, lane=lane) == expected_capacity
 
 
 def test_model_queue_status_counts_waiters_and_running_slots():
@@ -176,10 +176,10 @@ def test_model_semaphore_enforces_independent_local_capacities():
         with pytest.raises(LlmError, match="local extract"):
             with semaphore.acquire(settings.ollama_extract_model, timeout=0.01):
                 pass
-        with semaphore.acquire(settings.ollama_research_model, timeout=0.01):
-            with semaphore.acquire(settings.ollama_research_model, timeout=0.01):
+        with semaphore.acquire(settings.ollama_research_model, timeout=0.01, lane="research"):
+            with semaphore.acquire(settings.ollama_research_model, timeout=0.01, lane="research"):
                 with pytest.raises(LlmError, match="local research"):
-                    with semaphore.acquire(settings.ollama_research_model, timeout=0.01):
+                    with semaphore.acquire(settings.ollama_research_model, timeout=0.01, lane="research"):
                         pass
 
 
@@ -223,7 +223,9 @@ def test_model_semaphore_renews_short_redis_lease(monkeypatch):
     semaphore._redis = FakeRedis()
     monkeypatch.setattr("backend.app.llm.INFERENCE_LOCK_HEARTBEAT_SECONDS", 0.01)
 
-    with semaphore.acquire(semaphore.settings.ollama_research_model, timeout=0.1):
+    with semaphore.acquire(
+        semaphore.settings.ollama_research_model, timeout=0.1, lane="research"
+    ):
         time_module.sleep(0.035)
 
     assert lock.extensions >= 2
@@ -252,7 +254,9 @@ def test_gateway_does_not_retry_transport_failures(monkeypatch):
     monkeypatch.setattr(gateway.gpu, "acquire", lambda *args, **kwargs: _null_context())
 
     with pytest.raises(httpx.ConnectError):
-        gateway.generate_json(model="qwen2.5:7b", system="system", prompt="prompt")
+        gateway.generate_json(
+            model="qwen2.5:7b", lane="assist", system="system", prompt="prompt"
+        )
 
     with SessionLocal() as db:
         rows = list(db.scalars(select(ModelCallAuditRow).order_by(ModelCallAuditRow.attempt)))
@@ -282,6 +286,7 @@ def test_gateway_retries_invalid_json_once(monkeypatch):
 
     assert gateway.generate_json(
         model="qwen2.5:7b",
+        lane="assist",
         system="system",
         prompt="prompt",
         schema=AuditOutput,
@@ -317,6 +322,7 @@ def test_research_pool_routes_one_slot_per_endpoint(monkeypatch):
     for _ in range(2):
         assert gateway.generate_json(
             model=settings.ollama_research_model,
+            lane="research",
             system="system",
             prompt="prompt",
             schema=AuditOutput,
@@ -330,6 +336,67 @@ def test_research_pool_routes_one_slot_per_endpoint(monkeypatch):
         item[1]["json"]["options"]["num_predict"] == 1024 for item in client.urls
     )
     assert all(item[1]["timeout"] == 900 for item in client.urls)
+
+
+def test_same_7b_model_keeps_assist_and_research_lanes_isolated(monkeypatch):
+    settings = Settings(
+        ollama_assist_model="qwen2.5:7b",
+        ollama_research_model="qwen2.5:7b",
+        ollama_assist_base_url="http://assist.invalid",
+        ollama_research_base_urls="http://research-0.invalid,http://research-1.invalid",
+        ollama_assist_num_threads=8,
+        ollama_research_num_threads=8,
+        ollama_assist_max_output_tokens=8192,
+        ollama_research_max_output_tokens=8192,
+    )
+    gateway = LlmGateway(settings)
+    gateway.gpu._redis = None
+
+    class LaneClient:
+        def __init__(self):
+            self.requests = []
+
+        def get(self, *_args, **_kwargs):
+            return FakeResponse({"models": [{"name": "qwen2.5:7b"}]})
+
+        def post(self, url, **kwargs):
+            self.requests.append((url, kwargs))
+            return FakeResponse(
+                {
+                    "message": {"content": '{"answer":"ok"}'},
+                    "prompt_eval_count": 4321,
+                }
+            )
+
+    gateway.client = LaneClient()
+    monkeypatch.setattr("backend.app.llm.persist_model_audit", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        gateway.prompt_budget,
+        "fit",
+        lambda **_kwargs: ([{"role": "user", "content": "bounded"}], 4321),
+    )
+
+    for lane in ("assist", "research", "research"):
+        assert gateway.generate_json(
+            model="qwen2.5:7b",
+            lane=lane,
+            system="system",
+            prompt="prompt",
+            schema=AuditOutput,
+        ) == {"answer": "ok"}
+
+    assert [request[0] for request in gateway.client.requests] == [
+        "http://assist.invalid/api/chat",
+        "http://research-0.invalid/api/chat",
+        "http://research-1.invalid/api/chat",
+    ]
+    for _, request in gateway.client.requests:
+        assert request["json"]["options"] == {
+            "temperature": 0.1,
+            "num_ctx": 16384,
+            "num_predict": 8192,
+            "num_thread": 8,
+        }
 
 
 def test_legacy_backfill_is_idempotent_and_labeled(db):

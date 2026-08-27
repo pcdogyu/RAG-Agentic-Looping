@@ -298,6 +298,7 @@ class EventResearchService:
         )
         payload = self.llm.generate_json(
             model=self.settings.ollama_research_model,
+            lane="research",
             system="你是证据优先的宏观和行业事件研究员，不提供实盘指令。",
             prompt=prompt,
             schema=EventReportDraft,
@@ -323,6 +324,7 @@ class EventResearchService:
         )
         payload = self.llm.generate_json(
             model=self.settings.ollama_research_model,
+            lane="research",
             system="你是中性事件研报修订器，只能使用给定证据。",
             prompt=prompt,
             schema=EventReportDraft,
