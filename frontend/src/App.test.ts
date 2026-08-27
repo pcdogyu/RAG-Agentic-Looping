@@ -21,6 +21,7 @@ import {
   ModelInferenceQueuePanel,
   ModelQueueTaskGrid,
   type ModelQueueOverviewItem,
+  type ModelQueueTask,
   navigationGroups,
   newsBoardRefreshIntervalMs,
   newsBoardStatusLabels,
@@ -33,6 +34,7 @@ import {
   routeFromHash,
   TopNavigation,
   UnifiedModelQueuePanel,
+  removeTasksFromQueueOverview,
 } from "./AppPages";
 import ModelLogsPage, {
   buildModelLogQuery,
@@ -774,6 +776,36 @@ describe("research queue page", () => {
       expect(modelPanel).toContain("实例个数<strong>1</strong>");
       expect(modelPanel).toContain("单实例并发<strong>1 路</strong>");
     }
+  });
+
+  it("removes a cancelled card and decrements its pending count immediately", () => {
+    const queuedTask = {
+      task_id: "event-run", kind: "event_research", entity_id: "event-1",
+      title: "富时中国A50指数期货盘初上涨", subtitle: "中性事件研报",
+      source: "business", status: "queued", attempt: 1, task_count: 1,
+      queued_at: "2026-08-27T01:00:00Z", started_at: null, completed_at: null,
+      updated_at: "2026-08-27T01:00:00Z", queue_duration_ms: 60_000,
+      execution_duration_ms: null, error: null, metrics: {},
+    } satisfies ModelQueueTask;
+    const research = overviewQueue({
+      id: "research", model: "qwen2.5:7b", purpose: "标的研究",
+      counts: {
+        queued: 2, running: 0, retrying: 0, verifying: 0,
+        waiting_for_model: 0, completed: 8, failed: 2,
+      },
+      total_tasks: 12,
+      tasks: [queuedTask],
+    });
+
+    const updated = removeTasksFromQueueOverview(
+      { generated_at: "2026-08-27T01:00:00Z", queues: [research] },
+      "research",
+      (task) => task.task_id === queuedTask.task_id,
+    );
+
+    expect(updated.queues[0].counts.queued).toBe(1);
+    expect(updated.queues[0].total_tasks).toBe(11);
+    expect(updated.queues[0].tasks).toEqual([]);
   });
 });
 
