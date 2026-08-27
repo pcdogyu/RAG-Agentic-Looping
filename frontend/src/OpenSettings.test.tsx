@@ -32,6 +32,21 @@ describe("open source and search settings", () => {
     expect(markup).toContain("置信度 95% · 资料覆盖完整");
   });
 
+  it("does not score a conclusion whose evidence gate is incomplete", () => {
+    const markup = renderToStaticMarkup(createElement(ConclusionScore, {
+      score: null,
+      rating: "watch",
+      confidence: 0,
+      evidenceComplete: false,
+      directionalEvidenceComplete: false,
+      signalStatus: "insufficient_evidence",
+    }));
+
+    expect(markup).toContain("暂不评分");
+    expect(markup).toContain("方向证据不足 · 评级：观察");
+    expect(markup).not.toContain("发布分：0");
+  });
+
   it("deduplicates a news item repeated as evidence", () => {
     const references = conclusionReferences({
       news: [{
@@ -70,6 +85,9 @@ describe("open source and search settings", () => {
 
     expect(markup).toContain("历史失败研究");
     expect(markup).toContain("重新执行会创建新任务");
+    expect(markup).toContain("正在加载历史失败研究…");
+    expect(markup).toContain("正在加载研究结论…");
+    expect(markup).not.toContain("当前筛选范围内没有最终标的建议。");
     expect(failedResearchRetryPath({ kind: "asset", id: "asset-run" })).toBe(
       "/api/v1/research-runs/asset-run/retry",
     );

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from collections.abc import Callable
 from datetime import timedelta
 from difflib import SequenceMatcher
@@ -24,6 +23,7 @@ from backend.app.providers.registry import (
     explicit_symbol_present,
     query_mentions_issuer,
 )
+from backend.app.services.directional_scoring import directional_text_hint
 from backend.app.services.source_lineage import enrich_news_lineage, normalize_text, source_group
 from backend.app.storage import (
     event_news_item_ids,
@@ -273,9 +273,33 @@ class EventService:
                     phase="event_extraction_fallback",
                     status="fallback",
                     executor="rules",
-                    model="keyword-rules:v1",
+                    model="keyword-rules:v2",
                     summary=f"规则引擎已整理为 {extracted.event_type.value} 事件。",
                     metrics={"entities": len(extracted.entities)},
+                )
+            )
+
+        extracted_direction = extracted.impact_direction
+        resolved_direction = directional_text_hint(
+            item.title,
+            item.summary,
+            extracted.direct_impact,
+            fallback=extracted_direction,
+        )
+        extracted.impact_direction = resolved_direction or 0
+        if extracted.impact_direction != extracted_direction:
+            extraction_steps.append(
+                AnalysisStep(
+                    phase="direction_normalization",
+                    executor="deterministic-language-rules:v2",
+                    summary=(
+                        "明确利多/利空事实覆盖了模型的初步事件方向："
+                        f"{extracted_direction:+d} → {extracted.impact_direction:+d}。"
+                    ),
+                    metrics={
+                        "model_direction": extracted_direction,
+                        "resolved_direction": extracted.impact_direction,
+                    },
                 )
             )
 
@@ -375,9 +399,7 @@ class EventService:
             if any(keyword in text for keyword in keywords):
                 event_type = candidate_type
                 break
-        direction = -1 if re.search(r"loss|miss|ban|hack|跌|亏损|处罚|被盗", text) else 0
-        if re.search(r"beat|growth|approval|record|增长|获批|创新高", text):
-            direction = 1
+        direction = directional_text_hint(text, fallback=0) or 0
         entities = list(item.symbols)
         return ExtractedEvent(
             event_type=event_type,

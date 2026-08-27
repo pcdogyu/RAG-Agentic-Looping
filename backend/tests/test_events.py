@@ -76,6 +76,30 @@ def test_extracts_event_and_maps_asset():
     assert event.analysis_steps[-1].metrics["candidate_count"] == 1
 
 
+def test_explicit_adverse_news_corrects_an_incorrect_positive_model_direction():
+    settings = Settings(fmp_access_token="", fmp_mcp_url="")
+    registry = ProviderRegistry(settings)
+    item = NewsItem(
+        source="Example Wire",
+        source_quality=SourceQuality.PROFESSIONAL,
+        title="Securities Fraud Class Action Lawsuit Filed Against Apple",
+        summary="The complaint alleges material misstatements and investor losses.",
+        url="https://example.com/apple-lawsuit",
+        published_at=datetime(2025, 1, 31, tzinfo=UTC),
+        as_of=datetime(2025, 1, 31, tzinfo=UTC),
+        content_hash=sha256(b"apple-lawsuit").hexdigest(),
+        symbols=["AAPL"],
+    )
+
+    event = EventService(registry, settings, FakeLlm()).extract(item)
+
+    assert event.candidates[0].impact_direction == -1
+    normalization = next(
+        step for step in event.analysis_steps if step.phase == "direction_normalization"
+    )
+    assert normalization.metrics == {"model_direction": 1, "resolved_direction": -1}
+
+
 def test_ingest_clusters_duplicate_reprints(db):
     settings = Settings(fmp_access_token="", fmp_mcp_url="")
     registry = ProviderRegistry(settings)

@@ -40,6 +40,7 @@ from backend.app.services.directional_scoring import (
     blocked_probabilities,
     calibrate_probabilities,
     deterministic_direction_score,
+    directional_text_hint,
     gated_score,
     probabilities_for_score,
 )
@@ -898,6 +899,26 @@ class ResearchService:
         confidence = min(candidate.relevance, candidate.mapping_confidence)
         return direction, candidate.relevance, confidence
 
+    @classmethod
+    def _direction_inputs(
+        cls,
+        run: ResearchRun,
+        event_payload: dict[str, Any] | None,
+        draft: DraftOutput,
+    ) -> tuple[int | None, float, float]:
+        direction, relevance, confidence = cls._mapping_inputs(run, event_payload)
+        event = NewsEvent.model_validate(event_payload) if event_payload else None
+        direction = directional_text_hint(
+            event.headline if event else None,
+            event.direct_impact if event else None,
+            draft.summary,
+            draft.financials_and_growth,
+            *draft.risks,
+            fallback=direction,
+            allow_beneficial=False,
+        )
+        return direction, relevance, confidence
+
     @staticmethod
     def _source_weight(quality: SourceQuality) -> float:
         return {
@@ -960,7 +981,9 @@ class ResearchService:
         assessments: list[ClaimEvidenceAssessment] = []
         semantic_missing: list[str] = []
 
-        event_direction, event_relevance, _ = self._mapping_inputs(run, state.get("event"))
+        event_direction, event_relevance, _ = self._direction_inputs(
+            run, state.get("event"), draft
+        )
         factor_summary = state.get("factor_summary", {})
         preview = deterministic_direction_score(
             bull_probability=draft.bull_probability,
@@ -1516,8 +1539,8 @@ class ResearchService:
         draft = DraftOutput.model_validate(state["draft"])
         verification = VerificationOutput.model_validate(state["verification"])
         event = NewsEvent.model_validate(state["event"]) if state.get("event") else None
-        event_direction, event_relevance, mapping_confidence = self._mapping_inputs(
-            run, state.get("event")
+        event_direction, event_relevance, mapping_confidence = self._direction_inputs(
+            run, state.get("event"), draft
         )
         factor_summary = state.get("factor_summary", {})
         calibration_reliability = (
@@ -1725,7 +1748,7 @@ class ResearchService:
             mapping_confidence=mapping_confidence,
             claim_assessments=verification.claim_assessments,
             gate_reasons=gate_reasons,
-            scoring_version="deterministic-event-factor-v1",
+            scoring_version="deterministic-event-factor-v2",
             calibration_version="evidence-shrinkage-score-aligned-v2",
         )
         run.recommendation = recommendation

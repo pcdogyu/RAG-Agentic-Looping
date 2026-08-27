@@ -154,6 +154,7 @@ export type ModelInferenceQueueItem = {
 
 export type ModelQueueTask = {
   task_id: string;
+  instance_id: string | null;
   kind: string;
   entity_id: string | null;
   title: string;
@@ -172,6 +173,43 @@ export type ModelQueueTask = {
   metrics: Record<string, unknown>;
 };
 
+type ModelQueueCounts = {
+  queued: number;
+  running: number;
+  retrying: number;
+  verifying: number;
+  waiting_for_model: number;
+  completed: number;
+  failed: number;
+};
+
+type ModelQueueMetrics = {
+  average_queue_duration_ms: number | null;
+  average_execution_duration_ms: number | null;
+  longest_wait_ms: number | null;
+  estimated_clear_ms: number | null;
+  queue_duration_sample_count: number;
+  execution_duration_sample_count: number;
+  execution_p50_ms: number | null;
+  execution_p90_ms: number | null;
+  throughput_per_hour: number | null;
+};
+
+export type ModelQueueInstanceItem = {
+  id: string;
+  healthy: boolean;
+  model_available: boolean;
+  state: string;
+  capacity: number;
+  available: number;
+  observable: boolean;
+  counts: ModelQueueCounts;
+  metrics: ModelQueueMetrics;
+  total_tasks: number;
+  truncated: boolean;
+  tasks: ModelQueueTask[];
+};
+
 export type ModelQueueOverviewItem = {
   id: "extract" | "research" | "assist" | "code";
   model: string;
@@ -185,31 +223,9 @@ export type ModelQueueOverviewItem = {
   instance_count: number;
   per_instance_concurrency: number;
   observable: boolean;
-  instances: Array<{
-    id: string;
-    healthy: boolean;
-    model_available: boolean;
-  }>;
-  counts: {
-    queued: number;
-    running: number;
-    retrying: number;
-    verifying: number;
-    waiting_for_model: number;
-    completed: number;
-    failed: number;
-  };
-  metrics: {
-    average_queue_duration_ms: number | null;
-    average_execution_duration_ms: number | null;
-    longest_wait_ms: number | null;
-    estimated_clear_ms: number | null;
-    queue_duration_sample_count: number;
-    execution_duration_sample_count: number;
-    execution_p50_ms: number | null;
-    execution_p90_ms: number | null;
-    throughput_per_hour: number | null;
-  };
+  instances: ModelQueueInstanceItem[];
+  counts: ModelQueueCounts;
+  metrics: ModelQueueMetrics;
   total_tasks: number;
   truncated: boolean;
   tasks: ModelQueueTask[];
@@ -960,14 +976,15 @@ type Recommendation = {
   run_id: string;
   asset: { symbol: string; name: string; market: string };
   rating: string;
-  score: number;
+  score: number | null;
   confidence: number;
   evidence_complete: boolean;
   directional_evidence_complete?: boolean;
   direction_verified?: boolean;
   signal_status?: "technical_failure" | "insufficient_evidence" | "neutral" | "directional";
   model_score?: number | null;
-  raw_score?: number;
+  raw_score?: number | null;
+  score_available?: boolean;
   evidence_strength?: number;
   mapping_confidence?: number;
   gate_reasons?: string[];
@@ -1087,7 +1104,7 @@ const signalStatusLabels: Record<string, string> = {
 export function ConclusionScore({
   score, rating, confidence, evidenceComplete, directionalEvidenceComplete, signalStatus,
 }: {
-  score: number;
+  score: number | null;
   rating: string;
   confidence: number;
   evidenceComplete: boolean;
@@ -1095,10 +1112,13 @@ export function ConclusionScore({
   signalStatus?: string;
 }) {
   const resolvedStatus = signalStatus || (
-    !evidenceComplete ? "insufficient_evidence" : (Math.abs(score) < 20 ? "neutral" : "directional")
+    !evidenceComplete ? "insufficient_evidence" : (Math.abs(score ?? 0) < 20 ? "neutral" : "directional")
   );
-  return <div className="conclusion-score">
-    <strong>发布分：{score > 0 ? "+" : ""}{score}</strong>
+  const publishedScore = score ?? 0;
+  const scoreBlocked = score === null || resolvedStatus === "insufficient_evidence" || resolvedStatus === "technical_failure";
+  const scoreTone = scoreBlocked ? "neutral" : publishedScore <= -20 ? "negative" : publishedScore >= 20 ? "positive" : "neutral";
+  return <div className={`conclusion-score ${scoreTone}`}>
+    <strong>{scoreBlocked ? "暂不评分" : `发布分：${publishedScore > 0 ? "+" : ""}${publishedScore}`}</strong>
     <span>{signalStatusLabels[resolvedStatus] || resolvedStatus} · 评级：{ratingLabels[rating] || rating}</span>
     <small>
       置信度 {Math.round(confidence * 100)}% · 资料覆盖{evidenceComplete ? "完整" : "不足"}
@@ -1113,28 +1133,39 @@ export function ConclusionsPage({ apiBase }: { apiBase: string }) {
   const [cursor, setCursor] = useState<string | null>(null);
   const [selected, setSelected] = useState<ConclusionDetail | null>(null);
   const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [failedItems, setFailedItems] = useState<FailedResearch[]>([]);
+  const [failuresLoading, setFailuresLoading] = useState(true);
   const [retryingId, setRetryingId] = useState("");
   const [retryMessage, setRetryMessage] = useState("");
 
   async function load(append = false) {
     const params = new URLSearchParams({ ...filters, limit: "20" });
     if (append && cursor) params.set("cursor", cursor);
+    if (append) setLoadingMore(true); else setLoading(true);
     try {
       const response = await fetch(`${apiBase}/api/v1/conclusions?${params}`);
       if (!response.ok) throw new Error("结论请求失败");
       const payload = await response.json() as { items: Recommendation[]; next_cursor: string | null };
       setItems((current) => append ? [...current, ...payload.items] : payload.items);
       setCursor(payload.next_cursor); setError("");
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "结论请求失败"); }
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "结论请求失败");
+    } finally {
+      if (append) setLoadingMore(false); else setLoading(false);
+    }
   }
   async function loadFailures() {
+    setFailuresLoading(true);
     try {
       const response = await fetch(`${apiBase}/api/v1/failed-research-runs?limit=50`);
       if (!response.ok) throw new Error("失败研究记录请求失败");
       setFailedItems(await response.json() as FailedResearch[]);
     } catch (reason) {
       setRetryMessage(reason instanceof Error ? reason.message : "失败研究记录请求失败");
+    } finally {
+      setFailuresLoading(false);
     }
   }
   useEffect(() => { load(); loadFailures(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -1158,13 +1189,13 @@ export function ConclusionsPage({ apiBase }: { apiBase: string }) {
   }
   return (
     <section className="app-page conclusions-page">
-      <PageHeading eyebrow="RESEARCH OUTCOMES" title="研究结论" copy="仅展示最终标的建议；关联新闻和证据保留为可追溯依据。" />
+      <PageHeading eyebrow="RESEARCH OUTCOMES" title="研究结论" copy="只有资料与方向证据门禁通过后才显示评分；证据不足时标记为暂不评分，不把 0 误当成中性结论。" />
       <form className="page-filters" onSubmit={(e) => { e.preventDefault(); load(); }}>
         <input aria-label="搜索结论" placeholder="标的、代码或核心观点" value={filters.q} onChange={(e) => setFilters({ ...filters, q: e.target.value })} />
         <select aria-label="市场" value={filters.market} onChange={(e) => setFilters({ ...filters, market: e.target.value })}><option value="">全部市场</option><option value="US">美股</option><option value="CN">A股</option><option value="HK">港股</option><option value="CRYPTO">加密</option></select>
         <select aria-label="评级" value={filters.rating} onChange={(e) => setFilters({ ...filters, rating: e.target.value })}><option value="">全部评级</option>{Object.entries(ratingLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>
         <select aria-label="证据状态" value={filters.evidence_status} onChange={(e) => setFilters({ ...filters, evidence_status: e.target.value })}><option value="">全部资料覆盖</option><option value="complete">资料覆盖完整</option><option value="incomplete">资料覆盖不足</option></select>
-        <button>筛选</button>
+        <button disabled={loading}>{loading ? "筛选中…" : "筛选"}</button>
       </form>
       {error && <div className="page-error">{error}</div>}
       <section className="failed-research-panel">
@@ -1179,7 +1210,9 @@ export function ConclusionsPage({ apiBase }: { apiBase: string }) {
               <button type="button" disabled={retryingId === item.id || retryActive} onClick={() => retry(item)}>{retryingId === item.id ? "正在排队…" : retryActive ? "重跑中" : "重新执行"}</button>
             </article>;
           })}
-          {!failedItems.length && !retryMessage && <div className="page-empty">当前没有失败研究。</div>}
+          {!failedItems.length && !retryMessage && (failuresLoading
+            ? <div className="page-message">正在加载历史失败研究…</div>
+            : <div className="page-empty">当前没有失败研究。</div>)}
         </div>
       </section>
       <div className="conclusion-list">
@@ -1187,16 +1220,19 @@ export function ConclusionsPage({ apiBase }: { apiBase: string }) {
           <div><span>{item.asset.market} · {new Date(item.as_of).toLocaleString("zh-CN")}</span><strong>{item.asset.symbol} · {item.asset.name}</strong><p>{item.thesis.summary}</p></div>
           <ConclusionScore score={item.score} rating={item.rating} confidence={item.confidence} evidenceComplete={item.evidence_complete} directionalEvidenceComplete={item.directional_evidence_complete} signalStatus={item.signal_status} />
         </button>)}
-        {!items.length && !error && <div className="page-empty">当前筛选范围内没有最终标的建议。</div>}
+        {!items.length && !error && (loading
+          ? <div className="page-message">正在加载研究结论…</div>
+          : <div className="page-empty">当前筛选范围内没有最终标的建议。</div>)}
       </div>
-      {cursor && <button className="load-more" type="button" onClick={() => load(true)}>加载更多</button>}
+      {cursor && <button className="load-more" type="button" disabled={loadingMore} onClick={() => load(true)}>{loadingMore ? "正在加载…" : "加载更多"}</button>}
       {selected && <div className="modal-backdrop" onClick={() => setSelected(null)}><article className="modal conclusion-modal" onClick={(e) => e.stopPropagation()}>
         <button className="close" onClick={() => setSelected(null)}>×</button>
         <p className="eyebrow">{selected.recommendation.asset.market} · {selected.recommendation.asset.symbol}</p><h2>{selected.recommendation.asset.name}</h2>
         <ConclusionScore score={selected.recommendation.score} rating={selected.recommendation.rating} confidence={selected.recommendation.confidence} evidenceComplete={selected.recommendation.evidence_complete} directionalEvidenceComplete={selected.recommendation.directional_evidence_complete} signalStatus={selected.recommendation.signal_status} />
+        <p className="score-explanation">通过证据门禁后，评分由情景概率、事件方向和可用研究因子按固定权重计算，再按证据强度和证券映射可信度收缩；门禁未通过时不对外评分。</p>
         <div className="probability-grid"><span>看多 <strong>{Math.round(selected.recommendation.bull_probability * 100)}%</strong></span><span>基准 <strong>{Math.round(selected.recommendation.base_probability * 100)}%</strong></span><span>看空 <strong>{Math.round(selected.recommendation.bear_probability * 100)}%</strong></span></div>
         <div className="research-gate-grid">
-          <span>程序原始分<strong>{(selected.recommendation.raw_score ?? selected.recommendation.score) > 0 ? "+" : ""}{selected.recommendation.raw_score ?? selected.recommendation.score}</strong></span>
+          <span>程序原始分<strong>{selected.recommendation.score_available === false || ["technical_failure", "insufficient_evidence"].includes(selected.recommendation.signal_status || "") ? "—" : <>{(selected.recommendation.raw_score ?? selected.recommendation.score ?? 0) > 0 ? "+" : ""}{selected.recommendation.raw_score ?? selected.recommendation.score ?? 0}</>}</strong></span>
           <span>证据强度<strong>{Math.round((selected.recommendation.evidence_strength ?? (selected.recommendation.evidence_complete ? 1 : 0)) * 100)}%</strong></span>
           <span>映射可信度<strong>{Math.round((selected.recommendation.mapping_confidence ?? 1) * 100)}%</strong></span>
           <span>研究期限<strong>{selected.recommendation.horizon_days ?? 90} 天</strong></span>

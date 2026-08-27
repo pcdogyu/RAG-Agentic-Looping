@@ -774,3 +774,46 @@ def test_conclusions_list_filter_and_detail(db):
     assert detail.status_code == 200
     assert detail.json()["recommendation"]["thesis"]["summary"] == "Durable earnings growth"
     assert detail.json()["run"]["id"] == str(run.id)
+
+
+def test_conclusions_omit_all_scores_when_evidence_is_insufficient(db):
+    asset = AssetRef(
+        asset_id="equity:XNAS:NOSCORE",
+        asset_class=AssetClass.EQUITY,
+        market=Market.US,
+        symbol="NOSCORE",
+        name="No Score Corp",
+        exchange_or_provider="XNAS",
+    )
+    now = utc_now() - timedelta(minutes=1)
+    run = ResearchRun(asset=asset, as_of=now)
+    recommendation = Recommendation(
+        run_id=run.id,
+        asset=asset,
+        score=0,
+        model_score=-20,
+        raw_score=-34,
+        rating="watch",
+        confidence=0,
+        bull_probability=0.25,
+        base_probability=0.5,
+        bear_probability=0.25,
+        thesis=Thesis(summary="Evidence is still incomplete"),
+        as_of=now,
+        evidence_complete=False,
+    )
+    run.recommendation = recommendation
+    save_run(db, run)
+    save_recommendation(db, recommendation)
+
+    with TestClient(app) as client:
+        listed = client.get("/api/v1/conclusions?q=NOSCORE")
+        detail = client.get(f"/api/v1/conclusions/{recommendation.id}")
+
+    assert listed.status_code == 200
+    assert detail.status_code == 200
+    for payload in (listed.json()["items"][0], detail.json()["recommendation"]):
+        assert payload["score_available"] is False
+        assert payload["score"] is None
+        assert payload["model_score"] is None
+        assert payload["raw_score"] is None

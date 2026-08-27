@@ -19,7 +19,7 @@ from backend.app.db import (
     RecommendationRow,
     get_db,
 )
-from backend.app.domain import Recommendation, utc_now
+from backend.app.domain import Recommendation, SignalStatus, utc_now
 from backend.app.services.fact_sources import (
     BUILTIN_SOURCE_GROUPS,
     FACT_SOURCE_GROUPS,
@@ -409,12 +409,27 @@ def _decode_cursor(cursor: str) -> tuple[datetime, UUID]:
         raise HTTPException(status_code=422, detail="invalid cursor") from exc
 
 
+def _public_recommendation(recommendation: Recommendation) -> dict[str, Any]:
+    payload = recommendation.model_dump(mode="json")
+    score_available = bool(
+        recommendation.direction_verified
+        and recommendation.signal_status
+        not in {SignalStatus.INSUFFICIENT_EVIDENCE, SignalStatus.TECHNICAL_FAILURE}
+    )
+    payload["score_available"] = score_available
+    if not score_available:
+        payload["score"] = None
+        payload["model_score"] = None
+        payload["raw_score"] = None
+    return payload
+
+
 def _conclusion_detail(db: Session, recommendation: Recommendation) -> dict[str, Any]:
     run = get_run(db, recommendation.run_id)
     event = get_event(db, run.event_id) if run and run.event_id else None
     news = [get_news(db, item_id) for item_id in event.news_item_ids] if event else []
     return {
-        "recommendation": recommendation.model_dump(mode="json"),
+        "recommendation": _public_recommendation(recommendation),
         "run": run.model_dump(mode="json") if run else None,
         "event": event.model_dump(mode="json") if event else None,
         "news": [item.model_dump(mode="json") for item in news if item],
@@ -474,7 +489,7 @@ def list_conclusions(
     items = items[:limit]
     next_cursor = _encode_cursor(items[-1].as_of, items[-1].id) if has_more and items else None
     return {
-        "items": [item.model_dump(mode="json") for item in items],
+        "items": [_public_recommendation(item) for item in items],
         "next_cursor": next_cursor,
     }
 

@@ -1,6 +1,40 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+
+_ADVERSE_DIRECTION_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\bnegative\b",
+        r"\bsecurities?\s+fraud\b",
+        r"\bclass[ -]action(?:\s+lawsuit)?\b",
+        r"\blawsuit\s+against\b",
+        r"\binvestigation\s+alert\b",
+        r"\binvestigat(?:e|es|ed|ing|ion).{0,40}\bstockholders?\b",
+        r"\bpotential\s+securities\s+laws?\s+violations?\b",
+        r"\bnet\s+(?:income|profit).{0,24}\b(?:negative|loss)\b",
+        r"\bnet\s+loss(?:es)?\b",
+        r"\bsuffer(?:ed|ing)?\s+loss(?:es)?\b",
+        r"\bfinancial\s+(?:condition|position).{0,24}\b(?:deteriorat|weaken)",
+        r"证券欺诈|集体诉讼|股东调查|调查警报|证券违法|法律调查",
+        r"净利润.{0,16}(?:仍|持续)?(?:为)?负|净亏损|持续亏损|财务状况.{0,12}(?:恶化|转差)",
+        r"(?:市场|投资者)(?:信心|情绪).{0,12}(?:负面|下降|恶化)",
+        r"利空|负面影响|下降",
+    )
+)
+
+_BENEFICIAL_DIRECTION_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\bpositive\b",
+        r"\b(?:beat|growth)\b",
+        r"\brecord\s+(?:revenue|profit|earnings)\b",
+        r"\breturn(?:ed|s|ing)?\s+to\s+profitability\b",
+        r"\b(?:regulatory\s+)?approval\b",
+        r"扭亏为盈|增长|创新高|创纪录(?:营收|利润|业绩)|获批|利好|正面影响",
+    )
+)
 
 
 @dataclass(frozen=True)
@@ -9,6 +43,28 @@ class DirectionScore:
     probability_score: int
     event_score: int | None
     factor_score: int | None
+
+
+def directional_text_hint(
+    *texts: str | None,
+    fallback: int | None = None,
+    allow_beneficial: bool = True,
+) -> int | None:
+    """Resolve explicit directional language before using a model-provided fallback.
+
+    The patterns intentionally cover high-precision statements such as securities
+    fraud, shareholder investigations, and negative net income.  An explicit
+    adverse fact wins over generic positive language like revenue growth.
+    """
+
+    combined = "\n".join(value.strip() for value in texts if value and value.strip())
+    if any(pattern.search(combined) for pattern in _ADVERSE_DIRECTION_PATTERNS):
+        return -1
+    if allow_beneficial and any(
+        pattern.search(combined) for pattern in _BENEFICIAL_DIRECTION_PATTERNS
+    ):
+        return 1
+    return fallback if fallback in {-1, 1} else None
 
 
 def normalize_probabilities(

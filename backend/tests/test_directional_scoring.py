@@ -2,10 +2,34 @@ from backend.app.services.directional_scoring import (
     blocked_probabilities,
     calibrate_probabilities,
     deterministic_direction_score,
+    directional_text_hint,
     gated_score,
     normalize_probabilities,
     probabilities_for_score,
 )
+
+
+def test_explicit_adverse_facts_override_an_incorrect_positive_fallback():
+    assert directional_text_hint(
+        "Securities Fraud Class Action Lawsuit Against Hertz",
+        "negative",
+        fallback=1,
+    ) == -1
+    assert directional_text_hint(
+        "RBLX 的营收持续增长，尽管净利润仍为负值。",
+        fallback=1,
+    ) == -1
+    assert directional_text_hint(
+        "INVESTIGATION ALERT: law firm is investigating Innventure stockholders' claims",
+        "可能对投资者情绪产生负面影响",
+        fallback=0,
+    ) == -1
+
+
+def test_directional_text_hint_keeps_fallback_without_explicit_language():
+    assert directional_text_hint("Quarterly business update", fallback=1) == 1
+    assert directional_text_hint("Quarterly business update", fallback=0) is None
+    assert directional_text_hint("Revenue growth", fallback=0, allow_beneficial=False) is None
 
 
 def test_model_reported_score_is_not_an_input_to_deterministic_score():
