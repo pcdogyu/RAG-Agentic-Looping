@@ -73,6 +73,7 @@ from backend.app.storage import (
 )
 
 settings = get_settings()
+DEFAULT_MODEL_TASK_PRIORITY = 5
 SCAN_GATE_KEY = "market-loop:scan:active"
 SCAN_LOCK_KEY = "market-loop:scan:lock"
 SCAN_PAUSE_KEY = "market-loop:scan:pause"
@@ -93,9 +94,12 @@ celery_app.conf.update(
     enable_utc=True,
     task_track_started=True,
     task_acks_late=True,
+    task_default_priority=DEFAULT_MODEL_TASK_PRIORITY,
+    task_queue_max_priority=9,
     worker_prefetch_multiplier=1,
     task_routes={
         "market_loop.extract_news_item": {"queue": "extract"},
+        "market_loop.retry_news_item": {"queue": "extract"},
         "market_loop.finalize_news_extraction": {"queue": "extract"},
         "market_loop.resolve_event_assets": {"queue": "mapping"},
         "market_loop.research_event": {"queue": "research"},
@@ -103,6 +107,7 @@ celery_app.conf.update(
     },
     broker_transport_options={
         "visibility_timeout": SCAN_VISIBILITY_TIMEOUT_SECONDS,
+        "priority_steps": list(range(10)),
     },
     result_backend_transport_options={
         "visibility_timeout": SCAN_VISIBILITY_TIMEOUT_SECONDS,
@@ -433,6 +438,56 @@ def clear_news_extraction_queue(
             client.delete(SCAN_GATE_KEY)
         client.delete(SCAN_PAUSE_KEY)
     return {"cancelled": len(task_ids), "celery_task_ids": task_ids}
+
+
+def cancel_news_extraction_task(
+    *,
+    task_id: str,
+    news_id: str | None = None,
+    redis_client: Redis | None = None,
+) -> list[str]:
+    """Cancel one active scan extraction item before a manual replacement."""
+
+    client = redis_client or _redis_client()
+    payload = _read_news_extraction_queue(client)
+    now = utc_now()
+    revoked: list[str] = []
+    for item in payload.get("items", []):
+        matches = item.get("task_id") == task_id or (
+            news_id is not None and item.get("news_id") == news_id
+        )
+        if not matches or item.get("status") not in {"queued", "running", "retrying"}:
+            continue
+        if item.get("task_id"):
+            revoked.append(str(item["task_id"]))
+        active_attempt = _elapsed_ms(item.get("attempt_started_at"), now)
+        if active_attempt is not None:
+            item["execution_duration_ms"] = max(
+                0, int(item.get("execution_duration_ms") or 0)
+            ) + active_attempt
+        item.update(
+            status="cancelled",
+            updated_at=now.isoformat(),
+            completed_at=now.isoformat(),
+            attempt_started_at=None,
+            error=None,
+        )
+        break
+    if revoked:
+        counts = _news_extraction_counts(payload)
+        payload["state"] = (
+            "running"
+            if counts["running"]
+            else "retrying"
+            if counts["retrying"]
+            else "queued"
+            if counts["queued"]
+            else "completed_with_errors"
+            if counts["failed"]
+            else "completed"
+        )
+        _write_news_extraction_queue(client, payload)
+    return revoked
 
 
 def _update_scan_status(client: Redis, **updates: Any) -> dict[str, Any]:
@@ -775,6 +830,7 @@ def enqueue_research(
     retry_of_run_id: UUID | None = None,
     retry_attempt: int = 0,
     market_factor_refresh_days: int | None = None,
+    priority: int | None = None,
 ) -> tuple[str, ResearchRun]:
     """Persist a visible queued run before handing work to the LLM worker."""
 
@@ -874,6 +930,7 @@ def enqueue_research(
             args=[asset.asset_id, str(event.id) if event else None, str(run.id)],
             queue="research",
             task_id=task_id,
+            **({"priority": priority} if priority is not None else {}),
         )
     except Exception as exc:
         run.status = RunStatus.FAILED
@@ -950,12 +1007,22 @@ def _replace_event_step(event: NewsEvent, step: AnalysisStep) -> None:
     event.analysis_steps.append(step)
 
 
-def enqueue_asset_mapping(db, event: NewsEvent) -> str | None:
+def enqueue_asset_mapping(
+    db,
+    event: NewsEvent,
+    *,
+    force: bool = False,
+    priority: int | None = None,
+) -> str | None:
     """Queue one visible 7B mapping attempt for an unmapped event."""
 
-    if event.candidates or any(
-        step.phase == "asset_mapping_queue" and step.status in {"queued", "completed"}
-        for step in event.analysis_steps
+    if not force and (
+        event.candidates
+        or any(
+            step.phase == "asset_mapping_queue"
+            and step.status in {"queued", "completed"}
+            for step in event.analysis_steps
+        )
     ):
         return None
     _replace_event_step(
@@ -980,13 +1047,14 @@ def enqueue_asset_mapping(db, event: NewsEvent) -> str | None:
         entity_id=str(event.id),
         title=event.headline,
         subtitle=event.event_type.value,
-        source="automatic",
+        source="manual" if force else "automatic",
     )
     try:
         task = resolve_event_assets.apply_async(
             args=[str(event.id)],
             queue="mapping",
             task_id=task_id,
+            **({"priority": priority} if priority is not None else {}),
         )
     except Exception as exc:
         update_model_task(
@@ -1009,6 +1077,41 @@ def enqueue_asset_mapping(db, event: NewsEvent) -> str | None:
             ),
         )
         save_event(db, event)
+        raise
+    return str(task.id)
+
+
+def enqueue_news_extraction_retry(
+    news: NewsItem,
+    *,
+    priority: int | None = None,
+) -> str:
+    """Queue a standalone extraction attempt without reopening a completed scan."""
+
+    task_id = str(uuid4())
+    record_model_task(
+        "extract",
+        task_id=task_id,
+        kind="news_extraction",
+        entity_id=str(news.id),
+        title=news.title,
+        subtitle=news.source,
+        source="manual",
+    )
+    try:
+        task = retry_news_item.apply_async(
+            args=[str(news.id)],
+            queue="extract",
+            task_id=task_id,
+            **({"priority": priority} if priority is not None else {}),
+        )
+    except Exception as exc:
+        update_model_task(
+            "extract",
+            task_id,
+            status="failed",
+            error=f"{type(exc).__name__}: {exc}",
+        )
         raise
     return str(task.id)
 
@@ -1059,7 +1162,11 @@ def enqueue_event_report(db, event: NewsEvent) -> tuple[str | None, EventResearc
 
 
 def enqueue_event_research_retry(
-    db, event: NewsEvent, run: EventResearchRun
+    db,
+    event: NewsEvent,
+    run: EventResearchRun,
+    *,
+    priority: int | None = None,
 ) -> tuple[str, EventResearchRun]:
     """Reset the event's unique durable report row and queue a fresh manual attempt."""
 
@@ -1091,6 +1198,7 @@ def enqueue_event_research_retry(
             args=[str(event.id), str(run.id)],
             queue="research",
             task_id=task_id,
+            **({"priority": priority} if priority is not None else {}),
         )
     except Exception as exc:
         run.status = RunStatus.FAILED
@@ -1395,6 +1503,90 @@ def extract_news_item(self, scan_task_id: str, news_id: str) -> dict[str, Any]:
             news_id,
             "retrying" if retrying else "failed",
             attempt=self.request.retries + 1,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        if retrying:
+            raise self.retry(
+                exc=exc,
+                countdown=min(60, 2 ** (self.request.retries + 1)),
+            ) from exc
+        return {
+            "status": "failed",
+            "news_id": news_id,
+            "event_ids": [],
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
+@celery_app.task(bind=True, name="market_loop.retry_news_item", max_retries=2)
+def retry_news_item(self, news_id: str) -> dict[str, Any]:
+    """Retry one durable news item independently and queue its downstream work."""
+
+    task_id = str(self.request.id or f"news:{news_id}")
+    if model_task_is_cancelled("extract", task_id):
+        return {"status": "cancelled", "news_id": news_id, "event_ids": []}
+    attempt = self.request.retries + 1
+    update_model_task(
+        "extract",
+        task_id,
+        status="running",
+        attempt=attempt,
+        entity_id=news_id,
+    )
+    try:
+        init_db()
+        with SessionLocal() as db:
+            news = get_news(db, UUID(news_id))
+            if news is None:
+                raise ValueError(f"unknown news item: {news_id}")
+            update_model_task(
+                "extract",
+                task_id,
+                status="running",
+                attempt=attempt,
+                entity_id=news_id,
+                title=news.title,
+                subtitle=news.source,
+            )
+            registry = ProviderRegistry(assets=list_assets(db))
+            events = EventService(registry).ingest(db, [news])
+            research_queued = 0
+            mapping_queued = 0
+            if settings.auto_research:
+                for event in events:
+                    if event.candidates:
+                        research_queued += int(
+                            enqueue_event_research(db, event) is not None
+                        )
+                    else:
+                        mapping_queued += int(
+                            enqueue_asset_mapping(db, event) is not None
+                        )
+        update_model_task(
+            "extract",
+            task_id,
+            status="completed",
+            attempt=attempt,
+            metrics={
+                "event_count": len(events),
+                "research_queued": research_queued,
+                "asset_mapping_queued": mapping_queued,
+            },
+        )
+        return {
+            "status": "completed",
+            "news_id": news_id,
+            "event_ids": [str(event.id) for event in events],
+            "research_queued": research_queued,
+            "asset_mapping_queued": mapping_queued,
+        }
+    except Exception as exc:
+        retrying = self.request.retries < self.max_retries
+        update_model_task(
+            "extract",
+            task_id,
+            status="retrying" if retrying else "failed",
+            attempt=attempt,
             error=f"{type(exc).__name__}: {exc}",
         )
         if retrying:

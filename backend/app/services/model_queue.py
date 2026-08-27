@@ -33,6 +33,7 @@ from backend.app.storage import (
 MODEL_TASK_RETENTION = timedelta(hours=24)
 MODEL_TASK_KEY_TTL_SECONDS = 48 * 60 * 60
 MODEL_TASK_HASH_PREFIX = "market-loop:model-queue"
+TrackedModelLane = Literal["extract", "assist", "code"]
 ACTIVE_STATUSES = {
     "queued",
     "running",
@@ -157,7 +158,7 @@ def _safe_error(error: str | None) -> str | None:
 
 
 def record_model_task(
-    lane: Literal["assist", "code"],
+    lane: TrackedModelLane,
     *,
     task_id: str,
     kind: str,
@@ -201,7 +202,7 @@ def record_model_task(
 
 
 def cancel_model_tasks(
-    lane: Literal["assist", "code"],
+    lane: TrackedModelLane,
     *,
     redis_client: Redis | None = None,
 ) -> ModelTaskCancellationResult:
@@ -237,8 +238,40 @@ def cancel_model_tasks(
         return ModelTaskCancellationResult()
 
 
+def cancel_model_task(
+    lane: TrackedModelLane,
+    task_id: str,
+    *,
+    redis_client: Redis | None = None,
+) -> bool:
+    """Cancel one tracked model task so a replacement can supersede it."""
+
+    try:
+        client = redis_client or _redis_client()
+        key = _task_hash_key(lane)
+        raw = client.hget(key, task_id)
+        if not raw:
+            return False
+        value = raw.decode() if isinstance(raw, bytes) else raw
+        payload = json.loads(value)
+        if payload.get("status") not in ACTIVE_STATUSES:
+            return False
+        now = utc_now().isoformat()
+        payload.update(
+            status="cancelled",
+            updated_at=now,
+            completed_at=now,
+            error=None,
+        )
+        client.hset(key, task_id, json.dumps(payload, ensure_ascii=False))
+        client.expire(key, MODEL_TASK_KEY_TTL_SECONDS)
+        return True
+    except Exception:
+        return False
+
+
 def model_task_is_cancelled(
-    lane: Literal["assist", "code"],
+    lane: TrackedModelLane,
     task_id: str,
     *,
     redis_client: Redis | None = None,
@@ -255,7 +288,7 @@ def model_task_is_cancelled(
 
 
 def update_model_task(
-    lane: Literal["assist", "code"],
+    lane: TrackedModelLane,
     task_id: str,
     *,
     status: str,
@@ -274,11 +307,21 @@ def update_model_task(
         client = redis_client or _redis_client()
         key = _task_hash_key(lane)
         raw = client.hget(key, task_id)
+        default_kind = {
+            "extract": "news_extraction",
+            "assist": "asset_mapping",
+            "code": "code_evolution",
+        }[lane]
+        default_title = {
+            "extract": "新闻抽取任务",
+            "assist": "股票映射任务",
+            "code": "代码演进任务",
+        }[lane]
         payload = json.loads(raw) if raw else {
             "task_id": task_id,
-            "kind": "asset_mapping" if lane == "assist" else "code_evolution",
+            "kind": default_kind,
             "entity_id": entity_id,
-            "title": title or ("股票映射任务" if lane == "assist" else "代码演进任务"),
+            "title": title or default_title,
             "subtitle": subtitle or "",
             "source": source,
             "status": "queued",
@@ -368,7 +411,7 @@ def _task_from_payload(payload: dict[str, Any], now: datetime) -> ModelQueueTask
 
 
 def list_model_task_records(
-    lane: Literal["assist", "code"],
+    lane: TrackedModelLane,
     *,
     now: datetime | None = None,
     redis_client: Redis | None = None,
@@ -988,7 +1031,10 @@ def build_model_queue_overview(
         candidates = []
         source_errors["code"] = "代码演进候选状态暂时不可用。"
 
-    extract_tasks = _extraction_tasks(extraction_queue, now)
+    extract_records = list_model_task_records(
+        "extract", now=now, redis_client=client
+    ) if client is not None else []
+    extract_tasks = _merge_tasks(extract_records, _extraction_tasks(extraction_queue, now))
     research_live_ids = live_research_run_ids(client) if client is not None else None
     research_tasks = _research_tasks(
         runs,
@@ -1024,6 +1070,12 @@ def build_model_queue_overview(
     research_inference = inference_statuses.get("research", {})
     assist_inference = inference_statuses.get("assist", {})
     code_inference = inference_statuses.get("code", {})
+    tracked_extraction_counts = _counts(extract_records)
+    extraction_counts = {
+        key: int((extraction_queue.get("counts") or {}).get(key) or 0)
+        + int(getattr(tracked_extraction_counts, key))
+        for key in {"queued", "running", "retrying", "verifying", "completed", "failed"}
+    }
     queues = [
         _queue_item(
             queue_id="extract",
@@ -1037,12 +1089,7 @@ def build_model_queue_overview(
             tasks=extract_tasks,
             limit=min(limit, 200),
             broker_queued=(extraction_queue.get("counts") or {}).get("queued"),
-            count_overrides={
-                key: int(value or 0)
-                for key, value in (extraction_queue.get("counts") or {}).items()
-                if key
-                in {"queued", "running", "retrying", "verifying", "completed", "failed"}
-            },
+            count_overrides=extraction_counts,
             metric_overrides={
                 key: extraction_queue.get(key)
                 for key in {

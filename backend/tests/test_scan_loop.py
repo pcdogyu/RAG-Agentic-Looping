@@ -73,9 +73,17 @@ def test_scan_visibility_and_gate_cover_long_running_tasks():
     assert worker.celery_app.conf.task_routes["market_loop.extract_news_item"] == {
         "queue": "extract"
     }
+    assert worker.celery_app.conf.task_routes["market_loop.retry_news_item"] == {
+        "queue": "extract"
+    }
     assert worker.celery_app.conf.task_routes["market_loop.research_asset"] == {
         "queue": "research"
     }
+    assert worker.celery_app.conf.task_default_priority == 5
+    assert worker.celery_app.conf.task_queue_max_priority == 9
+    assert worker.celery_app.conf.broker_transport_options["priority_steps"] == list(
+        range(10)
+    )
 
 
 def test_market_factor_refresh_advances_only_when_a_larger_window_matures():
@@ -876,14 +884,58 @@ def test_unmapped_event_queues_only_one_visible_7b_mapping_task(db, monkeypatch)
 
     first = worker.enqueue_asset_mapping(db, event)
     repeated = worker.enqueue_asset_mapping(db, event)
+    forced = worker.enqueue_asset_mapping(db, event, force=True, priority=0)
 
     assert first == "mapping-task"
     assert repeated is None
-    assert len(queued) == 1
+    assert forced == "mapping-task"
+    assert len(queued) == 2
     assert queued[0]["queue"] == "mapping"
+    assert queued[1]["priority"] == 0
     assert event.analysis_steps[-1].phase == "asset_mapping_queue"
     assert event.analysis_steps[-1].status == "queued"
     assert event.analysis_steps[-1].model == "qwen2.5:7b"
+
+
+def test_standalone_news_retry_is_recorded_and_sent_with_requested_priority(
+    monkeypatch,
+):
+    observed = datetime(2026, 8, 22, 12, 0, tzinfo=UTC)
+    news = NewsItem(
+        source="Example",
+        title="Retry this durable news item",
+        url="https://example.com/retry-news",
+        published_at=observed,
+        observed_at=observed,
+        as_of=observed,
+        content_hash=sha256(b"retry-news").hexdigest(),
+    )
+    recorded = []
+    queued = []
+    monkeypatch.setattr(
+        worker,
+        "record_model_task",
+        lambda lane, **kwargs: recorded.append((lane, kwargs)),
+    )
+    monkeypatch.setattr(
+        worker.retry_news_item,
+        "apply_async",
+        lambda **kwargs: queued.append(kwargs) or SimpleNamespace(id=kwargs["task_id"]),
+    )
+
+    task_id = worker.enqueue_news_extraction_retry(news, priority=0)
+
+    assert recorded[0][0] == "extract"
+    assert recorded[0][1]["entity_id"] == str(news.id)
+    assert recorded[0][1]["source"] == "manual"
+    assert queued == [
+        {
+            "args": [str(news.id)],
+            "queue": "extract",
+            "task_id": task_id,
+            "priority": 0,
+        }
+    ]
 
 
 def test_7b_mapping_task_persists_candidates_and_queues_top_three(db, monkeypatch):

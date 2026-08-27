@@ -649,6 +649,8 @@ describe("research queue page", () => {
     expect(markup).toContain("通过<strong>1</strong>");
     expect(markup).toContain("拒绝<strong>2</strong>");
     expect(markup).toContain("最近错误");
+    expect(markup).toContain("手动重试");
+    expect(markup).toContain('title="以最高优先级插队重试"');
     expect(markup).toContain("排队 1分0秒");
   });
 
@@ -739,7 +741,7 @@ describe("research queue page", () => {
     expect(assistMarkup).toContain("assist-0 · 可用");
   });
 
-  it("renders per-task cancellation for research and clear controls for every model", () => {
+  it("renders cancellation, retry and clear controls for supported model queues", () => {
     const research = overviewQueue({
       id: "research", model: "qwen2.5:7b", purpose: "标的研究",
       tasks: [{
@@ -773,6 +775,12 @@ describe("research queue page", () => {
       }));
       expect(modelPanel).toContain('class="model-queue-clear"');
       expect(modelPanel).toContain(">清空</button>");
+      if (id === "code") {
+        expect(modelPanel).not.toContain('class="model-queue-retry"');
+      } else {
+        expect(modelPanel).toContain('class="model-queue-retry"');
+        expect(modelPanel).toContain(">重试</button>");
+      }
       expect(modelPanel).toContain("实例个数<strong>1</strong>");
       expect(modelPanel).toContain("单实例并发<strong>1 路</strong>");
     }

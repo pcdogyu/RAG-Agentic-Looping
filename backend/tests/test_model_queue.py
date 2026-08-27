@@ -15,6 +15,7 @@ from backend.app.domain import (
 from backend.app.providers.registry import SEED_ASSETS
 from backend.app.services.model_queue import (
     build_model_queue_overview,
+    cancel_model_task,
     cancel_model_tasks,
     list_model_task_records,
     model_task_is_cancelled,
@@ -115,6 +116,57 @@ def test_cancel_model_tasks_is_lane_scoped_and_terminal_safe():
     assert json.loads(redis.hget("market-loop:model-queue:assist:tasks", "mapping-done"))[
         "status"
     ] == "completed"
+
+
+def test_cancel_one_extract_task_only_supersedes_the_selected_attempt():
+    redis = FakeRedis()
+    for task_id in ("extract-old", "extract-other"):
+        record_model_task(
+            "extract",
+            task_id=task_id,
+            kind="news_extraction",
+            entity_id=f"news-{task_id}",
+            title=task_id,
+            redis_client=redis,
+        )
+
+    assert cancel_model_task("extract", "extract-old", redis_client=redis)
+    assert model_task_is_cancelled("extract", "extract-old", redis_client=redis)
+    assert not model_task_is_cancelled(
+        "extract", "extract-other", redis_client=redis
+    )
+
+
+def test_tracked_extract_retry_is_merged_into_extraction_overview(db):
+    now = datetime(2026, 8, 26, 8, 0, tzinfo=UTC)
+    redis = FakeRedis()
+    record_model_task(
+        "extract",
+        task_id="manual-extract",
+        kind="news_extraction",
+        entity_id="news-1",
+        title="手动重试新闻",
+        queued_at=now,
+        redis_client=redis,
+    )
+
+    overview = build_model_queue_overview(
+        db,
+        extraction_queue=_empty_extraction(now),
+        inference_statuses={
+            lane: _inference() for lane in ("extract", "research", "assist", "code")
+        },
+        threads={"extract": 4, "research": 16, "assist": 4, "code": 4},
+        limit=500,
+        settings=Settings(_env_file=None),
+        redis_client=redis,
+        generated_at=now,
+    )
+
+    extract = overview.queues[0]
+    assert extract.counts.queued == 1
+    assert extract.tasks[0].task_id == "manual-extract"
+    assert extract.tasks[0].title == "手动重试新闻"
 
 
 def test_extraction_summary_keeps_completed_counts_and_recorded_metrics(db):

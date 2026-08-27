@@ -3,6 +3,7 @@ from uuid import uuid4
 from backend.app import main
 from backend.app.domain import EventResearchRun, ResearchRun, RunStatus
 from backend.app.providers.registry import SEED_ASSETS
+from backend.app.services.model_queue import ModelQueueTask
 from backend.app.services.research_cancellation import cancel_research_tasks
 from backend.app.storage import get_event_research_run, get_run, save_event_research_run, save_run
 
@@ -115,3 +116,67 @@ def test_generic_clear_endpoint_uses_only_the_selected_model_queue(db, monkeypat
     }
     assert purged == ["extract"]
     assert revoked == ["extract-1", "extract-2"]
+
+
+def _failed_model_task(task_id: str = "failed-mapping") -> ModelQueueTask:
+    now = main.utc_now()
+    return ModelQueueTask(
+        task_id=task_id,
+        kind="asset_mapping",
+        entity_id=f"event-{task_id}",
+        title="映射失败新闻",
+        status="failed",
+        queued_at=now,
+        completed_at=now,
+        updated_at=now,
+        error="模型响应暂时不可解析",
+    )
+
+
+def test_single_model_retry_uses_highest_priority(db, monkeypatch):
+    task = _failed_model_task()
+    queued: list[tuple[str, int]] = []
+    monkeypatch.setattr(main, "_retryable_model_queue_tasks", lambda _queue: [task])
+    monkeypatch.setattr(
+        main,
+        "_enqueue_model_task_retry",
+        lambda _db, *, queue_id, task, priority: queued.append(
+            (task.task_id, priority)
+        )
+        or "replacement-task",
+    )
+    monkeypatch.setattr(main, "_mark_model_queue_snapshot_stale", lambda: None)
+
+    result = main.retry_model_queue_task(
+        "assist",
+        main.ModelTaskRetryRequest(
+            task_id=task.task_id,
+            kind=task.kind,
+            entity_id=task.entity_id,
+        ),
+        db,
+    )
+
+    assert queued == [(task.task_id, main.MANUAL_RETRY_PRIORITY)]
+    assert result["priority"] == "highest"
+    assert result["task_ids"] == ["replacement-task"]
+
+
+def test_bulk_model_retry_requeues_every_error_task_at_normal_priority(db, monkeypatch):
+    tasks = [_failed_model_task("first"), _failed_model_task("second")]
+    priorities: list[int] = []
+    monkeypatch.setattr(main, "_retryable_model_queue_tasks", lambda _queue: tasks)
+    monkeypatch.setattr(
+        main,
+        "_enqueue_model_task_retry",
+        lambda _db, *, queue_id, task, priority: priorities.append(priority)
+        or f"retry-{task.task_id}",
+    )
+    monkeypatch.setattr(main, "_mark_model_queue_snapshot_stale", lambda: None)
+
+    result = main.retry_model_queue_tasks("assist", db)
+
+    assert priorities == [main.BULK_RETRY_PRIORITY, main.BULK_RETRY_PRIORITY]
+    assert result["requested"] == 2
+    assert result["retried"] == 2
+    assert result["skipped"] == 0

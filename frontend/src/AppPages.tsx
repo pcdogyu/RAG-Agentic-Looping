@@ -360,11 +360,15 @@ const cancellableResearchStatuses = new Set(["queued", "running", "retrying", "v
 export function ModelQueueTaskGrid({
   queue,
   onCancel,
+  onRetry,
   cancellingTaskId,
+  retryingTaskId,
 }: {
   queue: ModelQueueOverviewItem;
   onCancel?: (task: ModelQueueTask) => void;
+  onRetry?: (task: ModelQueueTask) => void;
   cancellingTaskId?: string | null;
+  retryingTaskId?: string | null;
 }) {
   if (!queue.enabled && queue.id === "code") {
     return <div className="page-empty">代码演进未启用（EVOLUTION_ENABLED=false）。</div>;
@@ -411,10 +415,19 @@ export function ModelQueueTaskGrid({
         <span>排队 {formatQueueDuration(task.queue_duration_ms)}</span>
         <span>执行 {formatQueueDuration(task.execution_duration_ms)}</span>
       </div>
-      {task.error && <details className="model-task-error">
-        <summary>最近错误</summary>
-        <p>{task.error}</p>
-      </details>}
+      {task.error && <div className="model-task-error-row">
+        <details className="model-task-error">
+          <summary>最近错误</summary>
+          <p>{task.error}</p>
+        </details>
+        {queue.id !== "code" && <button
+          type="button"
+          className="model-task-retry"
+          title="以最高优先级插队重试"
+          disabled={retryingTaskId === task.task_id}
+          onClick={() => onRetry?.(task)}
+        >{retryingTaskId === task.task_id ? "重试中…" : "手动重试"}</button>}
+      </div>}
       <time dateTime={task.updated_at}>{new Date(task.updated_at).toLocaleString("zh-CN")}</time>
     </article>;
   })}</div>;
@@ -423,18 +436,27 @@ export function ModelQueueTaskGrid({
 export function UnifiedModelQueuePanel({
   queue,
   onCancelTask,
+  onRetryTask,
+  onRetryAll,
   onClear,
   cancellingTaskId,
+  retryingTaskId,
+  retryingAll,
   clearing,
 }: {
   queue: ModelQueueOverviewItem;
   onCancelTask?: (task: ModelQueueTask) => void;
+  onRetryTask?: (task: ModelQueueTask) => void;
+  onRetryAll?: () => void;
   onClear?: () => void;
   cancellingTaskId?: string | null;
+  retryingTaskId?: string | null;
+  retryingAll?: boolean;
   clearing?: boolean;
 }) {
   const secondary = queue.counts.retrying + queue.counts.verifying;
   const activeCount = queue.counts.queued + queue.counts.running + secondary;
+  const retryableCount = queue.tasks.filter((task) => task.error).length;
   return <section className={`model-queue-panel unified-model-queue-panel ${queue.id}`}>
     <header>
       <div>
@@ -443,6 +465,13 @@ export function UnifiedModelQueuePanel({
         <small>{queue.binding}</small>
       </div>
       <div className="model-queue-header-actions">
+        {queue.id !== "code" && <button
+          type="button"
+          className="model-queue-retry"
+          title="重试当前队列中的全部错误任务"
+          disabled={retryingAll || retryableCount === 0}
+          onClick={onRetryAll}
+        >{retryingAll ? "重试中…" : "重试"}</button>}
         <span className={`model-queue-state ${queue.state}`}>{modelQueueStateLabels[queue.state] ?? queue.state}</span>
         <button
           type="button"
@@ -485,7 +514,13 @@ export function UnifiedModelQueuePanel({
     {!queue.observable && <div className="page-error">模型推理槽位状态暂时不可用。</div>}
     {queue.error && <div className="page-error">{queue.error}</div>}
     {queue.truncated && <div className="page-message">队列过长，当前显示前 500 张任务卡。</div>}
-    <ModelQueueTaskGrid queue={queue} onCancel={onCancelTask} cancellingTaskId={cancellingTaskId} />
+    <ModelQueueTaskGrid
+      queue={queue}
+      onCancel={onCancelTask}
+      onRetry={onRetryTask}
+      cancellingTaskId={cancellingTaskId}
+      retryingTaskId={retryingTaskId}
+    />
   </section>;
 }
 
@@ -525,6 +560,8 @@ export function QueuePage({ apiBase }: { apiBase: string }) {
   const [error, setError] = useState("");
   const [actionMessage, setActionMessage] = useState("");
   const [cancellingTaskId, setCancellingTaskId] = useState<string | null>(null);
+  const [retryingTaskId, setRetryingTaskId] = useState<string | null>(null);
+  const [retryingQueueId, setRetryingQueueId] = useState<ModelQueueOverviewItem["id"] | null>(null);
   const [clearingQueueId, setClearingQueueId] = useState<ModelQueueOverviewItem["id"] | null>(null);
   const requestInFlight = useRef(false);
   const cancelledResearchTaskIds = useRef(new Map<string, number>());
@@ -616,6 +653,54 @@ export function QueuePage({ apiBase }: { apiBase: string }) {
     }
   }, [apiBase, removeQueueTasks]);
 
+  const retryModelTask = useCallback(async (
+    queue: ModelQueueOverviewItem,
+    task: ModelQueueTask,
+  ) => {
+    setRetryingTaskId(task.task_id);
+    setActionMessage("");
+    setError("");
+    try {
+      const response = await fetch(`${apiBase}/api/v1/model-queues/${queue.id}/tasks/retry`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ task_id: task.task_id, kind: task.kind, entity_id: task.entity_id }),
+      });
+      if (!response.ok) throw new Error(`手动重试失败（HTTP ${response.status}）`);
+      setActionMessage(`已将“${task.title}”插入 ${queue.model} 队列最前方重试。`);
+      await loadQueues();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "手动重试失败");
+    } finally {
+      setRetryingTaskId(null);
+    }
+  }, [apiBase, loadQueues]);
+
+  const retryModelQueue = useCallback(async (queue: ModelQueueOverviewItem) => {
+    const retryableCount = queue.tasks.filter((task) => task.error).length;
+    if (!retryableCount || !window.confirm(
+      `确认重试 ${queue.model} 当前 ${retryableCount} 个错误任务？成功任务不会重复执行。`,
+    )) return;
+    setRetryingQueueId(queue.id);
+    setActionMessage("");
+    setError("");
+    try {
+      const response = await fetch(`${apiBase}/api/v1/model-queues/${queue.id}/retry`, {
+        method: "POST",
+      });
+      if (!response.ok) throw new Error(`批量重试失败（HTTP ${response.status}）`);
+      const result = await response.json() as { retried: number; skipped: number };
+      setActionMessage(
+        `已重试 ${queue.model} 的 ${result.retried} 个错误任务${result.skipped ? `，跳过 ${result.skipped} 个已失效任务` : ""}。`,
+      );
+      await loadQueues();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "批量重试失败");
+    } finally {
+      setRetryingQueueId(null);
+    }
+  }, [apiBase, loadQueues]);
+
   useEffect(() => {
     const controller = new AbortController();
     void loadQueues(controller.signal, true);
@@ -649,8 +734,12 @@ export function QueuePage({ apiBase }: { apiBase: string }) {
         queue={queue}
         key={queue.id}
         onCancelTask={cancelResearchTask}
+        onRetryTask={(task) => void retryModelTask(queue, task)}
+        onRetryAll={() => void retryModelQueue(queue)}
         onClear={() => void clearModelQueue(queue)}
         cancellingTaskId={cancellingTaskId}
+        retryingTaskId={retryingTaskId}
+        retryingAll={retryingQueueId === queue.id}
         clearing={clearingQueueId === queue.id}
       />)}
     </div>

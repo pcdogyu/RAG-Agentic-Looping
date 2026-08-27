@@ -40,7 +40,9 @@ from backend.app.services.fact_sources import get_effective_settings
 from backend.app.services.mcp_registry import seed_integrations
 from backend.app.services.model_queue import (
     ModelQueueOverviewResponse,
+    ModelQueueTask,
     build_model_queue_overview,
+    cancel_model_task,
     cancel_model_tasks,
     record_model_task,
     update_model_task,
@@ -81,9 +83,13 @@ from backend.app.storage import (
     upsert_asset,
 )
 from backend.app.worker import (
+    DEFAULT_MODEL_TASK_PRIORITY,
+    cancel_news_extraction_task,
     celery_app,
     clear_news_extraction_queue,
+    enqueue_asset_mapping,
     enqueue_event_research_retry,
+    enqueue_news_extraction_retry,
     enqueue_research,
     enqueue_scan,
     evolve_failures,
@@ -306,6 +312,12 @@ class EvolutionRequest(BaseModel):
 
 
 class ResearchCancellationRequest(BaseModel):
+    task_id: str
+    kind: str
+    entity_id: str | None = None
+
+
+class ModelTaskRetryRequest(BaseModel):
     task_id: str
     kind: str
     entity_id: str | None = None
@@ -706,8 +718,11 @@ def clear_model_queue(queue_id: str, db: Session = Depends(get_db)):
         return clear_research_tasks(db)
     if queue_id == "extract":
         result = clear_news_extraction_queue()
-        cancelled = int(result["cancelled"])
-        task_ids = list(result["celery_task_ids"])
+        tracked = cancel_model_tasks("extract")
+        cancelled = int(result["cancelled"]) + tracked.cancelled
+        task_ids = list(
+            dict.fromkeys([*result["celery_task_ids"], *tracked.celery_task_ids])
+        )
     else:
         result = cancel_model_tasks("assist" if queue_id == "assist" else "code")
         cancelled = result.cancelled
@@ -720,6 +735,190 @@ def clear_model_queue(queue_id: str, db: Session = Depends(get_db)):
         "cancelled": cancelled,
         "purged": purged,
         "revoked": revoked,
+    }
+
+
+RETRYABLE_MODEL_QUEUES = {"extract", "research", "assist"}
+MANUAL_RETRY_PRIORITY = 0
+BULK_RETRY_PRIORITY = DEFAULT_MODEL_TASK_PRIORITY
+
+
+def _retryable_model_queue_tasks(queue_id: str) -> list[ModelQueueTask]:
+    overview = _build_model_queue_snapshot()
+    queue = next((item for item in overview.queues if item.id == queue_id), None)
+    if queue is None:
+        return []
+    return [task for task in queue.tasks if task.error]
+
+
+def _enqueue_model_task_retry(
+    db: Session,
+    *,
+    queue_id: str,
+    task: ModelQueueTask,
+    priority: int,
+) -> str:
+    if queue_id == "extract":
+        if not task.entity_id:
+            raise HTTPException(409, "news extraction task has no durable news id")
+        try:
+            news_uuid = UUID(task.entity_id)
+        except ValueError as exc:
+            raise HTTPException(422, "invalid news extraction entity_id") from exc
+        news = get_news(db, news_uuid)
+        if news is None:
+            raise HTTPException(409, "source news no longer exists")
+        if cancel_model_task("extract", task.task_id):
+            _revoke_model_tasks([task.task_id])
+        cancel_news_extraction_task(
+            task_id=task.task_id,
+            news_id=task.entity_id,
+        )
+        return enqueue_news_extraction_retry(news, priority=priority)
+
+    if queue_id == "assist":
+        if task.kind != "asset_mapping" or not task.entity_id:
+            raise HTTPException(422, "only asset mapping tasks can be retried")
+        try:
+            event_uuid = UUID(task.entity_id)
+        except ValueError as exc:
+            raise HTTPException(422, "invalid asset mapping entity_id") from exc
+        event = get_event(db, event_uuid)
+        if event is None:
+            raise HTTPException(409, "source event no longer exists")
+        if cancel_model_task("assist", task.task_id):
+            _revoke_model_tasks([task.task_id])
+        task_id = enqueue_asset_mapping(db, event, force=True, priority=priority)
+        if task_id is None:
+            raise HTTPException(409, "asset mapping retry was not queued")
+        return task_id
+
+    if task.kind == "asset_research":
+        try:
+            failed_run_id = UUID(task.task_id)
+        except ValueError as exc:
+            raise HTTPException(422, "invalid asset research task_id") from exc
+        failed_run = get_run(db, failed_run_id)
+        if failed_run is None:
+            raise HTTPException(404, "asset research run not found")
+        original = (
+            get_run(db, failed_run.retry_of_run_id)
+            if failed_run.retry_of_run_id is not None
+            else failed_run
+        )
+        if original is None:
+            raise HTTPException(409, "original asset research run no longer exists")
+        if original.status is not RunStatus.FAILED and original.retryable_reason is None:
+            raise HTTPException(409, "asset research run is no longer retryable")
+        retries = list_retries_for_run(db, original.id)
+        active_statuses = {RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.VERIFYING}
+        if any(item.status in active_statuses for item in retries):
+            raise HTTPException(409, "an asset research retry is already active")
+        event = get_event(db, original.event_id) if original.event_id else None
+        if original.event_id and event is None:
+            raise HTTPException(409, "source event no longer exists")
+        retry_attempt = max([item.retry_attempt for item in retries] or [0]) + 1
+        task_id, _ = enqueue_research(
+            db,
+            original.asset,
+            event,
+            as_of=utc_now(),
+            historical_replay=False,
+            retry_of_run_id=original.id,
+            retry_attempt=retry_attempt,
+            priority=priority,
+        )
+        return task_id
+
+    if task.kind == "event_research":
+        try:
+            run_uuid = UUID(task.task_id)
+        except ValueError as exc:
+            raise HTTPException(422, "invalid event research task_id") from exc
+        run = get_event_research_run(db, run_uuid)
+        if run is None:
+            raise HTTPException(404, "event research run not found")
+        if run.status is not RunStatus.FAILED and run.retryable_reason is None:
+            raise HTTPException(409, "event research run is no longer retryable")
+        event = get_event(db, run.event_id)
+        if event is None:
+            raise HTTPException(409, "source event no longer exists")
+        task_id, _ = enqueue_event_research_retry(
+            db,
+            event,
+            run,
+            priority=priority,
+        )
+        return task_id
+
+    raise HTTPException(422, "only research tasks can be retried in this queue")
+
+
+@app.post("/api/v1/model-queues/{queue_id}/tasks/retry", status_code=202)
+def retry_model_queue_task(
+    queue_id: str,
+    request: ModelTaskRetryRequest,
+    db: Session = Depends(get_db),
+):
+    if queue_id not in RETRYABLE_MODEL_QUEUES:
+        raise HTTPException(422, "this model queue does not support manual retry")
+    task = next(
+        (
+            item
+            for item in _retryable_model_queue_tasks(queue_id)
+            if item.task_id == request.task_id
+            and item.kind == request.kind
+            and item.entity_id == request.entity_id
+        ),
+        None,
+    )
+    if task is None:
+        raise HTTPException(404, "retryable model task not found")
+    task_id = _enqueue_model_task_retry(
+        db,
+        queue_id=queue_id,
+        task=task,
+        priority=MANUAL_RETRY_PRIORITY,
+    )
+    _mark_model_queue_snapshot_stale()
+    return {
+        "queue_id": queue_id,
+        "requested": 1,
+        "retried": 1,
+        "skipped": 0,
+        "task_ids": [task_id],
+        "priority": "highest",
+    }
+
+
+@app.post("/api/v1/model-queues/{queue_id}/retry", status_code=202)
+def retry_model_queue_tasks(queue_id: str, db: Session = Depends(get_db)):
+    if queue_id not in RETRYABLE_MODEL_QUEUES:
+        raise HTTPException(422, "this model queue does not support bulk retry")
+    tasks = _retryable_model_queue_tasks(queue_id)
+    retried_task_ids: list[str] = []
+    skipped = 0
+    for task in tasks:
+        try:
+            retried_task_ids.append(
+                _enqueue_model_task_retry(
+                    db,
+                    queue_id=queue_id,
+                    task=task,
+                    priority=BULK_RETRY_PRIORITY,
+                )
+            )
+        except HTTPException:
+            db.rollback()
+            skipped += 1
+    _mark_model_queue_snapshot_stale()
+    return {
+        "queue_id": queue_id,
+        "requested": len(tasks),
+        "retried": len(retried_task_ids),
+        "skipped": skipped,
+        "task_ids": retried_task_ids,
+        "priority": "normal",
     }
 
 
