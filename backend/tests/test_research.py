@@ -383,6 +383,9 @@ def test_final_status_distinguishes_neutral_insufficient_and_technical_failure(
     assert insufficient.recommendation.signal_status.value == "insufficient_evidence"
     assert insufficient.recommendation.score == 0
     assert insufficient.recommendation.gate_reasons
+    assert insufficient.recommendation.primary_gate_reason == (
+        insufficient.recommendation.gate_reasons[0]
+    )
 
     assert technical.status is RunStatus.FAILED
     assert technical.recommendation.signal_status.value == "technical_failure"

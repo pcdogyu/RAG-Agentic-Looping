@@ -9,6 +9,7 @@ import {
   factSourceGroupOptions,
   failedResearchRetryPath,
   firstUnhealthyGroup,
+  GateReasons,
   isSearchSource,
   NativeConfigEditor,
   parseFilterKeywords,
@@ -45,6 +46,23 @@ describe("open source and search settings", () => {
     expect(markup).toContain("暂不评分");
     expect(markup).toContain("方向证据不足 · 评级：观察");
     expect(markup).not.toContain("发布分：0");
+  });
+
+  it("shows one blocking gate reason before the complete reason list", () => {
+    const markup = renderToStaticMarkup(createElement(GateReasons, {
+      primaryReason: "claim-level evidence strength is below the publication threshold",
+      allReasons: [
+        "products_or_protocol",
+        "claim-level evidence strength is below the publication threshold",
+        "direction weakened below the publication threshold after evidence gating",
+      ],
+    }));
+
+    expect((markup.match(/<h3>门禁原因<\/h3>/g) || [])).toHaveLength(1);
+    expect((markup.match(/<h3>所有门禁原因<\/h3>/g) || [])).toHaveLength(1);
+    expect(markup.indexOf("门禁原因")).toBeLessThan(markup.indexOf("所有门禁原因"));
+    expect(markup.match(/claim-level evidence strength/g)).toHaveLength(2);
+    expect(markup.match(/products_or_protocol/g)).toHaveLength(1);
   });
 
   it("deduplicates a news item repeated as evidence", () => {

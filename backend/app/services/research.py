@@ -1777,6 +1777,7 @@ class ResearchService:
         if technical_failure and run.retryable_reason:
             gate_reasons.insert(0, run.retryable_reason)
         gate_reasons = list(dict.fromkeys(gate_reasons))
+        primary_gate_reason = gate_reasons[0] if not final_gate and gate_reasons else None
         confidence_ceiling = min(
             draft.confidence,
             verification.evidence_strength,
@@ -1832,6 +1833,7 @@ class ResearchService:
             evidence_strength=verification.evidence_strength,
             mapping_confidence=mapping_confidence,
             claim_assessments=verification.claim_assessments,
+            primary_gate_reason=primary_gate_reason,
             gate_reasons=gate_reasons,
             scoring_version="deterministic-event-factor-v2",
             calibration_version="evidence-shrinkage-score-aligned-v2",
@@ -1873,6 +1875,7 @@ class ResearchService:
                     "calibration_reliability": calibration_reliability,
                     "cloud_approved": cloud_approved,
                     "cloud_required": cloud_required,
+                    "primary_gate_reason": primary_gate_reason,
                     "gate_reasons": gate_reasons,
                     "score_components": {
                         "probability": direction_score.probability_score,

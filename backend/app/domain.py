@@ -257,6 +257,7 @@ class Recommendation(BaseModel):
     evidence_strength: float = Field(default=1, ge=0, le=1)
     mapping_confidence: float = Field(default=1, ge=0, le=1)
     claim_assessments: list[ClaimEvidenceAssessment] = Field(default_factory=list)
+    primary_gate_reason: str | None = None
     gate_reasons: list[str] = Field(default_factory=list)
     scoring_version: str = "deterministic-v1"
     calibration_version: str = "uncalibrated-v1"

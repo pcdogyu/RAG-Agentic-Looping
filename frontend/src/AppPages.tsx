@@ -1075,6 +1075,7 @@ type Recommendation = {
   score_available?: boolean;
   evidence_strength?: number;
   mapping_confidence?: number;
+  primary_gate_reason?: string | null;
   gate_reasons?: string[];
   horizon_days?: number;
   scoring_version?: string;
@@ -1228,6 +1229,26 @@ export function ConclusionScore({
       {directionalEvidenceComplete !== undefined && ` · 方向证据${directionalEvidenceComplete ? "通过" : "未通过"}`}
     </small>
   </div>;
+}
+
+export function GateReasons({
+  primaryReason,
+  allReasons = [],
+}: {
+  primaryReason?: string | null;
+  allReasons?: string[];
+}) {
+  const reasons = [...new Set(allReasons.filter(Boolean))];
+  const blockingReason = primaryReason || reasons[0];
+  if (!blockingReason) return null;
+  return <>
+    <h3>门禁原因</h3>
+    <ul className="gate-reasons"><li>{blockingReason}</li></ul>
+    {!!reasons.length && <>
+      <h3>所有门禁原因</h3>
+      <ul className="gate-reasons">{reasons.map((item) => <li key={item}>{item}</li>)}</ul>
+    </>}
+  </>;
 }
 
 export const changedTargetDesktopColumns = 5;
@@ -1429,7 +1450,7 @@ export function ConclusionsPage({ apiBase }: { apiBase: string }) {
           <span>映射可信度<strong>{Math.round((selected.recommendation.mapping_confidence ?? 1) * 100)}%</strong></span>
           <span>研究期限<strong>{selected.recommendation.horizon_days ?? 90} 天</strong></span>
         </div>
-        {!!selected.recommendation.gate_reasons?.length && <><h3>门禁原因</h3><ul className="gate-reasons">{selected.recommendation.gate_reasons.map((item) => <li key={item}>{item}</li>)}</ul></>}
+        <GateReasons primaryReason={selected.recommendation.primary_gate_reason} allReasons={selected.recommendation.gate_reasons} />
         <h3>核心观点</h3><p>{selected.recommendation.thesis.summary}</p>
         {selected.recommendation.thesis.historical_context && <><h3>历史背景</h3><p>{selected.recommendation.thesis.historical_context}</p></>}
         <h3>催化剂</h3><ul>{selected.recommendation.thesis.catalysts.map((item) => <li key={item}>{item}</li>)}</ul>
