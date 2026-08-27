@@ -154,7 +154,6 @@ export type ModelInferenceQueueItem = {
 
 export type ModelQueueTask = {
   task_id: string;
-  instance_id: string | null;
   kind: string;
   entity_id: string | null;
   title: string;
@@ -173,43 +172,6 @@ export type ModelQueueTask = {
   metrics: Record<string, unknown>;
 };
 
-type ModelQueueCounts = {
-  queued: number;
-  running: number;
-  retrying: number;
-  verifying: number;
-  waiting_for_model: number;
-  completed: number;
-  failed: number;
-};
-
-type ModelQueueMetrics = {
-  average_queue_duration_ms: number | null;
-  average_execution_duration_ms: number | null;
-  longest_wait_ms: number | null;
-  estimated_clear_ms: number | null;
-  queue_duration_sample_count: number;
-  execution_duration_sample_count: number;
-  execution_p50_ms: number | null;
-  execution_p90_ms: number | null;
-  throughput_per_hour: number | null;
-};
-
-export type ModelQueueInstanceItem = {
-  id: string;
-  healthy: boolean;
-  model_available: boolean;
-  state: string;
-  capacity: number;
-  available: number;
-  observable: boolean;
-  counts: ModelQueueCounts;
-  metrics: ModelQueueMetrics;
-  total_tasks: number;
-  truncated: boolean;
-  tasks: ModelQueueTask[];
-};
-
 export type ModelQueueOverviewItem = {
   id: "extract" | "research" | "assist" | "code";
   model: string;
@@ -223,9 +185,31 @@ export type ModelQueueOverviewItem = {
   instance_count: number;
   per_instance_concurrency: number;
   observable: boolean;
-  instances: ModelQueueInstanceItem[];
-  counts: ModelQueueCounts;
-  metrics: ModelQueueMetrics;
+  instances: Array<{
+    id: string;
+    healthy: boolean;
+    model_available: boolean;
+  }>;
+  counts: {
+    queued: number;
+    running: number;
+    retrying: number;
+    verifying: number;
+    waiting_for_model: number;
+    completed: number;
+    failed: number;
+  };
+  metrics: {
+    average_queue_duration_ms: number | null;
+    average_execution_duration_ms: number | null;
+    longest_wait_ms: number | null;
+    estimated_clear_ms: number | null;
+    queue_duration_sample_count: number;
+    execution_duration_sample_count: number;
+    execution_p50_ms: number | null;
+    execution_p90_ms: number | null;
+    throughput_per_hour: number | null;
+  };
   total_tasks: number;
   truncated: boolean;
   tasks: ModelQueueTask[];
