@@ -100,6 +100,49 @@ def test_explicit_adverse_news_corrects_an_incorrect_positive_model_direction():
     assert normalization.metrics == {"model_direction": 1, "resolved_direction": -1}
 
 
+def test_configured_positive_terms_override_a_neutral_model_direction():
+    class NeutralDirectionLlm:
+        def generate_json(self, **kwargs):
+            return ExtractedEvent(
+                event_type="product",
+                entities=["Apple"],
+                direct_impact="癌症疗法取得积极进展",
+                impact_direction=0,
+                novelty=0.7,
+                priority=0.8,
+                search_queries=["AAPL"],
+            ).model_dump(mode="json")
+
+    settings = Settings(
+        _env_file=None,
+        fmp_access_token="",
+        fmp_mcp_url="",
+        direction_positive_terms="上涨,广泛关注,积极进展",
+        direction_neutral_terms="等待更多信息",
+        direction_negative_terms="临床失败,下跌",
+    )
+    registry = ProviderRegistry(settings)
+    item = NewsItem(
+        source="Example Wire",
+        source_quality=SourceQuality.PROFESSIONAL,
+        title="Apple 癌症疗法取得积极进展并带动板块上涨",
+        summary="该进展引发市场广泛关注。",
+        url="https://example.com/apple-positive-progress",
+        published_at=datetime(2025, 1, 31, tzinfo=UTC),
+        as_of=datetime(2025, 1, 31, tzinfo=UTC),
+        content_hash=sha256(b"apple-positive-progress").hexdigest(),
+        symbols=["AAPL"],
+    )
+
+    event = EventService(registry, settings, NeutralDirectionLlm()).extract(item)
+
+    assert event.candidates[0].impact_direction == 1
+    normalization = next(
+        step for step in event.analysis_steps if step.phase == "direction_normalization"
+    )
+    assert normalization.metrics == {"model_direction": 0, "resolved_direction": 1}
+
+
 def test_ingest_clusters_duplicate_reprints(db):
     settings = Settings(fmp_access_token="", fmp_mcp_url="")
     registry = ProviderRegistry(settings)

@@ -285,6 +285,9 @@ class EventService:
             item.summary,
             extracted.direct_impact,
             fallback=extracted_direction,
+            positive_terms=self.settings.direction_positive_lexicon,
+            neutral_terms=self.settings.direction_neutral_lexicon,
+            negative_terms=self.settings.direction_negative_lexicon,
         )
         extracted.impact_direction = resolved_direction or 0
         if extracted.impact_direction != extracted_direction:

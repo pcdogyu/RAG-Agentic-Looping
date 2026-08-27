@@ -48,3 +48,16 @@ def test_research_urls_use_pool_or_main_fallback() -> None:
         "http://research-0:11435",
         "http://research-1:11436",
     ]
+
+
+def test_direction_lexicons_parse_supported_separators_and_remove_duplicates() -> None:
+    settings = Settings(
+        _env_file=None,
+        direction_positive_terms="上涨，积极进展|上涨",
+        direction_neutral_terms="持平; 维持不变",
+        direction_negative_terms="下跌；临床失败\n利空",
+    )
+
+    assert settings.direction_positive_lexicon == ["上涨", "积极进展"]
+    assert settings.direction_neutral_lexicon == ["持平", "维持不变"]
+    assert settings.direction_negative_lexicon == ["下跌", "临床失败", "利空"]

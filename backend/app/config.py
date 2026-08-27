@@ -1,3 +1,4 @@
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Self
@@ -103,6 +104,9 @@ class Settings(BaseSettings):
     evolution_auto_merge: bool = False
     max_verification_rounds: int = Field(default=2, ge=1, le=3)
     minimum_directional_confidence: float = Field(default=0.55, ge=0, le=1)
+    direction_positive_terms: str = ""
+    direction_neutral_terms: str = ""
+    direction_negative_terms: str = ""
 
     base_currency: str = "USD"
     initial_cash: float = 100_000.0
@@ -178,6 +182,28 @@ class Settings(BaseSettings):
     @property
     def official_rss_feeds(self) -> list[str]:
         return [item.strip() for item in self.official_rss_feed_urls.split(",") if item.strip()]
+
+    @staticmethod
+    def _direction_terms(configured: str) -> list[str]:
+        return list(
+            dict.fromkeys(
+                item.strip()
+                for item in re.split(r"[,，;；|\n]+", configured)
+                if item.strip()
+            )
+        )
+
+    @property
+    def direction_positive_lexicon(self) -> list[str]:
+        return self._direction_terms(self.direction_positive_terms)
+
+    @property
+    def direction_neutral_lexicon(self) -> list[str]:
+        return self._direction_terms(self.direction_neutral_terms)
+
+    @property
+    def direction_negative_lexicon(self) -> list[str]:
+        return self._direction_terms(self.direction_negative_terms)
 
 
 @lru_cache

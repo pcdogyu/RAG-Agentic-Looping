@@ -38,6 +38,46 @@ def test_explicit_benefit_language_is_recognized_as_positive():
     assert directional_text_hint("The company is poised to benefit from new AI orders") == 1
 
 
+def test_configured_lexicons_resolve_positive_neutral_and_negative_language():
+    positive = ["上涨", "广泛关注", "积极进展", "成本下降"]
+    neutral = ["维持评级", "等待更多信息"]
+    negative = ["下降", "临床失败", "利空"]
+
+    assert directional_text_hint(
+        "Moderna, Inc. (MRNA) 在mRNA癌症疗法方面取得积极进展，"
+        "引发市场广泛关注，并带动生物医药板块上涨。",
+        positive_terms=positive,
+        neutral_terms=neutral,
+        negative_terms=negative,
+    ) == 1
+    assert directional_text_hint(
+        "公司维持评级，等待更多信息。",
+        fallback=1,
+        positive_terms=positive,
+        neutral_terms=neutral,
+        negative_terms=negative,
+    ) == 0
+    assert directional_text_hint(
+        "候选药物临床失败，构成明确利空。",
+        fallback=1,
+        positive_terms=positive,
+        neutral_terms=neutral,
+        negative_terms=negative,
+    ) == -1
+
+
+def test_configured_longer_phrase_wins_and_negated_terms_do_not_signal():
+    assert directional_text_hint(
+        "成本下降",
+        positive_terms=["成本下降"],
+        negative_terms=["下降"],
+    ) == 1
+    assert directional_text_hint(
+        "公司尚未上涨",
+        positive_terms=["上涨"],
+    ) is None
+
+
 def test_negated_or_uncertain_benefit_language_blocks_positive_fallback():
     for text in (
         "Meta 未必受益",

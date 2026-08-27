@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import threading
+from collections.abc import Sequence
 from datetime import datetime, timedelta
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -906,6 +907,10 @@ class ResearchService:
         run: ResearchRun,
         event_payload: dict[str, Any] | None,
         _draft: DraftOutput,
+        *,
+        positive_terms: Sequence[str] = (),
+        neutral_terms: Sequence[str] = (),
+        negative_terms: Sequence[str] = (),
     ) -> tuple[int | None, float, float]:
         direction, relevance, confidence = cls._mapping_inputs(run, event_payload)
         event = NewsEvent.model_validate(event_payload) if event_payload else None
@@ -917,6 +922,9 @@ class ResearchService:
             event.direct_impact if event else None,
             fallback=direction,
             allow_beneficial=True,
+            positive_terms=positive_terms,
+            neutral_terms=neutral_terms,
+            negative_terms=negative_terms,
         )
         return direction, relevance, confidence
 
@@ -988,7 +996,12 @@ class ResearchService:
         semantic_missing: list[str] = []
 
         event_direction, event_relevance, _ = self._direction_inputs(
-            run, state.get("event"), draft
+            run,
+            state.get("event"),
+            draft,
+            positive_terms=self.settings.direction_positive_lexicon,
+            neutral_terms=self.settings.direction_neutral_lexicon,
+            negative_terms=self.settings.direction_negative_lexicon,
         )
         factor_summary = state.get("factor_summary", {})
         preview = deterministic_direction_score(
@@ -1607,7 +1620,12 @@ class ResearchService:
         verification = VerificationOutput.model_validate(state["verification"])
         event = NewsEvent.model_validate(state["event"]) if state.get("event") else None
         event_direction, event_relevance, mapping_confidence = self._direction_inputs(
-            run, state.get("event"), draft
+            run,
+            state.get("event"),
+            draft,
+            positive_terms=self.settings.direction_positive_lexicon,
+            neutral_terms=self.settings.direction_neutral_lexicon,
+            negative_terms=self.settings.direction_negative_lexicon,
         )
         factor_summary = state.get("factor_summary", {})
         calibration_reliability = (

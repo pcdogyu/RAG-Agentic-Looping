@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 _ADVERSE_DIRECTION_PATTERNS = tuple(
@@ -20,9 +21,11 @@ _ADVERSE_DIRECTION_PATTERNS = tuple(
         r"证券欺诈|集体诉讼|股东调查|调查警报|证券违法|法律调查",
         r"净利润.{0,16}(?:仍|持续)?(?:为)?负|净亏损|持续亏损|财务状况.{0,12}(?:恶化|转差)",
         r"(?:市场|投资者)(?:信心|情绪).{0,12}(?:负面|下降|恶化)",
-        r"利空|负面影响|下降",
+        r"利空|负面影响",
     )
 )
+
+_GENERIC_ADVERSE_DIRECTION_PATTERNS = (re.compile(r"下降", re.IGNORECASE),)
 
 _BENEFICIAL_DIRECTION_PATTERNS = tuple(
     re.compile(pattern, re.IGNORECASE)
@@ -56,6 +59,12 @@ _UNCERTAIN_OR_NEGATED_BENEFICIAL_PATTERNS = tuple(
     )
 )
 
+_TERM_NEGATION_PATTERN = re.compile(
+    r"(?:未|没有|并未|不再|无|尚未|并非|不是|未能|无法|难以|避免|免于)"
+    r"(?:出现|发生|实现|达到|取得|获得|形成|造成|带来|导致)?\s*$",
+    re.IGNORECASE,
+)
+
 
 @dataclass(frozen=True)
 class DirectionScore:
@@ -65,10 +74,56 @@ class DirectionScore:
     factor_score: int | None
 
 
+def _configured_term_strength(text: str, terms: Sequence[str]) -> tuple[int, int, int]:
+    matches: list[int] = []
+    folded = text.casefold()
+    for configured in terms:
+        term = configured.strip().casefold()
+        if not term:
+            continue
+        escaped = re.escape(term)
+        pattern = re.compile(
+            rf"(?<!\w){escaped}(?!\w)" if term.isascii() else escaped,
+            re.IGNORECASE,
+        )
+        for match in pattern.finditer(folded):
+            prefix = folded[max(0, match.start() - 12) : match.start()]
+            if _TERM_NEGATION_PATTERN.search(prefix):
+                continue
+            matches.append(len(term))
+    return (max(matches, default=0), sum(matches), len(matches))
+
+
+def _configured_text_hint(
+    text: str,
+    *,
+    positive_terms: Sequence[str],
+    neutral_terms: Sequence[str],
+    negative_terms: Sequence[str],
+    allow_beneficial: bool,
+) -> int | None:
+    positive = (
+        _configured_term_strength(text, positive_terms)
+        if allow_beneficial
+        else (0, 0, 0)
+    )
+    negative = _configured_term_strength(text, negative_terms)
+    if positive[0] or negative[0]:
+        # Prefer the more specific (longer) phrase, then total matched text and
+        # match count. Exact ties stay conservative and resolve as adverse.
+        return 1 if positive > negative else -1
+    if _configured_term_strength(text, neutral_terms)[0]:
+        return 0
+    return None
+
+
 def directional_text_hint(
     *texts: str | None,
     fallback: int | None = None,
     allow_beneficial: bool = True,
+    positive_terms: Sequence[str] = (),
+    neutral_terms: Sequence[str] = (),
+    negative_terms: Sequence[str] = (),
 ) -> int | None:
     """Resolve explicit directional language before using a model-provided fallback.
 
@@ -88,6 +143,17 @@ def directional_text_hint(
         for pattern in _UNCERTAIN_OR_NEGATED_BENEFICIAL_PATTERNS
     ):
         return fallback if fallback == -1 else None
+    configured_hint = _configured_text_hint(
+        combined,
+        positive_terms=positive_terms,
+        neutral_terms=neutral_terms,
+        negative_terms=negative_terms,
+        allow_beneficial=allow_beneficial,
+    )
+    if configured_hint is not None:
+        return configured_hint
+    if any(pattern.search(combined) for pattern in _GENERIC_ADVERSE_DIRECTION_PATTERNS):
+        return -1
     if allow_beneficial and any(
         pattern.search(combined) for pattern in _BENEFICIAL_DIRECTION_PATTERNS
     ):
