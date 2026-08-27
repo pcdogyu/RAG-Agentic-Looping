@@ -355,7 +355,7 @@ function taskSourceLabel(source: string | null) {
   return source || "业务任务";
 }
 
-const cancellableResearchStatuses = new Set(["queued", "running", "retrying", "verifying"]);
+const cancellableTaskStatuses = new Set(["queued", "running", "retrying", "verifying"]);
 
 export function ModelQueueTaskGrid({
   queue,
@@ -379,20 +379,24 @@ export function ModelQueueTaskGrid({
   return <div className="model-task-grid" data-queue={queue.id}>{queue.tasks.map((task) => {
     const isMapping = task.kind === "asset_mapping";
     const isEvolution = task.kind === "code_evolution";
-    const isCancellableResearch = queue.id === "research"
-      && ["asset_research", "event_research"].includes(task.kind)
-      && cancellableResearchStatuses.has(task.status);
+    const isCancellable = (
+      queue.id === "research" && ["asset_research", "event_research"].includes(task.kind)
+    ) || (
+      queue.id === "assist" && task.kind === "asset_mapping"
+    );
+    const canCancel = isCancellable && cancellableTaskStatuses.has(task.status);
+    const cancelNoun = queue.id === "assist" ? "股票映射任务" : "研究";
     const branch = queueMetricValue(task.metrics.branch);
     return <article className={`model-task-card ${task.status}`} key={task.task_id} title={task.title}>
       <div className="model-task-heading">
         <span className="model-task-status"><i />{modelTaskStatusLabels[task.status] ?? task.status}</span>
         <div className="model-task-heading-actions">
           <small>{taskSourceLabel(task.source)}</small>
-          {isCancellableResearch && <button
+          {canCancel && <button
             type="button"
             className="model-task-cancel"
-            aria-label={`取消 ${task.title} 的研究`}
-            title="取消该标的研究"
+            aria-label={`取消 ${task.title} 的${cancelNoun}`}
+            title={queue.id === "assist" ? "取消当前股票映射任务" : "取消该标的研究"}
             disabled={cancellingTaskId === task.task_id}
             onClick={() => onCancel?.(task)}
           >×</button>}
@@ -554,6 +558,58 @@ export function removeTasksFromQueueOverview(
   };
 }
 
+type CancelledTaskTombstone = {
+  queueId: ModelQueueOverviewItem["id"];
+  countField: "queued" | "running" | "retrying" | "verifying" | null;
+  maxCount: number;
+  cancelledAt: number;
+};
+
+function taskActiveCountField(task: ModelQueueTask): CancelledTaskTombstone["countField"] {
+  if (["queued", "proposed"].includes(task.status)) return "queued";
+  if (["running", "generating", "testing", "merging"].includes(task.status)) return "running";
+  if (task.status === "retrying") return "retrying";
+  if (task.status === "verifying") return "verifying";
+  return null;
+}
+
+export function applyCancelledTaskTombstone(
+  current: ModelQueueOverviewResponse,
+  taskId: string,
+  tombstone: CancelledTaskTombstone,
+): { overview: ModelQueueOverviewResponse; settled: boolean } {
+  const queue = current.queues.find((item) => item.id === tombstone.queueId);
+  if (!queue) return { overview: current, settled: false };
+  if (queue.tasks.some((task) => task.task_id === taskId)) {
+    return {
+      overview: removeTasksFromQueueOverview(
+        current,
+        tombstone.queueId,
+        (task) => task.task_id === taskId,
+      ),
+      settled: false,
+    };
+  }
+  if (!tombstone.countField) return { overview: current, settled: true };
+  if (queue.counts[tombstone.countField] <= tombstone.maxCount) {
+    return { overview: current, settled: true };
+  }
+  const queues = current.queues.map((item) => {
+    if (item.id !== tombstone.queueId) return item;
+    const counts = {
+      ...item.counts,
+      [tombstone.countField as string]: tombstone.maxCount,
+    };
+    return {
+      ...item,
+      counts,
+      total_tasks: counts.queued + counts.running + counts.retrying
+        + counts.verifying + counts.completed + counts.failed,
+    };
+  });
+  return { overview: { ...current, queues }, settled: false };
+}
+
 export function QueuePage({ apiBase }: { apiBase: string }) {
   const [overview, setOverview] = useState<ModelQueueOverviewResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -564,7 +620,7 @@ export function QueuePage({ apiBase }: { apiBase: string }) {
   const [retryingQueueId, setRetryingQueueId] = useState<ModelQueueOverviewItem["id"] | null>(null);
   const [clearingQueueId, setClearingQueueId] = useState<ModelQueueOverviewItem["id"] | null>(null);
   const requestInFlight = useRef(false);
-  const cancelledResearchTaskIds = useRef(new Map<string, number>());
+  const cancelledTaskIds = useRef(new Map<string, CancelledTaskTombstone>());
 
   const loadQueues = useCallback(async (signal?: AbortSignal, showLoading = false) => {
     if (requestInFlight.current) return;
@@ -574,17 +630,12 @@ export function QueuePage({ apiBase }: { apiBase: string }) {
       const response = await fetch(`${apiBase}/api/v1/model-queue-overview?limit=500`, { signal });
       if (!response.ok) throw new Error(`模型队列请求失败（HTTP ${response.status}）`);
       let next = await response.json() as ModelQueueOverviewResponse;
-      const research = next.queues.find((queue) => queue.id === "research");
       const snapshotTime = Date.parse(next.generated_at);
-      for (const [taskId, cancelledAt] of cancelledResearchTaskIds.current) {
-        if (research?.tasks.some((task) => task.task_id === taskId)) {
-          next = removeTasksFromQueueOverview(
-            next,
-            "research",
-            (task) => task.task_id === taskId,
-          );
-        } else if (Number.isFinite(snapshotTime) && snapshotTime >= cancelledAt) {
-          cancelledResearchTaskIds.current.delete(taskId);
+      for (const [taskId, tombstone] of cancelledTaskIds.current) {
+        const applied = applyCancelledTaskTombstone(next, taskId, tombstone);
+        next = applied.overview;
+        if (applied.settled && Number.isFinite(snapshotTime) && snapshotTime >= tombstone.cancelledAt) {
+          cancelledTaskIds.current.delete(taskId);
         }
       }
       setOverview(next);
@@ -607,24 +658,33 @@ export function QueuePage({ apiBase }: { apiBase: string }) {
       : current);
   }, []);
 
-  const cancelResearchTask = useCallback(async (task: ModelQueueTask) => {
+  const cancelModelTask = useCallback(async (
+    queue: ModelQueueOverviewItem,
+    task: ModelQueueTask,
+  ) => {
     setCancellingTaskId(task.task_id);
     setActionMessage("");
     setError("");
-    cancelledResearchTaskIds.current.set(task.task_id, Date.now());
-    removeQueueTasks("research", (item) => item.task_id === task.task_id);
+    const countField = taskActiveCountField(task);
+    cancelledTaskIds.current.set(task.task_id, {
+      queueId: queue.id,
+      countField,
+      maxCount: countField ? Math.max(0, queue.counts[countField] - 1) : 0,
+      cancelledAt: Date.now(),
+    });
+    removeQueueTasks(queue.id, (item) => item.task_id === task.task_id);
     try {
-      const response = await fetch(`${apiBase}/api/v1/model-queues/research/tasks/cancel`, {
+      const response = await fetch(`${apiBase}/api/v1/model-queues/${queue.id}/tasks/cancel`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ task_id: task.task_id, kind: task.kind, entity_id: task.entity_id }),
       });
-      if (!response.ok) throw new Error(`取消研究失败（HTTP ${response.status}）`);
+      if (!response.ok) throw new Error(`取消${queue.purpose}失败（HTTP ${response.status}）`);
       const result = await response.json() as { cancelled: number };
-      setActionMessage(`已取消“${task.title}”的 ${result.cancelled} 个活动研究任务。`);
+      setActionMessage(`已取消“${task.title}”的 ${result.cancelled} 个活动${queue.purpose}任务。`);
     } catch (reason) {
-      cancelledResearchTaskIds.current.delete(task.task_id);
-      setError(reason instanceof Error ? reason.message : "取消研究失败");
+      cancelledTaskIds.current.delete(task.task_id);
+      setError(reason instanceof Error ? reason.message : `取消${queue.purpose}失败`);
       void loadQueues(undefined, false);
     } finally {
       setCancellingTaskId(null);
@@ -733,7 +793,7 @@ export function QueuePage({ apiBase }: { apiBase: string }) {
       {overview?.queues.map((queue) => <UnifiedModelQueuePanel
         queue={queue}
         key={queue.id}
-        onCancelTask={cancelResearchTask}
+        onCancelTask={(task) => void cancelModelTask(queue, task)}
         onRetryTask={(task) => void retryModelTask(queue, task)}
         onRetryAll={() => void retryModelQueue(queue)}
         onClear={() => void clearModelQueue(queue)}

@@ -16,6 +16,7 @@ import AnalysisPage, {
 } from "./AnalysisPage";
 import BuildFooter, { buildInfo } from "./BuildFooter";
 import {
+  applyCancelledTaskTombstone,
   factSourceGroupDefinitions,
   formatQueueDuration,
   ModelInferenceQueuePanel,
@@ -759,8 +760,16 @@ describe("research queue page", () => {
     const panel = renderToStaticMarkup(createElement(UnifiedModelQueuePanel, {
       queue: research, onClear: () => undefined,
     }));
+    const mappingTask = {
+      ...research.tasks[0],
+      task_id: "mapping-task",
+      kind: "asset_mapping",
+      title: "石四药集团：上半年归母净利润增长",
+      source: "automatic",
+    } satisfies ModelQueueTask;
     const mapping = renderToStaticMarkup(createElement(ModelQueueTaskGrid, {
-      queue: overviewQueue({ tasks: research.tasks }), onCancel: () => undefined,
+      queue: overviewQueue({ id: "assist", purpose: "股票映射", tasks: [mappingTask] }),
+      onCancel: () => undefined,
     }));
 
     expect(grid).toContain('aria-label="取消 600519 · 贵州茅台 的研究"');
@@ -768,7 +777,9 @@ describe("research queue page", () => {
     expect(panel).toContain('class="model-queue-state running"');
     expect(panel).toContain('class="model-queue-clear"');
     expect(panel).toContain(">清空</button>");
-    expect(mapping).not.toContain("model-task-cancel");
+    expect(mapping).toContain("自动任务");
+    expect(mapping).toContain('aria-label="取消 石四药集团：上半年归母净利润增长 的股票映射任务"');
+    expect(mapping).toContain('title="取消当前股票映射任务"');
     for (const id of ["extract", "assist", "code"] as const) {
       const modelPanel = renderToStaticMarkup(createElement(UnifiedModelQueuePanel, {
         queue: overviewQueue({ id }), onClear: () => undefined,
@@ -814,6 +825,28 @@ describe("research queue page", () => {
     expect(updated.queues[0].counts.queued).toBe(1);
     expect(updated.queues[0].total_tasks).toBe(11);
     expect(updated.queues[0].tasks).toEqual([]);
+  });
+
+  it("keeps a cancelled mapping card hidden while a broker count snapshot is stale", () => {
+    const mapping = overviewQueue({
+      id: "assist", model: "qwen2.5:7b", purpose: "股票映射",
+      counts: {
+        queued: 238, running: 2, retrying: 84, verifying: 0,
+        waiting_for_model: 0, completed: 546, failed: 0,
+      },
+      total_tasks: 870,
+      tasks: [],
+    });
+
+    const applied = applyCancelledTaskTombstone(
+      { generated_at: "2026-08-27T06:00:05Z", queues: [mapping] },
+      "cancelled-mapping",
+      { queueId: "assist", countField: "queued", maxCount: 237, cancelledAt: 0 },
+    );
+
+    expect(applied.settled).toBe(false);
+    expect(applied.overview.queues[0].counts.queued).toBe(237);
+    expect(applied.overview.queues[0].total_tasks).toBe(869);
   });
 });
 

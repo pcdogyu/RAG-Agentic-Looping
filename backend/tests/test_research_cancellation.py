@@ -118,6 +118,42 @@ def test_generic_clear_endpoint_uses_only_the_selected_model_queue(db, monkeypat
     assert revoked == ["extract-1", "extract-2"]
 
 
+def test_cancel_asset_mapping_endpoint_cancels_and_revokes_one_task(monkeypatch):
+    cancelled: list[tuple[str, str]] = []
+    revoked: list[str] = []
+    refreshed: list[bool] = []
+    monkeypatch.setattr(
+        main,
+        "cancel_model_task",
+        lambda lane, task_id: cancelled.append((lane, task_id)) or True,
+    )
+    monkeypatch.setattr(
+        main,
+        "_revoke_model_tasks",
+        lambda task_ids: revoked.extend(task_ids) or len(task_ids),
+    )
+    monkeypatch.setattr(
+        main,
+        "_mark_model_queue_snapshot_stale",
+        lambda: refreshed.append(True),
+    )
+
+    result = main.cancel_asset_mapping_task(
+        main.ResearchCancellationRequest(
+            task_id="mapping-task", kind="asset_mapping", entity_id="event-one"
+        )
+    )
+
+    assert result == {
+        "queue_id": "assist",
+        "cancelled": 1,
+        "revoked": 1,
+    }
+    assert cancelled == [("assist", "mapping-task")]
+    assert revoked == ["mapping-task"]
+    assert refreshed == [True]
+
+
 def _failed_model_task(task_id: str = "failed-mapping") -> ModelQueueTask:
     now = main.utc_now()
     return ModelQueueTask(

@@ -691,6 +691,21 @@ def cancel_research_task(
     }
 
 
+@app.post("/api/v1/model-queues/assist/tasks/cancel", status_code=202)
+def cancel_asset_mapping_task(request: ResearchCancellationRequest):
+    if request.kind != "asset_mapping":
+        raise HTTPException(422, "only asset mapping tasks can be cancelled")
+    if not cancel_model_task("assist", request.task_id):
+        raise HTTPException(404, "active asset mapping task not found")
+    revoked = _revoke_model_tasks([request.task_id])
+    _mark_model_queue_snapshot_stale()
+    return {
+        "queue_id": "assist",
+        "cancelled": 1,
+        "revoked": revoked,
+    }
+
+
 @app.post("/api/v1/model-queues/research/clear", status_code=202)
 def clear_research_tasks(db: Session = Depends(get_db)):
     result = cancel_research_tasks(db)
