@@ -140,7 +140,7 @@ def test_news_extraction_registry_sorts_active_items_and_keeps_failed(monkeypatc
     assert payload["truncated"] is True
 
 
-def test_clear_news_extraction_queue_cancels_only_active_items():
+def test_clear_news_extraction_queue_cancels_active_and_failed_items():
     redis = FakeRedis()
     now = datetime(2026, 8, 26, 8, 0, tzinfo=UTC).isoformat()
     entries = [
@@ -161,12 +161,12 @@ def test_clear_news_extraction_queue_cancels_only_active_items():
     payload = worker._read_news_extraction_queue(redis)
 
     assert result == {
-        "cancelled": 2,
+        "cancelled": 3,
         "celery_task_ids": ["task-queued", "task-running"],
     }
     assert payload["state"] == "cancelled"
     assert [item["status"] for item in payload["items"]] == [
-        "cancelled", "cancelled", "completed", "failed",
+        "cancelled", "cancelled", "completed", "cancelled",
     ]
     assert redis.get(worker.SCAN_GATE_KEY) is None
 
@@ -215,6 +215,43 @@ def test_news_extraction_timing_accumulates_attempts_without_retry_wait(monkeypa
     assert payload["average_queue_duration_ms"] == 10000
     assert payload["average_execution_duration_ms"] == 50000
     assert payload["queue_duration_sample_count"] == 1
+    assert payload["execution_duration_sample_count"] == 1
+
+
+def test_news_extraction_average_execution_uses_recent_four_hours(monkeypatch):
+    redis = FakeRedis()
+    monkeypatch.setattr(worker, "_redis_client", lambda: redis)
+    now = datetime(2026, 8, 26, 8, 0, tzinfo=UTC)
+    monkeypatch.setattr(worker, "utc_now", lambda: now)
+    entries = [
+        {
+            "task_id": "recent",
+            "news_id": "news-recent",
+            "title": "最近完成",
+            "status": "completed",
+            "queued_at": (now - timedelta(minutes=3)).isoformat(),
+            "started_at": (now - timedelta(minutes=2)).isoformat(),
+            "completed_at": (now - timedelta(minutes=1)).isoformat(),
+            "updated_at": (now - timedelta(minutes=1)).isoformat(),
+            "execution_duration_ms": 60_000,
+        },
+        {
+            "task_id": "old",
+            "news_id": "news-old",
+            "title": "较早完成",
+            "status": "completed",
+            "queued_at": (now - timedelta(hours=6)).isoformat(),
+            "started_at": (now - timedelta(hours=5, minutes=30)).isoformat(),
+            "completed_at": (now - timedelta(hours=5)).isoformat(),
+            "updated_at": (now - timedelta(hours=5)).isoformat(),
+            "execution_duration_ms": 30 * 60_000,
+        },
+    ]
+    worker._initialize_news_extraction_queue(redis, "scan-1", entries, {})
+
+    payload = worker.get_news_extraction_queue()
+
+    assert payload["average_execution_duration_ms"] == 60_000
     assert payload["execution_duration_sample_count"] == 1
 
 

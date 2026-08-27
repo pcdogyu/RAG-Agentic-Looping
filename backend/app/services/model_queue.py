@@ -31,6 +31,7 @@ from backend.app.storage import (
 )
 
 MODEL_TASK_RETENTION = timedelta(hours=24)
+RECENT_EXECUTION_WINDOW = timedelta(hours=4)
 MODEL_TASK_KEY_TTL_SECONDS = 48 * 60 * 60
 MODEL_TASK_HASH_PREFIX = "market-loop:model-queue"
 TrackedModelLane = Literal["extract", "assist", "code"]
@@ -204,15 +205,22 @@ def record_model_task(
 def cancel_model_tasks(
     lane: TrackedModelLane,
     *,
+    include_failed: bool = False,
     redis_client: Redis | None = None,
 ) -> ModelTaskCancellationResult:
-    """Cancel active tasks for one model lane without touching other queues."""
+    """Cancel active and optionally failed tasks for one isolated model lane."""
 
     try:
         client = redis_client or _redis_client()
         key = _task_hash_key(lane)
-        now = utc_now().isoformat()
+        now_value = utc_now()
+        now = now_value.isoformat()
+        failed_cutoff = now_value - MODEL_TASK_RETENTION
         task_ids: list[str] = []
+        cancelled = 0
+        clearable_statuses = ACTIVE_STATUSES | (
+            FAILED_STATUSES if include_failed else set()
+        )
         for field, raw in client.hgetall(key).items():
             task_id = field.decode() if isinstance(field, bytes) else str(field)
             value = raw.decode() if isinstance(raw, bytes) else raw
@@ -220,8 +228,13 @@ def cancel_model_tasks(
                 payload = json.loads(value)
             except (TypeError, json.JSONDecodeError):
                 continue
-            if payload.get("status") not in ACTIVE_STATUSES:
+            status = payload.get("status")
+            if status not in clearable_statuses:
                 continue
+            if status in FAILED_STATUSES:
+                updated_at = _parse_datetime(payload.get("updated_at"))
+                if updated_at is None or updated_at < failed_cutoff:
+                    continue
             payload.update(
                 status="cancelled",
                 updated_at=now,
@@ -229,10 +242,12 @@ def cancel_model_tasks(
                 error=None,
             )
             client.hset(key, task_id, json.dumps(payload, ensure_ascii=False))
-            task_ids.append(str(payload.get("task_id") or task_id))
+            cancelled += 1
+            if status in ACTIVE_STATUSES:
+                task_ids.append(str(payload.get("task_id") or task_id))
         client.expire(key, MODEL_TASK_KEY_TTL_SECONDS)
         return ModelTaskCancellationResult(
-            cancelled=len(task_ids), celery_task_ids=task_ids
+            cancelled=cancelled, celery_task_ids=task_ids
         )
     except Exception:
         return ModelTaskCancellationResult()
@@ -601,6 +616,7 @@ def _metrics(
     counts: ModelQueueCounts,
     capacity: int,
     *,
+    generated_at: datetime,
     use_throughput: bool = False,
 ) -> ModelQueueMetrics:
     queue_durations = [
@@ -612,13 +628,23 @@ def _metrics(
         if item.execution_duration_ms is not None
         and (item.status in COMPLETED_STATUSES or item.status in FAILED_STATUSES)
     ]
+    recent_execution_cutoff = generated_at - RECENT_EXECUTION_WINDOW
+    recent_execution_durations = [
+        item.execution_duration_ms
+        for item in tasks
+        if item.execution_duration_ms is not None
+        and (item.status in COMPLETED_STATUSES or item.status in FAILED_STATUSES)
+        and as_utc(item.completed_at or item.updated_at) >= recent_execution_cutoff
+    ]
     waiting = [
         item.queue_duration_ms
         for item in tasks
         if item.status in {"queued", "retrying"} and item.queue_duration_ms is not None
     ]
     average_execution = (
-        sum(execution_durations) // len(execution_durations) if execution_durations else None
+        sum(recent_execution_durations) // len(recent_execution_durations)
+        if recent_execution_durations
+        else None
     )
     work = counts.queued + counts.retrying + counts.running + counts.verifying
     completed = [
@@ -648,7 +674,7 @@ def _metrics(
         longest_wait_ms=max(waiting) if waiting else None,
         estimated_clear_ms=estimated_clear,
         queue_duration_sample_count=len(queue_durations),
-        execution_duration_sample_count=len(execution_durations),
+        execution_duration_sample_count=len(recent_execution_durations),
         execution_p50_ms=percentile(0.5),
         execution_p90_ms=percentile(0.9),
         throughput_per_hour=throughput_per_hour,
@@ -700,6 +726,7 @@ def _queue_item(
     inference: dict[str, Any],
     tasks: list[ModelQueueTask],
     limit: int,
+    generated_at: datetime,
     broker_queued: int | None = None,
     count_overrides: dict[str, int] | None = None,
     metric_overrides: dict[str, int | None] | None = None,
@@ -730,6 +757,7 @@ def _queue_item(
         tasks,
         counts,
         capacity,
+        generated_at=generated_at,
         use_throughput=queue_id == "research",
     )
     for field, value in (metric_overrides or {}).items():
@@ -1088,6 +1116,7 @@ def build_model_queue_overview(
             inference=extract_inference,
             tasks=extract_tasks,
             limit=min(limit, 200),
+            generated_at=now,
             broker_queued=(extraction_queue.get("counts") or {}).get("queued"),
             count_overrides=extraction_counts,
             metric_overrides={
@@ -1112,6 +1141,7 @@ def build_model_queue_overview(
             inference=research_inference,
             tasks=research_tasks,
             limit=limit,
+            generated_at=now,
             error=" ".join(
                 filter(
                     None,
@@ -1134,6 +1164,7 @@ def build_model_queue_overview(
             inference=assist_inference,
             tasks=assist_tasks,
             limit=limit,
+            generated_at=now,
             broker_queued=broker_mapping,
             error=" ".join(
                 filter(
@@ -1161,6 +1192,7 @@ def build_model_queue_overview(
             inference=code_inference,
             tasks=code_tasks,
             limit=limit,
+            generated_at=now,
             broker_queued=broker_code,
             error=" ".join(
                 filter(

@@ -38,22 +38,28 @@ def test_cancel_asset_card_cancels_all_active_runs_and_late_save_cannot_restore(
     assert get_run(db, untouched.id).status is RunStatus.QUEUED
 
 
-def test_clear_cancels_asset_and_event_research_but_not_terminal_runs(db):
+def test_clear_cancels_active_and_failed_research_but_not_completed_runs(db):
     active_asset = ResearchRun(asset=SEED_ASSETS[0], status=RunStatus.VERIFYING)
     completed_asset = ResearchRun(asset=SEED_ASSETS[1], status=RunStatus.COMPLETED)
+    failed_asset = ResearchRun(asset=SEED_ASSETS[1], status=RunStatus.FAILED)
     active_event = EventResearchRun(event_id=uuid4(), status=RunStatus.QUEUED)
-    for run in (active_asset, completed_asset):
+    failed_event = EventResearchRun(event_id=uuid4(), status=RunStatus.FAILED)
+    for run in (active_asset, completed_asset, failed_asset):
         save_run(db, run)
-    save_event_research_run(db, active_event)
+    for run in (active_event, failed_event):
+        save_event_research_run(db, run)
 
-    result = cancel_research_tasks(db)
+    result = cancel_research_tasks(db, include_failed=True)
 
-    assert result.cancelled == 2
-    assert result.asset_runs == 1
-    assert result.event_runs == 1
+    assert result.cancelled == 4
+    assert result.asset_runs == 2
+    assert result.event_runs == 2
+    assert result.counts_by_status == {"verifying": 1, "failed": 2, "queued": 1}
     assert get_run(db, active_asset.id).status is RunStatus.CANCELLED
+    assert get_run(db, failed_asset.id).status is RunStatus.CANCELLED
     assert get_run(db, completed_asset.id).status is RunStatus.COMPLETED
     assert get_event_research_run(db, active_event.id).status is RunStatus.CANCELLED
+    assert get_event_research_run(db, failed_event.id).status is RunStatus.CANCELLED
 
 
 def test_cancel_and_clear_endpoints_revoke_only_research_tasks(db, monkeypatch):

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from collections import Counter
+from datetime import timedelta
 from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from backend.app.db import EventResearchRunRow, ResearchRunRow
@@ -16,6 +17,7 @@ ACTIVE_RESEARCH_STATUSES = {
     RunStatus.RUNNING.value,
     RunStatus.VERIFYING.value,
 }
+FAILED_RESEARCH_CLEAR_WINDOW = timedelta(hours=24)
 
 
 class ResearchCancellationResult(BaseModel):
@@ -70,19 +72,34 @@ def cancel_research_tasks(
     kind: Literal["asset_research", "event_research"] | None = None,
     entity_id: str | None = None,
     task_id: str | None = None,
+    include_failed: bool = False,
 ) -> ResearchCancellationResult:
-    """Cancel one displayed research card, or every currently active research run."""
+    """Cancel one displayed card, or clear active and optionally failed runs."""
     if kind == "asset_research" and not entity_id:
         raise ValueError("asset research cancellation requires entity_id")
     if kind == "event_research" and not task_id:
         raise ValueError("event research cancellation requires task_id")
 
-    asset_statement = select(ResearchRunRow).where(
-        ResearchRunRow.status.in_(ACTIVE_RESEARCH_STATUSES)
-    )
-    event_statement = select(EventResearchRunRow).where(
-        EventResearchRunRow.status.in_(ACTIVE_RESEARCH_STATUSES)
-    )
+    asset_status_filter = ResearchRunRow.status.in_(ACTIVE_RESEARCH_STATUSES)
+    event_status_filter = EventResearchRunRow.status.in_(ACTIVE_RESEARCH_STATUSES)
+    if include_failed:
+        failed_cutoff = utc_now() - FAILED_RESEARCH_CLEAR_WINDOW
+        asset_status_filter = or_(
+            asset_status_filter,
+            and_(
+                ResearchRunRow.status == RunStatus.FAILED.value,
+                ResearchRunRow.updated_at >= failed_cutoff,
+            ),
+        )
+        event_status_filter = or_(
+            event_status_filter,
+            and_(
+                EventResearchRunRow.status == RunStatus.FAILED.value,
+                EventResearchRunRow.updated_at >= failed_cutoff,
+            ),
+        )
+    asset_statement = select(ResearchRunRow).where(asset_status_filter)
+    event_statement = select(EventResearchRunRow).where(event_status_filter)
     if kind == "asset_research":
         asset_statement = asset_statement.where(ResearchRunRow.asset_id == entity_id)
         event_rows = []
@@ -107,9 +124,14 @@ def cancel_research_tasks(
     for row in asset_rows:
         run = ResearchRun.model_validate(row.payload)
         statuses[run.status.value] += 1
-        if run.celery_task_id:
+        if run.status.value in ACTIVE_RESEARCH_STATUSES and run.celery_task_id:
             celery_task_ids.append(run.celery_task_id)
-        run = _cancel_asset_run(run, "用户取消了该标的当前研究任务。")
+        reason = (
+            "用户清空了该标的失败研究记录。"
+            if run.status is RunStatus.FAILED
+            else "用户取消了该标的当前研究任务。"
+        )
+        run = _cancel_asset_run(run, reason)
         row.status = RunStatus.CANCELLED.value
         row.payload = run.model_dump(mode="json")
         row.updated_at = now
@@ -117,9 +139,14 @@ def cancel_research_tasks(
     for row in event_rows:
         run = EventResearchRun.model_validate(row.payload)
         statuses[run.status.value] += 1
-        if run.celery_task_id:
+        if run.status.value in ACTIVE_RESEARCH_STATUSES and run.celery_task_id:
             celery_task_ids.append(run.celery_task_id)
-        run = _cancel_event_run(run, "用户取消了当前中性事件研究任务。")
+        reason = (
+            "用户清空了失败的中性事件研究记录。"
+            if run.status is RunStatus.FAILED
+            else "用户取消了当前中性事件研究任务。"
+        )
+        run = _cancel_event_run(run, reason)
         row.status = RunStatus.CANCELLED.value
         row.payload = run.model_dump(mode="json")
         row.updated_at = now

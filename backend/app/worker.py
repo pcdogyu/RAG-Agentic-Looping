@@ -33,6 +33,7 @@ from backend.app.services.event_research import EventResearchService
 from backend.app.services.events import EventService
 from backend.app.services.evolution import EvolutionService
 from backend.app.services.model_queue import (
+    RECENT_EXECUTION_WINDOW,
     model_task_is_cancelled,
     record_model_task,
     update_model_task,
@@ -334,6 +335,7 @@ def get_news_extraction_queue(limit: int = 200) -> dict[str, Any]:
         status_rank = {"running": 0, "retrying": 1, "queued": 2, "failed": 3}
         queue_durations: list[int] = []
         execution_durations: list[int] = []
+        recent_execution_cutoff = generated_at - RECENT_EXECUTION_WINDOW
         public_items: list[dict[str, Any]] = []
         for stored_item in payload.get("items", []):
             item = dict(stored_item)
@@ -345,7 +347,13 @@ def get_news_extraction_queue(limit: int = 200) -> dict[str, Any]:
             item.pop("attempt_started_at", None)
             if queue_duration is not None:
                 queue_durations.append(queue_duration)
-            if execution_duration is not None:
+            completed_at = _registry_datetime(item.get("completed_at") or item.get("updated_at"))
+            if (
+                execution_duration is not None
+                and item.get("status") in {"completed", "failed"}
+                and completed_at is not None
+                and completed_at >= recent_execution_cutoff
+            ):
                 execution_durations.append(execution_duration)
             public_items.append(item)
         visible = [item for item in public_items if item.get("status") in status_rank]
@@ -397,18 +405,22 @@ def get_news_extraction_queue(limit: int = 200) -> dict[str, Any]:
 def clear_news_extraction_queue(
     redis_client: Redis | None = None,
 ) -> dict[str, Any]:
-    """Cancel the current 3B extraction batch and return its Celery task ids."""
+    """Clear active and failed 3B tasks, returning only active Celery task ids."""
 
     client = redis_client or _redis_client()
     payload = _read_news_extraction_queue(client)
     now = utc_now()
     task_ids: list[str] = []
+    cancelled = 0
     active_statuses = {"queued", "running", "retrying"}
+    clearable_statuses = active_statuses | {"failed"}
     for item in payload.get("items", []):
-        if item.get("status") not in active_statuses:
+        previous_status = item.get("status")
+        if previous_status not in clearable_statuses:
             continue
+        cancelled += 1
         task_id = item.get("task_id")
-        if task_id:
+        if task_id and previous_status in active_statuses:
             task_ids.append(str(task_id))
         active_attempt = _elapsed_ms(item.get("attempt_started_at"), now)
         if active_attempt is not None:
@@ -437,7 +449,7 @@ def clear_news_extraction_queue(
         if _decode(client.get(SCAN_GATE_KEY)) == scan_task_id:
             client.delete(SCAN_GATE_KEY)
         client.delete(SCAN_PAUSE_KEY)
-    return {"cancelled": len(task_ids), "celery_task_ids": task_ids}
+    return {"cancelled": cancelled, "celery_task_ids": task_ids}
 
 
 def cancel_news_extraction_task(

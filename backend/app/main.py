@@ -708,7 +708,7 @@ def cancel_asset_mapping_task(request: ResearchCancellationRequest):
 
 @app.post("/api/v1/model-queues/research/clear", status_code=202)
 def clear_research_tasks(db: Session = Depends(get_db)):
-    result = cancel_research_tasks(db)
+    result = cancel_research_tasks(db, include_failed=True)
     purged = _purge_research_queue()
     revoked = _revoke_research_tasks(result.celery_task_ids)
     _mark_model_queue_snapshot_stale()
@@ -733,13 +733,16 @@ def clear_model_queue(queue_id: str, db: Session = Depends(get_db)):
         return clear_research_tasks(db)
     if queue_id == "extract":
         result = clear_news_extraction_queue()
-        tracked = cancel_model_tasks("extract")
+        tracked = cancel_model_tasks("extract", include_failed=True)
         cancelled = int(result["cancelled"]) + tracked.cancelled
         task_ids = list(
             dict.fromkeys([*result["celery_task_ids"], *tracked.celery_task_ids])
         )
     else:
-        result = cancel_model_tasks("assist" if queue_id == "assist" else "code")
+        result = cancel_model_tasks(
+            "assist" if queue_id == "assist" else "code",
+            include_failed=True,
+        )
         cancelled = result.cancelled
         task_ids = result.celery_task_ids
     purged = _purge_model_queue(queue_names[queue_id])

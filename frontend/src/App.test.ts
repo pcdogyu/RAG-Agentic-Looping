@@ -726,6 +726,8 @@ describe("research queue page", () => {
     expect(markup).toContain("P50<strong>2分30秒</strong>");
     expect(markup).toContain("P90<strong>3分30秒</strong>");
     expect(markup).toContain("近24h吞吐<strong>2.5/时</strong>");
+    expect(markup).toContain("近4h平均执行<strong>3分0秒</strong>");
+    expect(markup).not.toContain("近24h平均执行");
     expect(markup).toContain("实例个数<strong>2</strong>");
     expect(markup).toContain("单实例并发<strong>1 路</strong>");
     expect(markup).toContain("research-0 · 可用");
@@ -824,6 +826,39 @@ describe("research queue page", () => {
 
     expect(updated.queues[0].counts.queued).toBe(1);
     expect(updated.queues[0].total_tasks).toBe(11);
+    expect(updated.queues[0].tasks).toEqual([]);
+  });
+
+  it("clears a failed card and decrements the failed count immediately", () => {
+    const failedTask = {
+      task_id: "failed-run", kind: "asset_research", entity_id: "cn:002129",
+      title: "002129 · TCL中环", subtitle: "CN · equity", source: "business",
+      status: "failed", attempt: 1, task_count: 1,
+      queued_at: "2026-08-27T01:00:00Z", started_at: "2026-08-27T01:01:00Z",
+      completed_at: "2026-08-27T01:02:00Z", updated_at: "2026-08-27T01:02:00Z",
+      queue_duration_ms: 60_000, execution_duration_ms: 60_000,
+      error: "模型失败", metrics: {},
+    } satisfies ModelQueueTask;
+    const research = overviewQueue({
+      id: "research", purpose: "标的研究",
+      counts: {
+        queued: 0, running: 0, retrying: 0, verifying: 0,
+        waiting_for_model: 0, completed: 188, failed: 1,
+      },
+      tasks: [failedTask], total_tasks: 189,
+    });
+    const panel = renderToStaticMarkup(createElement(UnifiedModelQueuePanel, {
+      queue: research, onClear: () => undefined,
+    }));
+    const updated = removeTasksFromQueueOverview(
+      { generated_at: "2026-08-27T01:03:00Z", queues: [research] },
+      "research",
+      (task) => task.status === "failed",
+    );
+
+    expect(panel).not.toContain('class="model-queue-clear" disabled=""');
+    expect(updated.queues[0].counts.failed).toBe(0);
+    expect(updated.queues[0].total_tasks).toBe(188);
     expect(updated.queues[0].tasks).toEqual([]);
   });
 

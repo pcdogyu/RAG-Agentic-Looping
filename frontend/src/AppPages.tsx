@@ -460,6 +460,7 @@ export function UnifiedModelQueuePanel({
 }) {
   const secondary = queue.counts.retrying + queue.counts.verifying;
   const activeCount = queue.counts.queued + queue.counts.running + secondary;
+  const clearableCount = activeCount + queue.counts.failed;
   const retryableCount = queue.tasks.filter((task) => task.error).length;
   return <section className={`model-queue-panel unified-model-queue-panel ${queue.id}`}>
     <header>
@@ -480,7 +481,7 @@ export function UnifiedModelQueuePanel({
         <button
           type="button"
           className="model-queue-clear"
-          disabled={clearing || activeCount === 0}
+          disabled={clearing || clearableCount === 0}
           onClick={onClear}
         >{clearing ? "清空中…" : "清空"}</button>
       </div>
@@ -491,7 +492,7 @@ export function UnifiedModelQueuePanel({
       <span>重试/验证<strong>{secondary}</strong></span>
       <span>完成/失败<strong>{queue.counts.completed}/{queue.counts.failed}</strong></span>
       <span title={`样本 ${queue.metrics.queue_duration_sample_count}`}>平均排队<strong>{formatQueueDuration(queue.metrics.average_queue_duration_ms)}</strong></span>
-      <span title={`近 24 小时终态样本 ${queue.metrics.execution_duration_sample_count}`}>近24h平均执行<strong>{formatQueueDuration(queue.metrics.average_execution_duration_ms)}</strong></span>
+      <span title={`近 4 小时终态样本 ${queue.metrics.execution_duration_sample_count}`}>近4h平均执行<strong>{formatQueueDuration(queue.metrics.average_execution_duration_ms)}</strong></span>
     </div>
     <div className="model-queue-runtime">
       <span>模型等待<strong>{queue.counts.waiting_for_model}</strong></span>
@@ -544,7 +545,8 @@ export function removeTasksFromQueueOverview(
         const field = ["queued", "proposed"].includes(task.status) ? "queued"
           : ["running", "generating", "testing", "merging"].includes(task.status) ? "running"
             : task.status === "retrying" ? "retrying"
-              : task.status === "verifying" ? "verifying" : null;
+              : task.status === "verifying" ? "verifying"
+                : ["failed", "rejected", "rolled_back"].includes(task.status) ? "failed" : null;
         if (field) counts[field] = Math.max(0, counts[field] - 1);
       }
       return {
@@ -694,7 +696,8 @@ export function QueuePage({ apiBase }: { apiBase: string }) {
   const clearModelQueue = useCallback(async (queue: ModelQueueOverviewItem) => {
     const activeCount = queue.counts.queued + queue.counts.running
       + queue.counts.retrying + queue.counts.verifying;
-    if (!activeCount || !window.confirm(`确认清空 ${queue.model} 当前 ${activeCount} 项${queue.purpose}任务？正在执行的任务会立即停止，未完成进度不会保留；后续扫描或调度仍可产生新任务。`)) return;
+    const clearableCount = activeCount + queue.counts.failed;
+    if (!clearableCount || !window.confirm(`确认清空 ${queue.model} 当前 ${clearableCount} 项${queue.purpose}任务（含 ${queue.counts.failed} 项失败任务）？正在执行的任务会立即停止，未完成进度不会保留；后续扫描或调度仍可产生新任务。`)) return;
     setClearingQueueId(queue.id);
     setActionMessage("");
     setError("");
@@ -704,6 +707,7 @@ export function QueuePage({ apiBase }: { apiBase: string }) {
       const result = await response.json() as { cancelled: number };
       removeQueueTasks(queue.id, (task) => [
         "queued", "proposed", "running", "generating", "retrying", "verifying", "testing", "merging",
+        "failed", "rejected", "rolled_back",
       ].includes(task.status));
       setActionMessage(`已清空 ${queue.model} 的 ${result.cancelled} 个当前${queue.purpose}任务；后续新任务不受影响。`);
     } catch (reason) {

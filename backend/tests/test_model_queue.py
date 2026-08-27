@@ -118,6 +118,36 @@ def test_cancel_model_tasks_is_lane_scoped_and_terminal_safe():
     ] == "completed"
 
 
+def test_clear_model_tasks_includes_failed_without_revoking_terminal_task():
+    redis = FakeRedis()
+    record_model_task(
+        "assist",
+        task_id="mapping-active",
+        kind="asset_mapping",
+        title="活动映射",
+        redis_client=redis,
+    )
+    record_model_task(
+        "assist",
+        task_id="mapping-failed",
+        kind="asset_mapping",
+        title="失败映射",
+        redis_client=redis,
+    )
+    update_model_task(
+        "assist", "mapping-failed", status="failed", redis_client=redis
+    )
+
+    result = cancel_model_tasks(
+        "assist", include_failed=True, redis_client=redis
+    )
+
+    assert result.cancelled == 2
+    assert result.celery_task_ids == ["mapping-active"]
+    assert model_task_is_cancelled("assist", "mapping-active", redis_client=redis)
+    assert model_task_is_cancelled("assist", "mapping-failed", redis_client=redis)
+
+
 def test_cancel_one_extract_task_only_supersedes_the_selected_attempt():
     redis = FakeRedis()
     for task_id in ("extract-old", "extract-other"):
@@ -453,6 +483,16 @@ def test_research_metrics_exclude_active_duration_and_expose_instances(db):
     save_run(
         db,
         ResearchRun(
+            asset=SEED_ASSETS[0],
+            status=RunStatus.COMPLETED,
+            created_at=now - timedelta(hours=6),
+            started_at=now - timedelta(hours=5, minutes=30),
+            completed_at=now - timedelta(hours=5),
+        ),
+    )
+    save_run(
+        db,
+        ResearchRun(
             asset=SEED_ASSETS[1],
             status=RunStatus.COMPLETED,
             created_at=now - timedelta(minutes=5),
@@ -484,9 +524,10 @@ def test_research_metrics_exclude_active_duration_and_expose_instances(db):
 
     research = overview.queues[1]
     assert research.metrics.average_execution_duration_ms == 2 * 60 * 1000
+    assert research.metrics.execution_duration_sample_count == 1
     assert research.metrics.execution_p50_ms == 2 * 60 * 1000
-    assert research.metrics.execution_p90_ms == 2 * 60 * 1000
-    assert research.metrics.throughput_per_hour == 1 / 24
+    assert research.metrics.execution_p90_ms == 30 * 60 * 1000
+    assert research.metrics.throughput_per_hour == 2 / 24
     assert research.instance_count == 2
     assert research.per_instance_concurrency == 1
     assert [instance.healthy for instance in research.instances] == [True, False]
