@@ -163,6 +163,20 @@ class CapturingResearchLlm(FakeResearchLlm):
         return super().generate_json(prompt=prompt, **kwargs)
 
 
+class IncompleteRevisionLlm:
+    def generate_json(self, **kwargs):
+        return DraftOutput(
+            summary="",
+            products_or_protocol="",
+            valuation_or_tokenomics="",
+            risks=[],
+            invalidation_conditions=[],
+            evidence_ids=["not-a-valid-evidence-id"],
+            score=50,
+            confidence=0.8,
+        ).model_dump(mode="json")
+
+
 class TargetedRegistry:
     def __init__(self, corroborating_news):
         self.corroborating_news = corroborating_news
@@ -439,7 +453,12 @@ def test_research_revision_recalculates_required_direction_score(db, tmp_path):
             "draft": DraftOutput(summary="Current report", score=0).model_dump(mode="json"),
             "verification": VerificationOutput(
                 evidence_complete=False,
-                missing_requirements=["risks"],
+                missing_requirements=[
+                    "risks",
+                    "evidence citations",
+                    "one official source or two independent sources",
+                ],
+                unsupported_claims=["claim is not supported by the cited filing"],
             ).model_dump(mode="json"),
             "evidence": [],
         }
@@ -447,7 +466,116 @@ def test_research_revision_recalculates_required_direction_score(db, tmp_path):
 
     assert "必须重新评估方向分数" in llm.systems[0]
     assert "不得省略 score" in llm.systems[0]
+    assert "本轮修复清单" in llm.prompts[0]
+    assert "valid_evidence_ids" in llm.prompts[0]
+    assert "转载、改写或聚合副本只算一个独立来源" in llm.prompts[0]
+    assert "Form 4 或持股变动文件不能支持" in llm.prompts[0]
     assert "score" in DraftOutput.model_json_schema()["required"]
+
+
+def test_direction_uses_source_event_facts_but_not_model_report_prose():
+    run = ResearchRun(asset=SEED_ASSETS[0])
+    observed = datetime(2026, 8, 27, tzinfo=UTC)
+
+    def event_with(direct_impact, impact_direction=0):
+        return NewsEvent(
+            news_item_ids=[],
+            headline="Quarterly business update",
+            event_type=EventType.OTHER,
+            direct_impact=direct_impact,
+            source_quality=SourceQuality.PROFESSIONAL,
+            published_at=observed,
+            observed_at=observed,
+            as_of=observed,
+            candidates=[
+                CandidateAsset(
+                    asset=run.asset,
+                    relationship="mentioned company",
+                    impact_direction=impact_direction,
+                    relevance=0.8,
+                    mapping_confidence=0.9,
+                    rationale="The source discusses the company.",
+                )
+            ],
+        )
+
+    bullish_draft = DraftOutput(
+        summary="这是明确利好并将推动利润增长。",
+        financials_and_growth="收入增长",
+        risks=["正面影响"],
+        score=80,
+    )
+    neutral_direction, _, _ = ResearchService._direction_inputs(
+        run,
+        event_with("The source only describes an infrastructure spending plan.")
+        .model_dump(mode="json"),
+        bullish_draft,
+    )
+    positive_direction, _, _ = ResearchService._direction_inputs(
+        run,
+        event_with("Meta 可能从中受益").model_dump(mode="json"),
+        DraftOutput(summary="中性报告", score=0),
+    )
+    uncertain_direction, _, _ = ResearchService._direction_inputs(
+        run,
+        event_with("Meta 未必受益", impact_direction=1).model_dump(mode="json"),
+        bullish_draft,
+    )
+
+    assert neutral_direction is None
+    assert positive_direction == 1
+    assert uncertain_direction is None
+
+
+def test_revision_marks_unresolved_sections_and_removes_invalid_citations(db, tmp_path):
+    service = ResearchService(
+        FakeRegistry(),
+        db,
+        Settings(_env_file=None, reports_dir=tmp_path),
+        IncompleteRevisionLlm(),
+    )
+    run = ResearchRun(asset=SEED_ASSETS[0])
+    missing = [
+        "summary",
+        "products_or_protocol",
+        "valuation_or_tokenomics",
+        "risks",
+        "invalidation_conditions",
+        "evidence citations",
+    ]
+    revised = service._revise(
+        {
+            "run": run.model_dump(mode="json"),
+            "draft": DraftOutput(summary="Initial", score=0).model_dump(mode="json"),
+            "verification": VerificationOutput(
+                evidence_complete=False,
+                missing_requirements=missing,
+            ).model_dump(mode="json"),
+            "evidence": [],
+        }
+    )
+    draft = DraftOutput.model_validate(revised["draft"])
+
+    assert "现有证据不足" in draft.summary
+    assert "现有证据不足" in draft.products_or_protocol
+    assert "现有证据不足" in draft.valuation_or_tokenomics
+    assert "现有证据不足" in draft.risks[0]
+    assert "现有证据不足" in draft.invalidation_conditions[0]
+    assert draft.evidence_ids == []
+
+    verified = service._verify(
+        {
+            "run": revised["run"],
+            "draft": revised["draft"],
+            "evidence": [],
+            "verification_round": 0,
+        }
+    )
+    remaining = VerificationOutput.model_validate(
+        verified["verification"]
+    ).missing_requirements
+    for requirement in missing:
+        assert requirement in remaining
 
 
 def test_a_share_structured_data_becomes_business_financial_and_valuation_evidence(

@@ -73,6 +73,7 @@ from backend.app.storage import (
 _checkpoint_setup_lock = threading.Lock()
 _checkpoint_setup_done = False
 SOURCE_GATE = "one official source or two independent sources"
+INSUFFICIENT_EVIDENCE_MARKER = "现有证据不足"
 DIRECTION_SCORE_INSTRUCTION = (
     "必须输出 score 字段，且必须是 -100 到 100 的整数方向评分："
     "-100 至 -60 表示强烈看空，-59 至 -20 表示看空，-19 至 19 表示中性，"
@@ -904,18 +905,18 @@ class ResearchService:
         cls,
         run: ResearchRun,
         event_payload: dict[str, Any] | None,
-        draft: DraftOutput,
+        _draft: DraftOutput,
     ) -> tuple[int | None, float, float]:
         direction, relevance, confidence = cls._mapping_inputs(run, event_payload)
         event = NewsEvent.model_validate(event_payload) if event_payload else None
+        # Only normalized source-event facts may override the mapped direction.
+        # Model-authored report prose is deliberately excluded so that a draft
+        # cannot manufacture or self-reinforce a positive/negative signal.
         direction = directional_text_hint(
             event.headline if event else None,
             event.direct_impact if event else None,
-            draft.summary,
-            draft.financials_and_growth,
-            *draft.risks,
             fallback=direction,
-            allow_beneficial=False,
+            allow_beneficial=True,
         )
         return direction, relevance, confidence
 
@@ -946,11 +947,16 @@ class ResearchService:
             "valuation_or_tokenomics": draft.valuation_or_tokenomics,
         }
         for name, value in required_text.items():
-            if not value.strip():
+            if not value.strip() or INSUFFICIENT_EVIDENCE_MARKER in value:
                 missing.append(name)
-        if not draft.risks:
+        if not draft.risks or any(
+            INSUFFICIENT_EVIDENCE_MARKER in item for item in draft.risks
+        ):
             missing.append("risks")
-        if not draft.invalidation_conditions:
+        if not draft.invalidation_conditions or any(
+            INSUFFICIENT_EVIDENCE_MARKER in item
+            for item in draft.invalidation_conditions
+        ):
             missing.append("invalidation_conditions")
         if not cited_ids:
             missing.append("evidence citations")
@@ -1476,14 +1482,31 @@ class ResearchService:
         run = ResearchRun.model_validate(state["run"])
         current = DraftOutput.model_validate(state["draft"])
         verification = VerificationOutput.model_validate(state["verification"])
+        evidence = [Evidence.model_validate(item) for item in state.get("evidence", [])]
+        valid_evidence_ids = {str(item.id) for item in evidence}
+        source_lineages = sorted(independent_evidence_groups(evidence))
+        repair_requirements = {
+            "missing_requirements": verification.missing_requirements,
+            "unsupported_claims": verification.unsupported_claims,
+            "contradictions": verification.contradictions,
+            "valid_evidence_ids": sorted(valid_evidence_ids),
+            "independent_source_lineages": source_lineages,
+        }
         prompt = (
             f"当前报告：{current.model_dump_json()}\n验证结果：{verification.model_dump_json()}\n"
+            f"本轮修复清单：{json.dumps(repair_requirements, ensure_ascii=False)}\n"
             "触发事件："
             f"{json.dumps(self._event_prompt_context(state.get('event')), ensure_ascii=False)}\n"
             f"程序研究因子：{json.dumps(state.get('factor_summary', {}), ensure_ascii=False, default=str)}\n"
             "可用证据："
             f"{compact_evidence(state.get('evidence', []), self.settings.research_prompt_evidence_chars)}\n"
-            "修订报告。不能通过编造来补足缺失来源；无法补足时保持低置信度和中性分数。"
+            "逐项修复清单中的缺失章节。能够由证据支持时必须填写；无法支持时不得留空，"
+            f"应明确写明“{INSUFFICIENT_EVIDENCE_MARKER}”并保持低置信度和中性分数。"
+            "每个重要事实和方向观点都必须绑定 valid_evidence_ids 中实际支持它的证据；"
+            "不得生成、猜测或沿用无效 evidence id。删除无法被证据支持的断言，不得编造。"
+            "同一原始报道的转载、改写或聚合副本只算一个独立来源，不能用来满足两份独立来源要求。"
+            "官方文件必须与所支持的具体观点直接相关；例如 Form 4 或持股变动文件不能支持"
+            "AI 基础设施受益观点，除非该观点本身就是该持股交易。"
         )
         revision_error: str | None = None
         try:
@@ -1492,6 +1515,9 @@ class ResearchService:
                 lane="research",
                 system=(
                     "你是投资研究报告修订器，只能使用给定证据。"
+                    "必须逐项执行本轮修复清单；缺失内容只能补充为证据支持的结论，"
+                    f"否则明确标注“{INSUFFICIENT_EVIDENCE_MARKER}”，不能留空。"
+                    "同一故事的转载不构成独立佐证，无关官方文件不构成观点支持。"
                     "修订时必须重新评估方向分数，不能机械沿用当前报告的 score。"
                     f"{DIRECTION_SCORE_INSTRUCTION}"
                 ),
@@ -1509,6 +1535,19 @@ class ResearchService:
             current.confidence = min(current.confidence, 0.5)
             current.score = 0
             revised_output = current
+        invalid_evidence_ids = [
+            value
+            for value in revised_output.evidence_ids
+            if value not in valid_evidence_ids
+        ]
+        revised_output.evidence_ids = list(
+            dict.fromkeys(
+                value
+                for value in revised_output.evidence_ids
+                if value in valid_evidence_ids
+            )
+        )
+        self._mark_unresolved_revision_sections(revised_output, verification)
         run.analysis_steps.append(
             AnalysisStep(
                 phase="report_revision",
@@ -1525,7 +1564,13 @@ class ResearchService:
                         else ""
                     )
                 ),
-                metrics={"confidence": revised_output.confidence, "score": revised_output.score},
+                metrics={
+                    "confidence": revised_output.confidence,
+                    "score": revised_output.score,
+                    "requested_repairs": verification.missing_requirements,
+                    "invalid_evidence_ids_removed": invalid_evidence_ids,
+                    "independent_source_lineages": len(source_lineages),
+                },
             )
         )
         save_run(self.db, run)
@@ -1533,6 +1578,28 @@ class ResearchService:
             "run": run.model_dump(mode="json"),
             "draft": revised_output.model_dump(mode="json"),
         }
+
+    @staticmethod
+    def _mark_unresolved_revision_sections(
+        draft: DraftOutput, verification: VerificationOutput
+    ) -> None:
+        """Make unresolved second-pass gaps explicit without inventing evidence."""
+
+        requested = set(verification.missing_requirements)
+        text_markers = {
+            "summary": "现有证据不足，无法形成可验证的核心观点。",
+            "products_or_protocol": "现有证据不足，无法形成产品或业务影响结论。",
+            "valuation_or_tokenomics": "现有证据不足，无法形成估值影响结论。",
+        }
+        for field_name, marker in text_markers.items():
+            if field_name in requested and not getattr(draft, field_name).strip():
+                setattr(draft, field_name, marker)
+        if "risks" in requested and not draft.risks:
+            draft.risks = ["现有证据不足，无法识别可验证风险。"]
+        if "invalidation_conditions" in requested and not draft.invalidation_conditions:
+            draft.invalidation_conditions = [
+                "现有证据不足，无法设定可验证失效条件。"
+            ]
 
     def _finalize(self, state: ResearchState) -> dict[str, Any]:
         run = ResearchRun.model_validate(state["run"])

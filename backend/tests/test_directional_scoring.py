@@ -32,6 +32,25 @@ def test_directional_text_hint_keeps_fallback_without_explicit_language():
     assert directional_text_hint("Revenue growth", fallback=0, allow_beneficial=False) is None
 
 
+def test_explicit_benefit_language_is_recognized_as_positive():
+    assert directional_text_hint("Meta 可能从中受益") == 1
+    assert directional_text_hint("该公司有望直接受益，并带来新增订单") == 1
+    assert directional_text_hint("The company is poised to benefit from new AI orders") == 1
+
+
+def test_negated_or_uncertain_benefit_language_blocks_positive_fallback():
+    for text in (
+        "Meta 未必受益",
+        "能否受益仍不确定",
+        "受益有限",
+        "收益可能被成本投入抵消",
+        "The company may not benefit from the spending cycle",
+        "Benefits remain uncertain and could be offset by costs",
+    ):
+        assert directional_text_hint(text, fallback=1) is None
+    assert directional_text_hint("Benefits remain uncertain", fallback=-1) == -1
+
+
 def test_model_reported_score_is_not_an_input_to_deterministic_score():
     result = deterministic_direction_score(
         bull_probability=0.60,

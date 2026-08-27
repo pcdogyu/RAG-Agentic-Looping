@@ -29,10 +29,30 @@ _BENEFICIAL_DIRECTION_PATTERNS = tuple(
     for pattern in (
         r"\bpositive\b",
         r"\b(?:beat|growth)\b",
+        r"\b(?:directly|clearly|materially|expected to|poised to)\s+benefit\b",
+        r"\b(?:creates?|drives?|adds?)\s+(?:new\s+)?(?:orders?|revenue|profit|earnings)\b",
+        r"\b(?:boosts?|improves?)\s+(?:revenue|profit|earnings|profitability|margins?)\b",
         r"\brecord\s+(?:revenue|profit|earnings)\b",
         r"\breturn(?:ed|s|ing)?\s+to\s+profitability\b",
         r"\b(?:regulatory\s+)?approval\b",
+        r"(?:明确|直接|显著|有望|预计|可能从中)受益",
+        r"带来新增订单|推动(?:收入|营收|利润|盈利).{0,12}增长|改善盈利能力",
         r"扭亏为盈|增长|创新高|创纪录(?:营收|利润|业绩)|获批|利好|正面影响",
+    )
+)
+
+_UNCERTAIN_OR_NEGATED_BENEFICIAL_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\b(?:may|might|could)\s+not\s+benefit\b",
+        r"\b(?:unlikely|unable)\s+to\s+benefit\b",
+        r"\b(?:limited|uncertain)\s+benefit\b",
+        r"\bbenefits?\s+(?:are|remain|is)\s+(?:limited|uncertain|unclear)\b",
+        r"\bbenefits?.{0,32}(?:offset|outweighed)\s+by\s+(?:costs?|spending|investment)\b",
+        r"(?:未必|不一定|不会|无法|难以|并未)(?:从中)?受益",
+        r"受益(?:程度)?有限|能否受益.{0,12}(?:不确定|尚不明确|未知)",
+        r"是否受益.{0,12}(?:不确定|尚不明确|未知)|受益.{0,12}(?:仍不确定|尚不明确)",
+        r"(?:收益|受益).{0,24}(?:被|由).{0,12}(?:成本|投入|支出).{0,12}抵消",
     )
 )
 
@@ -54,12 +74,20 @@ def directional_text_hint(
 
     The patterns intentionally cover high-precision statements such as securities
     fraud, shareholder investigations, and negative net income.  An explicit
-    adverse fact wins over generic positive language like revenue growth.
+    adverse fact wins over generic positive language like revenue growth.  A
+    negated or explicitly uncertain benefit statement also blocks a positive
+    model fallback instead of being misread as a benefit merely because it
+    contains the word "benefit" or "受益".
     """
 
     combined = "\n".join(value.strip() for value in texts if value and value.strip())
     if any(pattern.search(combined) for pattern in _ADVERSE_DIRECTION_PATTERNS):
         return -1
+    if any(
+        pattern.search(combined)
+        for pattern in _UNCERTAIN_OR_NEGATED_BENEFICIAL_PATTERNS
+    ):
+        return fallback if fallback == -1 else None
     if allow_beneficial and any(
         pattern.search(combined) for pattern in _BENEFICIAL_DIRECTION_PATTERNS
     ):
