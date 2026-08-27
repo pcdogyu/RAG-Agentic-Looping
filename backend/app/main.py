@@ -99,7 +99,7 @@ logger = logging.getLogger(__name__)
 
 MODEL_QUEUE_SNAPSHOT_LIMIT = 500
 MODEL_QUEUE_SNAPSHOT_TTL_SECONDS = 5.0
-MODEL_QUEUE_SNAPSHOT_REDIS_KEY = "market-loop:model-queue-overview:snapshot:v2"
+MODEL_QUEUE_SNAPSHOT_REDIS_KEY = "market-loop:model-queue-overview:snapshot:v3"
 _model_queue_snapshot: tuple[float, ModelQueueOverviewResponse] | None = None
 _model_queue_refreshing = False
 _model_queue_snapshot_lock = Lock()

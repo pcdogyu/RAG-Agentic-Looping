@@ -430,6 +430,8 @@ def test_unified_model_queue_overview_is_public_and_ordered(monkeypatch):
             "threads": 4,
             "capacity": 1,
             "available": 1,
+            "instance_count": 1,
+            "per_instance_concurrency": 1,
             "observable": True,
             "counts": {
                 "queued": 0,
@@ -484,6 +486,8 @@ def test_unified_model_queue_overview_is_public_and_ordered(monkeypatch):
         "code",
     ]
     assert payload["queues"][2]["model"] == "qwen2.5:7b"
+    assert all(item["instance_count"] == 1 for item in payload["queues"])
+    assert all(item["per_instance_concurrency"] == 1 for item in payload["queues"])
     assert payload["queues"][3]["enabled"] is False
 
 

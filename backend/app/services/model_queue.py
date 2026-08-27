@@ -119,6 +119,8 @@ class ModelQueueItem(BaseModel):
     threads: int = Field(ge=0)
     capacity: int = Field(ge=0)
     available: int = Field(ge=0)
+    instance_count: int = Field(ge=0)
+    per_instance_concurrency: int = Field(ge=0)
     observable: bool = True
     instances: list[ModelQueueInstance] = Field(default_factory=list)
     counts: ModelQueueCounts
@@ -661,6 +663,18 @@ def _queue_item(
     error: str | None = None,
 ) -> ModelQueueItem:
     waiting_for_model, running_slots, available, observable = _inference_values(inference)
+    raw_instances = list(inference.get("instances") or [])
+    instance_count = max(
+        0,
+        int(inference.get("instance_count") or len(raw_instances) or (1 if capacity else 0)),
+    )
+    per_instance_concurrency = max(
+        0,
+        int(
+            inference.get("per_instance_concurrency")
+            or (ceil(capacity / instance_count) if instance_count else 0)
+        ),
+    )
     counts = _counts(tasks)
     if broker_queued is not None:
         counts.queued = max(counts.queued, max(0, broker_queued))
@@ -700,8 +714,10 @@ def _queue_item(
         threads=max(0, threads),
         capacity=max(0, capacity),
         available=available,
+        instance_count=instance_count,
+        per_instance_concurrency=per_instance_concurrency,
         observable=observable,
-        instances=[ModelQueueInstance.model_validate(item) for item in inference.get("instances", [])],
+        instances=[ModelQueueInstance.model_validate(item) for item in raw_instances],
         counts=counts,
         metrics=metrics,
         total_tasks=sum(

@@ -182,6 +182,8 @@ export type ModelQueueOverviewItem = {
   threads: number;
   capacity: number;
   available: number;
+  instance_count: number;
+  per_instance_concurrency: number;
   observable: boolean;
   instances: Array<{
     id: string;
@@ -461,6 +463,8 @@ export function UnifiedModelQueuePanel({
     <div className="model-queue-runtime">
       <span>模型等待<strong>{queue.counts.waiting_for_model}</strong></span>
       <span>槽位<strong>{queue.available}/{queue.capacity}</strong></span>
+      <span>实例个数<strong>{queue.instance_count}</strong></span>
+      <span>单实例并发<strong>{queue.per_instance_concurrency} 路</strong></span>
       <span>CPU<strong>{queue.threads} 线程</strong></span>
       <span>最长等待<strong>{formatQueueDuration(queue.metrics.longest_wait_ms)}</strong></span>
       <span>预计清空<strong>{formatQueueDuration(queue.metrics.estimated_clear_ms)}</strong></span>

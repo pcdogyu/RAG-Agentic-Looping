@@ -286,6 +286,13 @@ class LlmGateway:
     def queue_status(self, model: str, *, lane: LlmLane | None = None) -> dict[str, Any]:
         resolved_lane = self._resolve_lane(model, lane)
         instances = self._endpoint_status(resolved_lane, model)
+        configured_capacity = self.gpu.capacity_for(model, resolved_lane)
+        instance_count = len(instances) or 1
+        per_instance_concurrency = (
+            (configured_capacity + instance_count - 1) // instance_count
+            if configured_capacity > 0
+            else 0
+        )
         available_slots = (
             {
                 index
@@ -300,7 +307,12 @@ class LlmGateway:
             if available_slots is not None
             else self.gpu.queue_status(model, lane=resolved_lane)
         )
-        return {**status, "instances": instances}
+        return {
+            **status,
+            "instances": instances,
+            "instance_count": instance_count,
+            "per_instance_concurrency": per_instance_concurrency,
+        }
 
     def _resolve_lane(self, model: str, lane: LlmLane | None = None) -> LlmLane:
         if lane is not None:

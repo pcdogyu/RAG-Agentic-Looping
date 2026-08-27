@@ -435,4 +435,6 @@ def test_research_metrics_exclude_active_duration_and_expose_instances(db):
     assert research.metrics.execution_p50_ms == 2 * 60 * 1000
     assert research.metrics.execution_p90_ms == 2 * 60 * 1000
     assert research.metrics.throughput_per_hour == 1 / 24
+    assert research.instance_count == 2
+    assert research.per_instance_concurrency == 1
     assert [instance.healthy for instance in research.instances] == [True, False]

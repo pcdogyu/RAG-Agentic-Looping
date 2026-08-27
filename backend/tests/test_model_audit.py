@@ -164,6 +164,35 @@ def test_model_queue_status_counts_waiters_and_running_slots():
     }
 
 
+def test_gateway_queue_status_exposes_instance_topology():
+    settings = Settings(
+        ollama_assist_base_url="http://assist.invalid",
+        ollama_research_base_urls=(
+            "http://research-0.invalid,http://research-1.invalid"
+        ),
+        ollama_assist_max_concurrency=1,
+        ollama_research_max_concurrency=2,
+    )
+    gateway = LlmGateway(settings)
+    gateway.gpu._redis = None
+
+    class HealthyClient:
+        def get(self, *_args, **_kwargs):
+            return FakeResponse({"models": [{"name": "qwen2.5:7b"}]})
+
+    gateway.client = HealthyClient()
+
+    extract = gateway.queue_status(settings.ollama_extract_model, lane="extract")
+    assist = gateway.queue_status(settings.ollama_assist_model, lane="assist")
+    research = gateway.queue_status(settings.ollama_research_model, lane="research")
+    code = gateway.queue_status(settings.ollama_code_model, lane="code")
+
+    assert (extract["instance_count"], extract["per_instance_concurrency"]) == (1, 1)
+    assert (assist["instance_count"], assist["per_instance_concurrency"]) == (1, 1)
+    assert (research["instance_count"], research["per_instance_concurrency"]) == (2, 1)
+    assert (code["instance_count"], code["per_instance_concurrency"]) == (1, 1)
+
+
 def test_model_semaphore_enforces_independent_local_capacities():
     settings = Settings(
         ollama_extract_max_concurrency=1,

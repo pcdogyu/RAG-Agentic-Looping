@@ -459,6 +459,8 @@ describe("research queue page", () => {
     threads: 4,
     capacity: 1,
     available: 0,
+    instance_count: 1,
+    per_instance_concurrency: 1,
     observable: true,
     instances: [],
     counts: {
@@ -695,6 +697,8 @@ describe("research queue page", () => {
     expect(markup).toContain("完成/失败<strong>8/2</strong>");
     expect(markup).toContain("最长等待<strong>4分0秒</strong>");
     expect(markup).toContain("预计清空<strong>12分0秒</strong>");
+    expect(markup).toContain("实例个数<strong>1</strong>");
+    expect(markup).toContain("单实例并发<strong>1 路</strong>");
     expect(markup).toContain("映射记录暂时不可用");
     expect(markup).toContain("当前显示前 500 张任务卡");
   });
@@ -705,6 +709,8 @@ describe("research queue page", () => {
         id: "research",
         model: "qwen2.5:7b",
         purpose: "标的研究",
+        instance_count: 2,
+        per_instance_concurrency: 1,
         instances: [
           { id: "research-0", healthy: true, model_available: true },
           { id: "research-1", healthy: false, model_available: false },
@@ -715,6 +721,8 @@ describe("research queue page", () => {
     expect(markup).toContain("P50<strong>2分30秒</strong>");
     expect(markup).toContain("P90<strong>3分30秒</strong>");
     expect(markup).toContain("近24h吞吐<strong>2.5/时</strong>");
+    expect(markup).toContain("实例个数<strong>2</strong>");
+    expect(markup).toContain("单实例并发<strong>1 路</strong>");
     expect(markup).toContain("research-0 · 可用");
     expect(markup).toContain("research-1 · 离线");
 
@@ -763,6 +771,8 @@ describe("research queue page", () => {
       }));
       expect(modelPanel).toContain('class="model-queue-clear"');
       expect(modelPanel).toContain(">清空</button>");
+      expect(modelPanel).toContain("实例个数<strong>1</strong>");
+      expect(modelPanel).toContain("单实例并发<strong>1 路</strong>");
     }
   });
 });
