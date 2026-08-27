@@ -20,6 +20,7 @@ import {
   factSourceGroupDefinitions,
   formatQueueDuration,
   ModelInferenceQueuePanel,
+  modelQueueInstances,
   ModelQueueTaskGrid,
   type ModelQueueOverviewItem,
   type ModelQueueTask,
@@ -702,15 +703,14 @@ describe("research queue page", () => {
     expect(markup).toContain("完成/失败<strong>8/2</strong>");
     expect(markup).toContain("最长等待<strong>4分0秒</strong>");
     expect(markup).toContain("预计清空<strong>12分0秒</strong>");
-    expect(markup).toContain("实例个数<strong>1</strong>");
-    expect(markup).toContain("单实例并发<strong>1 路</strong>");
+    expect(markup).not.toContain("实例个数");
+    expect(markup).toContain("实例并发<strong>1 路</strong>");
     expect(markup).toContain("映射记录暂时不可用");
     expect(markup).toContain("当前显示前 500 张任务卡");
   });
 
   it("renders research instance health and rolling latency metrics", () => {
-    const markup = renderToStaticMarkup(createElement(UnifiedModelQueuePanel, {
-      queue: overviewQueue({
+    const researchQueue = overviewQueue({
         id: "research",
         model: "qwen2.5:7b",
         purpose: "标的研究",
@@ -720,7 +720,16 @@ describe("research queue page", () => {
           { id: "research-0", healthy: true, model_available: true },
           { id: "research-1", healthy: false, model_available: false },
         ],
-      }),
+      });
+    const instances = modelQueueInstances(researchQueue);
+    expect(instances).toHaveLength(2);
+    const markup = renderToStaticMarkup(createElement(UnifiedModelQueuePanel, {
+      queue: researchQueue,
+      instance: instances[0],
+    }));
+    const offlineMarkup = renderToStaticMarkup(createElement(UnifiedModelQueuePanel, {
+      queue: researchQueue,
+      instance: instances[1],
     }));
 
     expect(markup).toContain("P50<strong>2分30秒</strong>");
@@ -728,10 +737,12 @@ describe("research queue page", () => {
     expect(markup).toContain("近24h吞吐<strong>2.5/时</strong>");
     expect(markup).toContain("近4h平均执行<strong>3分0秒</strong>");
     expect(markup).not.toContain("近24h平均执行");
-    expect(markup).toContain("实例个数<strong>2</strong>");
-    expect(markup).toContain("单实例并发<strong>1 路</strong>");
-    expect(markup).toContain("research-0 · 可用");
-    expect(markup).toContain("research-1 · 离线");
+    expect(markup).not.toContain("实例个数");
+    expect(markup).toContain("实例并发<strong>1 路</strong>");
+    expect(markup).toContain("research-0</h3>");
+    expect(markup).toContain("实例可用");
+    expect(offlineMarkup).toContain("research-1</h3>");
+    expect(offlineMarkup).toContain("实例离线");
 
     const assistMarkup = renderToStaticMarkup(createElement(UnifiedModelQueuePanel, {
       queue: overviewQueue({
@@ -741,7 +752,8 @@ describe("research queue page", () => {
         instances: [{ id: "assist-0", healthy: true, model_available: true }],
       }),
     }));
-    expect(assistMarkup).toContain("assist-0 · 可用");
+    expect(assistMarkup).toContain("assist-0</h3>");
+    expect(assistMarkup).toContain("实例可用");
   });
 
   it("renders cancellation, retry and clear controls for supported model queues", () => {
@@ -788,14 +800,10 @@ describe("research queue page", () => {
       }));
       expect(modelPanel).toContain('class="model-queue-clear"');
       expect(modelPanel).toContain(">清空</button>");
-      if (id === "code") {
-        expect(modelPanel).not.toContain('class="model-queue-retry"');
-      } else {
-        expect(modelPanel).toContain('class="model-queue-retry"');
-        expect(modelPanel).toContain(">重试</button>");
-      }
-      expect(modelPanel).toContain("实例个数<strong>1</strong>");
-      expect(modelPanel).toContain("单实例并发<strong>1 路</strong>");
+      expect(modelPanel).toContain('class="model-queue-retry"');
+      expect(modelPanel).toContain(">重试</button>");
+      expect(modelPanel).not.toContain("实例个数");
+      expect(modelPanel).toContain("实例并发<strong>1 路</strong>");
     }
   });
 

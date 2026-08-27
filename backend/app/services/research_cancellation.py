@@ -11,6 +11,10 @@ from sqlalchemy.orm import Session
 
 from backend.app.db import EventResearchRunRow, ResearchRunRow
 from backend.app.domain import AnalysisStep, EventResearchRun, ResearchRun, RunStatus, utc_now
+from backend.app.services.model_instances import (
+    instance_assignment,
+    update_instance_assignment,
+)
 
 ACTIVE_RESEARCH_STATUSES = {
     RunStatus.QUEUED.value,
@@ -73,6 +77,7 @@ def cancel_research_tasks(
     entity_id: str | None = None,
     task_id: str | None = None,
     include_failed: bool = False,
+    instance_id: str | None = None,
 ) -> ResearchCancellationResult:
     """Cancel one displayed card, or clear active and optionally failed runs."""
     if kind == "asset_research" and not entity_id:
@@ -117,6 +122,25 @@ def cancel_research_tasks(
         asset_rows = list(db.scalars(asset_statement).all())
     if kind != "asset_research":
         event_rows = list(db.scalars(event_statement).all())
+    if instance_id is not None:
+        def assigned_instance(run: ResearchRun | EventResearchRun) -> str | None:
+            return run.model_instance_id or (
+                instance_assignment("research", run.celery_task_id)
+                if run.celery_task_id
+                else None
+            )
+
+        asset_rows = [
+            row
+            for row in asset_rows
+            if assigned_instance(ResearchRun.model_validate(row.payload)) == instance_id
+        ]
+        event_rows = [
+            row
+            for row in event_rows
+            if assigned_instance(EventResearchRun.model_validate(row.payload))
+            == instance_id
+        ]
 
     statuses: Counter[str] = Counter()
     celery_task_ids: list[str] = []
@@ -132,6 +156,13 @@ def cancel_research_tasks(
             else "用户取消了该标的当前研究任务。"
         )
         run = _cancel_asset_run(run, reason)
+        if run.celery_task_id:
+            update_instance_assignment(
+                "research",
+                run.celery_task_id,
+                status="cancelled",
+                instance_id=run.model_instance_id,
+            )
         row.status = RunStatus.CANCELLED.value
         row.payload = run.model_dump(mode="json")
         row.updated_at = now
@@ -147,6 +178,13 @@ def cancel_research_tasks(
             else "用户取消了当前中性事件研究任务。"
         )
         run = _cancel_event_run(run, reason)
+        if run.celery_task_id:
+            update_instance_assignment(
+                "research",
+                run.celery_task_id,
+                status="cancelled",
+                instance_id=run.model_instance_id,
+            )
         row.status = RunStatus.CANCELLED.value
         row.payload = run.model_dump(mode="json")
         row.updated_at = now

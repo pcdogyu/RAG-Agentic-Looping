@@ -86,6 +86,65 @@ def test_scan_visibility_and_gate_cover_long_running_tasks():
     )
 
 
+def test_instance_task_delays_when_every_instance_is_offline(monkeypatch):
+    selected = SimpleNamespace(id="extract-0")
+    retry_options = {}
+    called = False
+
+    class FakeTask:
+        request = SimpleNamespace(
+            id="offline-task",
+            delivery_info={"routing_key": "extract.extract-0"},
+        )
+
+        def retry(self, **kwargs):
+            retry_options.update(kwargs)
+            return worker.Retry()
+
+    def business_task(_self, **_kwargs):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(worker, "select_model_instance", lambda *_args, **_kwargs: selected)
+    monkeypatch.setattr(worker, "instance_health", lambda *_args, **_kwargs: (False, False))
+    monkeypatch.setattr(worker, "update_instance_assignment", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(worker, "update_model_task", lambda *_args, **_kwargs: None)
+    wrapped = worker.model_instance_task("extract")(business_task)
+
+    with pytest.raises(worker.Retry):
+        wrapped(FakeTask(), model_instance_id="extract-0")
+
+    assert called is False
+    assert retry_options["queue"] == "extract.extract-0"
+    assert retry_options["countdown"] == 30
+    assert retry_options["max_retries"] == 1_000_000
+
+
+def test_periodic_evolution_dispatch_uses_an_instance_queue(monkeypatch):
+    selected = SimpleNamespace(id="code-1")
+    recorded = {}
+    published = {}
+
+    monkeypatch.setattr(worker, "select_model_instance", lambda *_args, **_kwargs: selected)
+    monkeypatch.setattr(
+        worker,
+        "record_model_task",
+        lambda _lane, **kwargs: recorded.update(kwargs),
+    )
+    monkeypatch.setattr(
+        worker.evolve_from_outcomes,
+        "apply_async",
+        lambda **kwargs: published.update(kwargs) or SimpleNamespace(id=kwargs["task_id"]),
+    )
+
+    result = worker.dispatch_evolve_from_outcomes.run()
+
+    assert recorded["instance_id"] == "code-1"
+    assert published["queue"] == "evolution.code-1"
+    assert published["kwargs"] == {"model_instance_id": "code-1"}
+    assert result == {"task_id": published["task_id"], "instance_id": "code-1"}
+
+
 def test_market_factor_refresh_advances_only_when_a_larger_window_matures():
     assert worker._due_market_factor_refresh_session(age_days=1.9) is None
     assert worker._due_market_factor_refresh_session(age_days=2) == 1
@@ -283,7 +342,8 @@ def test_news_extraction_workflow_routes_header_and_callback_to_extract(monkeypa
 
     assert len(task_ids) == 1
     assert isinstance(workflow, ChordStub)
-    assert captured["header"][0].options["queue"] == "extract"
+    assert captured["header"][0].options["queue"] == "extract.extract-0"
+    assert captured["header"][0].kwargs["model_instance_id"] == "extract-0"
     assert captured["callback"].options["queue"] == "extract"
     assert worker._read_news_extraction_queue(redis)["items"][0]["status"] == "queued"
 
@@ -896,7 +956,11 @@ def test_insufficient_run_requeues_when_persistent_cluster_gets_new_evidence(db,
 
     assert second_task is not None
     assert len(queued_tasks) == 2
-    assert all(task["queue"] == "research" for task in queued_tasks)
+    assert all(task["queue"] == "research.research-0" for task in queued_tasks)
+    assert all(
+        task["kwargs"]["model_instance_id"] == "research-0"
+        for task in queued_tasks
+    )
     assert len(list_runs(db)) == 2
 
 
@@ -927,7 +991,8 @@ def test_unmapped_event_queues_only_one_visible_7b_mapping_task(db, monkeypatch)
     assert repeated is None
     assert forced == "mapping-task"
     assert len(queued) == 2
-    assert queued[0]["queue"] == "mapping"
+    assert queued[0]["queue"] == "mapping.assist-0"
+    assert queued[0]["kwargs"]["model_instance_id"] == "assist-0"
     assert queued[1]["priority"] == 0
     assert event.analysis_steps[-1].phase == "asset_mapping_queue"
     assert event.analysis_steps[-1].status == "queued"
@@ -968,7 +1033,8 @@ def test_standalone_news_retry_is_recorded_and_sent_with_requested_priority(
     assert queued == [
         {
             "args": [str(news.id)],
-            "queue": "extract",
+            "kwargs": {"model_instance_id": "extract-0"},
+            "queue": "extract.extract-0",
             "task_id": task_id,
             "priority": 0,
         }

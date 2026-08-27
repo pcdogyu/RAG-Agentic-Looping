@@ -154,6 +154,7 @@ export type ModelInferenceQueueItem = {
 
 export type ModelQueueTask = {
   task_id: string;
+  instance_id?: string | null;
   kind: string;
   entity_id: string | null;
   title: string;
@@ -172,6 +173,48 @@ export type ModelQueueTask = {
   metrics: Record<string, unknown>;
 };
 
+type ModelQueueCounts = {
+  queued: number;
+  running: number;
+  retrying: number;
+  verifying: number;
+  waiting_for_model: number;
+  completed: number;
+  failed: number;
+};
+
+type ModelQueueMetrics = {
+  average_queue_duration_ms: number | null;
+  average_execution_duration_ms: number | null;
+  longest_wait_ms: number | null;
+  estimated_clear_ms: number | null;
+  queue_duration_sample_count: number;
+  execution_duration_sample_count: number;
+  execution_p50_ms: number | null;
+  execution_p90_ms: number | null;
+  throughput_per_hour: number | null;
+};
+
+export type ModelQueueInstanceItem = {
+  id: string;
+  healthy: boolean;
+  model_available: boolean;
+  state: string;
+  capacity: number;
+  available: number;
+  observable: boolean;
+  counts: ModelQueueCounts;
+  metrics: ModelQueueMetrics;
+  total_tasks: number;
+  truncated: boolean;
+  tasks: ModelQueueTask[];
+};
+
+type ModelQueueInstanceSummary = Pick<
+  ModelQueueInstanceItem,
+  "id" | "healthy" | "model_available"
+> & Partial<Omit<ModelQueueInstanceItem, "id" | "healthy" | "model_available">>;
+
 export type ModelQueueOverviewItem = {
   id: "extract" | "research" | "assist" | "code";
   model: string;
@@ -185,36 +228,40 @@ export type ModelQueueOverviewItem = {
   instance_count: number;
   per_instance_concurrency: number;
   observable: boolean;
-  instances: Array<{
-    id: string;
-    healthy: boolean;
-    model_available: boolean;
-  }>;
-  counts: {
-    queued: number;
-    running: number;
-    retrying: number;
-    verifying: number;
-    waiting_for_model: number;
-    completed: number;
-    failed: number;
-  };
-  metrics: {
-    average_queue_duration_ms: number | null;
-    average_execution_duration_ms: number | null;
-    longest_wait_ms: number | null;
-    estimated_clear_ms: number | null;
-    queue_duration_sample_count: number;
-    execution_duration_sample_count: number;
-    execution_p50_ms: number | null;
-    execution_p90_ms: number | null;
-    throughput_per_hour: number | null;
-  };
+  instances: ModelQueueInstanceSummary[];
+  counts: ModelQueueCounts;
+  metrics: ModelQueueMetrics;
   total_tasks: number;
   truncated: boolean;
   tasks: ModelQueueTask[];
   error: string | null;
 };
+
+export function modelQueueInstances(
+  queue: ModelQueueOverviewItem,
+): ModelQueueInstanceItem[] {
+  const summaries = queue.instances.length ? queue.instances : [{
+    id: `${queue.id}-0`,
+    healthy: true,
+    model_available: true,
+  }];
+  return summaries.map((instance, index) => ({
+    id: instance.id,
+    healthy: instance.healthy,
+    model_available: instance.model_available,
+    state: instance.state ?? queue.state,
+    capacity: instance.capacity ?? queue.per_instance_concurrency ?? queue.capacity,
+    available: instance.available ?? queue.available,
+    observable: instance.observable ?? queue.observable,
+    counts: instance.counts ?? queue.counts,
+    metrics: instance.metrics ?? queue.metrics,
+    total_tasks: instance.total_tasks ?? queue.total_tasks,
+    truncated: instance.truncated ?? queue.truncated,
+    tasks: instance.tasks ?? queue.tasks.filter(
+      (task) => task.instance_id === instance.id || (!task.instance_id && index === 0),
+    ),
+  }));
+}
 
 type ModelQueueOverviewResponse = {
   generated_at: string;
@@ -359,12 +406,14 @@ const cancellableTaskStatuses = new Set(["queued", "running", "retrying", "verif
 
 export function ModelQueueTaskGrid({
   queue,
+  tasks = queue.tasks,
   onCancel,
   onRetry,
   cancellingTaskId,
   retryingTaskId,
 }: {
   queue: ModelQueueOverviewItem;
+  tasks?: ModelQueueTask[];
   onCancel?: (task: ModelQueueTask) => void;
   onRetry?: (task: ModelQueueTask) => void;
   cancellingTaskId?: string | null;
@@ -373,10 +422,10 @@ export function ModelQueueTaskGrid({
   if (!queue.enabled && queue.id === "code") {
     return <div className="page-empty">代码演进未启用（EVOLUTION_ENABLED=false）。</div>;
   }
-  if (!queue.tasks.length) {
+  if (!tasks.length) {
     return <div className="page-empty">当前没有等待、运行或最近失败的{queue.purpose}任务。</div>;
   }
-  return <div className="model-task-grid" data-queue={queue.id}>{queue.tasks.map((task) => {
+  return <div className="model-task-grid" data-queue={queue.id}>{tasks.map((task) => {
     const isMapping = task.kind === "asset_mapping";
     const isEvolution = task.kind === "code_evolution";
     const isCancellable = (
@@ -439,6 +488,7 @@ export function ModelQueueTaskGrid({
 
 export function UnifiedModelQueuePanel({
   queue,
+  instance,
   onCancelTask,
   onRetryTask,
   onRetryAll,
@@ -449,6 +499,7 @@ export function UnifiedModelQueuePanel({
   clearing,
 }: {
   queue: ModelQueueOverviewItem;
+  instance?: ModelQueueInstanceItem;
   onCancelTask?: (task: ModelQueueTask) => void;
   onRetryTask?: (task: ModelQueueTask) => void;
   onRetryAll?: () => void;
@@ -458,26 +509,29 @@ export function UnifiedModelQueuePanel({
   retryingAll?: boolean;
   clearing?: boolean;
 }) {
-  const secondary = queue.counts.retrying + queue.counts.verifying;
-  const activeCount = queue.counts.queued + queue.counts.running + secondary;
-  const clearableCount = activeCount + queue.counts.failed;
-  const retryableCount = queue.tasks.filter((task) => task.error).length;
+  const activeInstance = instance ?? modelQueueInstances(queue)[0];
+  const secondary = activeInstance.counts.retrying + activeInstance.counts.verifying;
+  const activeCount = activeInstance.counts.queued + activeInstance.counts.running + secondary;
+  const clearableCount = activeCount + activeInstance.counts.failed;
+  const retryableCount = activeInstance.tasks.filter((task) => task.error).length;
+  const ready = activeInstance.healthy && activeInstance.model_available;
+  const state = ready ? activeInstance.state : "unavailable";
   return <section className={`model-queue-panel unified-model-queue-panel ${queue.id}`}>
     <header>
       <div>
         <p className="eyebrow">{modelQueueEyebrows[queue.id]}</p>
-        <h3>{queue.model} {queue.purpose}队列</h3>
-        <small>{queue.binding}</small>
+        <h3>{queue.model} {queue.purpose}队列 · {activeInstance.id}</h3>
+        <small>{queue.binding} · {ready ? "实例可用" : (activeInstance.healthy ? "模型缺失" : "实例离线")}</small>
       </div>
       <div className="model-queue-header-actions">
-        {queue.id !== "code" && <button
+        <button
           type="button"
           className="model-queue-retry"
           title="重试当前队列中的全部错误任务"
           disabled={retryingAll || retryableCount === 0}
           onClick={onRetryAll}
-        >{retryingAll ? "重试中…" : "重试"}</button>}
-        <span className={`model-queue-state ${queue.state}`}>{modelQueueStateLabels[queue.state] ?? queue.state}</span>
+        >{retryingAll ? "重试中…" : "重试"}</button>
+        <span className={`model-queue-state ${state}`}>{modelQueueStateLabels[state] ?? state}</span>
         <button
           type="button"
           className="model-queue-clear"
@@ -487,40 +541,32 @@ export function UnifiedModelQueuePanel({
       </div>
     </header>
     <div className="queue-metrics unified-queue-metrics" aria-live="polite">
-      <span>待处理<strong>{queue.counts.queued}</strong></span>
-      <span>运行<strong>{queue.counts.running}</strong></span>
+      <span>待处理<strong>{activeInstance.counts.queued}</strong></span>
+      <span>运行<strong>{activeInstance.counts.running}</strong></span>
       <span>重试/验证<strong>{secondary}</strong></span>
-      <span>完成/失败<strong>{queue.counts.completed}/{queue.counts.failed}</strong></span>
-      <span title={`样本 ${queue.metrics.queue_duration_sample_count}`}>平均排队<strong>{formatQueueDuration(queue.metrics.average_queue_duration_ms)}</strong></span>
-      <span title={`近 4 小时终态样本 ${queue.metrics.execution_duration_sample_count}`}>近4h平均执行<strong>{formatQueueDuration(queue.metrics.average_execution_duration_ms)}</strong></span>
+      <span>完成/失败<strong>{activeInstance.counts.completed}/{activeInstance.counts.failed}</strong></span>
+      <span title={`样本 ${activeInstance.metrics.queue_duration_sample_count}`}>平均排队<strong>{formatQueueDuration(activeInstance.metrics.average_queue_duration_ms)}</strong></span>
+      <span title={`近 4 小时终态样本 ${activeInstance.metrics.execution_duration_sample_count}`}>近4h平均执行<strong>{formatQueueDuration(activeInstance.metrics.average_execution_duration_ms)}</strong></span>
     </div>
-    <div className="model-queue-runtime">
-      <span>模型等待<strong>{queue.counts.waiting_for_model}</strong></span>
-      <span>槽位<strong>{queue.available}/{queue.capacity}</strong></span>
-      <span>实例个数<strong>{queue.instance_count}</strong></span>
-      <span>单实例并发<strong>{queue.per_instance_concurrency} 路</strong></span>
+    <div className={`model-queue-runtime ${queue.id === "research" ? "research" : "standard"}`}>
+      <span>模型等待<strong>{activeInstance.counts.waiting_for_model}</strong></span>
+      <span>槽位<strong>{activeInstance.available}/{activeInstance.capacity}</strong></span>
+      <span>实例并发<strong>{activeInstance.capacity} 路</strong></span>
       <span>CPU<strong>{queue.threads} 线程</strong></span>
-      <span>最长等待<strong>{formatQueueDuration(queue.metrics.longest_wait_ms)}</strong></span>
-      <span>预计清空<strong>{formatQueueDuration(queue.metrics.estimated_clear_ms)}</strong></span>
+      <span>最长等待<strong>{formatQueueDuration(activeInstance.metrics.longest_wait_ms)}</strong></span>
+      <span>预计清空<strong>{formatQueueDuration(activeInstance.metrics.estimated_clear_ms)}</strong></span>
       {queue.id === "research" && <>
-        <span>P50<strong>{formatQueueDuration(queue.metrics.execution_p50_ms)}</strong></span>
-        <span>P90<strong>{formatQueueDuration(queue.metrics.execution_p90_ms)}</strong></span>
-        <span>近24h吞吐<strong>{queue.metrics.throughput_per_hour === null ? "—" : `${queue.metrics.throughput_per_hour.toFixed(1)}/时`}</strong></span>
+        <span>P50<strong>{formatQueueDuration(activeInstance.metrics.execution_p50_ms)}</strong></span>
+        <span>P90<strong>{formatQueueDuration(activeInstance.metrics.execution_p90_ms)}</strong></span>
+        <span>近24h吞吐<strong>{activeInstance.metrics.throughput_per_hour === null ? "—" : `${activeInstance.metrics.throughput_per_hour.toFixed(1)}/时`}</strong></span>
       </>}
     </div>
-    {(queue.id === "research" || queue.id === "assist") && !!queue.instances.length && <div className="research-instance-status" aria-label={`${queue.purpose}实例状态`}>
-      {queue.instances.map((instance) => {
-        const ready = instance.healthy && instance.model_available;
-        return <span className={ready ? "healthy" : "unavailable"} key={instance.id}>
-          <i />{instance.id} · {ready ? "可用" : (instance.healthy ? "模型缺失" : "离线")}
-        </span>;
-      })}
-    </div>}
-    {!queue.observable && <div className="page-error">模型推理槽位状态暂时不可用。</div>}
+    {!activeInstance.observable && <div className="page-error">模型推理槽位状态暂时不可用。</div>}
     {queue.error && <div className="page-error">{queue.error}</div>}
-    {queue.truncated && <div className="page-message">队列过长，当前显示前 500 张任务卡。</div>}
+    {activeInstance.truncated && <div className="page-message">队列过长，当前显示前 500 张任务卡。</div>}
     <ModelQueueTaskGrid
       queue={queue}
+      tasks={activeInstance.tasks}
       onCancel={onCancelTask}
       onRetry={onRetryTask}
       cancellingTaskId={cancellingTaskId}
@@ -541,20 +587,38 @@ export function removeTasksFromQueueOverview(
       const removed = queue.tasks.filter(predicate);
       if (!removed.length) return queue;
       const counts = { ...queue.counts };
-      for (const task of removed) {
-        const field = ["queued", "proposed"].includes(task.status) ? "queued"
-          : ["running", "generating", "testing", "merging"].includes(task.status) ? "running"
-            : task.status === "retrying" ? "retrying"
-              : task.status === "verifying" ? "verifying"
-                : ["failed", "rejected", "rolled_back"].includes(task.status) ? "failed" : null;
-        if (field) counts[field] = Math.max(0, counts[field] - 1);
-      }
+      const removeFromCounts = (source: ModelQueueCounts, tasks: ModelQueueTask[]) => {
+        const next = { ...source };
+        for (const task of tasks) {
+          const field = ["queued", "proposed"].includes(task.status) ? "queued"
+            : ["running", "generating", "testing", "merging"].includes(task.status) ? "running"
+              : task.status === "retrying" ? "retrying"
+                : task.status === "verifying" ? "verifying"
+                  : ["failed", "rejected", "rolled_back"].includes(task.status) ? "failed" : null;
+          if (field) next[field] = Math.max(0, next[field] - 1);
+        }
+        return next;
+      };
+      const nextCounts = removeFromCounts(counts, removed);
       return {
         ...queue,
-        counts,
-        total_tasks: counts.queued + counts.running + counts.retrying
-          + counts.verifying + counts.completed + counts.failed,
+        counts: nextCounts,
+        total_tasks: nextCounts.queued + nextCounts.running + nextCounts.retrying
+          + nextCounts.verifying + nextCounts.completed + nextCounts.failed,
         tasks: queue.tasks.filter((task) => !predicate(task)),
+        instances: modelQueueInstances(queue).map((instance) => {
+          const instanceRemoved = instance.tasks.filter(predicate);
+          if (!instanceRemoved.length) return instance;
+          const instanceCounts = removeFromCounts(instance.counts, instanceRemoved);
+          return {
+            ...instance,
+            counts: instanceCounts,
+            total_tasks: instanceCounts.queued + instanceCounts.running
+              + instanceCounts.retrying + instanceCounts.verifying
+              + instanceCounts.completed + instanceCounts.failed,
+            tasks: instance.tasks.filter((task) => !predicate(task)),
+          };
+        }),
       };
     }),
   };
@@ -619,8 +683,8 @@ export function QueuePage({ apiBase }: { apiBase: string }) {
   const [actionMessage, setActionMessage] = useState("");
   const [cancellingTaskId, setCancellingTaskId] = useState<string | null>(null);
   const [retryingTaskId, setRetryingTaskId] = useState<string | null>(null);
-  const [retryingQueueId, setRetryingQueueId] = useState<ModelQueueOverviewItem["id"] | null>(null);
-  const [clearingQueueId, setClearingQueueId] = useState<ModelQueueOverviewItem["id"] | null>(null);
+  const [retryingQueueId, setRetryingQueueId] = useState<string | null>(null);
+  const [clearingQueueId, setClearingQueueId] = useState<string | null>(null);
   const requestInFlight = useRef(false);
   const cancelledTaskIds = useRef(new Map<string, CancelledTaskTombstone>());
 
@@ -693,23 +757,27 @@ export function QueuePage({ apiBase }: { apiBase: string }) {
     }
   }, [apiBase, loadQueues, removeQueueTasks]);
 
-  const clearModelQueue = useCallback(async (queue: ModelQueueOverviewItem) => {
-    const activeCount = queue.counts.queued + queue.counts.running
-      + queue.counts.retrying + queue.counts.verifying;
-    const clearableCount = activeCount + queue.counts.failed;
-    if (!clearableCount || !window.confirm(`确认清空 ${queue.model} 当前 ${clearableCount} 项${queue.purpose}任务（含 ${queue.counts.failed} 项失败任务）？正在执行的任务会立即停止，未完成进度不会保留；后续扫描或调度仍可产生新任务。`)) return;
-    setClearingQueueId(queue.id);
+  const clearModelQueue = useCallback(async (
+    queue: ModelQueueOverviewItem,
+    instance: ModelQueueInstanceItem,
+  ) => {
+    const activeCount = instance.counts.queued + instance.counts.running
+      + instance.counts.retrying + instance.counts.verifying;
+    const clearableCount = activeCount + instance.counts.failed;
+    if (!clearableCount || !window.confirm(`确认清空 ${queue.model} ${instance.id} 当前 ${clearableCount} 项${queue.purpose}任务（含 ${instance.counts.failed} 项失败任务）？正在执行的任务会立即停止，未完成进度不会保留；后续扫描或调度仍可产生新任务。`)) return;
+    const actionId = `${queue.id}:${instance.id}`;
+    setClearingQueueId(actionId);
     setActionMessage("");
     setError("");
     try {
-      const response = await fetch(`${apiBase}/api/v1/model-queues/${queue.id}/clear`, { method: "POST" });
+      const response = await fetch(`${apiBase}/api/v1/model-queues/${queue.id}/instances/${instance.id}/clear`, { method: "POST" });
       if (!response.ok) throw new Error(`清空${queue.purpose}队列失败（HTTP ${response.status}）`);
       const result = await response.json() as { cancelled: number };
-      removeQueueTasks(queue.id, (task) => [
+      removeQueueTasks(queue.id, (task) => task.instance_id === instance.id && [
         "queued", "proposed", "running", "generating", "retrying", "verifying", "testing", "merging",
         "failed", "rejected", "rolled_back",
       ].includes(task.status));
-      setActionMessage(`已清空 ${queue.model} 的 ${result.cancelled} 个当前${queue.purpose}任务；后续新任务不受影响。`);
+      setActionMessage(`已清空 ${queue.model} ${instance.id} 的 ${result.cancelled} 个当前${queue.purpose}任务；其他实例不受影响。`);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : `清空${queue.purpose}队列失败`);
     } finally {
@@ -728,7 +796,7 @@ export function QueuePage({ apiBase }: { apiBase: string }) {
       const response = await fetch(`${apiBase}/api/v1/model-queues/${queue.id}/tasks/retry`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ task_id: task.task_id, kind: task.kind, entity_id: task.entity_id }),
+        body: JSON.stringify({ task_id: task.task_id, kind: task.kind, entity_id: task.entity_id, instance_id: task.instance_id }),
       });
       if (!response.ok) throw new Error(`手动重试失败（HTTP ${response.status}）`);
       setActionMessage(`已将“${task.title}”插入 ${queue.model} 队列最前方重试。`);
@@ -740,22 +808,26 @@ export function QueuePage({ apiBase }: { apiBase: string }) {
     }
   }, [apiBase, loadQueues]);
 
-  const retryModelQueue = useCallback(async (queue: ModelQueueOverviewItem) => {
-    const retryableCount = queue.tasks.filter((task) => task.error).length;
+  const retryModelQueue = useCallback(async (
+    queue: ModelQueueOverviewItem,
+    instance: ModelQueueInstanceItem,
+  ) => {
+    const retryableCount = instance.tasks.filter((task) => task.error).length;
     if (!retryableCount || !window.confirm(
-      `确认重试 ${queue.model} 当前 ${retryableCount} 个错误任务？成功任务不会重复执行。`,
+      `确认重试 ${queue.model} ${instance.id} 当前 ${retryableCount} 个错误任务？成功任务不会重复执行。`,
     )) return;
-    setRetryingQueueId(queue.id);
+    const actionId = `${queue.id}:${instance.id}`;
+    setRetryingQueueId(actionId);
     setActionMessage("");
     setError("");
     try {
-      const response = await fetch(`${apiBase}/api/v1/model-queues/${queue.id}/retry`, {
+      const response = await fetch(`${apiBase}/api/v1/model-queues/${queue.id}/instances/${instance.id}/retry`, {
         method: "POST",
       });
       if (!response.ok) throw new Error(`批量重试失败（HTTP ${response.status}）`);
       const result = await response.json() as { retried: number; skipped: number };
       setActionMessage(
-        `已重试 ${queue.model} 的 ${result.retried} 个错误任务${result.skipped ? `，跳过 ${result.skipped} 个已失效任务` : ""}。`,
+        `已重试 ${queue.model} ${instance.id} 的 ${result.retried} 个错误任务${result.skipped ? `，跳过 ${result.skipped} 个已失效任务` : ""}。`,
       );
       await loadQueues();
     } catch (reason) {
@@ -794,18 +866,22 @@ export function QueuePage({ apiBase }: { apiBase: string }) {
     {actionMessage && <div className="page-message">{actionMessage}</div>}
     {!overview && loading && <div className="page-message">正在读取四条业务队列…</div>}
     <div className="model-queue-columns">
-      {overview?.queues.map((queue) => <UnifiedModelQueuePanel
-        queue={queue}
-        key={queue.id}
-        onCancelTask={(task) => void cancelModelTask(queue, task)}
-        onRetryTask={(task) => void retryModelTask(queue, task)}
-        onRetryAll={() => void retryModelQueue(queue)}
-        onClear={() => void clearModelQueue(queue)}
-        cancellingTaskId={cancellingTaskId}
-        retryingTaskId={retryingTaskId}
-        retryingAll={retryingQueueId === queue.id}
-        clearing={clearingQueueId === queue.id}
-      />)}
+      {overview?.queues.flatMap((queue) => modelQueueInstances(queue).map((instance) => {
+        const actionId = `${queue.id}:${instance.id}`;
+        return <UnifiedModelQueuePanel
+          queue={queue}
+          instance={instance}
+          key={actionId}
+          onCancelTask={(task) => void cancelModelTask(queue, task)}
+          onRetryTask={(task) => void retryModelTask(queue, task)}
+          onRetryAll={() => void retryModelQueue(queue, instance)}
+          onClear={() => void clearModelQueue(queue, instance)}
+          cancellingTaskId={cancellingTaskId}
+          retryingTaskId={retryingTaskId}
+          retryingAll={retryingQueueId === actionId}
+          clearing={clearingQueueId === actionId}
+        />;
+      }))}
     </div>
   </section>;
 }

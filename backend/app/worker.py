@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta
+from functools import wraps
 from time import sleep
 from typing import Any
 from uuid import UUID, uuid4
 
 from celery import Celery, chord
-from celery.exceptions import Ignore
+from celery.exceptions import Ignore, Retry
 from celery.signals import task_failure, task_success
 from redis import Redis
 from sqlalchemy import func, select
@@ -32,6 +33,16 @@ from backend.app.services.asset_mapping import AssetMappingService
 from backend.app.services.event_research import EventResearchService
 from backend.app.services.events import EventService
 from backend.app.services.evolution import EvolutionService
+from backend.app.services.model_instances import (
+    ModelLane,
+    broker_queue_name,
+    instance_assignment,
+    instance_health,
+    lane_model,
+    model_instance_affinity,
+    select_model_instance,
+    update_instance_assignment,
+)
 from backend.app.services.model_queue import (
     RECENT_EXECUTION_WINDOW,
     model_task_is_cancelled,
@@ -146,9 +157,9 @@ celery_app.conf.update(
             "options": {"queue": "io"},
         },
         "evolve-from-failures": {
-            "task": "market_loop.evolve_from_outcomes",
+            "task": "market_loop.dispatch_evolve_from_outcomes",
             "schedule": 7 * 24 * 60 * 60,
-            "options": {"queue": "evolution"},
+            "options": {"queue": "io"},
         },
         "system-monitor": {
             "task": "market_loop.monitor_health",
@@ -166,6 +177,78 @@ class ScanLeaseLost(RuntimeError):
 if not settings.evolution_enabled:
     celery_app.conf.beat_schedule.pop("evolve-from-failures", None)
     celery_app.conf.beat_schedule.pop("system-monitor", None)
+
+
+def model_instance_task(lane: ModelLane):
+    """Bind a Celery business task to one durable model instance."""
+
+    def decorate(function):
+        @wraps(function)
+        def wrapped(self, *args, model_instance_id: str | None = None, **kwargs):
+            task_id = str(self.request.id or uuid4())
+            preferred = model_instance_id or instance_assignment(lane, task_id)
+            routing_key = str((self.request.delivery_info or {}).get("routing_key") or "")
+            selected = select_model_instance(
+                lane,
+                task_id=task_id,
+                preferred=preferred,
+                settings=settings,
+                probe_health=bool(routing_key),
+            )
+            target_queue = broker_queue_name(lane, selected.id)
+            if routing_key and not all(
+                instance_health(selected, lane_model(settings, lane))
+            ):
+                update_instance_assignment(
+                    lane,
+                    task_id,
+                    status="retrying",
+                    instance_id=selected.id,
+                )
+                update_model_task(
+                    lane,
+                    task_id,
+                    status="retrying",
+                    instance_id=selected.id,
+                )
+                raise self.retry(
+                    kwargs={**kwargs, "model_instance_id": selected.id},
+                    queue=target_queue,
+                    countdown=30,
+                    max_retries=1_000_000,
+                )
+            if routing_key and routing_key != target_queue:
+                raise self.retry(
+                    kwargs={**kwargs, "model_instance_id": selected.id},
+                    queue=target_queue,
+                    countdown=1,
+                )
+            update_instance_assignment(
+                lane,
+                task_id,
+                status="running",
+                instance_id=selected.id,
+            )
+            try:
+                with model_instance_affinity(lane, selected.id, task_id=task_id):
+                    result = function(
+                        self,
+                        *args,
+                        model_instance_id=selected.id,
+                        **kwargs,
+                    )
+            except Retry:
+                update_instance_assignment(lane, task_id, status="retrying")
+                raise
+            except Exception:
+                update_instance_assignment(lane, task_id, status="failed")
+                raise
+            update_instance_assignment(lane, task_id, status="completed")
+            return result
+
+        return wrapped
+
+    return decorate
 
 
 @celery_app.task(name="market_loop.cleanup_model_audits")
@@ -404,6 +487,8 @@ def get_news_extraction_queue(limit: int = 200) -> dict[str, Any]:
 
 def clear_news_extraction_queue(
     redis_client: Redis | None = None,
+    *,
+    instance_id: str | None = None,
 ) -> dict[str, Any]:
     """Clear active and failed 3B tasks, returning only active Celery task ids."""
 
@@ -415,6 +500,8 @@ def clear_news_extraction_queue(
     active_statuses = {"queued", "running", "retrying"}
     clearable_statuses = active_statuses | {"failed"}
     for item in payload.get("items", []):
+        if instance_id is not None and item.get("instance_id") != instance_id:
+            continue
         previous_status = item.get("status")
         if previous_status not in clearable_statuses:
             continue
@@ -434,11 +521,32 @@ def clear_news_extraction_queue(
             attempt_started_at=None,
             error=None,
         )
-    payload["state"] = "cancelled"
+        if task_id:
+            update_instance_assignment(
+                "extract",
+                str(task_id),
+                status="cancelled",
+                instance_id=item.get("instance_id"),
+                redis_client=client,
+            )
+    remaining = _news_extraction_counts(payload)
+    payload["state"] = (
+        "cancelled"
+        if instance_id is None
+        else "running"
+        if remaining["running"]
+        else "retrying"
+        if remaining["retrying"]
+        else "queued"
+        if remaining["queued"]
+        else "completed_with_errors"
+        if remaining["failed"]
+        else "completed"
+    )
     payload["error"] = None
     _write_news_extraction_queue(client, payload)
     scan_task_id = payload.get("scan_task_id")
-    if scan_task_id:
+    if scan_task_id and instance_id is None:
         _update_scan_status(
             client,
             state="cancelled",
@@ -578,6 +686,14 @@ def _update_news_extraction_item(
         item["error"] = error
         if attempt is not None:
             item["attempt"] = attempt
+        if item.get("task_id"):
+            update_instance_assignment(
+                "extract",
+                str(item["task_id"]),
+                status=status,
+                instance_id=item.get("instance_id"),
+                redis_client=client,
+            )
         changed = True
         break
     if not changed:
@@ -843,6 +959,7 @@ def enqueue_research(
     retry_attempt: int = 0,
     market_factor_refresh_days: int | None = None,
     priority: int | None = None,
+    model_instance_id: str | None = None,
 ) -> tuple[str, ResearchRun]:
     """Persist a visible queued run before handing work to the LLM worker."""
 
@@ -891,6 +1008,13 @@ def enqueue_research(
             return canonical.celery_task_id or f"research:{canonical.id}", merged
 
     task_id = str(uuid4())
+    instance = select_model_instance(
+        "research",
+        task_id=task_id,
+        preferred=model_instance_id,
+        settings=settings,
+        probe_health=True,
+    )
     run = ResearchRun(
         event_id=event.id if event else None,
         trigger_event_ids=[event.id] if event else [],
@@ -900,6 +1024,7 @@ def enqueue_research(
         retry_of_run_id=retry_of_run_id,
         retry_attempt=retry_attempt,
         celery_task_id=task_id,
+        model_instance_id=instance.id,
         analysis_steps=[
             *(event.analysis_steps if event else []),
             *(
@@ -928,11 +1053,17 @@ def enqueue_research(
                     if retry_of_run_id
                     else f"已为主标的 {asset.symbol} 创建深度研究任务。"
                 ),
-                metrics=(
-                    {"retry_of_run_id": str(retry_of_run_id), "retry_attempt": retry_attempt}
-                    if retry_of_run_id
-                    else {}
-                ),
+                metrics={
+                    **(
+                        {
+                            "retry_of_run_id": str(retry_of_run_id),
+                            "retry_attempt": retry_attempt,
+                        }
+                        if retry_of_run_id
+                        else {}
+                    ),
+                    "instance_id": instance.id,
+                },
             ),
         ],
     )
@@ -940,7 +1071,8 @@ def enqueue_research(
     try:
         task = research_asset.apply_async(
             args=[asset.asset_id, str(event.id) if event else None, str(run.id)],
-            queue="research",
+            kwargs={"model_instance_id": instance.id},
+            queue=broker_queue_name("research", instance.id),
             task_id=task_id,
             **({"priority": priority} if priority is not None else {}),
         )
@@ -1025,6 +1157,7 @@ def enqueue_asset_mapping(
     *,
     force: bool = False,
     priority: int | None = None,
+    model_instance_id: str | None = None,
 ) -> str | None:
     """Queue one visible 7B mapping attempt for an unmapped event."""
 
@@ -1037,6 +1170,14 @@ def enqueue_asset_mapping(
         )
     ):
         return None
+    task_id = str(uuid4())
+    instance = select_model_instance(
+        "assist",
+        task_id=task_id,
+        preferred=model_instance_id,
+        settings=settings,
+        probe_health=True,
+    )
     _replace_event_step(
         event,
         AnalysisStep(
@@ -1048,10 +1189,10 @@ def enqueue_asset_mapping(
                 f"确定性映射未找到标的，已创建 {settings.ollama_assist_model} "
                 "二次标的发现任务。"
             ),
+            metrics={"instance_id": instance.id},
         ),
     )
     save_event(db, event)
-    task_id = str(uuid4())
     record_model_task(
         "assist",
         task_id=task_id,
@@ -1060,11 +1201,13 @@ def enqueue_asset_mapping(
         title=event.headline,
         subtitle=event.event_type.value,
         source="manual" if force else "automatic",
+        instance_id=instance.id,
     )
     try:
         task = resolve_event_assets.apply_async(
             args=[str(event.id)],
-            queue="mapping",
+            kwargs={"model_instance_id": instance.id},
+            queue=broker_queue_name("assist", instance.id),
             task_id=task_id,
             **({"priority": priority} if priority is not None else {}),
         )
@@ -1097,10 +1240,18 @@ def enqueue_news_extraction_retry(
     news: NewsItem,
     *,
     priority: int | None = None,
+    model_instance_id: str | None = None,
 ) -> str:
     """Queue a standalone extraction attempt without reopening a completed scan."""
 
     task_id = str(uuid4())
+    instance = select_model_instance(
+        "extract",
+        task_id=task_id,
+        preferred=model_instance_id,
+        settings=settings,
+        probe_health=True,
+    )
     record_model_task(
         "extract",
         task_id=task_id,
@@ -1109,11 +1260,13 @@ def enqueue_news_extraction_retry(
         title=news.title,
         subtitle=news.source,
         source="manual",
+        instance_id=instance.id,
     )
     try:
         task = retry_news_item.apply_async(
             args=[str(news.id)],
-            queue="extract",
+            kwargs={"model_instance_id": instance.id},
+            queue=broker_queue_name("extract", instance.id),
             task_id=task_id,
             **({"priority": priority} if priority is not None else {}),
         )
@@ -1128,17 +1281,30 @@ def enqueue_news_extraction_retry(
     return str(task.id)
 
 
-def enqueue_event_report(db, event: NewsEvent) -> tuple[str | None, EventResearchRun]:
+def enqueue_event_report(
+    db,
+    event: NewsEvent,
+    *,
+    model_instance_id: str | None = None,
+) -> tuple[str | None, EventResearchRun]:
     """Persist and queue one neutral report for an event with no verified asset."""
 
     existing = get_event_research_for_event(db, event.id)
     if existing:
         return None, existing
     task_id = str(uuid4())
+    instance = select_model_instance(
+        "research",
+        task_id=task_id,
+        preferred=model_instance_id,
+        settings=settings,
+        probe_health=True,
+    )
     run = EventResearchRun(
         event_id=event.id,
         as_of=max(event.as_of, event.observed_at),
         celery_task_id=task_id,
+        model_instance_id=instance.id,
         analysis_steps=[
             *event.analysis_steps,
             AnalysisStep(
@@ -1147,6 +1313,7 @@ def enqueue_event_report(db, event: NewsEvent) -> tuple[str | None, EventResearc
                 executor="celery",
                 model=settings.ollama_research_model,
                 summary="未找到经主数据验证的证券标的，已创建中性事件研报任务。",
+                metrics={"instance_id": instance.id},
             ),
         ],
     )
@@ -1154,7 +1321,8 @@ def enqueue_event_report(db, event: NewsEvent) -> tuple[str | None, EventResearc
     try:
         task = research_event.apply_async(
             args=[str(event.id), str(run.id)],
-            queue="research",
+            kwargs={"model_instance_id": instance.id},
+            queue=broker_queue_name("research", instance.id),
             task_id=task_id,
         )
     except Exception as exc:
@@ -1179,6 +1347,7 @@ def enqueue_event_research_retry(
     run: EventResearchRun,
     *,
     priority: int | None = None,
+    model_instance_id: str | None = None,
 ) -> tuple[str, EventResearchRun]:
     """Reset the event's unique durable report row and queue a fresh manual attempt."""
 
@@ -1193,7 +1362,15 @@ def enqueue_event_research_retry(
     run.error = None
     run.retryable_reason = None
     task_id = str(uuid4())
+    instance = select_model_instance(
+        "research",
+        task_id=task_id,
+        preferred=model_instance_id,
+        settings=settings,
+        probe_health=True,
+    )
     run.celery_task_id = task_id
+    run.model_instance_id = instance.id
     run.analysis_steps.append(
         AnalysisStep(
             phase="event_research_retry_queue",
@@ -1208,7 +1385,8 @@ def enqueue_event_research_retry(
     try:
         task = research_event.apply_async(
             args=[str(event.id), str(run.id)],
-            queue="research",
+            kwargs={"model_instance_id": instance.id},
+            queue=broker_queue_name("research", instance.id),
             task_id=task_id,
             **({"priority": priority} if priority is not None else {}),
         )
@@ -1270,9 +1448,19 @@ def _build_news_extraction_workflow(
 ) -> tuple[list[str], Any | None]:
     now = utc_now().isoformat()
     task_ids = [str(uuid4()) for _ in items]
+    instances = [
+        select_model_instance(
+            "extract",
+            task_id=task_id,
+            settings=settings,
+            probe_health=True,
+        )
+        for task_id in task_ids
+    ]
     entries = [
         {
             "task_id": task_id,
+            "instance_id": instance.id,
             "news_id": str(item.id),
             "title": item.title,
             "source": item.source,
@@ -1283,16 +1471,21 @@ def _build_news_extraction_workflow(
             "updated_at": now,
             "error": None,
         }
-        for task_id, item in zip(task_ids, items, strict=True)
+        for task_id, item, instance in zip(task_ids, items, instances, strict=True)
     ]
     _initialize_news_extraction_queue(client, scan_task_id, entries, metadata)
     if not items:
         return [], None
     header = [
-        extract_news_item.s(scan_task_id, str(item.id)).set(
-            queue="extract", task_id=task_id
+        extract_news_item.s(
+            scan_task_id,
+            str(item.id),
+            model_instance_id=instance.id,
+        ).set(
+            queue=broker_queue_name("extract", instance.id),
+            task_id=task_id,
         )
-        for task_id, item in zip(task_ids, items, strict=True)
+        for task_id, item, instance in zip(task_ids, items, instances, strict=True)
     ]
     callback = finalize_news_extraction.s(scan_task_id).set(queue="extract")
     return task_ids, chord(header, callback)
@@ -1440,7 +1633,13 @@ def scan_news(self) -> dict:
 
 
 @celery_app.task(bind=True, name="market_loop.extract_news_item", max_retries=2)
-def extract_news_item(self, scan_task_id: str, news_id: str) -> dict[str, Any]:
+@model_instance_task("extract")
+def extract_news_item(
+    self,
+    scan_task_id: str,
+    news_id: str,
+    model_instance_id: str | None = None,
+) -> dict[str, Any]:
     """Extract and cluster one durable news item on the serial 3B queue."""
 
     client = _redis_client()
@@ -1531,7 +1730,10 @@ def extract_news_item(self, scan_task_id: str, news_id: str) -> dict[str, Any]:
 
 
 @celery_app.task(bind=True, name="market_loop.retry_news_item", max_retries=2)
-def retry_news_item(self, news_id: str) -> dict[str, Any]:
+@model_instance_task("extract")
+def retry_news_item(
+    self, news_id: str, model_instance_id: str | None = None
+) -> dict[str, Any]:
     """Retry one durable news item independently and queue its downstream work."""
 
     task_id = str(self.request.id or f"news:{news_id}")
@@ -1738,7 +1940,10 @@ def finalize_news_extraction(
 
 
 @celery_app.task(bind=True, name="market_loop.resolve_event_assets", max_retries=2)
-def resolve_event_assets(self, event_id: str) -> dict:
+@model_instance_task("assist")
+def resolve_event_assets(
+    self, event_id: str, model_instance_id: str | None = None
+) -> dict:
     task_id = str(self.request.id or f"event:{event_id}")
     if model_task_is_cancelled("assist", task_id):
         return {"status": "cancelled", "event_id": event_id}
@@ -1913,7 +2118,13 @@ def resolve_event_assets(self, event_id: str) -> dict:
 
 
 @celery_app.task(bind=True, name="market_loop.research_event", max_retries=2)
-def research_event(self, event_id: str, run_id: str) -> dict:
+@model_instance_task("research")
+def research_event(
+    self,
+    event_id: str,
+    run_id: str,
+    model_instance_id: str | None = None,
+) -> dict:
     init_db()
     try:
         client = _redis_client()
@@ -1980,8 +2191,13 @@ def research_event(self, event_id: str, run_id: str) -> dict:
 
 
 @celery_app.task(bind=True, name="market_loop.research_asset")
+@model_instance_task("research")
 def research_asset(
-    self, asset_id: str, event_id: str | None = None, run_id: str | None = None
+    self,
+    asset_id: str,
+    event_id: str | None = None,
+    run_id: str | None = None,
+    model_instance_id: str | None = None,
 ) -> dict:
     init_db()
     registry = ProviderRegistry()
@@ -2338,11 +2554,17 @@ def _evolution_failure_cases(db) -> list[dict[str, Any]]:
     return failures
 
 
-@celery_app.task(bind=True, name="market_loop.evolve_from_outcomes")
-def evolve_from_outcomes(self) -> dict:
-    task_id = str(self.request.id or uuid4())
-    if model_task_is_cancelled("code", task_id):
-        return {"status": "cancelled"}
+@celery_app.task(name="market_loop.dispatch_evolve_from_outcomes")
+def dispatch_evolve_from_outcomes() -> dict[str, str]:
+    """Bind the periodic evolution run before it enters the model queue."""
+
+    task_id = str(uuid4())
+    instance = select_model_instance(
+        "code",
+        task_id=task_id,
+        settings=settings,
+        probe_health=True,
+    )
     record_model_task(
         "code",
         task_id=task_id,
@@ -2350,6 +2572,42 @@ def evolve_from_outcomes(self) -> dict:
         title="定期失败案例代码演进",
         subtitle="根据历史研究结果生成改进方案",
         source="automatic",
+        instance_id=instance.id,
+    )
+    try:
+        task = evolve_from_outcomes.apply_async(
+            kwargs={"model_instance_id": instance.id},
+            queue=broker_queue_name("code", instance.id),
+            task_id=task_id,
+        )
+    except Exception as exc:
+        update_model_task(
+            "code",
+            task_id,
+            status="failed",
+            source="automatic",
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        raise
+    return {"task_id": str(task.id), "instance_id": instance.id}
+
+
+@celery_app.task(bind=True, name="market_loop.evolve_from_outcomes")
+@model_instance_task("code")
+def evolve_from_outcomes(
+    self, model_instance_id: str | None = None
+) -> dict:
+    task_id = str(self.request.id or uuid4())
+    if model_task_is_cancelled("code", task_id):
+        return {"status": "cancelled"}
+    update_model_task(
+        "code",
+        task_id,
+        status="running",
+        title="定期失败案例代码演进",
+        subtitle="根据历史研究结果生成改进方案",
+        source="automatic",
+        instance_id=model_instance_id,
     )
     if not settings.evolution_enabled:
         update_model_task(
@@ -2368,7 +2626,12 @@ def evolve_from_outcomes(self) -> dict:
 
 
 @celery_app.task(bind=True, name="market_loop.evolve_failures")
-def evolve_failures(self, failures: list[dict]) -> dict:
+@model_instance_task("code")
+def evolve_failures(
+    self,
+    failures: list[dict],
+    model_instance_id: str | None = None,
+) -> dict:
     task_id = str(self.request.id or uuid4())
     if model_task_is_cancelled("code", task_id):
         return {"status": "cancelled"}
@@ -2393,7 +2656,12 @@ def evolve_failures(self, failures: list[dict]) -> dict:
 
 
 @celery_app.task(bind=True, name="market_loop.execute_evolution")
-def execute_evolution(self, candidate_id: str) -> dict:
+@model_instance_task("code")
+def execute_evolution(
+    self,
+    candidate_id: str,
+    model_instance_id: str | None = None,
+) -> dict:
     task_id = str(self.request.id or uuid4())
     if model_task_is_cancelled("code", task_id):
         return {"status": "cancelled", "candidate_id": candidate_id}

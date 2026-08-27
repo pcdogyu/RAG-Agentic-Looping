@@ -38,6 +38,12 @@ from backend.app.services.events import EventService
 from backend.app.services.evolution import EvolutionError, EvolutionService
 from backend.app.services.fact_sources import get_effective_settings
 from backend.app.services.mcp_registry import seed_integrations
+from backend.app.services.model_instances import (
+    broker_queue_name,
+    configured_model_instances,
+    lane_model,
+    select_model_instance,
+)
 from backend.app.services.model_queue import (
     ModelQueueOverviewResponse,
     ModelQueueTask,
@@ -98,6 +104,7 @@ from backend.app.worker import (
     request_scan_pause,
     resume_scan,
 )
+from backend.app.worker import evolve_from_outcomes as evolve_from_outcomes_task
 from backend.app.worker import execute_evolution as execute_evolution_task
 
 settings = get_settings()
@@ -321,6 +328,7 @@ class ModelTaskRetryRequest(BaseModel):
     task_id: str
     kind: str
     entity_id: str | None = None
+    instance_id: str | None = None
 
 
 @app.get("/health")
@@ -349,13 +357,9 @@ def health() -> dict:
     ollama_instances: list[dict] = []
     models: list[str] = []
     endpoints = [
-        ("main", settings.ollama_base_url.rstrip("/"), None),
-        ("assist-0", settings.ollama_assist_url, settings.ollama_assist_model),
-        *[
-            (f"research-{index}", url, settings.ollama_research_model)
-            for index, url in enumerate(settings.ollama_research_urls)
-            if url != settings.ollama_base_url.rstrip("/")
-        ],
+        (instance.id, instance.url, lane_model(settings, lane))
+        for lane in ("extract", "assist", "research", "code")
+        for instance in configured_model_instances(lane, settings)
     ]
     seen_endpoints: set[tuple[str, str]] = set()
     for instance_id, url, required_model in endpoints:
@@ -756,17 +760,27 @@ def clear_model_queue(queue_id: str, db: Session = Depends(get_db)):
     }
 
 
-RETRYABLE_MODEL_QUEUES = {"extract", "research", "assist"}
+RETRYABLE_MODEL_QUEUES = {"extract", "research", "assist", "code"}
 MANUAL_RETRY_PRIORITY = 0
 BULK_RETRY_PRIORITY = DEFAULT_MODEL_TASK_PRIORITY
 
 
-def _retryable_model_queue_tasks(queue_id: str) -> list[ModelQueueTask]:
+def _retryable_model_queue_tasks(
+    queue_id: str, instance_id: str | None = None
+) -> list[ModelQueueTask]:
     overview = _build_model_queue_snapshot()
     queue = next((item for item in overview.queues if item.id == queue_id), None)
     if queue is None:
         return []
-    return [task for task in queue.tasks if task.error]
+    tasks = queue.tasks
+    if instance_id is not None:
+        instance = next(
+            (item for item in queue.instances if item.id == instance_id), None
+        )
+        if instance is None:
+            return []
+        tasks = instance.tasks
+    return [task for task in tasks if task.error]
 
 
 def _enqueue_model_task_retry(
@@ -792,7 +806,11 @@ def _enqueue_model_task_retry(
             task_id=task.task_id,
             news_id=task.entity_id,
         )
-        return enqueue_news_extraction_retry(news, priority=priority)
+        return enqueue_news_extraction_retry(
+            news,
+            priority=priority,
+            model_instance_id=task.instance_id,
+        )
 
     if queue_id == "assist":
         if task.kind != "asset_mapping" or not task.entity_id:
@@ -806,10 +824,67 @@ def _enqueue_model_task_retry(
             raise HTTPException(409, "source event no longer exists")
         if cancel_model_task("assist", task.task_id):
             _revoke_model_tasks([task.task_id])
-        task_id = enqueue_asset_mapping(db, event, force=True, priority=priority)
+        task_id = enqueue_asset_mapping(
+            db,
+            event,
+            force=True,
+            priority=priority,
+            model_instance_id=task.instance_id,
+        )
         if task_id is None:
             raise HTTPException(409, "asset mapping retry was not queued")
         return task_id
+
+    if queue_id == "code":
+        candidate_id: UUID | None = None
+        if task.entity_id:
+            try:
+                candidate_id = UUID(task.entity_id)
+            except ValueError as exc:
+                raise HTTPException(422, "invalid evolution candidate entity_id") from exc
+            if not any(item.id == candidate_id for item in list_evolutions(db)):
+                raise HTTPException(409, "evolution candidate no longer exists")
+        if cancel_model_task("code", task.task_id):
+            _revoke_model_tasks([task.task_id])
+        task_id = str(uuid4())
+        instance = select_model_instance(
+            "code",
+            task_id=task_id,
+            preferred=task.instance_id,
+            settings=settings,
+            probe_health=True,
+        )
+        record_model_task(
+            "code",
+            task_id=task_id,
+            kind="code_evolution",
+            entity_id=str(candidate_id) if candidate_id else None,
+            title=task.title,
+            subtitle=task.subtitle,
+            source="manual",
+            instance_id=instance.id,
+        )
+        code_task = (
+            execute_evolution_task if candidate_id else evolve_from_outcomes_task
+        )
+        try:
+            published = code_task.apply_async(
+                args=[str(candidate_id)] if candidate_id else [],
+                kwargs={"model_instance_id": instance.id},
+                queue=broker_queue_name("code", instance.id),
+                task_id=task_id,
+                priority=priority,
+            )
+        except Exception as exc:
+            update_model_task(
+                "code",
+                task_id,
+                status="failed",
+                source="manual",
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            raise
+        return str(published.id)
 
     if task.kind == "asset_research":
         try:
@@ -845,6 +920,7 @@ def _enqueue_model_task_retry(
             retry_of_run_id=original.id,
             retry_attempt=retry_attempt,
             priority=priority,
+            model_instance_id=task.instance_id,
         )
         return task_id
 
@@ -866,6 +942,7 @@ def _enqueue_model_task_retry(
             event,
             run,
             priority=priority,
+            model_instance_id=task.instance_id,
         )
         return task_id
 
@@ -887,6 +964,10 @@ def retry_model_queue_task(
             if item.task_id == request.task_id
             and item.kind == request.kind
             and item.entity_id == request.entity_id
+            and (
+                request.instance_id is None
+                or item.instance_id == request.instance_id
+            )
         ),
         None,
     )
@@ -937,6 +1018,111 @@ def retry_model_queue_tasks(queue_id: str, db: Session = Depends(get_db)):
         "skipped": skipped,
         "task_ids": retried_task_ids,
         "priority": "normal",
+    }
+
+
+@app.post(
+    "/api/v1/model-queues/{queue_id}/instances/{instance_id}/retry",
+    status_code=202,
+)
+def retry_model_instance_tasks(
+    queue_id: str,
+    instance_id: str,
+    db: Session = Depends(get_db),
+):
+    if queue_id not in RETRYABLE_MODEL_QUEUES:
+        raise HTTPException(422, "this model queue does not support bulk retry")
+    tasks = _retryable_model_queue_tasks(queue_id, instance_id)
+    if not tasks:
+        overview = _build_model_queue_snapshot()
+        queue = next((item for item in overview.queues if item.id == queue_id), None)
+        if queue is None or not any(item.id == instance_id for item in queue.instances):
+            raise HTTPException(404, "model instance queue not found")
+    retried_task_ids: list[str] = []
+    skipped = 0
+    for task in tasks:
+        try:
+            retried_task_ids.append(
+                _enqueue_model_task_retry(
+                    db,
+                    queue_id=queue_id,
+                    task=task,
+                    priority=BULK_RETRY_PRIORITY,
+                )
+            )
+        except HTTPException:
+            db.rollback()
+            skipped += 1
+    _mark_model_queue_snapshot_stale()
+    return {
+        "queue_id": queue_id,
+        "instance_id": instance_id,
+        "requested": len(tasks),
+        "retried": len(retried_task_ids),
+        "skipped": skipped,
+        "task_ids": retried_task_ids,
+        "priority": "normal",
+    }
+
+
+@app.post(
+    "/api/v1/model-queues/{queue_id}/instances/{instance_id}/clear",
+    status_code=202,
+)
+def clear_model_instance_queue(
+    queue_id: str,
+    instance_id: str,
+    db: Session = Depends(get_db),
+):
+    lane_by_queue = {
+        "extract": "extract",
+        "research": "research",
+        "assist": "assist",
+        "code": "code",
+    }
+    lane = lane_by_queue.get(queue_id)
+    if lane is None:
+        raise HTTPException(422, "unknown model queue")
+    overview = _build_model_queue_snapshot()
+    queue = next((item for item in overview.queues if item.id == queue_id), None)
+    if queue is None or not any(item.id == instance_id for item in queue.instances):
+        raise HTTPException(404, "model instance queue not found")
+    if queue_id == "research":
+        result = cancel_research_tasks(
+            db,
+            include_failed=True,
+            instance_id=instance_id,
+        )
+        cancelled = result.cancelled
+        task_ids = result.celery_task_ids
+    elif queue_id == "extract":
+        extracted = clear_news_extraction_queue(instance_id=instance_id)
+        tracked = cancel_model_tasks(
+            "extract",
+            include_failed=True,
+            instance_id=instance_id,
+        )
+        cancelled = int(extracted["cancelled"]) + tracked.cancelled
+        task_ids = list(
+            dict.fromkeys([*extracted["celery_task_ids"], *tracked.celery_task_ids])
+        )
+    else:
+        tracked = cancel_model_tasks(
+            "assist" if queue_id == "assist" else "code",
+            include_failed=True,
+            instance_id=instance_id,
+        )
+        cancelled = tracked.cancelled
+        task_ids = tracked.celery_task_ids
+    purged = _purge_model_queue(broker_queue_name(lane, instance_id))
+    revoked = _revoke_model_tasks(task_ids)
+    _mark_model_queue_snapshot_stale()
+    return {
+        "queue_id": queue_id,
+        "instance_id": instance_id,
+        "cancelled": cancelled,
+        "purged": purged,
+        "revoked": revoked,
     }
 
 
@@ -1340,6 +1526,9 @@ def propose_evolution(request: EvolutionRequest, db: Session = Depends(get_db)):
         if not settings.evolution_enabled:
             raise HTTPException(409, "EVOLUTION_ENABLED is false")
         task_id = str(uuid4())
+        instance = select_model_instance(
+            "code", task_id=task_id, settings=settings, probe_health=True
+        )
         record_model_task(
             "code",
             task_id=task_id,
@@ -1347,11 +1536,13 @@ def propose_evolution(request: EvolutionRequest, db: Session = Depends(get_db)):
             title=f"失败案例代码演进（{len(request.failures)} 条）",
             subtitle="等待生成改进方案",
             source="manual",
+            instance_id=instance.id,
         )
         try:
             task = evolve_failures.apply_async(
                 args=[request.failures],
-                queue="evolution",
+                kwargs={"model_instance_id": instance.id},
+                queue=broker_queue_name("code", instance.id),
                 task_id=task_id,
             )
         except Exception as exc:
@@ -1377,6 +1568,9 @@ def execute_evolution(candidate_id: UUID, background: bool = True, db: Session =
         raise HTTPException(404, "evolution candidate not found")
     if background:
         task_id = str(uuid4())
+        instance = select_model_instance(
+            "code", task_id=task_id, settings=settings, probe_health=True
+        )
         record_model_task(
             "code",
             task_id=task_id,
@@ -1385,11 +1579,13 @@ def execute_evolution(candidate_id: UUID, background: bool = True, db: Session =
             title=candidate.hypothesis,
             subtitle=candidate.target_metric,
             source="manual",
+            instance_id=instance.id,
         )
         try:
             task = execute_evolution_task.apply_async(
                 args=[str(candidate_id)],
-                queue="evolution",
+                kwargs={"model_instance_id": instance.id},
+                queue=broker_queue_name("code", instance.id),
                 task_id=task_id,
             )
         except Exception as exc:

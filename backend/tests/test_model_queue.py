@@ -148,6 +148,163 @@ def test_clear_model_tasks_includes_failed_without_revoking_terminal_task():
     assert model_task_is_cancelled("assist", "mapping-failed", redis_client=redis)
 
 
+def test_clear_model_tasks_can_target_one_instance_only():
+    redis = FakeRedis()
+    for task_id, instance_id in (("mapping-0", "assist-0"), ("mapping-1", "assist-1")):
+        record_model_task(
+            "assist",
+            task_id=task_id,
+            kind="asset_mapping",
+            title=task_id,
+            instance_id=instance_id,
+            redis_client=redis,
+        )
+
+    result = cancel_model_tasks(
+        "assist",
+        instance_id="assist-0",
+        redis_client=redis,
+    )
+
+    assert result.celery_task_ids == ["mapping-0"]
+    assert model_task_is_cancelled("assist", "mapping-0", redis_client=redis)
+    assert not model_task_is_cancelled("assist", "mapping-1", redis_client=redis)
+
+
+def test_overview_splits_tasks_and_inference_counts_by_instance(db):
+    now = datetime(2026, 8, 26, 8, 0, tzinfo=UTC)
+    redis = FakeRedis()
+    record_model_task(
+        "assist",
+        task_id="mapping-0",
+        kind="asset_mapping",
+        title="实例零任务",
+        instance_id="assist-0",
+        queued_at=now,
+        redis_client=redis,
+    )
+    record_model_task(
+        "assist",
+        task_id="mapping-1",
+        kind="asset_mapping",
+        title="实例一任务",
+        instance_id="assist-1",
+        queued_at=now,
+        redis_client=redis,
+    )
+    update_model_task(
+        "assist", "mapping-1", status="failed", redis_client=redis
+    )
+    settings = Settings(
+        _env_file=None,
+        ollama_assist_base_urls="http://a0.invalid,http://a1.invalid",
+        ollama_assist_max_concurrency=2,
+    )
+    inference = _inference(capacity=2, running=1)
+    inference["instances"] = [
+        {
+            "id": "assist-0",
+            "healthy": True,
+            "model_available": True,
+            "capacity": 1,
+            "available": 0,
+            "queued": 0,
+            "running": 1,
+            "observable": True,
+        },
+        {
+            "id": "assist-1",
+            "healthy": True,
+            "model_available": True,
+            "capacity": 1,
+            "available": 1,
+            "queued": 0,
+            "running": 0,
+            "observable": True,
+        },
+    ]
+    inference["instance_count"] = 2
+    overview = build_model_queue_overview(
+        db,
+        extraction_queue=_empty_extraction(now),
+        inference_statuses={
+            "extract": _inference(),
+            "research": _inference(),
+            "assist": inference,
+            "code": _inference(),
+        },
+        threads={"extract": 4, "research": 8, "assist": 8, "code": 4},
+        limit=500,
+        settings=settings,
+        redis_client=redis,
+        generated_at=now,
+    )
+
+    assist = overview.queues[2]
+    assert [item.id for item in assist.instances] == ["assist-0", "assist-1"]
+    assert assist.instances[0].counts.queued == 1
+    assert assist.instances[0].counts.running == 1
+    assert assist.instances[0].tasks[0].instance_id == "assist-0"
+    assert assist.instances[1].counts.failed == 1
+    assert assist.instances[1].tasks[0].instance_id == "assist-1"
+    for field in ("queued", "running", "retrying", "completed", "failed"):
+        assert getattr(assist.counts, field) == sum(
+            getattr(instance.counts, field) for instance in assist.instances
+        )
+
+
+def test_overview_persists_a_deterministic_instance_for_legacy_tasks(db):
+    now = datetime(2026, 8, 26, 8, 0, tzinfo=UTC)
+    redis = FakeRedis()
+    record_model_task(
+        "assist",
+        task_id="legacy-mapping",
+        kind="asset_mapping",
+        title="旧共享队列任务",
+        queued_at=now,
+        redis_client=redis,
+    )
+    inference = _inference(capacity=2)
+    inference["instances"] = [
+        {
+            "id": f"assist-{index}",
+            "healthy": True,
+            "model_available": True,
+            "capacity": 1,
+            "available": 1,
+            "queued": 0,
+            "running": 0,
+            "observable": True,
+        }
+        for index in range(2)
+    ]
+    overview = build_model_queue_overview(
+        db,
+        extraction_queue=_empty_extraction(now),
+        inference_statuses={
+            "extract": _inference(),
+            "research": _inference(),
+            "assist": inference,
+            "code": _inference(),
+        },
+        threads={"extract": 4, "research": 8, "assist": 8, "code": 4},
+        limit=500,
+        settings=Settings(_env_file=None),
+        redis_client=redis,
+        generated_at=now,
+    )
+
+    task = overview.queues[2].tasks[0]
+    assignment = json.loads(
+        redis.hget(
+            "market-loop:model-instance:assist:assignments",
+            "legacy-mapping",
+        )
+    )
+    assert task.instance_id in {"assist-0", "assist-1"}
+    assert assignment["instance_id"] == task.instance_id
+
+
 def test_cancel_one_extract_task_only_supersedes_the_selected_attempt():
     redis = FakeRedis()
     for task_id in ("extract-old", "extract-other"):

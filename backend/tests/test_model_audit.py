@@ -20,6 +20,7 @@ from backend.app.model_audit import (
     detect_language,
     persist_model_audit,
 )
+from backend.app.services.model_instances import model_instance_affinity
 from backend.app.storage import save_event, save_news
 
 
@@ -426,6 +427,88 @@ def test_same_7b_model_keeps_assist_and_research_lanes_isolated(monkeypatch):
             "num_predict": 8192,
             "num_thread": 8,
         }
+
+
+def test_bound_research_task_keeps_instance_affinity(monkeypatch):
+    settings = Settings(
+        _env_file=None,
+        ollama_research_base_urls="http://affinity-0.invalid,http://affinity-1.invalid",
+        ollama_research_max_concurrency=2,
+    )
+    gateway = LlmGateway(settings)
+    gateway.gpu._redis = None
+
+    class Client:
+        def __init__(self):
+            self.urls = []
+
+        def get(self, *_args, **_kwargs):
+            return FakeResponse({"models": [{"name": settings.ollama_research_model}]})
+
+        def post(self, url, **_kwargs):
+            self.urls.append(url)
+            return FakeResponse({"message": {"content": '{"answer":"ok"}'}})
+
+    gateway.client = Client()
+    monkeypatch.setattr("backend.app.llm.persist_model_audit", lambda **_kwargs: None)
+
+    with model_instance_affinity("research", "research-1", task_id="task-1"):
+        for _ in range(2):
+            assert gateway.generate_json(
+                model=settings.ollama_research_model,
+                lane="research",
+                system="system",
+                prompt="prompt",
+                schema=AuditOutput,
+            ) == {"answer": "ok"}
+
+    assert gateway.client.urls == [
+        "http://affinity-1.invalid/api/chat",
+        "http://affinity-1.invalid/api/chat",
+    ]
+
+
+def test_transport_failure_moves_bound_task_to_other_healthy_instance(monkeypatch):
+    settings = Settings(
+        _env_file=None,
+        ollama_research_base_urls="http://failover-0.invalid,http://failover-1.invalid",
+        ollama_research_max_concurrency=2,
+    )
+    gateway = LlmGateway(settings)
+    gateway.gpu._redis = None
+
+    class Client:
+        def __init__(self):
+            self.urls = []
+
+        def get(self, *_args, **_kwargs):
+            return FakeResponse({"models": [{"name": settings.ollama_research_model}]})
+
+        def post(self, url, **_kwargs):
+            self.urls.append(url)
+            if "failover-0" in url:
+                request = httpx.Request("POST", url)
+                raise httpx.ConnectError("instance offline", request=request)
+            return FakeResponse({"message": {"content": '{"answer":"ok"}'}})
+
+    gateway.client = Client()
+    monkeypatch.setattr("backend.app.llm.persist_model_audit", lambda **_kwargs: None)
+    monkeypatch.setattr("backend.app.llm.sleep", lambda _seconds: None)
+
+    with model_instance_affinity("research", "research-0", task_id="task-2") as affinity:
+        assert gateway.generate_json(
+            model=settings.ollama_research_model,
+            lane="research",
+            system="system",
+            prompt="prompt",
+            schema=AuditOutput,
+        ) == {"answer": "ok"}
+        assert affinity.instance_id == "research-1"
+
+    assert gateway.client.urls == [
+        "http://failover-0.invalid/api/chat",
+        "http://failover-1.invalid/api/chat",
+    ]
 
 
 def test_legacy_backfill_is_idempotent_and_labeled(db):

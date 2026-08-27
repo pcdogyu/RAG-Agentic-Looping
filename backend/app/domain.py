@@ -302,6 +302,7 @@ class ResearchRun(BaseModel):
     retry_of_run_id: UUID | None = None
     retry_attempt: int = Field(default=0, ge=0)
     celery_task_id: str | None = None
+    model_instance_id: str | None = None
     coalesced_into_run_id: UUID | None = None
     retryable_reason: str | None = None
     verification_round: int = 0
@@ -344,6 +345,7 @@ class EventResearchRun(BaseModel):
     verification_round: int = 0
     retry_count: int = Field(default=0, ge=0)
     celery_task_id: str | None = None
+    model_instance_id: str | None = None
     retryable_reason: str | None = None
     missing_requirements: list[str] = Field(default_factory=list)
     contradictions: list[str] = Field(default_factory=list)

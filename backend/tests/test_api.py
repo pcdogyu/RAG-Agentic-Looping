@@ -97,8 +97,19 @@ def test_health_lists_dedicated_assist_and_research_instances(monkeypatch):
 
     assert response.status_code == 200
     instances = {item["id"]: item for item in response.json()["ollama_instances"]}
-    assert {"assist-0", "research-0", "research-1"}.issubset(instances)
-    assert all(instances[item]["model_available"] for item in instances if item != "main")
+    assert {
+        "extract-0",
+        "assist-0",
+        "research-0",
+        "research-1",
+        "code-0",
+    }.issubset(instances)
+    assert all(
+        instances[item]["model_available"]
+        for item in ("assist-0", "research-0", "research-1")
+    )
+    assert not instances["extract-0"]["model_available"]
+    assert not instances["code-0"]["model_available"]
 
 
 def test_scan_pause_and_resume_endpoints(monkeypatch):

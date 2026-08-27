@@ -16,6 +16,15 @@ from pydantic import BaseModel, ValidationError
 from backend.app.config import Settings, get_settings
 from backend.app.domain import utc_now
 from backend.app.model_audit import persist_model_audit
+from backend.app.services.model_instances import (
+    ModelInstanceSpec,
+    configured_model_instances,
+    current_model_instance,
+    instance_health,
+    mark_instance_unhealthy,
+    reassign_current_model_instance,
+    select_model_instance,
+)
 from backend.app.services.prompt_budget import QwenPromptBudget
 
 
@@ -82,8 +91,9 @@ class GpuSemaphore:
         return self._lane(model, lane)[1]
 
     @staticmethod
-    def _waiting_key(lane: str) -> str:
-        return f"market-loop:llm:{lane}:waiting"
+    def _waiting_key(lane: str, instance_id: str | None = None) -> str:
+        suffix = instance_id or "shared"
+        return f"market-loop:llm:{lane}:{suffix}:waiting"
 
     def queue_status(
         self,
@@ -91,6 +101,7 @@ class GpuSemaphore:
         available_slots: set[int] | None = None,
         *,
         lane: LlmLane | None = None,
+        instance_id: str | None = None,
     ) -> dict[str, int | str | bool]:
         """Return the cross-process waiting/running state for one model lane."""
         lane, configured_capacity = self._lane(model, lane)
@@ -112,7 +123,7 @@ class GpuSemaphore:
                 "observable": False,
             }
         try:
-            waiting_key = self._waiting_key(lane)
+            waiting_key = self._waiting_key(lane, instance_id)
             self._redis.zremrangebyscore(waiting_key, "-inf", time())
             queued = int(self._redis.zcard(waiting_key))
             running = sum(
@@ -156,6 +167,7 @@ class GpuSemaphore:
         available_slots: set[int] | None = None,
         *,
         lane: LlmLane | None = None,
+        instance_id: str | None = None,
     ) -> Iterator[int]:
         lane, capacity = self._lane(model, lane)
         slots = tuple(
@@ -169,7 +181,7 @@ class GpuSemaphore:
             deadline = monotonic() + timeout
             lock = None
             waiter_id = uuid4().hex
-            waiting_key = self._waiting_key(lane)
+            waiting_key = self._waiting_key(lane, instance_id)
             try:
                 self._redis.zadd(waiting_key, {waiter_id: time() + timeout + 30})
                 while lock is None:
@@ -236,49 +248,54 @@ class LlmGateway:
         self.client = httpx.Client(timeout=self.settings.ollama_timeout_seconds)
         self.gpu = GpuSemaphore(self.settings)
         self.prompt_budget = QwenPromptBudget(self.settings)
-        self._health_guard = threading.Lock()
-        self._endpoint_health: dict[str, tuple[float, bool, bool]] = {}
+        self._endpoint_cursor: dict[LlmLane, int] = {}
 
     def _model_urls(self, lane: LlmLane) -> list[str]:
+        if lane == "extract":
+            return self.settings.ollama_extract_urls
         if lane == "assist":
-            return [self.settings.ollama_assist_url]
+            return self.settings.ollama_assist_urls
         if lane == "research":
             return self.settings.ollama_research_urls
-        return [self.settings.ollama_base_url.rstrip("/")]
+        return self.settings.ollama_code_urls
+
+    @staticmethod
+    def _instance_slots(instances: list[ModelInstanceSpec]) -> dict[str, set[int]]:
+        result: dict[str, set[int]] = {}
+        offset = 0
+        for instance in instances:
+            result[instance.id] = set(range(offset, offset + instance.capacity))
+            offset += instance.capacity
+        return result
 
     def _endpoint_status(self, lane: LlmLane, model: str) -> list[dict[str, Any]]:
-        if lane not in {"assist", "research"}:
-            return []
-        if lane == "assist" and not self.settings.ollama_assist_base_url:
-            return []
-        if lane == "research" and not self.settings.ollama_research_base_urls:
-            return []
-        capacity = self.gpu.capacity_for(model, lane)
-        urls = self._model_urls(lane)[:capacity]
-        now = monotonic()
+        instances = configured_model_instances(lane, self.settings)
         result: list[dict[str, Any]] = []
-        for index, url in enumerate(urls):
-            cached = self._endpoint_health.get(url)
-            if cached is None or now - cached[0] >= 10:
-                healthy = False
-                model_available = False
-                try:
-                    response = self.client.get(f"{url}/api/tags", timeout=2)
-                    response.raise_for_status()
-                    names = {str(item.get("name")) for item in response.json().get("models", [])}
-                    healthy = True
-                    model_available = model in names
-                except (httpx.HTTPError, ValueError, KeyError):
-                    pass
-                with self._health_guard:
-                    self._endpoint_health[url] = (now, healthy, model_available)
-            else:
-                _, healthy, model_available = cached
+        slots = self._instance_slots(instances)
+        for instance in instances:
+            healthy, model_available = instance_health(
+                instance, model, client=self.client
+            )
+            inference = self.gpu.queue_status(
+                model,
+                slots[instance.id],
+                lane=lane,
+                instance_id=instance.id,
+            )
             result.append(
                 {
-                    "id": "assist-0" if lane == "assist" else f"research-{index}",
+                    "id": instance.id,
                     "healthy": healthy,
                     "model_available": model_available,
+                    "capacity": instance.capacity,
+                    "available": (
+                        inference["available"]
+                        if healthy and model_available
+                        else 0
+                    ),
+                    "queued": inference["queued"],
+                    "running": inference["running"],
+                    "observable": inference["observable"],
                 }
             )
         return result
@@ -287,26 +304,20 @@ class LlmGateway:
         resolved_lane = self._resolve_lane(model, lane)
         instances = self._endpoint_status(resolved_lane, model)
         configured_capacity = self.gpu.capacity_for(model, resolved_lane)
-        instance_count = len(instances) or 1
+        instance_count = len(instances)
         per_instance_concurrency = (
             (configured_capacity + instance_count - 1) // instance_count
             if configured_capacity > 0
             else 0
         )
-        available_slots = (
-            {
-                index
-                for index, instance in enumerate(instances)
-                if instance["healthy"] and instance["model_available"]
-            }
-            if instances
-            else None
-        )
-        status = (
-            self.gpu.queue_status(model, available_slots, lane=resolved_lane)
-            if available_slots is not None
-            else self.gpu.queue_status(model, lane=resolved_lane)
-        )
+        status = {
+            "lane": resolved_lane,
+            "capacity": sum(int(item["capacity"]) for item in instances),
+            "queued": sum(int(item["queued"]) for item in instances),
+            "running": sum(int(item["running"]) for item in instances),
+            "available": sum(int(item["available"]) for item in instances),
+            "observable": all(bool(item["observable"]) for item in instances),
+        }
         return {
             **status,
             "instances": instances,
@@ -414,34 +425,53 @@ class LlmGateway:
                 num_threads = self._num_threads_for(resolved_lane)
                 if num_threads:
                     options["num_thread"] = num_threads
-                model_urls = self._model_urls(resolved_lane)
                 instances = self._endpoint_status(resolved_lane, model)
-                available_slots = (
-                    {
-                        index
-                        for index, instance in enumerate(instances)
-                        if instance["healthy"] and instance["model_available"]
-                    }
-                    if instances
-                    else None
-                )
+                specs = configured_model_instances(resolved_lane, self.settings)
+                specs_by_id = {item.id: item for item in specs}
+                slots_by_id = self._instance_slots(specs)
+                affinity = current_model_instance(resolved_lane)
+                preferred_id = affinity.instance_id if affinity else None
+                ready_ids = {
+                    str(instance["id"])
+                    for instance in instances
+                    if instance["healthy"] and instance["model_available"]
+                }
+                if preferred_id not in ready_ids:
+                    if not ready_ids:
+                        raise LlmError(
+                            f"no healthy {resolved_lane} inference endpoint"
+                        )
+                    if affinity is None:
+                        ordered_ids = sorted(ready_ids)
+                        cursor = self._endpoint_cursor.get(resolved_lane, 0)
+                        preferred_id = ordered_ids[cursor % len(ordered_ids)]
+                        self._endpoint_cursor[resolved_lane] = cursor + 1
+                    else:
+                        selected = select_model_instance(
+                            resolved_lane,
+                            task_id=affinity.task_id,
+                            preferred=None,
+                            settings=self.settings,
+                            excluded=set(specs_by_id) - ready_ids,
+                        )
+                        preferred_id = selected.id
+                        reassign_current_model_instance(resolved_lane, selected.id)
+                selected_id = preferred_id
+                if selected_id is None:
+                    raise LlmError(f"no healthy {resolved_lane} inference endpoint")
+                selected_spec = specs_by_id[selected_id]
+                available_slots = slots_by_id[selected_id]
                 request_timeout = self._timeout_for(resolved_lane, attempt)
                 with self.gpu.acquire(
                     model,
                     request_timeout + 30,
                     available_slots,
                     lane=resolved_lane,
-                ) as slot:
-                    slot_index = int(slot or 0)
-                    endpoint_id = (
-                        "assist-0"
-                        if resolved_lane == "assist"
-                        else f"research-{slot_index}"
-                        if resolved_lane == "research"
-                        else "main"
-                    )
+                    instance_id=selected_id,
+                ) as _slot:
+                    endpoint_id = selected_id
                     response = self.client.post(
-                        f"{model_urls[slot_index % len(model_urls)]}/api/chat",
+                        f"{selected_spec.url}/api/chat",
                         json={
                             "model": model,
                             "messages": messages,
@@ -536,8 +566,36 @@ class LlmGateway:
                     entity_id=str(entity_id) if entity_id is not None else None,
                     settings=self.settings,
                 )
-                should_retry = attempt == 1 and isinstance(
-                    exc, (LlmResponseError, ValidationError)
+                if isinstance(exc, httpx.HTTPError) and endpoint_id:
+                    failed_spec = next(
+                        (item for item in configured_model_instances(resolved_lane, self.settings) if item.id == endpoint_id),
+                        None,
+                    )
+                    if failed_spec is not None:
+                        mark_instance_unhealthy(failed_spec, model)
+                        replacement_ids = ready_ids - {endpoint_id}
+                        replacement = (
+                            select_model_instance(
+                                resolved_lane,
+                                task_id=(
+                                    current_model_instance(resolved_lane).task_id
+                                    if current_model_instance(resolved_lane)
+                                    else None
+                                ),
+                                settings=self.settings,
+                                excluded=set(specs_by_id) - replacement_ids,
+                            )
+                            if replacement_ids
+                            else None
+                        )
+                        if replacement is not None:
+                            reassign_current_model_instance(resolved_lane, replacement.id)
+                should_retry = attempt == 1 and (
+                    isinstance(exc, (LlmResponseError, ValidationError))
+                    or (
+                        isinstance(exc, httpx.HTTPError)
+                        and len(configured_model_instances(resolved_lane, self.settings)) > 1
+                    )
                 )
                 if not should_retry:
                     raise

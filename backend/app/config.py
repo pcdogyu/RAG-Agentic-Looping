@@ -1,7 +1,8 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Self
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -19,8 +20,11 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
 
     ollama_base_url: str = "http://localhost:11434"
+    ollama_extract_base_urls: str = ""
     ollama_assist_base_url: str = ""
+    ollama_assist_base_urls: str = ""
     ollama_research_base_urls: str = ""
+    ollama_code_base_urls: str = ""
     ollama_extract_model: str = "qwen2.5:3b"
     ollama_assist_model: str = "qwen2.5:7b"
     ollama_research_model: str = "qwen2.5:7b"
@@ -116,17 +120,52 @@ class Settings(BaseSettings):
         return bool(self.cloud_llm_base_url and self.cloud_llm_api_key and self.cloud_llm_model)
 
     @property
+    def ollama_extract_urls(self) -> list[str]:
+        return self._ollama_urls(self.ollama_extract_base_urls, self.ollama_base_url)
+
+    @property
+    def ollama_assist_urls(self) -> list[str]:
+        return self._ollama_urls(
+            self.ollama_assist_base_urls,
+            self.ollama_assist_base_url or self.ollama_base_url,
+        )
+
+    @property
     def ollama_research_urls(self) -> list[str]:
+        return self._ollama_urls(self.ollama_research_base_urls, self.ollama_base_url)
+
+    @property
+    def ollama_code_urls(self) -> list[str]:
+        return self._ollama_urls(self.ollama_code_base_urls, self.ollama_base_url)
+
+    @staticmethod
+    def _ollama_urls(configured: str, fallback: str) -> list[str]:
         values = [
             value.strip().rstrip("/")
-            for value in self.ollama_research_base_urls.split(",")
+            for value in configured.split(",")
             if value.strip()
         ]
-        return values or [self.ollama_base_url.rstrip("/")]
+        return values or [fallback.rstrip("/")]
 
     @property
     def ollama_assist_url(self) -> str:
-        return (self.ollama_assist_base_url or self.ollama_base_url).rstrip("/")
+        return self.ollama_assist_urls[0]
+
+    @model_validator(mode="after")
+    def validate_ollama_instance_capacity(self) -> Self:
+        lanes = (
+            ("extract", self.ollama_extract_urls, self.ollama_extract_max_concurrency),
+            ("assist", self.ollama_assist_urls, self.ollama_assist_max_concurrency),
+            ("research", self.ollama_research_urls, self.ollama_research_max_concurrency),
+            ("code", self.ollama_code_urls, self.ollama_code_max_concurrency),
+        )
+        for lane, urls, capacity in lanes:
+            if capacity < len(urls):
+                raise ValueError(
+                    f"OLLAMA_{lane.upper()}_MAX_CONCURRENCY must be at least "
+                    f"the configured instance count ({len(urls)})"
+                )
+        return self
 
     @property
     def fmp_enabled(self) -> bool:
