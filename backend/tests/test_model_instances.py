@@ -162,3 +162,50 @@ def test_dispatch_migrates_an_offline_preferred_instance(monkeypatch):
     )
 
     assert selected.id == "research-1"
+
+
+def test_dispatch_rebalances_an_overloaded_healthy_preferred_instance():
+    settings = Settings(
+        _env_file=None,
+        ollama_research_base_urls="http://r0.invalid,http://r1.invalid,http://r2.invalid",
+        ollama_research_max_concurrency=3,
+    )
+    redis = FakeRedis()
+    for index in range(3):
+        record_instance_assignment(
+            "research", f"busy-{index}", "research-0", redis_client=redis
+        )
+
+    selected = select_model_instance(
+        "research",
+        task_id="move-me",
+        preferred="research-0",
+        settings=settings,
+        redis_client=redis,
+        rebalance_preferred=True,
+    )
+
+    assert selected.id in {"research-1", "research-2"}
+
+
+def test_dispatch_keeps_a_balanced_preferred_instance_when_rebalancing():
+    settings = Settings(
+        _env_file=None,
+        ollama_research_base_urls="http://r0.invalid,http://r1.invalid",
+        ollama_research_max_concurrency=2,
+    )
+    redis = FakeRedis()
+    record_instance_assignment(
+        "research", "already-queued", "research-0", redis_client=redis
+    )
+
+    selected = select_model_instance(
+        "research",
+        task_id="keep-me",
+        preferred="research-0",
+        settings=settings,
+        redis_client=redis,
+        rebalance_preferred=True,
+    )
+
+    assert selected.id == "research-0"

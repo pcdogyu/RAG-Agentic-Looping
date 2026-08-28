@@ -145,6 +145,41 @@ def test_instance_task_refreshes_running_model_task_lease(monkeypatch):
     assert len(touches) >= 2
 
 
+@pytest.mark.parametrize(
+    ("priority", "retries", "expected"),
+    [(5, 0, True), (0, 0, False), (5, 1, False)],
+)
+def test_research_instance_task_only_rebalances_ordinary_first_attempts(
+    monkeypatch, priority, retries, expected
+):
+    selected = SimpleNamespace(id="research-0")
+    selection = {}
+
+    class FakeTask:
+        request = SimpleNamespace(
+            id="research-task",
+            retries=retries,
+            delivery_info={
+                "routing_key": "research.research-0",
+                "priority": priority,
+            },
+        )
+
+    def select(*_args, **kwargs):
+        selection.update(kwargs)
+        return selected
+
+    monkeypatch.setattr(worker, "select_model_instance", select)
+    monkeypatch.setattr(worker, "instance_health", lambda *_args, **_kwargs: (True, True))
+    monkeypatch.setattr(worker, "update_instance_assignment", lambda *_args, **_kwargs: None)
+    wrapped = worker.model_instance_task("research")(
+        lambda _self, **_kwargs: "completed"
+    )
+
+    assert wrapped(FakeTask(), model_instance_id="research-0") == "completed"
+    assert selection["rebalance_preferred"] is expected
+
+
 def test_periodic_evolution_dispatch_uses_an_instance_queue(monkeypatch):
     selected = SimpleNamespace(id="code-1")
     recorded = {}

@@ -204,13 +204,22 @@ def model_instance_task(lane: ModelLane):
         def wrapped(self, *args, model_instance_id: str | None = None, **kwargs):
             task_id = str(self.request.id or uuid4())
             preferred = model_instance_id or instance_assignment(lane, task_id)
-            routing_key = str((self.request.delivery_info or {}).get("routing_key") or "")
+            delivery_info = self.request.delivery_info or {}
+            routing_key = str(delivery_info.get("routing_key") or "")
+            delivery_priority = delivery_info.get("priority")
+            rebalance_preferred = (
+                lane == "research"
+                and bool(routing_key)
+                and getattr(self.request, "retries", 0) == 0
+                and delivery_priority != 0
+            )
             selected = select_model_instance(
                 lane,
                 task_id=task_id,
                 preferred=preferred,
                 settings=settings,
                 probe_health=bool(routing_key),
+                rebalance_preferred=rebalance_preferred,
             )
             target_queue = broker_queue_name(lane, selected.id)
             if routing_key and not all(instance_health(selected, lane_model(settings, lane))):
@@ -2494,6 +2503,9 @@ def research_event(
             RunStatus.CANCELLED,
         }:
             return run.model_dump(mode="json")
+        if model_instance_id and run.model_instance_id != model_instance_id:
+            run.model_instance_id = model_instance_id
+            save_event_research_run(db, run)
         with research_lease(
             client,
             run_id=str(run.id),
@@ -2564,6 +2576,13 @@ def research_asset(
             RunStatus.CANCELLED,
         }:
             return queued_run.model_dump(mode="json")
+        if (
+            queued_run
+            and model_instance_id
+            and queued_run.model_instance_id != model_instance_id
+        ):
+            queued_run.model_instance_id = model_instance_id
+            save_run(db, queued_run)
         registry.add_assets(list_assets(db))
         asset = get_asset(db, asset_id) or registry.get_asset(asset_id)
         if not asset:

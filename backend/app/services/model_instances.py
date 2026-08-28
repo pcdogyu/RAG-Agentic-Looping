@@ -260,6 +260,7 @@ def select_model_instance(
     redis_client: Redis | None = None,
     probe_health: bool = False,
     excluded: set[str] | None = None,
+    rebalance_preferred: bool = False,
 ) -> ModelInstanceSpec:
     active_settings = settings or get_settings()
     instances = [
@@ -276,16 +277,22 @@ def select_model_instance(
         if not probe_health or all(instance_health(item, model))
     ]
     candidates = healthy or instances
+    loads = assignment_loads(lane, redis_client=redis_client)
+    minimum = min(loads[item.id] for item in candidates)
     if preferred:
         selected = next((item for item in candidates if item.id == preferred), None)
-        if selected is not None:
+        preferred_is_balanced = (
+            selected is not None
+            and loads[selected.id] <= minimum + max(1, selected.capacity)
+        )
+        if selected is not None and (
+            not rebalance_preferred or preferred_is_balanced
+        ):
             if task_id:
                 record_instance_assignment(
                     lane, task_id, selected.id, redis_client=redis_client
                 )
             return selected
-    loads = assignment_loads(lane, redis_client=redis_client)
-    minimum = min(loads[item.id] for item in candidates)
     tied = [item for item in candidates if loads[item.id] == minimum]
     offset = 0
     try:
