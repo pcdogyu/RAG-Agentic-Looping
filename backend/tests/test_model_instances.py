@@ -60,7 +60,7 @@ def test_three_research_endpoints_get_independent_capacity_and_queues():
             "http://r0.invalid,http://r1.invalid,http://r2.invalid"
         ),
         ollama_research_max_concurrency=3,
-        research_pipeline_concurrency=6,
+        research_pipeline_concurrency=3,
     )
 
     instances = configured_model_instances("research", settings)
@@ -112,6 +112,7 @@ def test_dispatch_chooses_least_loaded_instance_then_round_robins_ties():
         _env_file=None,
         ollama_research_base_urls="http://r0.invalid,http://r1.invalid",
         ollama_research_max_concurrency=2,
+        research_pipeline_concurrency=2,
     )
     redis = FakeRedis()
     record_instance_assignment(
@@ -144,6 +145,7 @@ def test_dispatch_migrates_an_offline_preferred_instance(monkeypatch):
         _env_file=None,
         ollama_research_base_urls="http://r0.invalid,http://r1.invalid",
         ollama_research_max_concurrency=2,
+        research_pipeline_concurrency=2,
     )
     redis = FakeRedis()
     monkeypatch.setattr(
@@ -193,6 +195,7 @@ def test_dispatch_keeps_a_balanced_preferred_instance_when_rebalancing():
         _env_file=None,
         ollama_research_base_urls="http://r0.invalid,http://r1.invalid",
         ollama_research_max_concurrency=2,
+        research_pipeline_concurrency=2,
     )
     redis = FakeRedis()
     record_instance_assignment(

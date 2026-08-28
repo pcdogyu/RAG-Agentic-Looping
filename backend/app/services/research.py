@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Literal, TypedDict
 from uuid import UUID, uuid4
 
+from celery.exceptions import SoftTimeLimitExceeded
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field, model_validator
@@ -58,6 +59,7 @@ from backend.app.services.research_factors import (
     FactorSource,
     build_research_factor_evidence,
 )
+from backend.app.services.research_lifecycle import mark_asset_research_timed_out
 from backend.app.services.retrieval import RetrievalService
 from backend.app.services.source_lineage import (
     canonicalize_url,
@@ -257,6 +259,8 @@ class ResearchService:
                     saver.setup()
                     _checkpoint_setup_done = True
             return saver
+        except SoftTimeLimitExceeded:
+            raise
         except Exception:
             self._close_checkpointer()
             return InMemorySaver()
@@ -329,6 +333,16 @@ class ResearchService:
                 durability="sync",
             )
             return ResearchRun.model_validate(final_state["run"])
+        except SoftTimeLimitExceeded:
+            self.db.rollback()
+            failed = get_run(self.db, run.id) or ResearchRun.model_validate(state["run"])
+            mark_asset_research_timed_out(
+                self.db,
+                failed,
+                self.settings,
+                limit_kind="soft",
+            )
+            raise
         except Exception as exc:
             self.db.rollback()
             failed = get_run(self.db, run.id) or ResearchRun.model_validate(state["run"])
@@ -448,6 +462,8 @@ class ResearchService:
                     run.evidence = evidence
                     save_run(self.db, run)
                     retrieval.index(run.asset.asset_id, evidence)
+        except SoftTimeLimitExceeded:
+            raise
         except Exception as exc:
             # Retrieval failure must not discard already collected structured evidence.
             retrieval_error = type(exc).__name__
@@ -522,6 +538,8 @@ class ResearchService:
                     published = datetime.fromisoformat(str(date_value)).replace(
                         tzinfo=run.as_of.tzinfo
                     )
+                except SoftTimeLimitExceeded:
+                    raise
                 except Exception:
                     published = run.as_of
                 if published > run.as_of:
@@ -558,6 +576,8 @@ class ResearchService:
                     continue
                 try:
                     published = datetime.fromisoformat(str(date_value).replace("Z", "+00:00"))
+                except SoftTimeLimitExceeded:
+                    raise
                 except Exception:
                     published = run.as_of
                 published = as_utc(published)
@@ -885,6 +905,8 @@ class ResearchService:
                 entity_type="research_run",
                 entity_id=run.id,
             )
+        except SoftTimeLimitExceeded:
+            raise
         except Exception as exc:
             draft_error = type(exc).__name__
             run.retryable_reason = f"model_{type(exc).__name__}"
@@ -1359,6 +1381,8 @@ class ResearchService:
                     and direction_supported
                 )
                 run.retryable_reason = None
+            except SoftTimeLimitExceeded:
+                raise
             except Exception as exc:
                 semantic_status = "failed"
                 semantic_missing.append(
@@ -1491,6 +1515,8 @@ class ResearchService:
                 evidence.append(item)
                 seen_facts.add(fact)
                 structured_added += 1
+        except SoftTimeLimitExceeded:
+            raise
         except Exception as exc:
             structured_error = type(exc).__name__
 
@@ -1515,6 +1541,8 @@ class ResearchService:
                 enriched = enrich_news_lineage(item)
                 if self._is_targeted_candidate(enriched, run.asset, event):
                     candidate_by_url[canonicalize_url(enriched.url)] = enriched
+        except SoftTimeLimitExceeded:
+            raise
         except Exception as exc:
             provider_error = type(exc).__name__
 
@@ -1527,6 +1555,8 @@ class ResearchService:
                 )
                 web_results.extend(found)
                 web_errors.extend(errors)
+            except SoftTimeLimitExceeded:
+                raise
             except Exception as exc:
                 web_errors.append(
                     {"source": "registry", "error": f"{type(exc).__name__}: {exc}"[:500]}
@@ -1649,6 +1679,8 @@ class ResearchService:
                 asset_id=run.asset.asset_id,
                 as_of=run.as_of,
             )
+        except SoftTimeLimitExceeded:
+            raise
         except Exception as exc:
             retrieval_error = type(exc).__name__
 
@@ -1804,6 +1836,8 @@ class ResearchService:
                 )
             revised_output = DraftOutput.model_validate(merged)
             run.retryable_reason = None
+        except SoftTimeLimitExceeded:
+            raise
         except Exception as exc:
             revision_error = type(exc).__name__
             run.retryable_reason = f"model_{type(exc).__name__}"

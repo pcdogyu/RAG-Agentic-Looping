@@ -9,7 +9,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from celery import Celery, chord
-from celery.exceptions import Ignore, Retry
+from celery.exceptions import Ignore, Retry, SoftTimeLimitExceeded
 from celery.signals import task_failure, task_success
 from redis import Redis
 from sqlalchemy import func, select
@@ -67,6 +67,7 @@ from backend.app.services.research_admission import (
 )
 from backend.app.services.research_lifecycle import (
     compact_queued_research_runs,
+    mark_asset_research_timed_out,
     reconcile_stale_research_runs,
     research_lease,
 )
@@ -101,7 +102,9 @@ from backend.app.storage import (
 settings = get_settings()
 DEFAULT_MODEL_TASK_PRIORITY = 5
 ASSET_RESEARCH_PRIORITY = 3
-EVENT_RESEARCH_PRIORITY = 7
+# Kombu's Redis transport polls configured priority buckets in ascending order.
+# Smaller numeric values therefore run before larger values on this broker.
+EVENT_RESEARCH_PRIORITY = 1
 SCAN_GATE_KEY = "market-loop:scan:active"
 SCAN_LOCK_KEY = "market-loop:scan:lock"
 SCAN_PAUSE_KEY = "market-loop:scan:pause"
@@ -1853,7 +1856,10 @@ def enqueue_event_research_retry(
 ) -> tuple[str, EventResearchRun]:
     """Reset the event's unique durable report row and queue a fresh manual attempt."""
 
-    effective_priority = EVENT_RESEARCH_PRIORITY if priority is None else priority
+    # Event reports always outrank asset research on Kombu's Redis transport.
+    # Keep the argument for compatibility with existing retry callers, but do not
+    # let manual or bulk retry policies silently reintroduce event starvation.
+    effective_priority = EVENT_RESEARCH_PRIORITY
     run.status = RunStatus.QUEUED
     run.as_of = utc_now()
     run.verification_round = 0
@@ -2693,7 +2699,12 @@ def research_event(
                 raise
 
 
-@celery_app.task(bind=True, name="market_loop.research_asset")
+@celery_app.task(
+    bind=True,
+    name="market_loop.research_asset",
+    soft_time_limit=settings.research_asset_soft_time_limit_seconds,
+    time_limit=settings.research_asset_hard_time_limit_seconds,
+)
 @model_instance_task("research")
 def research_asset(
     self,
@@ -2726,6 +2737,10 @@ def research_asset(
             and queued_run.model_instance_id != model_instance_id
         ):
             queued_run.model_instance_id = model_instance_id
+        if queued_run:
+            if queued_run.started_at is None:
+                queued_run.started_at = utc_now()
+            queued_run.status = RunStatus.RUNNING
             save_run(db, queued_run)
         registry.add_assets(list_assets(db))
         asset = get_asset(db, asset_id) or registry.get_asset(asset_id)
@@ -2740,43 +2755,60 @@ def research_asset(
     # PostgresSaver.setup() may run concurrent index DDL on first use. Close the
     # read transaction above first so that DDL cannot wait on its own task.
     try:
-        client = _redis_client()
-        client.ping()
-    except Exception:
-        client = None
-    with research_lease(
-        client,
-        run_id=str(queued_run.id) if queued_run else str(run_id or self.request.id),
-        task_id=str(self.request.id),
-        settings=settings,
-    ):
-        with SessionLocal() as db:
-            run = ResearchService(registry, db).run(
-                asset,
-                event,
-                as_of=queued_run.as_of if queued_run else None,
-                historical_replay=queued_run.historical_replay if queued_run else False,
-                queued_run=queued_run,
-                events=trigger_events,
-            )
-            persisted = get_run(db, run.id)
-            if persisted and persisted.status is RunStatus.CANCELLED:
-                return persisted.model_dump(mode="json")
-            if run.recommendation:
-                notifier.recommendation(run.recommendation)
-                if settings.auto_paper_trade and run.recommendation.rating in {
-                    Rating.BULLISH,
-                    Rating.STRONGLY_BULLISH,
-                }:
-                    portfolio = PortfolioService(registry)
-                    price = portfolio.current_price(run.recommendation)
-                    if price > 0:
-                        order = portfolio.create_from_recommendation(db, run.recommendation, price)
-                        notifier.send(
-                            f"模拟仓位变化：{order.side.value} {order.asset.symbol} "
-                            f"{order.quantity:g} @ {order.price:g} {order.currency}"
-                        )
-        return run.model_dump(mode="json")
+        try:
+            client = _redis_client()
+            client.ping()
+        except SoftTimeLimitExceeded:
+            raise
+        except Exception:
+            client = None
+        with research_lease(
+            client,
+            run_id=str(queued_run.id) if queued_run else str(run_id or self.request.id),
+            task_id=str(self.request.id),
+            settings=settings,
+        ):
+            with SessionLocal() as db:
+                run = ResearchService(registry, db).run(
+                    asset,
+                    event,
+                    as_of=queued_run.as_of if queued_run else None,
+                    historical_replay=queued_run.historical_replay if queued_run else False,
+                    queued_run=queued_run,
+                    events=trigger_events,
+                )
+                persisted = get_run(db, run.id)
+                if persisted and persisted.status is RunStatus.CANCELLED:
+                    return persisted.model_dump(mode="json")
+                if run.recommendation:
+                    notifier.recommendation(run.recommendation)
+                    if settings.auto_paper_trade and run.recommendation.rating in {
+                        Rating.BULLISH,
+                        Rating.STRONGLY_BULLISH,
+                    }:
+                        portfolio = PortfolioService(registry)
+                        price = portfolio.current_price(run.recommendation)
+                        if price > 0:
+                            order = portfolio.create_from_recommendation(
+                                db, run.recommendation, price
+                            )
+                            notifier.send(
+                                f"模拟仓位变化：{order.side.value} {order.asset.symbol} "
+                                f"{order.quantity:g} @ {order.price:g} {order.currency}"
+                            )
+    except SoftTimeLimitExceeded:
+        if queued_run:
+            with SessionLocal() as db:
+                timed_out = get_run(db, queued_run.id)
+                if timed_out is not None:
+                    mark_asset_research_timed_out(
+                        db,
+                        timed_out,
+                        settings,
+                        limit_kind="soft",
+                    )
+        raise
+    return run.model_dump(mode="json")
 
 
 @celery_app.task(name="market_loop.refresh_crypto_universe")

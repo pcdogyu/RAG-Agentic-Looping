@@ -48,8 +48,8 @@ class Settings(BaseSettings):
     ollama_code_num_threads: int = Field(default=0, ge=0, le=256)
     ollama_extract_max_concurrency: int = Field(default=1, ge=1, le=16)
     ollama_assist_max_concurrency: int = Field(default=1, ge=1, le=16)
-    ollama_research_max_concurrency: int = Field(default=2, ge=1, le=16)
-    research_pipeline_concurrency: int = Field(default=4, ge=1, le=32)
+    ollama_research_max_concurrency: int = Field(default=3, ge=1, le=16)
+    research_pipeline_concurrency: int = Field(default=3, ge=1, le=32)
     ollama_code_max_concurrency: int = Field(default=1, ge=1, le=16)
     ollama_max_output_tokens: int = Field(default=1024, ge=64, le=8192)
     ollama_assist_max_output_tokens: int = Field(default=8192, ge=64, le=8192)
@@ -69,6 +69,8 @@ class Settings(BaseSettings):
     research_asset_cooldown_hours: int = Field(default=24, ge=0, le=720)
     research_heartbeat_seconds: int = Field(default=30, ge=10, le=120)
     research_lease_seconds: int = Field(default=120, ge=30, le=600)
+    research_asset_soft_time_limit_seconds: int = Field(default=2040, ge=60, le=86400)
+    research_asset_hard_time_limit_seconds: int = Field(default=2100, ge=60, le=86400)
     model_task_heartbeat_seconds: int = Field(default=30, ge=10, le=120)
     model_task_lease_seconds: int = Field(default=180, ge=60, le=900)
     model_audit_enabled: bool = True
@@ -177,6 +179,19 @@ class Settings(BaseSettings):
             raise ValueError(
                 "RESEARCH_PIPELINE_CONCURRENCY must be at least the configured "
                 f"research instance count ({len(self.ollama_research_urls)})"
+            )
+        if self.research_pipeline_concurrency > self.ollama_research_max_concurrency:
+            raise ValueError(
+                "RESEARCH_PIPELINE_CONCURRENCY must not exceed "
+                "OLLAMA_RESEARCH_MAX_CONCURRENCY"
+            )
+        if (
+            self.research_asset_soft_time_limit_seconds
+            >= self.research_asset_hard_time_limit_seconds
+        ):
+            raise ValueError(
+                "RESEARCH_ASSET_SOFT_TIME_LIMIT_SECONDS must be less than "
+                "RESEARCH_ASSET_HARD_TIME_LIMIT_SECONDS"
             )
         if self.model_task_lease_seconds < self.model_task_heartbeat_seconds * 2:
             raise ValueError(

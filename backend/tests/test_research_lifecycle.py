@@ -8,6 +8,7 @@ from backend.app.domain import EventResearchRun, ResearchRun, RunStatus, utc_now
 from backend.app.providers.registry import SEED_ASSETS
 from backend.app.services.research_lifecycle import (
     compact_queued_research_runs,
+    mark_asset_research_timed_out,
     reconcile_stale_research_runs,
 )
 from backend.app.storage import (
@@ -36,6 +37,16 @@ class MemoryRedis(EmptyRedis):
 
     def delete(self, key):
         return int(self.values.pop(key, None) is not None)
+
+    def scan_iter(self, pattern):
+        prefix = str(pattern).rstrip("*")
+        return [key for key in self.values if str(key).startswith(prefix)]
+
+
+def test_research_task_priority_and_time_limits_match_redis_runtime() -> None:
+    assert worker.EVENT_RESEARCH_PRIORITY < worker.ASSET_RESEARCH_PRIORITY
+    assert worker.research_asset.soft_time_limit == 2040
+    assert worker.research_asset.time_limit == 2100
 
 
 def test_compacts_only_queued_runs_inside_rolling_window(db):
@@ -89,6 +100,61 @@ def test_reconciles_stale_active_run_into_manual_retry_state(db):
     assert repaired == 1
     assert stored.status is RunStatus.FAILED
     assert stored.retryable_reason == "stale_worker_lease"
+
+
+def test_reconciles_hard_timed_out_asset_into_retryable_timeout(db):
+    started_at = utc_now() - timedelta(minutes=36)
+    now = utc_now() + timedelta(minutes=3)
+    run = ResearchRun(
+        asset=SEED_ASSETS[0],
+        status=RunStatus.RUNNING,
+        started_at=started_at,
+    )
+    save_run(db, run)
+    settings = Settings(_env_file=None, research_lease_seconds=120)
+
+    repaired = reconcile_stale_research_runs(db, EmptyRedis(), settings, now=now)
+
+    stored = get_run(db, run.id)
+    assert repaired == 1
+    assert stored.status is RunStatus.FAILED
+    assert stored.retryable_reason == "research_time_limit"
+    assert stored.completed_at == now
+    assert stored.analysis_steps[-1].phase == "research_time_limit"
+    assert stored.analysis_steps[-1].metrics["limit_kind"] == "hard"
+
+
+def test_live_lease_prevents_hard_timeout_reconciliation(db):
+    now = utc_now()
+    run = ResearchRun(
+        asset=SEED_ASSETS[0],
+        status=RunStatus.RUNNING,
+        started_at=now - timedelta(minutes=36),
+        updated_at=now - timedelta(minutes=3),
+    )
+    save_run(db, run)
+    redis = MemoryRedis()
+    redis.set(f"market-loop:research:lease:{run.id}", "live")
+
+    repaired = reconcile_stale_research_runs(db, redis, Settings(_env_file=None), now=now)
+
+    assert repaired == 0
+    assert get_run(db, run.id).status is RunStatus.RUNNING
+
+
+def test_timeout_marker_does_not_overwrite_terminal_run(db):
+    run = ResearchRun(asset=SEED_ASSETS[0], status=RunStatus.CANCELLED)
+    save_run(db, run)
+
+    changed = mark_asset_research_timed_out(
+        db,
+        run,
+        Settings(_env_file=None),
+        limit_kind="soft",
+    )
+
+    assert changed is False
+    assert get_run(db, run.id).status is RunStatus.CANCELLED
 
 
 def test_recovers_queued_runs_when_redis_dispatch_markers_are_missing(

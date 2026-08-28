@@ -3,6 +3,9 @@ import re
 from datetime import UTC, datetime
 from hashlib import sha256
 
+import pytest
+from celery.exceptions import SoftTimeLimitExceeded
+
 from backend.app.config import Settings
 from backend.app.domain import (
     CandidateAsset,
@@ -29,7 +32,7 @@ from backend.app.services.research import (
     SemanticVerificationOutput,
     VerificationOutput,
 )
-from backend.app.storage import get_event, save_event, save_news
+from backend.app.storage import get_event, get_run, save_event, save_news
 
 
 class FakeRegistry:
@@ -187,6 +190,11 @@ class FailingDraftLlm(FakeResearchLlm):
         if kwargs.get("schema") is DraftOutput:
             raise TimeoutError("research model unavailable")
         return super().generate_json(**kwargs)
+
+
+class SoftTimeoutResearchLlm(FakeResearchLlm):
+    def generate_json(self, **kwargs):
+        raise SoftTimeLimitExceeded()
 
 
 class UnsupportedSemanticLlm(FakeResearchLlm):
@@ -976,3 +984,23 @@ def test_verification_gap_is_advisory_and_does_not_trigger_second_research_pass(
     persisted_event = get_event(db, event.id)
     assert persisted_event is not None
     assert len(persisted_event.news_item_ids) == 1
+
+
+def test_soft_time_limit_is_persisted_and_propagated(db, tmp_path):
+    queued = ResearchRun(asset=SEED_ASSETS[0])
+    service = ResearchService(
+        FakeRegistry(),
+        db,
+        Settings(_env_file=None, reports_dir=tmp_path),
+        SoftTimeoutResearchLlm(),
+    )
+
+    with pytest.raises(SoftTimeLimitExceeded):
+        service.run(SEED_ASSETS[0], queued_run=queued, historical_replay=True)
+
+    stored = get_run(db, queued.id)
+    assert stored.status is RunStatus.FAILED
+    assert stored.retryable_reason == "research_time_limit"
+    assert stored.completed_at is not None
+    assert stored.analysis_steps[-1].phase == "research_time_limit"
+    assert stored.analysis_steps[-1].metrics["limit_kind"] == "soft"

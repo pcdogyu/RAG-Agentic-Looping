@@ -133,6 +133,7 @@ def test_gateway_uses_model_specific_threads_and_capacity(
         ollama_extract_max_concurrency=1,
         ollama_assist_max_concurrency=1,
         ollama_research_max_concurrency=2,
+        research_pipeline_concurrency=2,
         ollama_code_max_concurrency=1,
     )
     gateway = LlmGateway(settings)
@@ -172,6 +173,7 @@ def test_gateway_queue_status_exposes_instance_topology():
         ollama_research_base_urls=("http://research-0.invalid,http://research-1.invalid"),
         ollama_assist_max_concurrency=1,
         ollama_research_max_concurrency=2,
+        research_pipeline_concurrency=2,
     )
     gateway = LlmGateway(settings)
     gateway.gpu._redis = None
@@ -197,6 +199,7 @@ def test_model_semaphore_enforces_independent_local_capacities():
     settings = Settings(
         ollama_extract_max_concurrency=1,
         ollama_research_max_concurrency=2,
+        research_pipeline_concurrency=2,
     )
     semaphore = GpuSemaphore(settings)
     semaphore._redis = None
@@ -250,7 +253,12 @@ def test_model_semaphore_renews_short_redis_lease(monkeypatch):
             assert thread_local is False
             return lock
 
-    semaphore = GpuSemaphore(Settings(ollama_research_max_concurrency=1))
+    semaphore = GpuSemaphore(
+        Settings(
+            ollama_research_max_concurrency=1,
+            research_pipeline_concurrency=1,
+        )
+    )
     semaphore._redis = FakeRedis()
     monkeypatch.setattr("backend.app.llm.INFERENCE_LOCK_HEARTBEAT_SECONDS", 0.01)
 
@@ -487,6 +495,7 @@ def test_bound_research_task_keeps_instance_affinity(monkeypatch):
         _env_file=None,
         ollama_research_base_urls="http://affinity-0.invalid,http://affinity-1.invalid",
         ollama_research_max_concurrency=2,
+        research_pipeline_concurrency=2,
     )
     gateway = LlmGateway(settings)
     gateway.gpu._redis = None
@@ -526,6 +535,7 @@ def test_transport_failure_moves_bound_task_to_other_healthy_instance(monkeypatc
         _env_file=None,
         ollama_research_base_urls="http://failover-0.invalid,http://failover-1.invalid",
         ollama_research_max_concurrency=2,
+        research_pipeline_concurrency=2,
     )
     gateway = LlmGateway(settings)
     gateway.gpu._redis = None

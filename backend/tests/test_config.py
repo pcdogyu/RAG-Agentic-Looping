@@ -35,7 +35,9 @@ def test_default_ollama_roles_keep_extract_and_research_models_resident(
     assert settings.ollama_7b_max_input_tokens == 5000
     assert settings.ollama_research_max_input_tokens == 3500
     assert settings.ollama_research_revision_max_input_tokens == 2500
-    assert settings.research_pipeline_concurrency == 4
+    assert settings.research_pipeline_concurrency == 3
+    assert settings.research_asset_soft_time_limit_seconds == 2040
+    assert settings.research_asset_hard_time_limit_seconds == 2100
     assert settings.research_prompt_evidence_chars == 6000
     assert settings.research_prompt_context_chars == 1000
     assert settings.ollama_assist_max_output_tokens == 8192
@@ -97,6 +99,25 @@ def test_research_pipeline_concurrency_must_cover_every_instance() -> None:
             ollama_research_base_urls="http://research-0,http://research-1",
             ollama_research_max_concurrency=2,
             research_pipeline_concurrency=1,
+        )
+
+
+def test_research_pipeline_concurrency_must_not_exceed_model_capacity() -> None:
+    with pytest.raises(ValueError, match="OLLAMA_RESEARCH_MAX_CONCURRENCY"):
+        Settings(
+            _env_file=None,
+            ollama_research_base_urls="http://research-0,http://research-1",
+            ollama_research_max_concurrency=2,
+            research_pipeline_concurrency=3,
+        )
+
+
+def test_asset_research_soft_limit_must_precede_hard_limit() -> None:
+    with pytest.raises(ValueError, match="RESEARCH_ASSET_SOFT_TIME_LIMIT_SECONDS"):
+        Settings(
+            _env_file=None,
+            research_asset_soft_time_limit_seconds=2100,
+            research_asset_hard_time_limit_seconds=2100,
         )
 
 

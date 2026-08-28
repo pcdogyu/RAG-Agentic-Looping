@@ -21,6 +21,7 @@ from backend.app.storage import (
 )
 
 LEASE_PREFIX = "market-loop:research:lease:"
+RESEARCH_TIME_LIMIT_REASON = "research_time_limit"
 
 
 def research_lease_key(run_id: str) -> str:
@@ -80,6 +81,48 @@ def research_lease(
                 pass
 
 
+def mark_asset_research_timed_out(
+    db: Session,
+    run: ResearchRun,
+    settings: Settings,
+    *,
+    limit_kind: str,
+    now: datetime | None = None,
+) -> bool:
+    """Persist one active asset run as a retryable end-to-end timeout."""
+
+    if run.status not in {RunStatus.RUNNING, RunStatus.VERIFYING}:
+        return False
+    current = as_utc(now or utc_now())
+    run.status = RunStatus.FAILED
+    run.completed_at = current
+    run.retryable_reason = RESEARCH_TIME_LIMIT_REASON
+    run.error = (
+        "标的研究超过全流程时限（软超时34分钟，硬超时35分钟），可重新执行。 / "
+        "Asset research exceeded the end-to-end time limit "
+        "(34-minute soft limit, 35-minute hard limit) and can be retried."
+    )
+    run.analysis_steps.append(
+        AnalysisStep(
+            phase="research_time_limit",
+            status="failed",
+            executor="research-lifecycle",
+            summary=(
+                "标的研究达到全流程时间限制，已安全终止并转入可重新执行状态。 / "
+                "Asset research reached its end-to-end time limit and was moved "
+                "to a retryable failed state."
+            ),
+            metrics={
+                "limit_kind": limit_kind,
+                "soft_limit_seconds": settings.research_asset_soft_time_limit_seconds,
+                "hard_limit_seconds": settings.research_asset_hard_time_limit_seconds,
+            },
+        )
+    )
+    save_run(db, run)
+    return True
+
+
 def reconcile_stale_research_runs(
     db: Session,
     redis_client: Redis | None,
@@ -97,6 +140,22 @@ def reconcile_stale_research_runs(
         if run.status not in {RunStatus.RUNNING, RunStatus.VERIFYING}:
             continue
         if str(run.id) in live_ids or as_utc(run.updated_at) > cutoff:
+            continue
+        hard_timed_out = bool(
+            run.started_at is not None
+            and current - as_utc(run.started_at)
+            >= timedelta(seconds=settings.research_asset_hard_time_limit_seconds)
+        )
+        if hard_timed_out:
+            repaired += int(
+                mark_asset_research_timed_out(
+                    db,
+                    run,
+                    settings,
+                    limit_kind="hard",
+                    now=current,
+                )
+            )
             continue
         run.status = RunStatus.FAILED
         run.completed_at = current
