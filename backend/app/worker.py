@@ -1740,6 +1740,7 @@ def enqueue_event_research_retry(
             summary=f"已为历史失败事件研报创建第 {run.retry_count} 次重新执行。",
             metrics={
                 "retry_count": run.retry_count,
+                "instance_id": instance.id,
                 "priority": effective_priority,
             },
         )

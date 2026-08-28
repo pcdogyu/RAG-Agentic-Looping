@@ -1,5 +1,6 @@
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
+from types import SimpleNamespace
 from uuid import uuid4
 
 from fastapi import HTTPException
@@ -233,6 +234,72 @@ def test_failed_asset_research_can_be_requeued_with_latest_data(db, monkeypatch)
     assert response.json()["retry_attempt"] == 1
     assert captured["historical_replay"] is False
     assert captured["as_of"] > original.as_of
+
+
+def test_failed_asset_research_can_target_a_healthy_instance(db, monkeypatch):
+    original = ResearchRun(
+        asset=SEED_ASSETS[1],
+        status=RunStatus.FAILED,
+        error="TimeoutError: model timed out",
+    )
+    save_run(db, original)
+    captured = {}
+
+    def fake_enqueue(_db, asset, event, **kwargs):
+        captured.update(kwargs)
+        retry = ResearchRun(
+            asset=asset,
+            retry_of_run_id=kwargs["retry_of_run_id"],
+            retry_attempt=kwargs["retry_attempt"],
+            model_instance_id=kwargs["model_instance_id"],
+        )
+        return "targeted-task", retry
+
+    monkeypatch.setattr(
+        "backend.app.main.configured_model_instances",
+        lambda *_args, **_kwargs: [SimpleNamespace(id="research-2")],
+    )
+    monkeypatch.setattr(
+        "backend.app.main.instance_health",
+        lambda *_args, **_kwargs: (True, True),
+    )
+    monkeypatch.setattr("backend.app.main.enqueue_research", fake_enqueue)
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"/api/v1/research-runs/{original.id}/retry?instance_id=research-2"
+        )
+
+    assert response.status_code == 202
+    assert response.json()["instance_id"] == "research-2"
+    assert captured["model_instance_id"] == "research-2"
+    assert captured["priority"] == 0
+
+
+def test_targeted_research_retry_rejects_unknown_or_unavailable_instance(
+    db, monkeypatch
+):
+    original = ResearchRun(asset=SEED_ASSETS[1], status=RunStatus.FAILED)
+    save_run(db, original)
+    monkeypatch.setattr(
+        "backend.app.main.configured_model_instances",
+        lambda *_args, **_kwargs: [SimpleNamespace(id="research-0")],
+    )
+    monkeypatch.setattr(
+        "backend.app.main.instance_health",
+        lambda *_args, **_kwargs: (False, True),
+    )
+
+    with TestClient(app) as client:
+        missing = client.post(
+            f"/api/v1/research-runs/{original.id}/retry?instance_id=research-9"
+        )
+        unavailable = client.post(
+            f"/api/v1/research-runs/{original.id}/retry?instance_id=research-0"
+        )
+
+    assert missing.status_code == 404
+    assert unavailable.status_code == 409
 
 
 def test_failed_asset_research_is_hidden_when_result_already_exists(db):
@@ -758,17 +825,33 @@ def test_failed_event_research_can_be_requeued(db, monkeypatch):
     )
     save_event_research_run(db, run)
 
-    def fake_retry(_db, queued_event, queued_run):
+    captured = {}
+
+    def fake_retry(_db, queued_event, queued_run, **kwargs):
         assert queued_event.id == event.id
+        captured.update(kwargs)
         queued_run.status = RunStatus.QUEUED
         queued_run.retry_count += 1
+        queued_run.model_instance_id = kwargs["model_instance_id"]
         return "event-retry-task", queued_run
 
+    monkeypatch.setattr(
+        "backend.app.main.configured_model_instances",
+        lambda *_args, **_kwargs: [SimpleNamespace(id="research-1")],
+    )
+    monkeypatch.setattr(
+        "backend.app.main.instance_health",
+        lambda *_args, **_kwargs: (True, True),
+    )
     monkeypatch.setattr("backend.app.main.enqueue_event_research_retry", fake_retry)
 
     with TestClient(app) as client:
-        response = client.post(f"/api/v1/event-research-runs/{run.id}/retry")
+        response = client.post(
+            f"/api/v1/event-research-runs/{run.id}/retry?instance_id=research-1"
+        )
 
     assert response.status_code == 202
     assert response.json()["run_id"] == str(run.id)
     assert response.json()["retry_count"] == 1
+    assert response.json()["instance_id"] == "research-1"
+    assert captured == {"priority": 0, "model_instance_id": "research-1"}

@@ -43,6 +43,7 @@ from backend.app.services.mcp_registry import seed_integrations
 from backend.app.services.model_instances import (
     broker_queue_name,
     configured_model_instances,
+    instance_health,
     lane_model,
     select_model_instance,
 )
@@ -1159,10 +1160,33 @@ def failed_research_runs(
     return [item.api_item() for item in reversed(candidates)][:limit]
 
 
+def _available_research_instance(instance_id: str | None) -> str | None:
+    if instance_id is None:
+        return None
+    instance = next(
+        (
+            item
+            for item in configured_model_instances("research", settings)
+            if item.id == instance_id
+        ),
+        None,
+    )
+    if instance is None:
+        raise HTTPException(404, "research instance not found")
+    healthy, model_available = instance_health(
+        instance,
+        lane_model(settings, "research"),
+    )
+    if not healthy or not model_available:
+        raise HTTPException(409, "research instance is unavailable")
+    return instance.id
+
+
 def _queue_asset_research_retry(
     run_id: UUID,
     db: Session,
     known_retries: tuple[ResearchRun, ...] | None = None,
+    model_instance_id: str | None = None,
 ) -> dict:
     original = get_run(db, run_id)
     if not original:
@@ -1191,17 +1215,24 @@ def _queue_asset_research_retry(
         historical_replay=False,
         retry_of_run_id=original.id,
         retry_attempt=retry_attempt,
+        priority=MANUAL_RETRY_PRIORITY if model_instance_id else None,
+        model_instance_id=model_instance_id,
     )
     return {
         "task_id": task_id,
         "run_id": str(run.id),
         "retry_of_run_id": str(original.id),
         "retry_attempt": retry_attempt,
+        "instance_id": run.model_instance_id,
         "status": "queued",
     }
 
 
-def _queue_event_research_retry(run_id: UUID, db: Session) -> dict:
+def _queue_event_research_retry(
+    run_id: UUID,
+    db: Session,
+    model_instance_id: str | None = None,
+) -> dict:
     run = get_event_research_run(db, run_id)
     if not run:
         raise HTTPException(404, "event research run not found")
@@ -1212,11 +1243,20 @@ def _queue_event_research_retry(run_id: UUID, db: Session) -> dict:
     event = get_event(db, run.event_id)
     if not event:
         raise HTTPException(409, "source event no longer exists")
-    task_id, run = enqueue_event_research_retry(db, event, run)
+    retry_options = (
+        {
+            "priority": MANUAL_RETRY_PRIORITY,
+            "model_instance_id": model_instance_id,
+        }
+        if model_instance_id
+        else {}
+    )
+    task_id, run = enqueue_event_research_retry(db, event, run, **retry_options)
     return {
         "task_id": task_id,
         "run_id": str(run.id),
         "retry_count": run.retry_count,
+        "instance_id": run.model_instance_id,
         "status": "queued",
     }
 
@@ -1285,15 +1325,33 @@ def retry_failed_research_runs(db: Session = Depends(get_db)):
 
 
 @app.post("/api/v1/research-runs/{run_id}/retry", status_code=202)
-def retry_research_run(run_id: UUID, db: Session = Depends(get_db)):
+def retry_research_run(
+    run_id: UUID,
+    instance_id: str | None = Query(default=None, min_length=1, max_length=64),
+    db: Session = Depends(get_db),
+):
+    selected_instance_id = _available_research_instance(instance_id)
     with _failed_research_retry_lock:
-        return _queue_asset_research_retry(run_id, db)
+        return _queue_asset_research_retry(
+            run_id,
+            db,
+            model_instance_id=selected_instance_id,
+        )
 
 
 @app.post("/api/v1/event-research-runs/{run_id}/retry", status_code=202)
-def retry_event_research_run(run_id: UUID, db: Session = Depends(get_db)):
+def retry_event_research_run(
+    run_id: UUID,
+    instance_id: str | None = Query(default=None, min_length=1, max_length=64),
+    db: Session = Depends(get_db),
+):
+    selected_instance_id = _available_research_instance(instance_id)
     with _failed_research_retry_lock:
-        return _queue_event_research_retry(run_id, db)
+        return _queue_event_research_retry(
+            run_id,
+            db,
+            model_instance_id=selected_instance_id,
+        )
 
 
 @app.get("/api/v1/event-research-runs", response_model=list[EventResearchRun])

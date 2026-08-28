@@ -1164,10 +1164,23 @@ export type FailedResearchBulkRetryResponse = {
 
 export const failedResearchBulkRetryPath = "/api/v1/failed-research-runs/retry";
 
-export function failedResearchRetryPath(item: Pick<FailedResearch, "kind" | "id">) {
-  return item.kind === "asset"
+export function failedResearchRetryPath(
+  item: Pick<FailedResearch, "kind" | "id">,
+  instanceId?: string,
+) {
+  const path = item.kind === "asset"
     ? `/api/v1/research-runs/${item.id}/retry`
     : `/api/v1/event-research-runs/${item.id}/retry`;
+  return instanceId ? `${path}?instance_id=${encodeURIComponent(instanceId)}` : path;
+}
+
+export function availableResearchInstances(queues: ModelQueueOverviewItem[]) {
+  const research = queues.find((queue) => queue.id === "research" && queue.enabled);
+  return research
+    ? modelQueueInstances(research).filter(
+      (instance) => instance.healthy && instance.model_available,
+    )
+    : [];
 }
 
 export async function retryAllFailedResearch(
@@ -1530,6 +1543,7 @@ export function ConclusionsPage({ apiBase }: { apiBase: string }) {
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [failedItems, setFailedItems] = useState<FailedResearch[]>([]);
+  const [researchInstances, setResearchInstances] = useState<ModelQueueInstanceItem[]>([]);
   const [failuresLoading, setFailuresLoading] = useState(true);
   const [retryingId, setRetryingId] = useState("");
   const [retryingAll, setRetryingAll] = useState(false);
@@ -1555,9 +1569,18 @@ export function ConclusionsPage({ apiBase }: { apiBase: string }) {
   async function loadFailures() {
     setFailuresLoading(true);
     try {
-      const response = await fetch(`${apiBase}/api/v1/failed-research-runs?limit=50`);
+      const queueRequest = fetch(`${apiBase}/api/v1/model-queue-overview?limit=1`)
+        .then(async (response) => response.ok
+          ? await response.json() as { queues: ModelQueueOverviewItem[] }
+          : null)
+        .catch(() => null);
+      const [response, overview] = await Promise.all([
+        fetch(`${apiBase}/api/v1/failed-research-runs?limit=50`),
+        queueRequest,
+      ]);
       if (!response.ok) throw new Error("失败研究记录请求失败");
       setFailedItems(await response.json() as FailedResearch[]);
+      setResearchInstances(overview ? availableResearchInstances(overview.queues) : []);
     } catch (reason) {
       setRetryMessage(reason instanceof Error ? reason.message : "失败研究记录请求失败");
       setRetryMessageError(true);
@@ -1567,13 +1590,13 @@ export function ConclusionsPage({ apiBase }: { apiBase: string }) {
   }
   useEffect(() => { load(); loadFailures(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  async function retry(item: FailedResearch) {
+  async function retry(item: FailedResearch, instanceId?: string) {
     setRetryingId(item.id); setRetryMessage(""); setRetryMessageError(false);
     try {
-      const response = await fetch(`${apiBase}${failedResearchRetryPath(item)}`, { method: "POST" });
+      const response = await fetch(`${apiBase}${failedResearchRetryPath(item, instanceId)}`, { method: "POST" });
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.detail || "重新执行失败");
-      setRetryMessage(`已重新排队：${item.asset?.symbol || item.event?.headline || item.id}`);
+      setRetryMessage(`${instanceId ? `已送入 ${instanceId}` : "已重新排队"}：${item.asset?.symbol || item.event?.headline || item.id}`);
       setRetryMessageError(false);
       await loadFailures();
     } catch (reason) {
@@ -1620,7 +1643,19 @@ export function ConclusionsPage({ apiBase }: { apiBase: string }) {
             const retryActive = ["queued", "running", "verifying"].includes(item.latest_retry?.status || "");
             return <article key={`${item.kind}-${item.id}`} className="failed-research-item">
               <div><span>{item.kind === "asset" ? "标的研究" : "事件研报"} · {new Date(item.updated_at).toLocaleString("zh-CN")}</span><strong>{item.asset ? `${item.asset.symbol} · ${item.asset.name}` : item.event?.headline || item.id}</strong><p>{item.error || "未记录错误详情"}</p>{item.latest_retry && <small>最近重跑：{item.latest_retry.status} · {new Date(item.latest_retry.updated_at).toLocaleString("zh-CN")}</small>}</div>
-              <button type="button" disabled={retryingAll || retryingId === item.id || retryActive} onClick={() => retry(item)}>{retryingId === item.id ? "正在排队…" : retryActive ? "重跑中" : "重新执行"}</button>
+              <div className="failed-research-controls">
+                <button type="button" disabled={retryingAll || retryingId === item.id || retryActive} onClick={() => retry(item)}>{retryingId === item.id ? "正在排队…" : retryActive ? "重跑中" : "重新执行"}</button>
+                <div className="failed-research-queues" aria-label={`可用研究队列 ${researchInstances.length} 个`}>
+                  <span>可用队列 {researchInstances.length}</span>
+                  {researchInstances.map((instance) => <button
+                    type="button"
+                    key={instance.id}
+                    title={`送入 ${instance.id}；当前排队 ${instance.counts.queued} 条`}
+                    disabled={retryingAll || retryingId === item.id || retryActive}
+                    onClick={() => retry(item, instance.id)}
+                  >{instance.id}</button>)}
+                </div>
+              </div>
             </article>;
           })}
           {!failedItems.length && !retryMessage && (failuresLoading

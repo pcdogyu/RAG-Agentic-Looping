@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import {
+  availableResearchInstances,
   ConclusionScore,
   ConclusionsPage,
   conclusionReferences,
@@ -143,6 +144,10 @@ describe("open source and search settings", () => {
     expect(failedResearchRetryPath({ kind: "event", id: "event-run" })).toBe(
       "/api/v1/event-research-runs/event-run/retry",
     );
+    expect(failedResearchRetryPath(
+      { kind: "asset", id: "asset-run" },
+      "research-2",
+    )).toBe("/api/v1/research-runs/asset-run/retry?instance_id=research-2");
   });
 
   it("posts one direct bulk retry request and formats the partial result", async () => {
@@ -178,6 +183,24 @@ describe("open source and search settings", () => {
       ],
     });
     expect(remaining.map((item) => item.id)).toEqual(["failed"]);
+  });
+
+  it("lists only healthy research instances as manual retry targets", () => {
+    const counts = { queued: 0, running: 0, retrying: 0, verifying: 0, waiting_for_model: 0, completed: 0, failed: 0 };
+    const metrics = { average_queue_duration_ms: null, average_execution_duration_ms: null, longest_wait_ms: null, estimated_clear_ms: null, queue_duration_sample_count: 0, execution_duration_sample_count: 0, execution_p50_ms: null, execution_p90_ms: null, throughput_per_hour: null };
+    const instances = availableResearchInstances([{
+      id: "research", model: "qwen2.5:7b", purpose: "标的研究", binding: "研究", enabled: true,
+      state: "running", threads: 30, capacity: 3, available: 3, instance_count: 3,
+      per_instance_concurrency: 1, observable: true, counts, metrics, total_tasks: 0,
+      truncated: false, tasks: [], error: null,
+      instances: [
+        { id: "research-0", healthy: true, model_available: true },
+        { id: "research-1", healthy: false, model_available: true },
+        { id: "research-2", healthy: true, model_available: true },
+      ],
+    }]);
+
+    expect(instances.map((item) => item.id)).toEqual(["research-0", "research-2"]);
   });
 
   it("shows MCP management controls without an administrator unlock", () => {
