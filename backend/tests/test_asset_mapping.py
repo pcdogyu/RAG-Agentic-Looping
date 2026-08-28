@@ -259,8 +259,16 @@ def test_curated_product_metadata_survives_an_older_persisted_listing() -> None:
         exchange_or_provider="NYSE",
         issuer_id="fmp:stale-provider-id",
     )
+    unlinked_babaf = AssetRef(
+        asset_id="equity:OTC:BABAF",
+        asset_class=AssetClass.EQUITY,
+        market=Market.US,
+        symbol="BABAF",
+        name="Alibaba Group Holding Limited",
+        exchange_or_provider="OTC",
+    )
 
-    registry = ProviderRegistry(settings, assets=[stale_baba])
+    registry = ProviderRegistry(settings, assets=[stale_baba, unlinked_babaf])
     refreshed = registry.get_asset(stale_baba.asset_id)
 
     assert refreshed is not None

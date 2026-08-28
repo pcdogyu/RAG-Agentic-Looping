@@ -510,7 +510,23 @@ class ProviderRegistry:
         resolved: dict[str, tuple[AssetRef, str]] = {}
         for owner, product in direct_matches:
             for asset in self._assets.values():
-                if self.same_issuer(owner, asset):
+                explicitly_linked = (
+                    owner.asset_id == asset.asset_id
+                    or (
+                        bool(owner.issuer_id)
+                        and bool(asset.issuer_id)
+                        and normalize_security_text(owner.issuer_id or "")
+                        == normalize_security_text(asset.issuer_id or "")
+                    )
+                    or owner.primary_listing_asset_id == asset.asset_id
+                    or asset.primary_listing_asset_id == owner.asset_id
+                    or (
+                        bool(owner.primary_listing_asset_id)
+                        and owner.primary_listing_asset_id
+                        == asset.primary_listing_asset_id
+                    )
+                )
+                if explicitly_linked:
                     resolved[asset.asset_id] = (asset, product)
         return list(resolved.values())
 
