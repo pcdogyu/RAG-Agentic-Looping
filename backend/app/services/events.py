@@ -9,8 +9,10 @@ from sqlalchemy.orm import Session
 
 from backend.app.config import Settings, get_settings
 from backend.app.domain import (
+    ActionStage,
     AnalysisStep,
     CandidateAsset,
+    EventAction,
     EventType,
     NewsEvent,
     NewsItem,
@@ -23,7 +25,6 @@ from backend.app.providers.registry import (
     explicit_symbol_present,
     query_mentions_issuer,
 )
-from backend.app.services.directional_scoring import directional_text_hint
 from backend.app.services.source_lineage import enrich_news_lineage, normalize_text, source_group
 from backend.app.storage import (
     event_news_item_ids,
@@ -40,7 +41,7 @@ class ExtractedEvent(BaseModel):
     entities: list[str] = Field(default_factory=list)
     direct_impact: str
     horizon_days: int = Field(default=90, ge=1, le=730)
-    impact_direction: int = Field(default=0, ge=-1, le=1)
+    actions: list[EventAction] = Field(default_factory=list, max_length=3)
     novelty: float = Field(default=0.5, ge=0, le=1)
     priority: float = Field(default=0.5, ge=0, le=1)
     search_queries: list[str] = Field(default_factory=list)
@@ -118,6 +119,11 @@ class EventService:
                     dict.fromkeys([*existing.news_item_ids, *event.news_item_ids])
                 )
                 existing.entities = list(dict.fromkeys([*existing.entities, *event.entities]))
+                known_actions = {action.id for action in existing.actions}
+                existing.actions.extend(
+                    action for action in event.actions if action.id not in known_actions
+                )
+                existing.actions = existing.actions[:3]
                 merged = {item.asset.asset_id: item for item in existing.candidates}
                 for candidate in event.candidates:
                     previous = merged.get(candidate.asset.asset_id)
@@ -223,7 +229,10 @@ class EventService:
     def extract(self, item: NewsItem) -> NewsEvent:
         prompt = (
             "从新闻元数据中提取一个可投资研究事件。不要补充新闻中没有的事实。"
-            "影响方向只表示初步假设，不是投资建议。"
+            "只提取事实框架，不得输出全局影响方向、分数或评级。"
+            "actions 逐项记录主体、动作、对象、范围、action_type 与 action_stage；"
+            "谴责/表态属于 statement，威胁属于 threat，政策宣布属于 announced，"
+            "正式生效属于 effective，已经发生的供应中断属于 realized。"
             "entities 必须保留新闻明确出现的公司、品牌和品牌产品名称，"
             "即使新闻没有给出证券代码。\n"
             f"标题：{item.title}\n摘要：{item.summary[:3000]}\n"
@@ -282,33 +291,6 @@ class EventService:
                 )
             )
 
-        extracted_direction = extracted.impact_direction
-        resolved_direction = directional_text_hint(
-            item.title,
-            item.summary,
-            extracted.direct_impact,
-            fallback=extracted_direction,
-            positive_terms=self.settings.direction_positive_lexicon,
-            neutral_terms=self.settings.direction_neutral_lexicon,
-            negative_terms=self.settings.direction_negative_lexicon,
-        )
-        extracted.impact_direction = resolved_direction or 0
-        if extracted.impact_direction != extracted_direction:
-            extraction_steps.append(
-                AnalysisStep(
-                    phase="direction_normalization",
-                    executor="deterministic-language-rules:v2",
-                    summary=(
-                        "明确利多/利空事实覆盖了模型的初步事件方向："
-                        f"{extracted_direction:+d} → {extracted.impact_direction:+d}。"
-                    ),
-                    metrics={
-                        "model_direction": extracted_direction,
-                        "resolved_direction": extracted.impact_direction,
-                    },
-                )
-            )
-
         queries = [item.title, *item.symbols, *extracted.entities, *extracted.search_queries]
         source_text = f"{item.title}\n{item.summary}"
         candidates: dict[str, CandidateAsset] = {}
@@ -346,7 +328,6 @@ class EventService:
                 candidates[asset.asset_id] = CandidateAsset(
                     asset=asset,
                     relationship=relationship,
-                    impact_direction=extracted.impact_direction,
                     relevance=relevance,
                     rationale=f"新闻中的 {query} 与 {asset.name} 匹配",
                     mapping_confidence=mapping_confidence,
@@ -358,7 +339,6 @@ class EventService:
             candidate = CandidateAsset(
                 asset=asset,
                 relationship="product_owner",
-                impact_direction=extracted.impact_direction,
                 relevance=0.85,
                 rationale=f"主数据确认新闻中的 {product} 归属于 {asset.name}",
                 mapping_confidence=0.99,
@@ -402,6 +382,7 @@ class EventService:
             headline=item.title,
             event_type=extracted.event_type,
             entities=extracted.entities,
+            actions=extracted.actions,
             direct_impact=extracted.direct_impact,
             horizon_days=extracted.horizon_days,
             source_quality=item.source_quality,
@@ -422,14 +403,95 @@ class EventService:
             if any(keyword in text for keyword in keywords):
                 event_type = candidate_type
                 break
-        direction = directional_text_hint(text, fallback=0) or 0
         entities = list(item.symbols)
         return ExtractedEvent(
             event_type=event_type,
             entities=entities,
             direct_impact=item.summary[:400] or item.title,
-            impact_direction=direction,
+            actions=EventService._fallback_actions(item),
             novelty=0.4,
             priority=0.45,
             search_queries=entities,
         )
+
+    @staticmethod
+    def _fallback_actions(item: NewsItem) -> list[EventAction]:
+        source = f"{item.title} {item.summary}"
+        text = source.casefold()
+        actions: list[EventAction] = []
+
+        if any(term in text for term in ("谴责", "抗议", "condemn", "等同于", "重申立场")):
+            actions.append(
+                EventAction(
+                    actor="新闻所述表态方",
+                    action_type="condemnation",
+                    action_stage=ActionStage.STATEMENT,
+                    action="公开谴责或表态",
+                    object="新闻所述对象",
+                    scope=source[:240],
+                    strength=0.15,
+                )
+            )
+        if any(term in text for term in ("制裁", "sanction")):
+            effective = any(
+                term in text for term in ("正式生效", "开始执行", "已实施", "takes effect")
+            )
+            actions.append(
+                EventAction(
+                    actor="制裁实施方",
+                    action_type="sanctions",
+                    action_stage=ActionStage.EFFECTIVE if effective else ActionStage.ANNOUNCED,
+                    action="实施或宣布制裁",
+                    object="受制裁方",
+                    scope=source[:240],
+                    strength=0.75 if effective else 0.55,
+                )
+            )
+        if any(term in text for term in ("威胁关闭", "警告关闭", "threaten to close")):
+            actions.append(
+                EventAction(
+                    actor="新闻所述威胁方",
+                    action_type="strait_closure",
+                    action_stage=ActionStage.THREAT,
+                    action="威胁关闭航道",
+                    object="霍尔木兹海峡",
+                    scope=source[:240],
+                    strength=0.35,
+                )
+            )
+        elif any(term in text for term in ("海峡关闭", "航道中断", "strait closed")):
+            actions.append(
+                EventAction(
+                    actor="新闻所述行为方",
+                    action_type="strait_closure",
+                    action_stage=ActionStage.REALIZED,
+                    action="航道已经关闭或中断",
+                    object="霍尔木兹海峡",
+                    scope=source[:240],
+                    strength=0.90,
+                )
+            )
+        if any(term in text for term in ("恢复谈判", "恢复通航", "重新开放", "resume talks")):
+            actions.append(
+                EventAction(
+                    actor="新闻所述参与方",
+                    action_type="deescalation",
+                    action_stage=ActionStage.REALIZED,
+                    action="恢复谈判或通航",
+                    object="相关谈判或航道",
+                    scope=source[:240],
+                    strength=0.85,
+                )
+            )
+        if not actions:
+            actions.append(
+                EventAction(
+                    actor="新闻所述主体",
+                    action_type="unknown",
+                    action_stage=ActionStage.UNKNOWN,
+                    action=item.title[:160],
+                    scope=item.summary[:240],
+                    strength=0.10,
+                )
+            )
+        return actions[:3]

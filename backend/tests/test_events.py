@@ -6,9 +6,11 @@ import pytest
 
 from backend.app.config import Settings
 from backend.app.domain import (
+    ActionStage,
     AssetClass,
     AssetRef,
     CandidateAsset,
+    EventAction,
     EventType,
     Market,
     NewsEvent,
@@ -27,7 +29,16 @@ class FakeLlm:
             event_type="earnings",
             entities=["Apple"],
             direct_impact="Services revenue grew",
-            impact_direction=1,
+            actions=[
+                EventAction(
+                    actor="Apple",
+                    action_type="earnings_release",
+                    action_stage=ActionStage.ANNOUNCED,
+                    action="发布业绩",
+                    object="季度服务收入",
+                    strength=0.6,
+                )
+            ],
             novelty=0.7,
             priority=0.8,
             search_queries=["AAPL"],
@@ -65,7 +76,8 @@ def test_extracts_event_and_maps_asset():
     event = EventService(registry, settings, FakeLlm()).extract(item)
     assert event.event_type.value == "earnings"
     assert event.candidates[0].asset.asset_id == "equity:XNAS:AAPL"
-    assert event.candidates[0].impact_direction == 1
+    assert "impact_direction" not in event.candidates[0].model_dump()
+    assert event.actions[0].action_stage is ActionStage.ANNOUNCED
     assert event.priority == pytest.approx(0.64)
     assert [step.phase for step in event.analysis_steps] == [
         "news_collection",
@@ -112,7 +124,7 @@ def test_product_owner_master_maps_alibaba_cloud_to_hk_and_us_listings(monkeypat
     )
 
 
-def test_explicit_adverse_news_corrects_an_incorrect_positive_model_direction():
+def test_extraction_does_not_assign_a_global_direction_from_adverse_words():
     settings = Settings(fmp_access_token="", fmp_mcp_url="")
     registry = ProviderRegistry(settings)
     item = NewsItem(
@@ -129,21 +141,17 @@ def test_explicit_adverse_news_corrects_an_incorrect_positive_model_direction():
 
     event = EventService(registry, settings, FakeLlm()).extract(item)
 
-    assert event.candidates[0].impact_direction == -1
-    normalization = next(
-        step for step in event.analysis_steps if step.phase == "direction_normalization"
-    )
-    assert normalization.metrics == {"model_direction": 1, "resolved_direction": -1}
+    assert "impact_direction" not in event.candidates[0].model_dump()
+    assert all(step.phase != "direction_normalization" for step in event.analysis_steps)
 
 
-def test_configured_positive_terms_override_a_neutral_model_direction():
+def test_configured_direction_terms_do_not_create_a_global_direction():
     class NeutralDirectionLlm:
         def generate_json(self, **kwargs):
             return ExtractedEvent(
                 event_type="product",
                 entities=["Apple"],
                 direct_impact="癌症疗法取得积极进展",
-                impact_direction=0,
                 novelty=0.7,
                 priority=0.8,
                 search_queries=["AAPL"],
@@ -172,11 +180,8 @@ def test_configured_positive_terms_override_a_neutral_model_direction():
 
     event = EventService(registry, settings, NeutralDirectionLlm()).extract(item)
 
-    assert event.candidates[0].impact_direction == 1
-    normalization = next(
-        step for step in event.analysis_steps if step.phase == "direction_normalization"
-    )
-    assert normalization.metrics == {"model_direction": 0, "resolved_direction": 1}
+    assert "impact_direction" not in event.candidates[0].model_dump()
+    assert all(step.phase != "direction_normalization" for step in event.analysis_steps)
 
 
 def test_ingest_clusters_duplicate_reprints(db):

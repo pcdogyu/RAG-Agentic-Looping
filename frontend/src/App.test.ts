@@ -301,7 +301,7 @@ describe("analysis mapping states", () => {
     const markup = renderToStaticMarkup(createElement(AnalysisTraceList, { logs: [log] }));
 
     expect(markup).toContain("影响分");
-    expect(markup).toContain("观望");
+    expect(markup).toContain("中性");
     expect(markup).toContain("新闻事实置信度");
     expect(markup).toContain("92%");
     expect(markup).toContain("评级置信度");
@@ -310,7 +310,7 @@ describe("analysis mapping states", () => {
     expect(markup).not.toContain("程序原始分");
   });
 
-  it("renders a completed neutral event report and its affected scope", () => {
+  it("renders a completed target-impact report with neutral untradeable details", () => {
     const log = {
       id: "event-log",
       event_id: "event-2",
@@ -334,12 +334,36 @@ describe("analysis mapping states", () => {
         catalysts: [],
         risks: [],
         unresolved_questions: [],
+        scoring_version: "target-transmission-v2",
+        fact_confidence: 0.9,
+        trade_status: "untradeable",
+        missing_information: ["sanction_scope"],
+        impacts: [{
+          target_type: "sector",
+          target_name: "智能制造",
+          asset: null,
+          direction: 0,
+          score: 0,
+          rating: "watch",
+          confidence: 0.4,
+          transmission_path: ["政策更新", "行业预期"],
+          rationale: "范围未确认",
+          missing_information: ["sanction_scope"],
+          trade_status: "untradeable",
+          execution_supported: false,
+          technical_failure: false,
+        }],
       },
     } satisfies AnalysisLog;
     const markup = renderToStaticMarkup(createElement(AnalysisTraceList, { logs: [log] }));
 
-    expect(markup).toContain("中性事件研报");
-    expect(markup).toContain("CN · 智能制造");
+    expect(markup).toContain("逐目标事件研报");
+    expect(markup).toContain("逐目标宏观传导");
+    expect(markup).toContain('class="target-impact-scroll"');
+    expect(markup).toContain("智能制造");
+    expect(markup).toContain("政策更新 → 行业预期");
+    expect(markup).toContain("暂不可交易");
+    expect(markup).toContain("sanction_scope");
     expect(markup).toContain("政策影响仍待观察");
   });
 });

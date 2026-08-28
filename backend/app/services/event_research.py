@@ -2,36 +2,38 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pydantic import Field
 from sqlalchemy.orm import Session
 
 from backend.app.config import Settings, get_settings
 from backend.app.domain import (
     AnalysisStep,
+    AssetClass,
+    AssetRef,
     EventReport,
     EventResearchRun,
     Evidence,
     NewsEvent,
     RunStatus,
     SourceQuality,
+    TradeStatus,
     utc_now,
 )
 from backend.app.llm import LlmGateway, gateway
+from backend.app.services.macro_impacts import (
+    TARGET_SCORING_VERSION,
+    EventImpactDraft,
+    finalize_impacts,
+    public_rule_catalog,
+    rule_based_event_draft,
+)
 from backend.app.services.mcp_registry import SearchRequest, search_enabled_sources_sync
 from backend.app.services.prompt_budget import compact_evidence
 from backend.app.services.source_lineage import independent_evidence_groups, source_group
-from backend.app.storage import get_news, save_event_research_run
+from backend.app.storage import get_news, list_assets, save_event_research_run
 
 
-class EventReportDraft(BaseModel):
-    summary: str
-    affected_markets: list[str] = Field(default_factory=list)
-    affected_sectors: list[str] = Field(default_factory=list)
-    scenarios: list[str] = Field(default_factory=list)
-    catalysts: list[str] = Field(default_factory=list)
-    risks: list[str] = Field(default_factory=list)
-    unresolved_questions: list[str] = Field(default_factory=list)
-    evidence_ids: list[str] = Field(default_factory=list)
+class EventReportDraft(EventImpactDraft):
     confidence: float = Field(default=0.3, ge=0, le=1)
 
 
@@ -85,7 +87,7 @@ class EventResearchService:
                     else self.settings.ollama_research_model
                 ),
                 summary=(
-                    f"已生成中性事件研报草稿，置信度 {draft.confidence:.0%}，"
+                    f"已生成逐目标事件研报草稿，包含 {len(draft.impacts)} 个目标，"
                     f"引用 {len(draft.evidence_ids)} 条证据。"
                     + (f" 模型不可用（{draft_error}），当前为保守结果。" if draft_error else "")
                 ),
@@ -105,7 +107,14 @@ class EventResearchService:
         run.contradictions = contradictions
         run.analysis_steps.append(self._verification_step(1, complete, missing, contradictions))
         source_gate = "one official source or two independent sources"
-        if not complete and source_gate in missing:
+        needs_macro_context = any(
+            action.action_type in {"sanctions", "strait_closure", "deescalation"}
+            for action in event.actions
+        )
+        if (
+            not run.historical_replay
+            and (source_gate in missing or needs_macro_context)
+        ):
             added, errors = self._supplement_web_evidence(event, run)
             run.analysis_steps.append(
                 AnalysisStep(
@@ -160,7 +169,7 @@ class EventResearchService:
                         else self.settings.ollama_research_model
                     ),
                     summary=(
-                        "已根据结构和引用校验结果修订中性事件研报。"
+                        "已根据结构和引用校验结果修订逐目标事件研报。"
                         + (
                             f" 模型不可用（{revision_error}），已保留保守草稿。"
                             if revision_error
@@ -176,6 +185,33 @@ class EventResearchService:
             run.analysis_steps.append(self._verification_step(2, complete, missing, contradictions))
 
         valid_ids = {str(item.id): item.id for item in run.evidence}
+        technical_failure = bool(draft_error) or any(
+            step.phase in {"asset_mapping", "asset_mapping_7b"}
+            and step.status in {"failed", "fallback"}
+            for step in event.analysis_steps
+        )
+        macro_factors, impacts, fact_confidence, missing_information = finalize_impacts(
+            draft,
+            event=event,
+            evidence=run.evidence,
+            assets=self._asset_map(event),
+            technical_failure=technical_failure,
+        )
+        if not complete:
+            impacts = [
+                item.model_copy(
+                    update={
+                        "missing_information": list(
+                            dict.fromkeys([*item.missing_information, "evidence_gate"])
+                        ),
+                        "trade_status": TradeStatus.UNTRADEABLE,
+                    }
+                )
+                for item in impacts
+            ]
+            missing_information = list(
+                dict.fromkeys([*missing_information, "evidence_gate"])
+            )
         run.report = EventReport(
             summary=draft.summary,
             affected_markets=draft.affected_markets,
@@ -187,8 +223,22 @@ class EventResearchService:
             evidence_ids=[valid_ids[item] for item in draft.evidence_ids if item in valid_ids],
             confidence=draft.confidence if complete else min(draft.confidence, 0.54),
             evidence_complete=complete,
+            scoring_version=TARGET_SCORING_VERSION,
+            fact_confidence=fact_confidence,
+            macro_factors=macro_factors,
+            impacts=impacts,
+            trade_status=(
+                TradeStatus.TRADEABLE
+                if any(item.trade_status is TradeStatus.TRADEABLE for item in impacts)
+                else TradeStatus.UNTRADEABLE
+            ),
+            missing_information=missing_information,
         )
-        run.status = RunStatus.COMPLETED if complete else RunStatus.INSUFFICIENT_EVIDENCE
+        run.status = (
+            RunStatus.COMPLETED
+            if complete and not technical_failure
+            else RunStatus.INSUFFICIENT_EVIDENCE
+        )
         run.analysis_steps.append(
             AnalysisStep(
                 phase="event_report_finalization",
@@ -196,12 +246,14 @@ class EventResearchService:
                 executor="event-evidence-gate",
                 model="event-evidence-gate:v1",
                 summary=(
-                    f"中性事件研报已定稿，置信度 {run.report.confidence:.0%}，"
-                    f"证据{'完整' if complete else '不足'}；不会生成资产评级或模拟交易。"
+                    f"逐目标事件研报已定稿，共 {len(impacts)} 个目标，"
+                    f"事件状态为 {run.report.trade_status.value}。"
                 ),
                 metrics={
                     "confidence": run.report.confidence,
                     "evidence_complete": complete,
+                    "target_count": len(impacts),
+                    "trade_status": run.report.trade_status.value,
                 },
             )
         )
@@ -209,17 +261,13 @@ class EventResearchService:
         self._write_report(event, run)
         return run
 
-    @staticmethod
-    def _fallback_draft(event: NewsEvent, run: EventResearchRun) -> EventReportDraft:
-        return EventReportDraft(
-            summary=f"已收集 {len(run.evidence)} 条与“{event.headline}”相关的证据，但本地研究模型暂时不可用。",
-            affected_markets=[],
-            affected_sectors=[],
-            scenarios=["等待模型恢复后重新生成中性事件研报"],
-            risks=["当前为保守回退结果，尚未完成模型综合分析"],
-            unresolved_questions=["重新执行模型研究并复核证据引用"],
-            evidence_ids=[str(item.id) for item in run.evidence],
-            confidence=min(0.45, len(run.evidence) * 0.1),
+    def _fallback_draft(self, event: NewsEvent, run: EventResearchRun) -> EventReportDraft:
+        draft = rule_based_event_draft(event, run.evidence, self._asset_map(event))
+        return EventReportDraft.model_validate(
+            {
+                **draft.model_dump(mode="json"),
+                "confidence": min(0.45, len(run.evidence) * 0.1),
+            }
         )
 
     def _supplement_web_evidence(
@@ -266,11 +314,30 @@ class EventResearchService:
                 break
         return added, errors
 
+    def _asset_map(self, event: NewsEvent) -> dict[str, AssetRef]:
+        direct_ids = {item.asset.asset_id for item in event.candidates[:3]}
+        assets = {
+            item.asset_id: item
+            for item in list_assets(self.db)
+            if item.asset_id in direct_ids
+            or item.asset_class in {AssetClass.COMMODITY, AssetClass.FX}
+        }
+        assets.update(
+            {item.asset.asset_id: item.asset for item in event.candidates[:3]}
+        )
+        return assets
+
     def _build_evidence(self, run: EventResearchRun, event: NewsEvent) -> list[Evidence]:
         evidence: list[Evidence] = []
         for news_id in event.news_item_ids:
             item = get_news(self.db, news_id)
             if not item:
+                continue
+            if run.historical_replay and (
+                item.published_at > run.as_of
+                or item.observed_at > run.as_of
+                or item.as_of > run.as_of
+            ):
                 continue
             evidence.append(
                 Evidence(
@@ -289,17 +356,35 @@ class EventResearchService:
         return evidence
 
     def _generate_draft(self, event: NewsEvent, run: EventResearchRun) -> EventReportDraft:
+        allowed_assets = [
+            {
+                "asset_id": asset.asset_id,
+                "symbol": asset.symbol,
+                "name": asset.name,
+                "asset_class": asset.asset_class.value,
+            }
+            for asset in self._asset_map(event).values()
+            if asset.asset_id in {item.asset.asset_id for item in event.candidates[:3]}
+            or asset.symbol in {"CLUSD", "BZUSD", "ZGUSD"}
+        ]
         prompt = (
-            f"事件：{event.model_dump_json(exclude={'analysis_steps', 'candidates'})}\n"
+            f"事实框架：{event.model_dump_json(exclude={'analysis_steps'})}\n"
             f"研究截止：{run.as_of.isoformat()}\n"
+            f"版本化宏观规则：{public_rule_catalog()}\n"
+            f"允许绑定的真实主数据工具：{allowed_assets}\n"
             f"证据：{compact_evidence(run.evidence, self.settings.research_prompt_evidence_chars, max_per_group=2)}\n"
-            "生成不绑定证券的中性事件研报。区分事实、情景和未知；不得给个股评级、方向分数或交易指令。"
-            "只能引用给定 evidence_ids；证据不足时降低 confidence 并列入 unresolved_questions。"
+            "生成最多 6 个互不重复的目标影响；每个方向必须对应 target_name，禁止全局方向、"
+            "全局 score 或全局 rating。直接证券候选最多 3 个并优先占用目标名额。"
+            "summary 只总结证据支持的事件事实，不得包含资产方向、分数、评级或交易结论。"
+            "只输出传导六因子与置信四因子，最终分数、评级和可交易状态由程序计算。"
+            "asset_id 只能从允许工具中选择；宏观目标没有真实工具时保持空。"
+            "只能引用给定 evidence_ids 和 actions.id。未知制裁范围、生效日、支付结算、"
+            "港口航运、实际供应或市场反应必须写入 missing_information。"
         )
         payload = self.llm.generate_json(
             model=self.settings.ollama_research_model,
             lane="research",
-            system="你是证据优先的宏观和行业事件研究员，不提供实盘指令。",
+            system="你是证据优先的目标传导研究员；先判断对谁，再判断可交易资产路径。",
             prompt=prompt,
             schema=EventReportDraft,
             operation="event_report_drafting",
@@ -325,7 +410,7 @@ class EventResearchService:
         payload = self.llm.generate_json(
             model=self.settings.ollama_research_model,
             lane="research",
-            system="你是中性事件研报修订器，只能使用给定证据。",
+            system="你是逐目标事件研报修订器，只能使用给定证据。",
             prompt=prompt,
             schema=EventReportDraft,
             operation="event_report_revision",
@@ -348,6 +433,14 @@ class EventResearchService:
             missing.append("scenarios")
         if not draft.risks:
             missing.append("risks")
+        if not draft.impacts:
+            missing.append("target impacts")
+        target_keys = {
+            (item.target_type.value, item.asset_id or item.target_name.strip().casefold())
+            for item in draft.impacts
+        }
+        if len(target_keys) != len(draft.impacts):
+            missing.append("unique target impacts")
         available_ids = {str(item.id) for item in run.evidence}
         cited_ids = set(draft.evidence_ids)
         if not cited_ids:
@@ -406,6 +499,22 @@ class EventResearchService:
             for item in run.evidence
             if item.id in report.evidence_ids
         )
+        impact_rows = "\n".join(
+            "| "
+            + " | ".join(
+                [
+                    item.target_name,
+                    item.rating.value,
+                    f"{item.score:+.2f}",
+                    f"{item.confidence:.0%}",
+                    " → ".join(item.transmission_path) or "—",
+                    item.trade_status.value,
+                    "、".join(item.missing_information) or "—",
+                ]
+            )
+            + " |"
+            for item in report.impacts
+        )
         content = (
             f"# {event.headline}\n\n"
             f"- 类型：{event.event_type.value}\n"
@@ -413,6 +522,10 @@ class EventResearchService:
             f"- 证据完整：{'是' if report.evidence_complete else '否'}\n"
             f"- 截止时间：{run.as_of.isoformat()}\n\n"
             f"## 事件摘要\n\n{report.summary}\n\n"
+            "## 逐目标影响\n\n"
+            "| 目标 | 评级 | 分数 | 方向置信度 | 传导路径 | 可交易状态 | 缺失信息 |\n"
+            "|---|---:|---:|---:|---|---|---|\n"
+            f"{impact_rows}\n\n"
             "## 受影响市场与行业\n\n"
             + "\n".join(
                 f"- {item}" for item in [*report.affected_markets, *report.affected_sectors]
@@ -425,7 +538,7 @@ class EventResearchService:
             + "\n".join(f"- {item}" for item in report.risks)
             + "\n\n## 待验证问题\n\n"
             + "\n".join(f"- {item}" for item in report.unresolved_questions)
-            + f"\n\n## 证据\n\n{citations}\n\n> 中性事件研究，不构成投资建议。\n"
+            + f"\n\n## 证据\n\n{citations}\n\n> 目标传导研究，不构成投资建议。\n"
         )
         path.write_text(content, encoding="utf-8")
         return path

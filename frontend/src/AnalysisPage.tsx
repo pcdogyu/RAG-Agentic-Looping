@@ -10,6 +10,22 @@ type AnalysisStep = {
   occurred_at: string;
 };
 
+type TargetImpact = {
+  target_type: string;
+  target_name: string;
+  asset: { symbol: string; name: string; asset_class: string } | null;
+  direction: -1 | 0 | 1;
+  score: number;
+  rating: string;
+  confidence: number;
+  transmission_path: string[];
+  rationale: string;
+  missing_information: string[];
+  trade_status: "tradeable" | "untradeable";
+  execution_supported: boolean;
+  technical_failure: boolean;
+};
+
 export type AnalysisLog = {
   id: string;
   event_id: string | null;
@@ -18,7 +34,7 @@ export type AnalysisLog = {
   status: string;
   updated_at: string;
   news: Array<{ id: string; title: string; source: string; url: string; published_at: string }>;
-  event: { headline: string; event_type: string; direct_impact: string; priority: number } | null;
+  event: { headline: string; event_type: string; direct_impact: string; priority: number; actions?: unknown[] } | null;
   asset: { symbol: string; name: string; market: string } | null;
   models: string[];
   steps: AnalysisStep[];
@@ -36,6 +52,7 @@ export type AnalysisLog = {
     horizon_days?: number;
     fact_confidence?: number;
     summary: string;
+    impact?: TargetImpact | null;
   } | {
     kind: "event_report";
     confidence: number;
@@ -47,19 +64,26 @@ export type AnalysisLog = {
     catalysts: string[];
     risks: string[];
     unresolved_questions: string[];
+    scoring_version?: string;
+    fact_confidence?: number;
+    impacts?: TargetImpact[];
+    trade_status?: "tradeable" | "untradeable";
+    missing_information?: string[];
   } | null;
 };
 
 const labels: Record<string, string> = {
   strongly_bullish: "强烈看多",
   bullish: "看多",
-  watch: "观望",
+  watch: "中性",
   bearish: "看空",
   strongly_bearish: "强烈看空",
   insufficient_evidence: "证据不足",
   technical_failure: "技术失败",
   neutral: "中性信号",
   directional: "方向信号",
+  tradeable: "可交易",
+  untradeable: "暂不可交易",
   completed: "已完成",
   running: "研究中",
   verifying: "验证中",
@@ -88,13 +112,13 @@ const phaseLabels: Record<string, string> = {
   cloud_verification: "高影响云复核",
   finalization: "评级与置信度定稿",
   research_failed: "研究任务失败",
-  event_research_queue: "中性事件研报入队",
+  event_research_queue: "逐目标事件研报入队",
   event_evidence_gathering: "事件证据收集",
-  event_report_drafting: "中性事件研报生成",
+  event_report_drafting: "逐目标事件研报生成",
   event_report_verification: "事件证据与引用校验",
-  event_report_revision: "中性事件研报修订",
-  event_report_finalization: "中性事件研报定稿",
-  event_research_failed: "中性事件研报失败",
+  event_report_revision: "逐目标事件研报修订",
+  event_report_finalization: "逐目标事件研报定稿",
+  event_research_failed: "逐目标事件研报失败",
 };
 
 export function analysisPendingText(status: string) {
@@ -137,7 +161,7 @@ export function AnalysisTraceList({ logs }: { logs: AnalysisLog[] }) {
           </div>
           <div className="trace-asset">
             <strong>{log.asset?.symbol || (log.event_research_run_id ? "EVENT" : "—")}</strong>
-            <span>{log.asset?.name || (log.event_research_run_id ? "中性事件研报" : "未映射主标的")}</span>
+            <span>{log.asset?.name || (log.event_research_run_id ? "逐目标事件研报" : "未映射主标的")}</span>
           </div>
           <div className="trace-confidence">
             <strong>{log.result ? `${Math.round(log.result.confidence * 100)}%` : "—"}</strong>
@@ -185,7 +209,7 @@ export function AnalysisTraceList({ logs }: { logs: AnalysisLog[] }) {
           {log.result?.kind === "asset_recommendation" ? <div className="trace-result">
             <div><span>信号状态</span><strong>{labels[log.result.signal_status || ""] || "旧版结论"}</strong></div>
             <div><span>最终结果</span><strong>{labels[log.result.rating] || log.result.rating}</strong></div>
-            <div><span>{log.result.scoring_version === "short-term-impact-v1" ? "影响分" : "发布分"}</span><strong>{log.result.score > 0 ? "+" : ""}{log.result.score}</strong></div>
+            <div><span>{log.result.scoring_version === "target-transmission-v2" ? "目标影响分" : "影响分"}</span><strong>{log.result.score > 0 ? "+" : ""}{log.result.score}</strong></div>
             {log.result.scoring_version === "short-term-impact-v1" ? <>
               <div><span>新闻事实置信度</span><strong>{Math.round((log.result.fact_confidence ?? log.result.confidence) * 100)}%</strong></div>
               <div><span>评级置信度</span><strong>{Math.round(log.result.confidence * 100)}%</strong></div>
@@ -198,11 +222,26 @@ export function AnalysisTraceList({ logs }: { logs: AnalysisLog[] }) {
             </>}
             <p>{log.result.summary}</p>
           </div> : log.result?.kind === "event_report" ? <div className="trace-result event-report-result">
-            <div><span>最终结果</span><strong>中性事件研报</strong></div>
-            <div><span>置信度</span><strong>{Math.round(log.result.confidence * 100)}%</strong></div>
+            <div><span>研报类型</span><strong>逐目标宏观传导</strong></div>
+            <div><span>事件状态</span><strong>{labels[log.result.trade_status || "untradeable"]}</strong></div>
+            <div><span>事实置信度</span><strong>{Math.round((log.result.fact_confidence ?? log.result.confidence) * 100)}%</strong></div>
             <div><span>证据</span><strong>{log.result.evidence_complete ? "完整" : "不足"}</strong></div>
-            <div><span>影响范围</span><strong>{[...log.result.affected_markets, ...log.result.affected_sectors].join(" · ") || "待确认"}</strong></div>
-            <p>{log.result.summary}</p>
+            <p><b>事实摘要：</b>{log.result.summary}</p>
+            <div className="target-impact-scroll">
+              <table className="target-impact-table">
+                <thead><tr><th>目标</th><th>方向</th><th>分数</th><th>置信度</th><th>传导路径</th><th>状态</th><th>缺失信息</th></tr></thead>
+                <tbody>{(log.result.impacts || []).map((impact) => <tr key={`${impact.target_type}-${impact.asset?.symbol || impact.target_name}`}>
+                  <td><strong>{impact.target_name}</strong>{impact.asset && <small>{impact.asset.symbol}</small>}</td>
+                  <td>{labels[impact.rating] || impact.rating}</td>
+                  <td>{impact.score > 0 ? "+" : ""}{impact.score.toFixed(2)}</td>
+                  <td>{Math.round(impact.confidence * 100)}%</td>
+                  <td>{impact.transmission_path.join(" → ") || "—"}</td>
+                  <td>{labels[impact.trade_status]}</td>
+                  <td>{impact.missing_information.join("、") || "—"}</td>
+                </tr>)}</tbody>
+              </table>
+            </div>
+            {!!log.result.missing_information?.length && <p className="target-missing"><b>事件缺失信息：</b>{log.result.missing_information.join("、")}</p>}
           </div> : <div className="trace-pending">{analysisPendingText(log.status)}</div>}
         </div>}
       </article>;

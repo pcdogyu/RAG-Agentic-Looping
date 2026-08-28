@@ -3,7 +3,16 @@ from uuid import uuid4
 import pytest
 
 from backend.app.config import Settings
-from backend.app.domain import Recommendation, Thesis, rating_for, utc_now
+from backend.app.domain import (
+    Rating,
+    Recommendation,
+    TargetImpact,
+    TargetType,
+    Thesis,
+    TradeStatus,
+    rating_for,
+    utc_now,
+)
 from backend.app.providers.registry import SEED_ASSETS, ProviderRegistry
 from backend.app.services.portfolio import PortfolioError, PortfolioService
 
@@ -59,3 +68,36 @@ def test_repeated_order_cannot_exceed_single_asset_limit(db):
     service.create_from_recommendation(db, rec, price=200)
     with pytest.raises(PortfolioError, match="risk limit"):
         service.create_from_recommendation(db, rec, price=200)
+
+
+def test_commodity_target_can_be_rated_but_paper_order_is_rejected(db):
+    service = PortfolioService(ProviderRegistry(Settings(fmp_access_token="")))
+    asset = next(item for item in SEED_ASSETS if item.symbol == "CLUSD")
+    impact = TargetImpact(
+        target_type=TargetType.COMMODITY_PRICE,
+        target_name="WTI 原油价格",
+        asset=asset,
+        direction=1,
+        score=0.3,
+        rating=Rating.BULLISH,
+        confidence=0.7,
+        trade_status=TradeStatus.TRADEABLE,
+        execution_supported=False,
+    )
+    rec = Recommendation(
+        run_id=uuid4(),
+        asset=asset,
+        score=30,
+        rating=Rating.BULLISH,
+        confidence=0.7,
+        bull_probability=0.6,
+        base_probability=0.3,
+        bear_probability=0.1,
+        thesis=Thesis(summary="供应风险上升"),
+        as_of=utc_now(),
+        scoring_version="target-transmission-v2",
+        impact=impact,
+    )
+
+    with pytest.raises(PortfolioError, match="not supported for commodity or FX"):
+        service.create_from_recommendation(db, rec, price=75)

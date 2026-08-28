@@ -642,11 +642,10 @@ def test_research_draft_respects_cpu_prompt_budgets(db, tmp_path):
     )
 
     assert len(llm.prompts) == 1
-    assert "必须输出 score 字段" in llm.systems[0]
-    assert "-100 到 100" in llm.systems[0]
-    assert "S=D×(45M+25T+15I+15C)" in llm.systems[0]
-    assert "未来 1 至 3 个交易日" in llm.systems[0]
-    assert "证据核验不会改变方向或隐藏评分" in llm.prompts[0]
+    assert "方向只能针对当前研究工具" in llm.systems[0]
+    assert "最终 score/rating/confidence/trade_status 全部由程序计算" in llm.systems[0]
+    assert "六个传导因子" in llm.systems[0]
+    assert "当前工具就是唯一评级目标" in llm.prompts[0]
     assert llm.prompts[0].count("x") <= settings.research_prompt_evidence_chars
     assert llm.prompts[0].count("y") <= settings.research_prompt_context_chars
 
@@ -679,8 +678,8 @@ def test_research_revision_recalculates_required_direction_score(db, tmp_path):
         }
     )
 
-    assert "必须重新评估方向分数" in llm.systems[0]
-    assert "不得省略 score" in llm.systems[0]
+    assert "方向只能针对当前研究工具" in llm.systems[0]
+    assert "禁止输出全局方向" in llm.systems[0]
     assert "本轮修复清单" in llm.prompts[0]
     assert "valid_evidence_ids" in llm.prompts[0]
     assert "转载、改写或聚合副本只算一个独立来源" in llm.prompts[0]
@@ -690,14 +689,15 @@ def test_research_revision_recalculates_required_direction_score(db, tmp_path):
         settings.ollama_research_revision_max_input_tokens
     )
     assert llm.calls[0]["max_output_tokens"] == 1024
-    assert "score" in DraftOutput.model_json_schema()["required"]
+    assert "target_impact" in DraftOutput.model_json_schema()["properties"]
+    assert "score" not in DraftOutput.model_json_schema()["required"]
 
 
-def test_direction_uses_source_event_facts_but_not_model_report_prose():
+def test_identity_mapping_does_not_assign_direction_from_event_or_model_prose():
     run = ResearchRun(asset=SEED_ASSETS[0])
     observed = datetime(2026, 8, 27, tzinfo=UTC)
 
-    def event_with(direct_impact, impact_direction=0):
+    def event_with(direct_impact):
         return NewsEvent(
             news_item_ids=[],
             headline="Quarterly business update",
@@ -711,7 +711,6 @@ def test_direction_uses_source_event_facts_but_not_model_report_prose():
                 CandidateAsset(
                     asset=run.asset,
                     relationship="mentioned company",
-                    impact_direction=impact_direction,
                     relevance=0.8,
                     mapping_confidence=0.9,
                     rationale="The source discusses the company.",
@@ -719,32 +718,25 @@ def test_direction_uses_source_event_facts_but_not_model_report_prose():
             ],
         )
 
-    bullish_draft = DraftOutput(
-        summary="这是明确利好并将推动利润增长。",
-        financials_and_growth="收入增长",
-        risks=["正面影响"],
-        score=80,
-    )
-    neutral_direction, _, _ = ResearchService._direction_inputs(
+    neutral_direction, relevance, confidence = ResearchService._mapping_inputs(
         run,
         event_with("The source only describes an infrastructure spending plan.")
         .model_dump(mode="json"),
-        bullish_draft,
     )
-    positive_direction, _, _ = ResearchService._direction_inputs(
+    positive_direction, _, _ = ResearchService._mapping_inputs(
         run,
         event_with("Meta 可能从中受益").model_dump(mode="json"),
-        DraftOutput(summary="中性报告", score=0),
     )
-    uncertain_direction, _, _ = ResearchService._direction_inputs(
+    uncertain_direction, _, _ = ResearchService._mapping_inputs(
         run,
-        event_with("Meta 未必受益", impact_direction=1).model_dump(mode="json"),
-        bullish_draft,
+        event_with("Meta 未必受益").model_dump(mode="json"),
     )
 
     assert neutral_direction is None
-    assert positive_direction == 1
+    assert positive_direction is None
     assert uncertain_direction is None
+    assert relevance == 0.8
+    assert confidence == 0.8
 
 
 def test_revision_marks_unresolved_sections_and_removes_invalid_citations(db, tmp_path):

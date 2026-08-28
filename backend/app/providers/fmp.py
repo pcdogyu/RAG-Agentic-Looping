@@ -293,6 +293,42 @@ class FmpProvider:
             )
         return output
 
+    def list_macro_assets(self) -> list[AssetRef]:
+        """Load FMP continuous commodity benchmarks and spot FX master data."""
+
+        output: dict[str, AssetRef] = {}
+        for endpoint, asset_class, market in (
+            ("commodities-list", AssetClass.COMMODITY, Market.COMMODITY),
+            ("forex-list", AssetClass.FX, Market.FX),
+        ):
+            payload = self._rest(endpoint, {}, ttl=86400)
+            if isinstance(payload, dict):
+                payload = payload.get("data", payload.get("results", []))
+            for item in payload if isinstance(payload, list) else []:
+                symbol = str(item.get("symbol") or item.get("ticker") or "").strip().upper()
+                if not symbol:
+                    continue
+                name = str(item.get("name") or item.get("companyName") or symbol).strip()
+                asset_id = f"{asset_class.value}:fmp:{symbol}"
+                output[asset_id] = AssetRef(
+                    asset_id=asset_id,
+                    asset_class=asset_class,
+                    market=market,
+                    symbol=symbol,
+                    name=name,
+                    exchange_or_provider="fmp",
+                    currency=str(item.get("currency") or "USD").strip().upper(),
+                    aliases=[
+                        value
+                        for value in {
+                            str(item.get("shortName") or "").strip(),
+                            str(item.get("underlyingName") or "").strip(),
+                        }
+                        if value and value not in {symbol, name}
+                    ],
+                )
+        return list(output.values())
+
     @staticmethod
     def _explicit_issuer_id(item: dict[str, Any]) -> str | None:
         for key, namespace in (
@@ -387,7 +423,7 @@ class FmpProvider:
         return payload if isinstance(payload, dict) else {}
 
     def get_fundamentals(self, asset: AssetRef) -> dict[str, Any]:
-        if asset.asset_class is AssetClass.CRYPTO:
+        if asset.asset_class in {AssetClass.CRYPTO, AssetClass.COMMODITY, AssetClass.FX}:
             return {}
         symbol = asset.symbol
         calls = {

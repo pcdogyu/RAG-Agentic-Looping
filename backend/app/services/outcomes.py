@@ -297,7 +297,9 @@ class OutcomeService:
         exit_at: datetime,
         observed_at: datetime,
     ) -> BenchmarkResult:
-        benchmark_symbol = self.benchmark_symbols[recommendation.asset.market]
+        benchmark_symbol = self.benchmark_symbols.get(recommendation.asset.market)
+        if not benchmark_symbol:
+            return BenchmarkResult(status="missing")
         matches = self.registry.resolve_assets(benchmark_symbol)
         exact_matches = [asset for asset in matches if asset.symbol.upper() == benchmark_symbol]
         if not exact_matches:

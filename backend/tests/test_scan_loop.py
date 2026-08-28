@@ -10,11 +10,17 @@ from backend.app import worker
 from backend.app.domain import (
     AnalysisStep,
     CandidateAsset,
+    EventReport,
+    EventResearchRun,
     Evidence,
     NewsEvent,
     NewsItem,
+    Rating,
     RunStatus,
     SourceQuality,
+    TargetImpact,
+    TargetType,
+    TradeStatus,
 )
 from backend.app.main import _analysis_logs
 from backend.app.providers.registry import SEED_ASSETS
@@ -656,7 +662,7 @@ def test_failed_extraction_does_not_block_batch_finalization(db, monkeypatch):
     queued = []
     monkeypatch.setattr(
         worker,
-        "enqueue_event_research",
+        "enqueue_event_report",
         lambda _db, queued_event: queued.append(queued_event.id) or ("task", object()),
     )
 
@@ -1299,7 +1305,7 @@ def test_standalone_news_retry_is_recorded_and_sent_with_requested_priority(
     ]
 
 
-def test_7b_mapping_task_persists_candidates_and_queues_top_three(db, monkeypatch):
+def test_7b_mapping_persists_candidates_then_queues_target_event_report(db, monkeypatch):
     observed = datetime(2026, 8, 22, 12, 0, tzinfo=UTC)
     news = NewsItem(
         source="Example",
@@ -1341,12 +1347,13 @@ def test_7b_mapping_task_persists_candidates_and_queues_top_three(db, monkeypatc
             proposed_count=4,
         ),
     )
-    queued_assets = []
+    queued_reports = []
     monkeypatch.setattr(
-        worker.research_asset,
-        "apply_async",
-        lambda *, args, **kwargs: (
-            queued_assets.append(args[0]) or SimpleNamespace(id=f"research-{len(queued_assets)}")
+        worker,
+        "enqueue_event_report",
+        lambda _db, mapped_event: (
+            queued_reports.append(mapped_event.id)
+            or ("event-report-task", EventResearchRun(event_id=mapped_event.id))
         ),
     )
 
@@ -1355,7 +1362,66 @@ def test_7b_mapping_task_persists_candidates_and_queues_top_three(db, monkeypatc
     db.expire_all()
     persisted = get_event(db, event.id)
     assert result["verified_assets"] == 4
-    assert result["research_queued"] == 3
+    assert result["status"] == "event_research_queued"
+    assert result["task_id"] == "event-report-task"
     assert persisted is not None
     assert len(persisted.candidates) == 4
-    assert queued_assets == [item.asset.asset_id for item in candidates[:3]]
+    assert queued_reports == [event.id]
+
+
+def test_target_research_queues_only_impacts_that_pass_v2_gate(db, monkeypatch):
+    observed = datetime(2026, 8, 22, 12, 0, tzinfo=UTC)
+    event = NewsEvent(
+        news_item_ids=[],
+        headline="目标门槛测试",
+        event_type="other",
+        direct_impact="测试",
+        source_quality=SourceQuality.PROFESSIONAL,
+        published_at=observed,
+        observed_at=observed,
+        as_of=observed,
+    )
+    tradeable = TargetImpact(
+        target_type=TargetType.TRADABLE_ASSET,
+        target_name=SEED_ASSETS[0].name,
+        asset=SEED_ASSETS[0],
+        direction=1,
+        score=0.3,
+        rating=Rating.BULLISH,
+        confidence=0.7,
+        trade_status=TradeStatus.TRADEABLE,
+        execution_supported=True,
+    )
+    blocked = tradeable.model_copy(
+        update={
+            "target_name": SEED_ASSETS[1].name,
+            "asset": SEED_ASSETS[1],
+            "score": 0.1,
+            "rating": Rating.WATCH,
+            "trade_status": TradeStatus.UNTRADEABLE,
+        }
+    )
+    captured = []
+    monkeypatch.setattr(worker, "get_run_for_event_asset", lambda *_args: None)
+    monkeypatch.setattr(
+        worker,
+        "enqueue_research",
+        lambda _db, asset, queued_event, **_kwargs: (
+            captured.append((asset.asset_id, queued_event.id))
+            or ("research-task", object())
+        ),
+    )
+
+    queued = worker.enqueue_target_researches(
+        db,
+        event,
+        EventReport(
+            summary="逐目标",
+            scoring_version="target-transmission-v2",
+            impacts=[tradeable, blocked],
+            trade_status=TradeStatus.TRADEABLE,
+        ),
+    )
+
+    assert len(queued) == 1
+    assert captured == [(SEED_ASSETS[0].asset_id, event.id)]

@@ -55,6 +55,7 @@ class AssetMappingResult(BaseModel):
     master_derived_count: int = 0
     rejected_count: int = 0
     no_asset_reason: str = ""
+    technical_warning: str = ""
 
 
 def normalize_security_text(value: str) -> str:
@@ -160,9 +161,7 @@ class AssetMappingService:
                 max_output_tokens=self.settings.ollama_asset_mapping_max_output_tokens,
             )
             output = AssetMappingOutput.model_validate(payload)
-        except (LlmError, ValidationError):
-            if not master_candidates:
-                raise
+        except (LlmError, ValidationError) as exc:
             # Product ownership is deterministic master data. A malformed or
             # unavailable model response must not discard an already verified
             # owner/listing relationship.
@@ -170,6 +169,9 @@ class AssetMappingService:
                 candidates=[],
                 no_asset_reason="模型未返回合规结果，已使用主数据中的产品归属。",
             )
+            technical_warning = f"{type(exc).__name__}: asset mapping validation failed"
+        else:
+            technical_warning = ""
         candidates: dict[str, CandidateAsset] = dict(master_candidates)
         rejected = 0
         for hint in output.candidates:
@@ -188,6 +190,7 @@ class AssetMappingService:
             master_derived_count=len(master_candidates),
             rejected_count=rejected,
             no_asset_reason="" if ranked else output.no_asset_reason,
+            technical_warning=technical_warning,
         )
 
     def _verified_product_candidates(
@@ -201,7 +204,6 @@ class AssetMappingService:
             candidates[asset.asset_id] = CandidateAsset(
                 asset=asset,
                 relationship="product_owner",
-                impact_direction=0,
                 relevance=0.85,
                 rationale=f"主数据确认新闻中的 {product} 归属于 {asset.name}",
                 mapping_confidence=0.99,
@@ -230,7 +232,6 @@ class AssetMappingService:
                 CandidateAsset(
                     asset=asset,
                     relationship="product_owner",
-                    impact_direction=0,
                     relevance=hint.confidence,
                     rationale=hint.rationale,
                     mapping_confidence=hint.confidence,
@@ -282,7 +283,6 @@ class AssetMappingService:
                     relationship=(
                         "cross_listing_issuer" if cross_listing else hint.relationship
                     ),
-                    impact_direction=0,
                     relevance=(
                         min(hint.confidence, 0.55)
                         if cross_listing

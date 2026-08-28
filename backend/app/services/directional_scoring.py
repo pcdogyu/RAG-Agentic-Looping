@@ -5,6 +5,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
 
+from backend.app.domain import Rating
+
 _ADVERSE_DIRECTION_PATTERNS = tuple(
     re.compile(pattern, re.IGNORECASE)
     for pattern in (
@@ -93,6 +95,19 @@ class RatingConfidenceScore:
     market_context_completeness_contribution: float
 
 
+@dataclass(frozen=True)
+class TargetTransmissionScore:
+    score: float
+    score_points: int
+    rating: Rating
+
+
+@dataclass(frozen=True)
+class TargetConfidenceScore:
+    confidence: float
+    uncapped_confidence: float
+
+
 def _unit_interval(value: float | None) -> float:
     return max(0.0, min(1.0, float(value or 0)))
 
@@ -101,6 +116,79 @@ def round_half_up(value: float) -> int:
     """Use conventional half-up rounding instead of Python's bankers rounding."""
 
     return int(Decimal(str(value)).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+
+def _round_two(value: float) -> float:
+    return float(Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+
+
+def target_rating_for(score: float) -> Rating:
+    """Map the normalized target score to the v2 five-level rating."""
+
+    if score >= 0.65:
+        return Rating.STRONGLY_BULLISH
+    if score >= 0.25:
+        return Rating.BULLISH
+    if score <= -0.65:
+        return Rating.STRONGLY_BEARISH
+    if score <= -0.25:
+        return Rating.BEARISH
+    return Rating.WATCH
+
+
+def target_transmission_score(
+    *,
+    direction: int,
+    event_strength: float | None,
+    target_relevance: float | None,
+    transmission_directness: float | None,
+    realization_probability: float | None,
+    novelty: float | None,
+    persistence: float | None,
+) -> TargetTransmissionScore:
+    """Calculate the auditable multiplicative target-transmission v2 score."""
+
+    if direction not in {-1, 0, 1}:
+        raise ValueError("direction must be -1, 0, or 1")
+    normalized = direction
+    for value in (
+        event_strength,
+        target_relevance,
+        transmission_directness,
+        realization_probability,
+        novelty,
+        persistence,
+    ):
+        normalized *= _unit_interval(value)
+    score = max(-1.0, min(1.0, _round_two(normalized)))
+    return TargetTransmissionScore(
+        score=score,
+        score_points=max(-100, min(100, round_half_up(score * 100))),
+        rating=target_rating_for(score),
+    )
+
+
+def target_confidence_score(
+    *,
+    fact_confidence: float | None,
+    direction_clarity: float | None,
+    source_reliability: float | None,
+    transmission_certainty: float | None,
+    market_context_completeness: float | None,
+) -> TargetConfidenceScore:
+    """Calculate target confidence and cap it by verified fact confidence."""
+
+    uncapped = (
+        0.40 * _unit_interval(direction_clarity)
+        + 0.25 * _unit_interval(source_reliability)
+        + 0.20 * _unit_interval(transmission_certainty)
+        + 0.15 * _unit_interval(market_context_completeness)
+    )
+    confidence = min(_unit_interval(fact_confidence), uncapped)
+    return TargetConfidenceScore(
+        confidence=round(confidence, 4),
+        uncapped_confidence=round(uncapped, 4),
+    )
 
 
 def short_term_impact_score(

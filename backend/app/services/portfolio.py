@@ -128,6 +128,16 @@ class PortfolioService:
         price: float,
         target_weight: float | None = None,
     ) -> PaperOrder:
+        if recommendation.asset.asset_class not in {AssetClass.EQUITY, AssetClass.CRYPTO}:
+            raise PortfolioError("paper execution is not supported for commodity or FX assets")
+        if recommendation.scoring_version == "target-transmission-v2":
+            if (
+                recommendation.impact is None
+                or not recommendation.impact.execution_supported
+                or recommendation.impact.trade_status.value != "tradeable"
+                or abs(recommendation.impact.score) < 0.25
+            ):
+                raise PortfolioError("target impact does not meet the v2 trading gate")
         if recommendation.rating not in {Rating.BULLISH, Rating.STRONGLY_BULLISH}:
             raise PortfolioError(
                 "only bullish recommendations can open a position"

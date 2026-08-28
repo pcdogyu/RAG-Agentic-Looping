@@ -100,6 +100,60 @@ SEED_ASSETS = [
         products=["阿里云", "Alibaba Cloud"],
         issuer_id="curated:alibaba-group",
     ),
+    AssetRef(
+        asset_id="commodity:fmp:CLUSD",
+        asset_class=AssetClass.COMMODITY,
+        market=Market.COMMODITY,
+        symbol="CLUSD",
+        name="WTI Crude Oil Continuous Benchmark",
+        exchange_or_provider="fmp",
+        aliases=["WTI", "WTI crude", "West Texas Intermediate", "WTI 原油"],
+    ),
+    AssetRef(
+        asset_id="commodity:fmp:BZUSD",
+        asset_class=AssetClass.COMMODITY,
+        market=Market.COMMODITY,
+        symbol="BZUSD",
+        name="Brent Crude Oil Continuous Benchmark",
+        exchange_or_provider="fmp",
+        aliases=["Brent", "Brent crude", "布伦特原油"],
+    ),
+    AssetRef(
+        asset_id="commodity:fmp:ZGUSD",
+        asset_class=AssetClass.COMMODITY,
+        market=Market.COMMODITY,
+        symbol="ZGUSD",
+        name="Gold Continuous Benchmark",
+        exchange_or_provider="fmp",
+        aliases=["Gold", "黄金", "现货黄金"],
+    ),
+    AssetRef(
+        asset_id="fx:fmp:EURUSD",
+        asset_class=AssetClass.FX,
+        market=Market.FX,
+        symbol="EURUSD",
+        name="EUR/USD Spot FX",
+        exchange_or_provider="fmp",
+        aliases=["EUR/USD", "欧元兑美元"],
+    ),
+    AssetRef(
+        asset_id="fx:fmp:USDJPY",
+        asset_class=AssetClass.FX,
+        market=Market.FX,
+        symbol="USDJPY",
+        name="USD/JPY Spot FX",
+        exchange_or_provider="fmp",
+        aliases=["USD/JPY", "美元兑日元"],
+    ),
+    AssetRef(
+        asset_id="fx:fmp:USDCNH",
+        asset_class=AssetClass.FX,
+        market=Market.FX,
+        symbol="USDCNH",
+        name="USD/CNH Spot FX",
+        exchange_or_provider="fmp",
+        aliases=["USD/CNH", "美元兑离岸人民币"],
+    ),
 ]
 
 
@@ -489,6 +543,11 @@ class ProviderRegistry:
         self._assets.update({asset.asset_id: asset for asset in assets})
         return assets
 
+    def refresh_macro_universe(self) -> list[AssetRef]:
+        assets = self.fmp.list_macro_assets()
+        self._assets.update({asset.asset_id: asset for asset in assets})
+        return assets
+
     def all_assets(self) -> list[AssetRef]:
         return list(self._assets.values())
 
@@ -686,7 +745,7 @@ class ProviderRegistry:
 
     @staticmethod
     def _broad_benchmark(asset: AssetRef) -> AssetRef | None:
-        if asset.asset_class is AssetClass.CRYPTO:
+        if asset.asset_class in {AssetClass.CRYPTO, AssetClass.COMMODITY, AssetClass.FX}:
             # BTC is not a broad-market index; leave the benchmark unavailable
             # until a true point-in-time crypto market index source is wired.
             return None

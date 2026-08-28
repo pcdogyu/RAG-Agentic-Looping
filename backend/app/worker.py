@@ -19,12 +19,14 @@ from backend.app.db import NewsRow, SessionLocal, init_db
 from backend.app.domain import (
     AnalysisStep,
     AssetRef,
+    EventReport,
     EventResearchRun,
     NewsEvent,
     NewsItem,
     Rating,
     ResearchRun,
     RunStatus,
+    TradeStatus,
     as_utc,
     utc_now,
 )
@@ -154,6 +156,11 @@ celery_app.conf.update(
         "refresh-crypto-universe": {
             "task": "market_loop.refresh_crypto_universe",
             "schedule": 6 * 60 * 60,
+            "options": {"queue": "io"},
+        },
+        "refresh-macro-universe": {
+            "task": "market_loop.refresh_macro_universe",
+            "schedule": 24 * 60 * 60,
             "options": {"queue": "io"},
         },
         "evaluate-outcomes": {
@@ -1479,6 +1486,50 @@ def enqueue_event_research(db, event: NewsEvent) -> tuple[str, ResearchRun] | No
     return queued[0] if queued else None
 
 
+def enqueue_target_researches(
+    db,
+    event: NewsEvent,
+    report: EventReport,
+    limit: int = 3,
+    *,
+    historical_replay: bool = False,
+    as_of: datetime | None = None,
+) -> list[tuple[str, ResearchRun]]:
+    """Queue only verified tools whose target impact passed the v2 trade gate."""
+
+    queued: list[tuple[str, ResearchRun]] = []
+    for impact in report.impacts:
+        if (
+            len(queued) >= limit
+            or impact.asset is None
+            or impact.trade_status is not TradeStatus.TRADEABLE
+        ):
+            continue
+        try:
+            previous = get_run_for_event_asset(db, event.id, impact.asset.asset_id)
+            if (
+                previous
+                and previous.recommendation
+                and previous.recommendation.scoring_version == "target-transmission-v2"
+            ):
+                continue
+            queued.append(
+                enqueue_research(
+                    db,
+                    impact.asset,
+                    event,
+                    as_of=as_of,
+                    historical_replay=historical_replay,
+                    retry_of_run_id=(previous.id if historical_replay and previous else None),
+                    force_research=historical_replay,
+                    queue_phase=("target_impact_v2_replay" if historical_replay else None),
+                )
+            )
+        except ResearchAdmissionError:
+            continue
+    return queued
+
+
 def _replace_event_step(event: NewsEvent, step: AnalysisStep) -> None:
     for index in range(len(event.analysis_steps) - 1, -1, -1):
         if event.analysis_steps[index].phase == step.phase:
@@ -1764,7 +1815,7 @@ def enqueue_event_report(
     *,
     model_instance_id: str | None = None,
 ) -> tuple[str | None, EventResearchRun]:
-    """Persist and queue one neutral report for an event with no verified asset."""
+    """Persist and queue the required target-specific report for every event."""
 
     existing = get_event_research_for_event(db, event.id)
     if existing:
@@ -1789,7 +1840,7 @@ def enqueue_event_report(
                 status="queued",
                 executor="celery",
                 model=settings.ollama_research_model,
-                summary="未找到经主数据验证的证券标的，已创建中性事件研报任务。",
+                summary="已创建事实框架与逐目标宏观传导研报任务。",
                 metrics={
                     "instance_id": instance.id,
                     "priority": EVENT_RESEARCH_PRIORITY,
@@ -1817,7 +1868,7 @@ def enqueue_event_report(
                 phase="event_research_queue",
                 status="failed",
                 executor="celery",
-                summary=f"中性事件研报入队失败（{type(exc).__name__}）。",
+                summary=f"逐目标事件研报入队失败（{type(exc).__name__}）。",
             )
         )
         save_event_research_run(db, run)
@@ -2259,10 +2310,11 @@ def retry_news_item(self, news_id: str, model_instance_id: str | None = None) ->
             mapping_queued = 0
             if settings.auto_research:
                 for event in events:
-                    if event.candidates:
-                        research_queued += int(enqueue_event_research(db, event) is not None)
-                    else:
+                    if not event.candidates:
                         mapping_queued += int(enqueue_asset_mapping(db, event) is not None)
+                    else:
+                        report_task_id, _ = enqueue_event_report(db, event)
+                        research_queued += int(report_task_id is not None)
         update_model_task(
             "extract",
             task_id,
@@ -2366,10 +2418,11 @@ def finalize_news_extraction(
                 if not settings.auto_research:
                     continue
                 try:
-                    if event.candidates:
-                        queued += int(enqueue_event_research(db, event) is not None)
-                    else:
+                    if not event.candidates:
                         mapping_queued += int(enqueue_asset_mapping(db, event) is not None)
+                    else:
+                        report_task_id, _ = enqueue_event_report(db, event)
+                        queued += int(report_task_id is not None)
                 except Exception as exc:
                     notifier.send(
                         f"下游研究任务入队失败：{event.headline}\n错误：{type(exc).__name__}"
@@ -2490,7 +2543,11 @@ def resolve_event_assets(self, event_id: str, model_instance_id: str | None = No
                     event,
                     AnalysisStep(
                         phase="asset_mapping",
-                        status="completed" if event.candidates else "unmapped",
+                        status=(
+                            "fallback"
+                            if mapping_result.technical_warning
+                            else "completed" if event.candidates else "unmapped"
+                        ),
                         executor="ollama+provider-registry",
                         model=settings.ollama_assist_model,
                         summary=(
@@ -2507,6 +2564,7 @@ def resolve_event_assets(self, event_id: str, model_instance_id: str | None = No
                             "rejected_count": mapping_result.rejected_count,
                             "provider_errors": registry.mapping_errors,
                             "no_asset_reason": mapping_result.no_asset_reason,
+                            "technical_warning": mapping_result.technical_warning,
                         },
                     ),
                 )
@@ -2522,31 +2580,6 @@ def resolve_event_assets(self, event_id: str, model_instance_id: str | None = No
                 )
                 save_event(db, event)
 
-            if event.candidates:
-                queued = enqueue_event_researches(db, event, 3)
-                update_model_task(
-                    "assist",
-                    task_id,
-                    status="completed",
-                    metrics={
-                        "proposed_count": (
-                            mapping_result.proposed_count
-                            if mapping_result is not None
-                            else len(event.candidates)
-                        ),
-                        "verified_count": len(event.candidates),
-                        "rejected_count": (
-                            mapping_result.rejected_count if mapping_result is not None else 0
-                        ),
-                    },
-                )
-                return {
-                    "status": "mapped",
-                    "event_id": event_id,
-                    "verified_assets": len(event.candidates),
-                    "research_queued": len(queued),
-                }
-
             task_id, run = enqueue_event_report(db, event)
             update_model_task(
                 "assist",
@@ -2556,7 +2589,7 @@ def resolve_event_assets(self, event_id: str, model_instance_id: str | None = No
                     "proposed_count": (
                         mapping_result.proposed_count if mapping_result is not None else 0
                     ),
-                    "verified_count": 0,
+                    "verified_count": len(event.candidates),
                     "rejected_count": (
                         mapping_result.rejected_count if mapping_result is not None else 0
                     ),
@@ -2567,6 +2600,7 @@ def resolve_event_assets(self, event_id: str, model_instance_id: str | None = No
                 "event_id": event_id,
                 "event_research_run_id": str(run.id),
                 "task_id": task_id,
+                "verified_assets": len(event.candidates),
             }
         except Exception as exc:
             db.rollback()
@@ -2599,7 +2633,15 @@ def resolve_event_assets(self, event_id: str, model_instance_id: str | None = No
                     exc=exc,
                     countdown=min(60, 2 ** (self.request.retries + 1)),
                 ) from exc
-            raise
+            report_task_id, report_run = enqueue_event_report(db, event)
+            return {
+                "status": "event_research_queued_after_mapping_failure",
+                "event_id": event_id,
+                "event_research_run_id": str(report_run.id),
+                "task_id": report_task_id,
+                "verified_assets": len(event.candidates),
+                "technical_warning": f"{type(exc).__name__}: asset mapping failed",
+            }
 
 
 @celery_app.task(bind=True, name="market_loop.research_event", max_retries=2)
@@ -2650,7 +2692,22 @@ def research_event(
                     f"事件研究完成：{event.headline}\n"
                     f"证据{'完整' if result.report and result.report.evidence_complete else '不足'}"
                 )
-                return result.model_dump(mode="json")
+                queued = (
+                    enqueue_target_researches(
+                        db,
+                        event,
+                        result.report,
+                        3,
+                        historical_replay=result.historical_replay,
+                        as_of=result.as_of,
+                    )
+                    if result.report
+                    else []
+                )
+                return {
+                    **result.model_dump(mode="json"),
+                    "target_research_queued": len(queued),
+                }
             except Exception as exc:
                 db.rollback()
                 run = get_event_research_run(db, UUID(run_id)) or run
@@ -2664,7 +2721,7 @@ def research_event(
                         executor="event-research",
                         model=settings.ollama_research_model,
                         summary=(
-                            f"中性事件研报{'暂时失败，等待重试' if retrying else '最终失败'}"
+                            f"逐目标事件研报{'暂时失败，等待重试' if retrying else '最终失败'}"
                             f"（{type(exc).__name__}）。"
                         ),
                     )
@@ -2676,6 +2733,25 @@ def research_event(
                         countdown=min(60, 2 ** (self.request.retries + 1)),
                     ) from exc
                 raise
+
+
+@celery_app.task(name="market_loop.reprocess_target_impacts_v2")
+def reprocess_target_impacts_v2(batch_size: int = 25, max_active: int = 50) -> dict:
+    """Continue bounded historical v2 batches until no database gap remains."""
+
+    from backend.app.target_impact_backfill import reprocess_target_impacts
+
+    result = reprocess_target_impacts(
+        apply=True,
+        batch_size=batch_size,
+        max_active=max_active,
+    )
+    if not result["complete"]:
+        reprocess_target_impacts_v2.apply_async(
+            kwargs={"batch_size": batch_size, "max_active": max_active},
+            countdown=60,
+        )
+    return result
 
 
 @celery_app.task(
@@ -2795,6 +2871,19 @@ def refresh_crypto_universe() -> dict:
     init_db()
     registry = ProviderRegistry()
     assets = registry.refresh_crypto_universe()
+    with SessionLocal() as db:
+        for asset in assets:
+            upsert_asset(db, asset)
+    return {"assets": len(assets)}
+
+
+@celery_app.task(name="market_loop.refresh_macro_universe")
+def refresh_macro_universe() -> dict:
+    """Refresh FMP continuous commodity and spot-FX instrument identities."""
+
+    init_db()
+    registry = ProviderRegistry()
+    assets = registry.refresh_macro_universe()
     with SessionLocal() as db:
         for asset in assets:
             upsert_asset(db, asset)

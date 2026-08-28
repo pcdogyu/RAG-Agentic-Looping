@@ -207,6 +207,14 @@ h1 span { color: var(--mint); font-weight: 400; }
 .trace-result p { grid-column: 1 / -1; margin: 4px 0 0; color: var(--result-copy); font-size: 12px; line-height: 1.7; }
 .event-report-result { border-color: rgba(88,214,255,.24); background: var(--event-result-surface); }
 .event-report-result strong { color: var(--cyan); }
+.event-report-result .target-impact-scroll { grid-column: 1 / -1; overflow-x: auto; }
+.target-impact-table { width: 100%; min-width: 820px; border-collapse: collapse; font-size: 11px; }
+.target-impact-table th, .target-impact-table td { padding: 10px 9px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+.target-impact-table th { color: var(--muted); font-weight: 500; white-space: nowrap; }
+.target-impact-table td { color: var(--result-copy); line-height: 1.5; }
+.target-impact-table td > strong { display: block; font: 600 12px "Noto Sans SC", sans-serif; color: var(--text); }
+.target-impact-table small { display: block; margin-top: 2px; color: var(--muted); font: 10px "DM Mono", monospace; }
+.event-report-result .target-missing { padding-top: 4px; color: var(--muted); }
 .trace-pending { padding: 16px 18px; border: 1px dashed var(--line); border-radius: 8px; color: var(--muted); font-size: 12px; }
 
 .model-logs-page { min-height: 100vh; }

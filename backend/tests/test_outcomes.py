@@ -209,6 +209,49 @@ def test_missing_benchmark_is_explicit_without_losing_raw_outcome():
     assert outcome.alpha is None
 
 
+@pytest.mark.parametrize(
+    ("target", "prices"),
+    [
+        (
+            asset(
+                "CLUSD",
+                asset_id="commodity:fmp:CLUSD",
+                market=Market.COMMODITY,
+                asset_class=AssetClass.COMMODITY,
+            ),
+            [
+                {"date": "2025-01-01", "close": 70},
+                {"date": "2025-01-31", "close": 77},
+            ],
+        ),
+        (
+            asset(
+                "EURUSD",
+                asset_id="fx:fmp:EURUSD",
+                market=Market.FX,
+                asset_class=AssetClass.FX,
+            ),
+            [
+                {"date": "2025-01-01", "close": 1.05},
+                {"date": "2025-01-31", "close": 1.1025},
+            ],
+        ),
+    ],
+)
+def test_commodity_and_fx_recommendations_can_be_backtested(target, prices):
+    registry = StaticRegistry({target.asset_id: prices}, [target])
+
+    outcome = OutcomeService(registry)._evaluate(
+        recommendation(target),
+        30,
+        observed_at=datetime(2025, 2, 10, tzinfo=UTC),
+    )
+
+    assert outcome is not None
+    assert outcome.raw_return == pytest.approx(0.10 if target.market is Market.COMMODITY else 0.05)
+    assert outcome.benchmark_status == "missing"
+
+
 def test_btc_is_marked_as_self_benchmark_instead_of_fake_zero_alpha():
     btc = asset(
         "BTC",

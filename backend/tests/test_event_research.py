@@ -3,9 +3,17 @@ from datetime import UTC, datetime
 from hashlib import sha256
 
 from backend.app.config import Settings
-from backend.app.domain import EventResearchRun, NewsEvent, NewsItem, SourceQuality
+from backend.app.domain import (
+    EventResearchRun,
+    NewsEvent,
+    NewsItem,
+    RunStatus,
+    SourceQuality,
+    TargetType,
+)
 from backend.app.main import _analysis_logs
 from backend.app.services.event_research import EventReportDraft, EventResearchService
+from backend.app.services.macro_impacts import TargetImpactDraft
 from backend.app.services.mcp_registry import SearchResult
 from backend.app.storage import (
     list_event_research_runs,
@@ -27,6 +35,15 @@ class EventResearchLlm:
             risks=["单一来源可能不完整"],
             unresolved_questions=["是否有独立来源确认"],
             evidence_ids=[evidence_id],
+            impacts=[
+                TargetImpactDraft(
+                    target_type=TargetType.OTHER,
+                    target_name="区域风险偏好",
+                    rationale="证据尚不足以绑定交易工具。",
+                    evidence_ids=[evidence_id],
+                    missing_information=["tradable_asset_path"],
+                )
+            ],
             confidence=0.72,
         ).model_dump(mode="json")
 
@@ -250,3 +267,52 @@ def test_event_research_uses_one_bounded_web_supplement(monkeypatch, db, tmp_pat
     )
     assert len(result.evidence) == 2
     assert [step.phase for step in result.analysis_steps].count("web_search_verification") == 1
+
+
+def test_historical_event_replay_never_calls_live_search(monkeypatch, db, tmp_path):
+    observed = datetime(2025, 8, 22, 12, 0, tzinfo=UTC)
+    news = NewsItem(
+        source="Aggregator",
+        source_quality=SourceQuality.AGGREGATOR,
+        title="历史供应链事件",
+        summary="当时只有一个已观察来源。",
+        url="https://archive.example/event",
+        published_at=observed,
+        observed_at=observed,
+        as_of=observed,
+        content_hash=sha256(b"historical-event-replay").hexdigest(),
+    )
+    event = NewsEvent(
+        news_item_ids=[news.id],
+        headline=news.title,
+        event_type="supply_chain",
+        direct_impact=news.summary,
+        source_quality=news.source_quality,
+        published_at=observed,
+        observed_at=observed,
+        as_of=observed,
+    )
+    save_news(db, news)
+    save_event(db, event)
+    monkeypatch.setattr(
+        "backend.app.services.event_research.search_enabled_sources_sync",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("historical replay attempted live search")
+        ),
+    )
+
+    result = EventResearchService(
+        db,
+        Settings(fmp_access_token="", fmp_mcp_url="", reports_dir=tmp_path),
+        EventResearchLlm(),
+    ).run(
+        event,
+        EventResearchRun(
+            event_id=event.id,
+            as_of=observed,
+            historical_replay=True,
+        ),
+    )
+
+    assert result.status is not RunStatus.COMPLETED
+    assert len(result.evidence) == 1

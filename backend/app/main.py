@@ -1473,7 +1473,11 @@ def _analysis_logs(db: Session, limit: int) -> list[dict]:
         asset = (
             run.asset
             if run
-            else (event.candidates[0].asset if event and event.candidates else None)
+            else (
+                None
+                if event_run
+                else (event.candidates[0].asset if event and event.candidates else None)
+            )
         )
         status = (
             run.status.value
@@ -1512,6 +1516,7 @@ def _analysis_logs(db: Session, limit: int) -> list[dict]:
                     "headline": event.headline,
                     "event_type": event.event_type.value,
                     "direct_impact": event.direct_impact,
+                    "actions": [item.model_dump(mode="json") for item in event.actions],
                     "priority": event.priority,
                 }
                 if event
@@ -1537,6 +1542,11 @@ def _analysis_logs(db: Session, limit: int) -> list[dict]:
                     ),
                     "signal_status": recommendation.signal_status.value,
                     "summary": recommendation.thesis.summary,
+                    "impact": (
+                        recommendation.impact.model_dump(mode="json")
+                        if recommendation.impact
+                        else None
+                    ),
                 }
                 if recommendation
                 else (
@@ -1551,6 +1561,16 @@ def _analysis_logs(db: Session, limit: int) -> list[dict]:
                         "catalysts": report.catalysts,
                         "risks": report.risks,
                         "unresolved_questions": report.unresolved_questions,
+                        "scoring_version": report.scoring_version,
+                        "fact_confidence": report.fact_confidence,
+                        "macro_factors": [
+                            item.model_dump(mode="json") for item in report.macro_factors
+                        ],
+                        "impacts": [
+                            item.model_dump(mode="json") for item in report.impacts
+                        ],
+                        "trade_status": report.trade_status.value,
+                        "missing_information": report.missing_information,
                     }
                     if report
                     else None
