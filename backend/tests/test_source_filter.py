@@ -61,6 +61,7 @@ def test_whitelist_miss_is_recorded_as_a_filter_reason(db):
     assert accepted == []
     assert filtered == 1
     assert list_filter_logs(db)[0]["matched_keyword"] == WHITELIST_MISS_REASON
+    assert list_filter_logs(db)[0]["rescan_allowed"] is True
 
 
 def test_blacklist_vetoes_whitelist_and_keywords_are_normalized():
@@ -201,3 +202,87 @@ def test_public_filter_api_supports_update_validation_logs_and_reset(db):
     assert len(logs.json()["items"]) == 1
     assert reset.json()["blacklist_keywords"] == ["天气"]
     assert reset.json()["whitelist_keywords"] == []
+
+
+def test_whitelist_miss_rescan_restores_news_and_queues_full_pipeline(
+    db, monkeypatch
+):
+    from backend.app import worker
+
+    save_source_filter(
+        db,
+        SourceFilterConfig(whitelist_keywords=["Apple"], blacklist_keywords=["天气"]),
+    )
+    blocked = news("Microsoft earnings", suffix="manual-rescan")
+    filter_news_items(db, [blocked])
+    log = list_filter_logs(db)[0]
+    queued = []
+    monkeypatch.setattr(
+        worker,
+        "enqueue_news_extraction_retry",
+        lambda item, **kwargs: queued.append((item, kwargs)) or "extract-task",
+    )
+
+    with TestClient(app) as client:
+        response = client.post(f"/api/v1/source-filter/logs/{log['id']}/rescan")
+
+    assert response.status_code == 202
+    assert response.json()["status"] == "queued"
+    assert response.json()["task_id"] == "extract-task"
+    assert queued[0][0].title == blocked.title
+    assert queued[0][0].raw_metadata["manual_source_filter_rescan"] is True
+    assert queued[0][1] == {"force_asset_mapping": True}
+    assert get_news(db, queued[0][0].id) is not None
+    assert list_filter_logs(db) == []
+
+
+def test_blacklist_filter_record_cannot_be_manually_rescanned(db, monkeypatch):
+    from backend.app import worker
+
+    save_source_filter(
+        db,
+        SourceFilterConfig(whitelist_keywords=["天气"], blacklist_keywords=["天气"]),
+    )
+    filter_news_items(db, [news("城市天气预报", suffix="blocked-rescan")])
+    log = list_filter_logs(db)[0]
+    monkeypatch.setattr(
+        worker,
+        "enqueue_news_extraction_retry",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("blacklist record was queued")
+        ),
+    )
+
+    with TestClient(app) as client:
+        response = client.post(f"/api/v1/source-filter/logs/{log['id']}/rescan")
+
+    assert response.status_code == 409
+    assert len(list_filter_logs(db)) == 1
+
+
+def test_whitelist_miss_rescan_restores_audit_when_queue_publish_fails(
+    db, monkeypatch
+):
+    from backend.app import worker
+
+    save_source_filter(
+        db,
+        SourceFilterConfig(whitelist_keywords=["Apple"], blacklist_keywords=[]),
+    )
+    blocked = news("Microsoft earnings", suffix="rescan-publish-failure")
+    filter_news_items(db, [blocked])
+    log = list_filter_logs(db)[0]
+    monkeypatch.setattr(
+        worker,
+        "enqueue_news_extraction_retry",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("broker down")),
+    )
+
+    with TestClient(app) as client:
+        response = client.post(f"/api/v1/source-filter/logs/{log['id']}/rescan")
+
+    assert response.status_code == 503
+    restored = list_filter_logs(db)
+    assert len(restored) == 1
+    assert restored[0]["id"] == log["id"]
+    assert restored[0]["rescan_allowed"] is True

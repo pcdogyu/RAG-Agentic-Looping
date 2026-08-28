@@ -1112,6 +1112,7 @@ def test_unmapped_event_queues_only_one_visible_7b_mapping_task(db, monkeypatch)
     assert queued[0]["queue"] == "mapping.assist-0"
     assert queued[0]["kwargs"]["model_instance_id"] == "assist-0"
     assert queued[1]["priority"] == 0
+    assert queued[1]["kwargs"]["force_mapping"] is True
     assert event.analysis_steps[-1].phase == "asset_mapping_queue"
     assert event.analysis_steps[-1].status == "queued"
     assert event.analysis_steps[-1].model == "qwen2.5:7b"
@@ -1305,7 +1306,67 @@ def test_standalone_news_retry_is_recorded_and_sent_with_requested_priority(
     ]
 
 
-def test_7b_mapping_persists_candidates_then_queues_target_event_report(db, monkeypatch):
+def test_standalone_news_rescan_forces_downstream_7b_mapping(db, monkeypatch):
+    observed = datetime(2026, 8, 22, 12, 0, tzinfo=UTC)
+    news = NewsItem(
+        source="Example",
+        title="Force this news through mapping",
+        url="https://example.com/force-news-mapping",
+        published_at=observed,
+        observed_at=observed,
+        as_of=observed,
+        content_hash=sha256(b"force-news-mapping").hexdigest(),
+    )
+    save_news(db, news)
+    event = NewsEvent(
+        news_item_ids=[news.id],
+        headline=news.title,
+        event_type="other",
+        direct_impact=news.title,
+        source_quality=news.source_quality,
+        published_at=observed,
+        observed_at=observed,
+        as_of=observed,
+        candidates=[
+            CandidateAsset(
+                asset=SEED_ASSETS[0],
+                relationship="direct",
+                relevance=0.95,
+                rationale="deterministic mapping",
+            )
+        ],
+    )
+    captured = []
+    monkeypatch.setattr(worker, "init_db", lambda: None)
+    monkeypatch.setattr(worker.settings, "auto_research", False)
+    monkeypatch.setattr(worker, "model_task_is_cancelled", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(worker, "update_model_task", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        worker.EventService,
+        "ingest",
+        lambda *_args, **_kwargs: [event],
+    )
+    monkeypatch.setattr(
+        worker,
+        "enqueue_asset_mapping",
+        lambda _db, queued_event, **kwargs: (
+            captured.append((queued_event.id, kwargs)) or "mapping-task"
+        ),
+    )
+
+    result = worker.retry_news_item.run(
+        str(news.id),
+        force_asset_mapping=True,
+    )
+
+    assert result["status"] == "completed"
+    assert result["asset_mapping_queued"] == 1
+    assert captured == [(event.id, {"force": True})]
+
+
+def test_forced_7b_mapping_replaces_candidates_then_queues_target_event_report(
+    db, monkeypatch
+):
     observed = datetime(2026, 8, 22, 12, 0, tzinfo=UTC)
     news = NewsItem(
         source="Example",
@@ -1337,6 +1398,14 @@ def test_7b_mapping_persists_candidates_then_queues_target_event_report(db, monk
         published_at=observed,
         observed_at=observed,
         as_of=observed,
+        candidates=[
+            CandidateAsset(
+                asset=SEED_ASSETS[-1],
+                relationship="direct",
+                relevance=0.7,
+                rationale="preexisting deterministic mapping",
+            )
+        ],
     )
     save_event(db, event)
     monkeypatch.setattr(
@@ -1357,7 +1426,7 @@ def test_7b_mapping_persists_candidates_then_queues_target_event_report(db, monk
         ),
     )
 
-    result = worker.resolve_event_assets.run(str(event.id))
+    result = worker.resolve_event_assets.run(str(event.id), force_mapping=True)
 
     db.expire_all()
     persisted = get_event(db, event.id)

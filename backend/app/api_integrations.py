@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 from datetime import datetime
+from hashlib import sha256
 from typing import Annotated, Any
 from uuid import UUID
 
@@ -16,11 +17,19 @@ from backend.app.config import get_settings
 from backend.app.db import (
     IntegrationSettingRow,
     McpSourceRow,
+    NewsFilterLogRow,
     RecommendationRow,
     ResearchRunRow,
     get_db,
 )
-from backend.app.domain import Recommendation, ResearchRun, SignalStatus, utc_now
+from backend.app.domain import (
+    NewsItem,
+    Recommendation,
+    ResearchRun,
+    SignalStatus,
+    SourceQuality,
+    utc_now,
+)
 from backend.app.services.fact_sources import (
     BUILTIN_SOURCE_GROUPS,
     FACT_SOURCE_GROUPS,
@@ -47,13 +56,21 @@ from backend.app.services.mcp_registry import (
 )
 from backend.app.services.secret_store import encrypt_secret
 from backend.app.services.source_filter import (
+    WHITELIST_MISS_REASON,
     SourceFilterConfig,
     list_filter_logs,
     reset_source_filter,
     save_source_filter,
     source_filter_payload,
 )
-from backend.app.storage import get_event, get_news, get_run
+from backend.app.storage import (
+    event_news_item_ids,
+    get_event,
+    get_news,
+    get_news_by_content_hash,
+    get_run,
+    save_news,
+)
 
 router = APIRouter()
 
@@ -101,6 +118,95 @@ def get_source_filter_logs(
     db: Db, limit: int = Query(default=100, ge=1, le=500)
 ) -> dict[str, Any]:
     return {"items": list_filter_logs(db, limit=limit)}
+
+
+def _rescan_source_quality(source: str) -> SourceQuality:
+    normalized = source.casefold()
+    if normalized == "sec" or normalized.startswith("sec ") or "sec.gov" in normalized:
+        return SourceQuality.OFFICIAL
+    if "fmp" in normalized:
+        return SourceQuality.PROFESSIONAL
+    return SourceQuality.AGGREGATOR
+
+
+@router.post("/api/v1/source-filter/logs/{log_id}/rescan", status_code=202)
+def rescan_source_filter_log(log_id: UUID, db: Db) -> dict[str, Any]:
+    row = db.get(NewsFilterLogRow, log_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="filtered news record not found")
+    if row.matched_keyword != WHITELIST_MISS_REASON:
+        raise HTTPException(
+            status_code=409,
+            detail="only whitelist-miss records can be rescanned",
+        )
+
+    content_hash = row.content_hash
+    news = get_news_by_content_hash(db, content_hash)
+    if news is not None and news.id in event_news_item_ids(db):
+        content_hash = sha256(f"{row.content_hash}:rescan:{row.id}".encode()).hexdigest()
+        news = get_news_by_content_hash(db, content_hash)
+    if news is None:
+        now = utc_now()
+        news = NewsItem(
+            source=row.source,
+            source_quality=_rescan_source_quality(row.source),
+            title=row.title,
+            url=row.url,
+            published_at=row.published_at,
+            observed_at=now,
+            as_of=now,
+            content_hash=content_hash,
+            raw_metadata={
+                "manual_source_filter_rescan": True,
+                "source_filter_log_id": str(row.id),
+                "original_filter_reason": row.matched_keyword,
+                "original_content_hash": row.content_hash,
+            },
+        )
+        if not save_news(db, news):
+            news = get_news_by_content_hash(db, content_hash)
+        if news is None:
+            raise HTTPException(status_code=409, detail="filtered news could not be restored")
+
+    log_snapshot = {
+        "id": row.id,
+        "content_hash": row.content_hash,
+        "source": row.source,
+        "title": row.title,
+        "url": row.url,
+        "matched_keyword": row.matched_keyword,
+        "published_at": row.published_at,
+        "first_filtered_at": row.first_filtered_at,
+        "last_filtered_at": row.last_filtered_at,
+        "hit_count": row.hit_count,
+    }
+    db.delete(row)
+    db.commit()
+    try:
+        from backend.app.worker import enqueue_news_extraction_retry
+
+        task_id = enqueue_news_extraction_retry(
+            news,
+            force_asset_mapping=True,
+        )
+    except Exception as exc:
+        if db.get(NewsFilterLogRow, log_id) is None:
+            db.add(NewsFilterLogRow(**log_snapshot))
+            try:
+                db.commit()
+            except IntegrityError:
+                db.rollback()
+        raise HTTPException(
+            status_code=503,
+            detail=f"news rescan could not be queued: {type(exc).__name__}",
+        ) from exc
+
+    return {
+        "status": "queued",
+        "task_id": task_id,
+        "news_id": str(news.id),
+        "title": news.title,
+    }
 
 
 def _apply_source(row: McpSourceRow, payload: SourceInput, *, creating: bool = False) -> None:

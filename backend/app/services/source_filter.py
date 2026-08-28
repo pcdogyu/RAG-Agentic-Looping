@@ -172,6 +172,7 @@ def _log_payload(row: NewsFilterLogRow) -> dict[str, Any]:
         "first_filtered_at": as_utc(row.first_filtered_at),
         "last_filtered_at": as_utc(row.last_filtered_at),
         "hit_count": row.hit_count,
+        "rescan_allowed": row.matched_keyword == WHITELIST_MISS_REASON,
     }
 
 

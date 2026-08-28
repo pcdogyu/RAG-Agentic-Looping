@@ -1993,7 +1993,30 @@ type SourceFilterLog = {
   first_filtered_at: string;
   last_filtered_at: string;
   hit_count: number;
+  rescan_allowed: boolean;
 };
+
+export function sourceFilterRescanPath(logId: string) {
+  return `/api/v1/source-filter/logs/${encodeURIComponent(logId)}/rescan`;
+}
+
+export function SourceFilterAuditRow({
+  item,
+  busy,
+  onRescan,
+}: {
+  item: SourceFilterLog;
+  busy: boolean;
+  onRescan: (item: SourceFilterLog) => void;
+}) {
+  return <article>
+    <div><span>{item.source} · {new Date(item.last_filtered_at).toLocaleString("zh-CN")}</span><h4><a href={item.url} target="_blank" rel="noreferrer">{item.title}</a></h4></div>
+    <div className="filter-log-result">
+      <div><strong>过滤原因：{item.matched_keyword}</strong><small>累计 {item.hit_count} 次</small></div>
+      {item.rescan_allowed && <button type="button" disabled={busy} onClick={() => onRescan(item)}>{busy ? "重新扫描中…" : "重新扫描"}</button>}
+    </div>
+  </article>;
+}
 
 const defaultSourceFilter: SourceFilterConfig = {
   enabled: true,
@@ -2022,6 +2045,7 @@ export function SourceFilterPage({ apiBase }: { apiBase: string }) {
   const [logs, setLogs] = useState<SourceFilterLog[]>([]);
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(true);
+  const [rescanningIds, setRescanningIds] = useState<Set<string>>(new Set());
 
   function applyConfig(payload: SourceFilterConfig) {
     setConfig(payload);
@@ -2068,6 +2092,30 @@ export function SourceFilterPage({ apiBase }: { apiBase: string }) {
     applyConfig(await response.json() as SourceFilterConfig);
     setMessage("已恢复默认过滤规则。");
   }
+  async function rescan(item: SourceFilterLog) {
+    setRescanningIds((current) => new Set(current).add(item.id));
+    try {
+      const response = await fetch(`${apiBase}${sourceFilterRescanPath(item.id)}`, {
+        method: "POST",
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.detail || "重新扫描失败");
+      setLogs((current) => current.filter((value) => value.id !== item.id));
+      setConfig((current) => ({
+        ...current,
+        retained_log_count: Math.max(0, current.retained_log_count - 1),
+      }));
+      setMessage(`已将“${item.title}”重新送入 3B 抽取、7B 股票映射和后续研究队列。`);
+    } catch (reason) {
+      setMessage(reason instanceof Error ? reason.message : "重新扫描失败");
+    } finally {
+      setRescanningIds((current) => {
+        const next = new Set(current);
+        next.delete(item.id);
+        return next;
+      });
+    }
+  }
   const whitelistCount = parseFilterKeywords(whitelist).length;
   const blacklistCount = parseFilterKeywords(blacklist).length;
   return <section className="app-page source-filter-page">
@@ -2091,10 +2139,7 @@ export function SourceFilterPage({ apiBase }: { apiBase: string }) {
     {message && <div className={message.includes("失败") ? "page-error" : "page-message"}>{message}</div>}
     <section className="filter-audit" aria-labelledby="filter-audit-title">
       <div className="filter-audit-heading"><div><p className="eyebrow">FILTER AUDIT</p><h3 id="filter-audit-title">最近过滤记录</h3></div><span>{loading ? "读取中…" : `${logs.length} 条`}</span></div>
-      <div className="filter-log-list">{logs.map((item) => <article key={item.id}>
-        <div><span>{item.source} · {new Date(item.last_filtered_at).toLocaleString("zh-CN")}</span><h4><a href={item.url} target="_blank" rel="noreferrer">{item.title}</a></h4></div>
-        <div><strong>过滤原因：{item.matched_keyword}</strong><small>累计 {item.hit_count} 次</small></div>
-      </article>)}</div>
+      <div className="filter-log-list">{logs.map((item) => <SourceFilterAuditRow key={item.id} item={item} busy={rescanningIds.has(item.id)} onRescan={rescan} />)}</div>
       {!loading && logs.length === 0 && <div className="page-empty">还没有新闻标题被过滤。</div>}
     </section>
   </section>;

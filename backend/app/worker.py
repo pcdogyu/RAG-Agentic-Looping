@@ -1591,7 +1591,10 @@ def enqueue_asset_mapping(
     try:
         task = resolve_event_assets.apply_async(
             args=[str(event.id)],
-            kwargs={"model_instance_id": instance.id},
+            kwargs={
+                "model_instance_id": instance.id,
+                **({"force_mapping": True} if force else {}),
+            },
             queue=broker_queue_name("assist", instance.id),
             task_id=task_id,
             **({"priority": priority} if priority is not None else {}),
@@ -1769,6 +1772,7 @@ def enqueue_news_extraction_retry(
     *,
     priority: int | None = None,
     model_instance_id: str | None = None,
+    force_asset_mapping: bool = False,
 ) -> str:
     """Queue a standalone extraction attempt without reopening a completed scan."""
 
@@ -1793,7 +1797,10 @@ def enqueue_news_extraction_retry(
     try:
         task = retry_news_item.apply_async(
             args=[str(news.id)],
-            kwargs={"model_instance_id": instance.id},
+            kwargs={
+                "model_instance_id": instance.id,
+                **({"force_asset_mapping": True} if force_asset_mapping else {}),
+            },
             queue=broker_queue_name("extract", instance.id),
             task_id=task_id,
             **({"priority": priority} if priority is not None else {}),
@@ -2275,7 +2282,12 @@ def extract_news_item(
 
 @celery_app.task(bind=True, name="market_loop.retry_news_item", max_retries=2)
 @model_instance_task("extract")
-def retry_news_item(self, news_id: str, model_instance_id: str | None = None) -> dict[str, Any]:
+def retry_news_item(
+    self,
+    news_id: str,
+    model_instance_id: str | None = None,
+    force_asset_mapping: bool = False,
+) -> dict[str, Any]:
     """Retry one durable news item independently and queue its downstream work."""
 
     task_id = str(self.request.id or f"news:{news_id}")
@@ -2308,10 +2320,17 @@ def retry_news_item(self, news_id: str, model_instance_id: str | None = None) ->
             events = EventService(registry).ingest(db, [news])
             research_queued = 0
             mapping_queued = 0
-            if settings.auto_research:
+            if settings.auto_research or force_asset_mapping:
                 for event in events:
-                    if not event.candidates:
-                        mapping_queued += int(enqueue_asset_mapping(db, event) is not None)
+                    if force_asset_mapping or not event.candidates:
+                        mapping_queued += int(
+                            enqueue_asset_mapping(
+                                db,
+                                event,
+                                force=force_asset_mapping,
+                            )
+                            is not None
+                        )
                     else:
                         report_task_id, _ = enqueue_event_report(db, event)
                         research_queued += int(report_task_id is not None)
@@ -2481,7 +2500,12 @@ def finalize_news_extraction(
 
 @celery_app.task(bind=True, name="market_loop.resolve_event_assets", max_retries=2)
 @model_instance_task("assist")
-def resolve_event_assets(self, event_id: str, model_instance_id: str | None = None) -> dict:
+def resolve_event_assets(
+    self,
+    event_id: str,
+    model_instance_id: str | None = None,
+    force_mapping: bool = False,
+) -> dict:
     task_id = str(self.request.id or f"event:{event_id}")
     if model_task_is_cancelled("assist", task_id):
         return {"status": "cancelled", "event_id": event_id}
@@ -2515,7 +2539,7 @@ def resolve_event_assets(self, event_id: str, model_instance_id: str | None = No
         registry = ProviderRegistry(assets=list_assets(db))
         try:
             mapping_result = None
-            if not event.candidates:
+            if force_mapping or not event.candidates:
                 _replace_event_step(
                     event,
                     AnalysisStep(

@@ -28,6 +28,8 @@ import {
   searchSourceLabel,
   SearchPage,
   SourceFilterPage,
+  SourceFilterAuditRow,
+  sourceFilterRescanPath,
   SourcesPage,
   type Recommendation,
 } from "./AppPages";
@@ -478,5 +480,34 @@ describe("open source and search settings", () => {
     expect(parseFilterKeywords(" 天气, WEATHER，weather\n公告 ")).toEqual([
       "天气", "WEATHER", "公告",
     ]);
+  });
+
+  it("offers rescan only for whitelist misses", () => {
+    const item = {
+      id: "filter-log-1",
+      source: "FMP Stock News",
+      title: "Tesla catalyst",
+      url: "https://example.com/tesla",
+      matched_keyword: "未命中白名单",
+      published_at: "2026-08-29T00:00:00Z",
+      first_filtered_at: "2026-08-29T00:01:00Z",
+      last_filtered_at: "2026-08-29T00:02:00Z",
+      hit_count: 3,
+      rescan_allowed: true,
+    };
+    const allowed = renderToStaticMarkup(createElement(SourceFilterAuditRow, {
+      item, busy: false, onRescan: () => undefined,
+    }));
+    const blocked = renderToStaticMarkup(createElement(SourceFilterAuditRow, {
+      item: { ...item, matched_keyword: "天气", rescan_allowed: false },
+      busy: false,
+      onRescan: () => undefined,
+    }));
+
+    expect(sourceFilterRescanPath(item.id)).toBe(
+      "/api/v1/source-filter/logs/filter-log-1/rescan",
+    );
+    expect(allowed).toContain(">重新扫描</button>");
+    expect(blocked).not.toContain(">重新扫描</button>");
   });
 });

@@ -408,6 +408,11 @@ h1 span { color: var(--mint); font-weight: 400; }
 .filter-log-list article:last-child { border-bottom: 0; }
 .filter-log-list article > div { display: grid; gap: 5px; min-width: 0; }
 .filter-log-list article > div:last-child { justify-items: end; }
+.filter-log-list .filter-log-result { display: flex; grid-template-columns: none; align-items: center; justify-content: flex-end; gap: 13px; }
+.filter-log-result > div { display: grid; gap: 5px; justify-items: end; }
+.filter-log-result button { padding: 7px 10px; border: 1px solid rgba(99,242,186,.36); border-radius: 6px; color: var(--mint); background: transparent; font-size: 11px; cursor: pointer; white-space: nowrap; }
+.filter-log-result button:hover { border-color: var(--mint); background: rgba(99,242,186,.08); }
+.filter-log-result button:disabled { opacity: .5; cursor: default; }
 .filter-log-list span, .filter-log-list small { color: var(--muted); font-size: 10px; }
 .filter-log-list h4 { margin: 0; font-size: 14px; }
 .filter-log-list a { color: var(--text); text-decoration: none; }
