@@ -86,6 +86,80 @@ def _empty_extraction(now: datetime):
     }
 
 
+def test_extract_overview_deduplicates_tracking_and_hides_stale_running_records(db):
+    now = datetime(2026, 8, 28, 10, 0, tzinfo=UTC)
+    redis = FakeRedis()
+    record_model_task(
+        "extract",
+        task_id="current-extract",
+        kind="news_extraction",
+        title="新闻抽取任务",
+        queued_at=now - timedelta(minutes=2),
+        redis_client=redis,
+    )
+    update_model_task(
+        "extract",
+        "current-extract",
+        status="running",
+        occurred_at=now - timedelta(seconds=30),
+        redis_client=redis,
+    )
+    record_model_task(
+        "extract",
+        task_id="stale-extract",
+        kind="news_extraction",
+        title="新闻抽取任务",
+        queued_at=now - timedelta(minutes=10),
+        redis_client=redis,
+    )
+    update_model_task(
+        "extract",
+        "stale-extract",
+        status="running",
+        occurred_at=now - timedelta(minutes=9),
+        redis_client=redis,
+    )
+    extraction = _empty_extraction(now)
+    extraction["state"] = "running"
+    extraction["total_items"] = 1
+    extraction["counts"]["running"] = 1
+    extraction["items"] = [
+        {
+            "task_id": "current-extract",
+            "instance_id": "extract-0",
+            "news_id": "news-current",
+            "title": "当前真实新闻标题",
+            "source": "金十",
+            "status": "running",
+            "attempt": 1,
+            "queued_at": (now - timedelta(minutes=2)).isoformat(),
+            "started_at": (now - timedelta(seconds=30)).isoformat(),
+            "updated_at": (now - timedelta(seconds=30)).isoformat(),
+        }
+    ]
+
+    overview = build_model_queue_overview(
+        db,
+        extraction_queue=extraction,
+        inference_statuses={
+            "extract": _inference(running=1),
+            "research": _inference(),
+            "assist": _inference(),
+            "code": _inference(),
+        },
+        threads={"extract": 4, "research": 8, "assist": 8, "code": 4},
+        limit=500,
+        settings=Settings(_env_file=None, model_task_lease_seconds=180),
+        redis_client=redis,
+        generated_at=now,
+    )
+
+    extract = overview.queues[0]
+    assert extract.counts.running == 1
+    assert [item.task_id for item in extract.tasks] == ["current-extract"]
+    assert extract.tasks[0].title == "当前真实新闻标题"
+
+
 def test_cancel_model_tasks_is_lane_scoped_and_terminal_safe():
     redis = FakeRedis()
     record_model_task(

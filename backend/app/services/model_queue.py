@@ -707,8 +707,17 @@ def _evolution_candidate_tasks(
 def _merge_tasks(
     primary: list[ModelQueueTask], fallback: list[ModelQueueTask]
 ) -> list[ModelQueueTask]:
+    task_ids = {item.task_id for item in primary}
     entity_ids = {item.entity_id for item in primary if item.entity_id}
-    return [*primary, *(item for item in fallback if item.entity_id not in entity_ids)]
+    return [
+        *primary,
+        *(
+            item
+            for item in fallback
+            if item.task_id not in task_ids
+            and (not item.entity_id or item.entity_id not in entity_ids)
+        ),
+    ]
 
 
 def _sort_tasks(tasks: list[ModelQueueTask]) -> list[ModelQueueTask]:
@@ -1381,9 +1390,16 @@ def build_model_queue_overview(
         if client is not None
         else []
     )
+    extract_lease_cutoff = now - timedelta(seconds=active_settings.model_task_lease_seconds)
+    extract_records = [
+        item
+        for item in extract_records
+        if item.status not in RUNNING_STATUSES or item.updated_at > extract_lease_cutoff
+    ]
+    extraction_tasks = _extraction_tasks(extraction_queue, now, redis_client=client)
     extract_tasks = _merge_tasks(
+        extraction_tasks,
         extract_records,
-        _extraction_tasks(extraction_queue, now, redis_client=client),
     )
     research_live_ids = live_research_run_ids(client) if client is not None else None
     research_tasks = _research_tasks(
@@ -1426,10 +1442,12 @@ def build_model_queue_overview(
     research_inference = inference_statuses.get("research", {})
     assist_inference = inference_statuses.get("assist", {})
     code_inference = inference_statuses.get("code", {})
-    tracked_extraction_counts = _counts(extract_records)
+    merged_extraction_counts = _counts(extract_tasks)
     extraction_counts = {
-        key: int((extraction_queue.get("counts") or {}).get(key) or 0)
-        + int(getattr(tracked_extraction_counts, key))
+        key: max(
+            int((extraction_queue.get("counts") or {}).get(key) or 0),
+            int(getattr(merged_extraction_counts, key)),
+        )
         for key in {"queued", "running", "retrying", "verifying", "completed", "failed"}
     }
     queues = [

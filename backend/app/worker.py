@@ -291,15 +291,37 @@ def model_instance_task(lane: ModelLane):
                     )
             except Retry:
                 update_instance_assignment(lane, task_id, status="retrying")
+                if lane in {"extract", "assist", "code"}:
+                    update_model_task(
+                        lane,
+                        task_id,
+                        status="retrying",
+                        instance_id=selected.id,
+                    )
                 raise
-            except Exception:
+            except Exception as exc:
                 update_instance_assignment(lane, task_id, status="failed")
+                if lane in {"extract", "assist", "code"}:
+                    update_model_task(
+                        lane,
+                        task_id,
+                        status="failed",
+                        instance_id=selected.id,
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
                 raise
             finally:
                 heartbeat_stop.set()
                 if heartbeat_thread is not None:
                     heartbeat_thread.join(timeout=1)
             update_instance_assignment(lane, task_id, status="completed")
+            if lane in {"extract", "assist", "code"}:
+                update_model_task(
+                    lane,
+                    task_id,
+                    status="completed",
+                    instance_id=selected.id,
+                )
             return result
 
         return wrapped

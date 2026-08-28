@@ -118,6 +118,7 @@ def test_instance_task_delays_when_every_instance_is_offline(monkeypatch):
 def test_instance_task_refreshes_running_model_task_lease(monkeypatch):
     selected = SimpleNamespace(id="extract-0")
     touches = []
+    statuses = []
 
     class FakeTask:
         request = SimpleNamespace(
@@ -133,7 +134,11 @@ def test_instance_task_refreshes_running_model_task_lease(monkeypatch):
     monkeypatch.setattr(worker, "select_model_instance", lambda *_args, **_kwargs: selected)
     monkeypatch.setattr(worker, "instance_health", lambda *_args, **_kwargs: (True, True))
     monkeypatch.setattr(worker, "update_instance_assignment", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(worker, "update_model_task", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        worker,
+        "update_model_task",
+        lambda *_args, **kwargs: statuses.append(kwargs["status"]),
+    )
     monkeypatch.setattr(
         worker,
         "touch_model_task",
@@ -143,6 +148,37 @@ def test_instance_task_refreshes_running_model_task_lease(monkeypatch):
 
     assert wrapped(FakeTask(), model_instance_id="extract-0") == "completed"
     assert len(touches) >= 2
+    assert statuses == ["running", "completed"]
+
+
+def test_instance_task_marks_tracked_model_task_failed(monkeypatch):
+    selected = SimpleNamespace(id="extract-0")
+    updates = []
+
+    class FakeTask:
+        request = SimpleNamespace(
+            id="failed-task",
+            delivery_info={"routing_key": "extract.extract-0"},
+        )
+
+    def business_task(_self, **_kwargs):
+        raise RuntimeError("inference failed")
+
+    monkeypatch.setattr(worker, "select_model_instance", lambda *_args, **_kwargs: selected)
+    monkeypatch.setattr(worker, "instance_health", lambda *_args, **_kwargs: (True, True))
+    monkeypatch.setattr(worker, "update_instance_assignment", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        worker,
+        "update_model_task",
+        lambda *_args, **kwargs: updates.append(kwargs),
+    )
+    wrapped = worker.model_instance_task("extract")(business_task)
+
+    with pytest.raises(RuntimeError, match="inference failed"):
+        wrapped(FakeTask(), model_instance_id="extract-0")
+
+    assert [item["status"] for item in updates] == ["running", "failed"]
+    assert updates[-1]["error"] == "RuntimeError: inference failed"
 
 
 @pytest.mark.parametrize(
