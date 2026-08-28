@@ -31,6 +31,10 @@ export type AnalysisLog = {
     evidence_complete: boolean;
     directional_evidence_complete?: boolean;
     signal_status?: "technical_failure" | "insufficient_evidence" | "neutral" | "directional";
+    scoring_version?: string;
+    horizon_unit?: "calendar_days" | "trading_sessions";
+    horizon_days?: number;
+    fact_confidence?: number;
     summary: string;
   } | {
     kind: "event_report";
@@ -49,7 +53,7 @@ export type AnalysisLog = {
 const labels: Record<string, string> = {
   strongly_bullish: "强烈看多",
   bullish: "看多",
-  watch: "观察",
+  watch: "观望",
   bearish: "看空",
   strongly_bearish: "强烈看空",
   insufficient_evidence: "证据不足",
@@ -181,11 +185,17 @@ export function AnalysisTraceList({ logs }: { logs: AnalysisLog[] }) {
           {log.result?.kind === "asset_recommendation" ? <div className="trace-result">
             <div><span>信号状态</span><strong>{labels[log.result.signal_status || ""] || "旧版结论"}</strong></div>
             <div><span>最终结果</span><strong>{labels[log.result.rating] || log.result.rating}</strong></div>
-            <div><span>发布分</span><strong>{log.result.score > 0 ? "+" : ""}{log.result.score}</strong></div>
-            <div><span>程序原始分</span><strong>{(log.result.raw_score ?? log.result.score) > 0 ? "+" : ""}{log.result.raw_score ?? log.result.score}</strong></div>
-            <div><span>置信度</span><strong>{Math.round(log.result.confidence * 100)}%</strong></div>
-            <div><span>资料覆盖</span><strong>{log.result.evidence_complete ? "完整" : "不足"}</strong></div>
-            <div><span>方向证据</span><strong>{log.result.directional_evidence_complete ? "通过" : "未通过"}</strong></div>
+            <div><span>{log.result.scoring_version === "short-term-impact-v1" ? "影响分" : "发布分"}</span><strong>{log.result.score > 0 ? "+" : ""}{log.result.score}</strong></div>
+            {log.result.scoring_version === "short-term-impact-v1" ? <>
+              <div><span>新闻事实置信度</span><strong>{Math.round((log.result.fact_confidence ?? log.result.confidence) * 100)}%</strong></div>
+              <div><span>评级置信度</span><strong>{Math.round(log.result.confidence * 100)}%</strong></div>
+              <div><span>研究期限</span><strong>未来 1–{log.result.horizon_days ?? 3} 个交易日</strong></div>
+            </> : <>
+              <div><span>程序原始分</span><strong>{(log.result.raw_score ?? log.result.score) > 0 ? "+" : ""}{log.result.raw_score ?? log.result.score}</strong></div>
+              <div><span>置信度</span><strong>{Math.round(log.result.confidence * 100)}%</strong></div>
+              <div><span>资料覆盖</span><strong>{log.result.evidence_complete ? "完整" : "不足"}</strong></div>
+              <div><span>方向证据</span><strong>{log.result.directional_evidence_complete ? "通过" : "未通过"}</strong></div>
+            </>}
             <p>{log.result.summary}</p>
           </div> : log.result?.kind === "event_report" ? <div className="trace-result event-report-result">
             <div><span>最终结果</span><strong>中性事件研报</strong></div>

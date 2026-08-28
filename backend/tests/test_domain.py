@@ -13,15 +13,23 @@ from backend.app.domain import (
     ("score", "confidence", "complete", "expected"),
     [
         (80, 0.8, True, Rating.STRONGLY_BULLISH),
-        (30, 0.8, True, Rating.BULLISH),
+        (60, 0.8, True, Rating.STRONGLY_BULLISH),
+        (59, 0.8, True, Rating.BULLISH),
+        (15, 0.1, False, Rating.BULLISH),
+        (14, 0.8, True, Rating.WATCH),
         (0, 0.8, True, Rating.WATCH),
-        (-30, 0.8, True, Rating.BEARISH),
+        (-14, 0.8, True, Rating.WATCH),
+        (-15, 0.1, False, Rating.BEARISH),
+        (-59, 0.8, True, Rating.BEARISH),
+        (-60, 0.8, True, Rating.STRONGLY_BEARISH),
         (-80, 0.8, True, Rating.STRONGLY_BEARISH),
-        (90, 0.54, True, Rating.WATCH),
-        (90, 0.9, False, Rating.WATCH),
+        (90, 0.54, True, Rating.STRONGLY_BULLISH),
+        (90, 0.9, False, Rating.STRONGLY_BULLISH),
     ],
 )
-def test_rating_gate(score, confidence, complete, expected):
+def test_rating_uses_score_boundaries_without_confidence_gate(
+    score, confidence, complete, expected
+):
     assert rating_for(score, confidence, complete) is expected
 
 
@@ -38,3 +46,8 @@ def test_rating_gate(score, confidence, complete, expected):
 def test_ungated_model_opinion_uses_five_ratings(score, direction, rating):
     assert model_direction_for(score) is direction
     assert model_rating_for(score) is rating
+
+
+@pytest.mark.parametrize("value", ["watch", "neutral", "观望", "官网"])
+def test_watch_rating_accepts_display_and_common_model_aliases(value):
+    assert Rating(value) is Rating.WATCH

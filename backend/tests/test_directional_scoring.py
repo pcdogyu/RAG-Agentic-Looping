@@ -6,6 +6,9 @@ from backend.app.services.directional_scoring import (
     gated_score,
     normalize_probabilities,
     probabilities_for_score,
+    rating_confidence_score,
+    round_half_up,
+    short_term_impact_score,
 )
 
 
@@ -137,3 +140,50 @@ def test_published_probabilities_are_consistent_with_program_score():
 
     assert (bull, base, bear) == (0.125, 0.4, 0.475)
     assert round(100 * (bull - bear)) == -35
+
+
+def test_gold_etf_example_uses_short_term_formula_and_component_confidence():
+    impact = short_term_impact_score(
+        direction=-1,
+        magnitude=0.217,
+        persistence=0.20,
+        representativeness=0.80,
+        market_confirmation=0,
+    )
+    confidence = rating_confidence_score(
+        direction_clarity=1,
+        source_reliability=0.92,
+        magnitude_certainty=0.80,
+        market_context_completeness=0.20,
+    )
+
+    assert impact.score == -27
+    assert impact.magnitude_contribution == -9.765
+    assert confidence.confidence == 0.82
+
+
+def test_short_term_formula_treats_missing_factors_as_zero_and_rounds_half_up():
+    missing = short_term_impact_score(
+        direction=1,
+        magnitude=None,
+        persistence=None,
+        representativeness=None,
+        market_confirmation=None,
+    )
+
+    assert missing.score == 0
+    assert round_half_up(14.5) == 15
+    assert round_half_up(-14.5) == -15
+
+
+def test_neutral_direction_keeps_score_zero_even_with_large_factors():
+    neutral = short_term_impact_score(
+        direction=0,
+        magnitude=1,
+        persistence=1,
+        representativeness=1,
+        market_confirmation=1,
+    )
+
+    assert neutral.score == 0
+    assert neutral.magnitude_contribution == 0

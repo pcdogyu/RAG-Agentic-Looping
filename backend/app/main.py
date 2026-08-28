@@ -60,6 +60,7 @@ from backend.app.services.news_board import NewsBoardResponse, build_news_board
 from backend.app.services.notifications import notifier
 from backend.app.services.portfolio import PortfolioError, PortfolioService
 from backend.app.services.research import ResearchService
+from backend.app.services.research_admission import ResearchAdmissionError
 from backend.app.services.research_cancellation import cancel_research_tasks
 from backend.app.services.research_queue import (
     NewsExtractionQueueResponse,
@@ -72,6 +73,7 @@ from backend.app.storage import (
     get_event,
     get_event_research_run,
     get_news,
+    get_recommendation,
     get_run,
     list_active_runs,
     list_assets,
@@ -86,6 +88,7 @@ from backend.app.storage import (
     list_runs,
     normalize_legacy_akshare_timestamps,
     save_evolution,
+    save_run,
     upsert_asset,
 )
 from backend.app.worker import (
@@ -102,6 +105,7 @@ from backend.app.worker import (
     get_news_extraction_queue,
     get_scan_status,
     request_scan_pause,
+    reserve_research_run,
     resume_scan,
 )
 from backend.app.worker import evolve_from_outcomes as evolve_from_outcomes_task
@@ -555,23 +559,51 @@ def start_research(request: ResearchRequest, db: Session = Depends(get_db)):
         raise HTTPException(404, "asset not found")
     if request.background:
         event = get_event(db, request.event_id) if request.event_id else None
-        task_id, run = enqueue_research(
+        try:
+            task_id, run = enqueue_research(
+                db,
+                asset,
+                event,
+                request.as_of,
+                historical_replay=request.historical_replay,
+            )
+        except ResearchAdmissionError as exc:
+            raise HTTPException(409, exc.detail()) from exc
+        return {"task_id": task_id, "run_id": str(run.id), "status": "queued"}
+    event = get_event(db, request.event_id) if request.event_id else None
+    # Release the read-only transaction before first-use checkpoint DDL. Build
+    # the service before reserving the visible run, so constructor failures
+    # cannot leave a permanently queued reservation behind.
+    db.rollback()
+    service = ResearchService(active_registry, db)
+    try:
+        queued_run = reserve_research_run(
             db,
             asset,
             event,
             request.as_of,
             historical_replay=request.historical_replay,
         )
-        return {"task_id": task_id, "run_id": str(run.id), "status": "queued"}
-    event = get_event(db, request.event_id) if request.event_id else None
-    # Release the read-only transaction before first-use checkpoint DDL.
-    db.rollback()
-    return ResearchService(active_registry, db).run(
-        asset,
-        event,
-        request.as_of,
-        historical_replay=request.historical_replay,
-    )
+    except ResearchAdmissionError as exc:
+        raise HTTPException(409, exc.detail()) from exc
+    try:
+        return service.run(
+            asset,
+            event,
+            request.as_of,
+            historical_replay=request.historical_replay,
+            queued_run=queued_run,
+        )
+    except Exception as exc:
+        db.rollback()
+        queued_run.status = RunStatus.FAILED
+        queued_run.error = f"{type(exc).__name__}: synchronous research failed"
+        queued_run.completed_at = utc_now()
+        try:
+            save_run(db, queued_run)
+        except Exception:
+            logger.exception("synchronous research failure state could not be saved")
+        raise
 
 
 @app.get("/api/v1/research-runs")
@@ -929,17 +961,20 @@ def _enqueue_model_task_retry(
         if original.event_id and event is None:
             raise HTTPException(409, "source event no longer exists")
         retry_attempt = max([item.retry_attempt for item in retries] or [0]) + 1
-        task_id, _ = enqueue_research(
-            db,
-            original.asset,
-            event,
-            as_of=utc_now(),
-            historical_replay=False,
-            retry_of_run_id=original.id,
-            retry_attempt=retry_attempt,
-            priority=priority,
-            model_instance_id=task.instance_id,
-        )
+        try:
+            task_id, _ = enqueue_research(
+                db,
+                original.asset,
+                event,
+                as_of=utc_now(),
+                historical_replay=False,
+                retry_of_run_id=original.id,
+                retry_attempt=retry_attempt,
+                priority=priority,
+                model_instance_id=task.instance_id,
+            )
+        except ResearchAdmissionError as exc:
+            raise HTTPException(409, exc.detail()) from exc
         return task_id
 
     if task.kind == "event_research":
@@ -1207,17 +1242,20 @@ def _queue_asset_research_retry(
     if original.event_id and event is None:
         raise HTTPException(409, "source event no longer exists")
     retry_attempt = max([item.retry_attempt for item in retries] or [0]) + 1
-    task_id, run = enqueue_research(
-        db,
-        original.asset,
-        event,
-        as_of=utc_now(),
-        historical_replay=False,
-        retry_of_run_id=original.id,
-        retry_attempt=retry_attempt,
-        priority=MANUAL_RETRY_PRIORITY if model_instance_id else None,
-        model_instance_id=model_instance_id,
-    )
+    try:
+        task_id, run = enqueue_research(
+            db,
+            original.asset,
+            event,
+            as_of=utc_now(),
+            historical_replay=False,
+            retry_of_run_id=original.id,
+            retry_attempt=retry_attempt,
+            priority=MANUAL_RETRY_PRIORITY if model_instance_id else None,
+            model_instance_id=model_instance_id,
+        )
+    except ResearchAdmissionError as exc:
+        raise HTTPException(409, exc.detail()) from exc
     return {
         "task_id": task_id,
         "run_id": str(run.id),
@@ -1322,6 +1360,40 @@ def retry_failed_research_runs(db: Session = Depends(get_db)):
             failed=sum(item.status == "failed" for item in results),
             results=results,
         )
+
+
+@app.post("/api/v1/conclusions/{recommendation_id}/research", status_code=202)
+def research_conclusion_again(
+    recommendation_id: UUID,
+    db: Session = Depends(get_db),
+):
+    recommendation = get_recommendation(db, recommendation_id)
+    if recommendation is None:
+        raise HTTPException(404, "recommendation not found")
+    source_run = get_run(db, recommendation.run_id)
+    if source_run is None:
+        raise HTTPException(409, "source research run no longer exists")
+    event = get_event(db, source_run.event_id) if source_run.event_id else None
+    if source_run.event_id is not None and event is None:
+        raise HTTPException(409, "source event no longer exists")
+    try:
+        task_id, run = enqueue_research(
+            db,
+            recommendation.asset,
+            event,
+            as_of=utc_now(),
+            historical_replay=False,
+            force_research=True,
+            queue_phase="forced_research_queue",
+        )
+    except ResearchAdmissionError as exc:
+        raise HTTPException(409, exc.detail()) from exc
+    return {
+        "task_id": task_id,
+        "run_id": str(run.id),
+        "source_recommendation_id": str(recommendation.id),
+        "status": "queued",
+    }
 
 
 @app.post("/api/v1/research-runs/{run_id}/retry", status_code=202)
@@ -1455,6 +1527,10 @@ def _analysis_logs(db: Session, limit: int) -> list[dict]:
                     "score": recommendation.score,
                     "raw_score": recommendation.raw_score,
                     "confidence": recommendation.confidence,
+                    "fact_confidence": recommendation.fact_confidence,
+                    "scoring_version": recommendation.scoring_version,
+                    "horizon_unit": recommendation.horizon_unit.value,
+                    "horizon_days": recommendation.horizon_days,
                     "evidence_complete": recommendation.evidence_complete,
                     "directional_evidence_complete": (
                         recommendation.directional_evidence_complete

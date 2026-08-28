@@ -24,17 +24,18 @@
 
 ## 项目定位
 
-Market Loop Agent 面向 1–6 个月的中线研究，通过有限、可恢复、可验证的循环代替无限制的“自由思考”：
+Market Loop Agent 面向未来 1–3 个交易日的短线事件影响研究，通过有限、可恢复、可验证的循环代替无限制的“自由思考”：
 
 ```text
 每 10 分钟发现新闻
   → 去重与事件抽取
   → 映射股票/加密标的
   → 收集财务、公告、历史新闻和链上指标
-  → 两轮证据验证
-  → 五级研究建议
+  → 7B 结构化短线草稿
+  → 非阻断证据质量核验
+  → 五档研究建议
   → 模拟组合
-  → 1/5/20/60/120 日结果观察
+  → 第三个后续交易收盘结果观察
   → 评测与可选自动演进
 ```
 
@@ -45,7 +46,7 @@ Market Loop Agent 面向 1–6 个月的中线研究，通过有限、可恢复�
 - SEC EDGAR、RSS、AkShare/CNInfo、CoinGecko、DefiLlama 和 CCXT 数据适配器。
 - 结构化财务数据、全文检索、pgvector 向量检索和 RRF 融合重排。
 - Ollama 本地三模型分工、Redis 跨进程 GPU 单并发和及时卸载。
-- LangGraph `收集 → 撰写 → 验证 → 定向补证 → 再验证 → 定稿` 状态图与 PostgreSQL checkpoint。
+- LangGraph `收集 → 7B 草稿 → 证据质量核验 → 定稿` 状态图与 PostgreSQL checkpoint。
 - 跨批次持久化事件簇、规范化来源血缘和同源转载折叠，避免把重复稿件误算成独立证据。
 - FastAPI、SSE 实时事件流、React Web 看板、Celery 调度和 Telegram 可选通知。
 - 10 万美元初始模拟组合、市场交易规则、成本约束和多周期结果评估。
@@ -93,7 +94,7 @@ flowchart LR
 - **证据优先**：重要结论绑定证据 ID、来源 URL 和时间边界；官方披露优先于聚合内容。
 - **时间安全**：数据携带 `published_at`、`observed_at`、`as_of`，历史回放不得读取当时尚未观察到的内容。
 - **GPU 单并发**：所有 Ollama 请求共用 Redis 分布式锁；不同 Worker 可独立排队，但不会让多个模型同时占用显存。
-- **安全降级**：数据源故障时使用缓存或备用 Provider；证据不足、低置信度或未完成高影响复核时输出“观察”。
+- **安全降级**：数据源故障时使用缓存或备用 Provider；证据缺口转为质量提示并压低置信度，只有研究模型技术失败才不评分。
 
 ## 组件说明
 
@@ -173,22 +174,17 @@ RAG-Agentic-Looping/
 ```mermaid
 stateDiagram-v2
     [*] --> 收集
-    收集 --> 撰写
-    撰写 --> 验证
-    验证 --> 定向补证: 实时研究且来源门槛不足
-    定向补证 --> 修订
-    验证 --> 修订: 其他缺失、冲突或高影响且轮次未满
-    修订 --> 验证
-    验证 --> 定稿: 通过或已达到两轮上限
+    收集 --> 7B草稿
+    7B草稿 --> 证据质量核验
+    证据质量核验 --> 定稿
     定稿 --> [*]
 ```
 
 - 检索同时使用元数据过滤、BM25、CPU 向量和 RRF 重排。
-- 一个官方原始来源，或两个独立来源，才能满足重大事实的来源门槛。
-- 验证检查章节完整性、引用 ID、来源血缘、未知引用和时间穿越；Reuters 等同源转载只计为一个独立来源。
-- 首轮来源不足时，系统会按事件和资产定向查询结构化数据、本地新闻与远端新闻，写回事件簇后修订报告并再次验证；历史回放不会抓取 `as_of` 之后的材料。
-- 两轮后仍不合格会生成低置信度“观察”建议，不产生方向性仓位。
-- `|score| ≥ 60` 属于高影响建议；未配置可选云端复核时，即使本地证据完整也降级为“观察”。
+- 核验检查章节完整性、引用 ID、来源血缘、未知引用和时间穿越；Reuters 等同源转载只计为一个独立来源。
+- 来源质量、有效证据引用和逐观点核验覆盖度只限制置信度因子，不改变模型方向、隐藏评分或把评分归零。
+- 7B 原始意见单独留档，程序按 `S = D × (45M + 25T + 15I + 15C)` 计算最终影响分；缺失因子按 0，代表性 `I` 不得高于标的映射可信度。
+- 同一标的完成研究后 24 小时内不再自动或普通手工入队；结论页与标的页的“重新调研”可绕过冷却，但不能绕过已有活动任务。
 
 ### 4. 模拟组合与结果观察
 
@@ -197,7 +193,7 @@ stateDiagram-v2
 - 至少保留 10% 现金。
 - 股票成本默认每边 15 bps；加密默认每边 25 bps。
 - A 股按手数、港股按 `lot_size`、美股按整股、加密按小数精度处理。
-- 在 1、5、20、60、120 日评估原始收益、基准收益、Alpha、方向命中、最大回撤和 Brier 校准。
+- 新版短线结论在入场后的第三个后续交易收盘评估原始收益、基准收益、Alpha、方向命中、最大回撤和 Brier 校准；旧结论继续使用原日历日口径。
 - 默认基准：美股 `SPY`、A 股 `000300`、港股 `HSI`、加密资产 `BTC`；Provider 无法提供基准时保守返回 0。
 
 ## 模型与硬件要求
@@ -220,7 +216,7 @@ stateDiagram-v2
 - `OLLAMA_NUM_THREADS` 默认 `0` 由 Ollama 自动选择；虚拟化或多 NUMA 主机应按实测设置，避免线程过多反而拖慢推理。
 - `OLLAMA_MAX_OUTPUT_TOKENS` 限制单次结构化输出，避免异常生成长期占用推理槽。
 - Redis 按实例维护推理槽位和任务亲和；三个 Research 端点各自保持单并发，不互相阻塞。
-- 三个 Research 端点分别绑定 10 个 CPU，每端点单推理并发；`research-worker` 使用 6 个流水线槽位、预取为 1，以重叠检索、证据门禁和模型等待。
+- 三个 Research 端点分别绑定 10 个 CPU，每端点单推理并发；`research-worker` 使用 6 个流水线槽位、预取为 1，以重叠检索、证据质量核验和模型等待。
 - CPU 推理可以运行，但完整扫描和三路 7B 深研仍需持续观察 NUMA 竞争与系统负载。
 
 ### 推荐运行环境
@@ -410,7 +406,7 @@ curl http://localhost:8000/health
 | `OLLAMA_RESEARCH_BASE_URLS` | `11435,11436,11439` | 三个 Research 7B 宿主机端点，逗号分隔 |
 | `OLLAMA_RESEARCH_NUM_THREADS` | `10` | 每个 Research 7B 请求使用的 CPU 线程数 |
 | `OLLAMA_RESEARCH_MAX_CONCURRENCY` | `3` | Research 模型总推理并发，每实例保持 1 路 |
-| `RESEARCH_PIPELINE_CONCURRENCY` | `6` | 研究流水线并发数；与 Ollama 推理并发独立，用于重叠检索、门禁和模型阶段 |
+| `RESEARCH_PIPELINE_CONCURRENCY` | `6` | 研究流水线并发数；与 Ollama 推理并发独立，用于重叠检索、核验和模型阶段 |
 | `OLLAMA_RESEARCH_MAX_INPUT_TOKENS` | `3500` | Research 7B 单次调用的完整提示词上限 |
 | `OLLAMA_RESEARCH_REVISION_MAX_INPUT_TOKENS` | `2500` | Research 7B 定向修订调用的提示词上限 |
 | `RESEARCH_PROMPT_EVIDENCE_CHARS` | `6000` | 研究草稿和修订时最多传入的证据字符数 |
@@ -440,15 +436,16 @@ curl http://localhost:8000/health
 |---|---:|---|
 | `SCAN_INTERVAL_MINUTES` | `20` | 新闻发现周期，允许范围 5–1440 分钟 |
 | `SCAN_BATCH_SIZE` | `40` | 单次最多处理新闻数，允许范围 1–200 |
+| `RESEARCH_ASSET_COOLDOWN_HOURS` | `24` | 同一标的完成研究后的自动入队冷却小时数；页面强制重研和失败恢复可绕过冷却 |
 | `AUTO_RESEARCH` | `true` | 为高优先级、高相关候选自动排队深研 |
 | `AUTO_PAPER_TRADE` | `false` | 是否依据已验证看多建议自动创建模拟订单 |
 | `EVOLUTION_ENABLED` | `false` | 是否启用演进任务和监控 |
 | `EVOLUTION_AUTO_MERGE` | `false` | 门禁通过后是否自动合并；风险极高 |
-| `CLOUD_LLM_BASE_URL` | 空 | 可选 OpenAI-compatible 高影响复核服务 |
-| `CLOUD_LLM_API_KEY` | 空 | 可选云复核密钥 |
-| `CLOUD_LLM_MODEL` | 空 | 可选云复核模型 |
+| `CLOUD_LLM_BASE_URL` | 空 | 旧版云复核兼容配置；短线评分流程不调用 |
+| `CLOUD_LLM_API_KEY` | 空 | 旧版云复核兼容配置；短线评分流程不调用 |
+| `CLOUD_LLM_MODEL` | 空 | 旧版云复核兼容配置；短线评分流程不调用 |
 
-云端复核只有三个变量同时非空时才启用；系统没有云端配置时不会静默发送本地研究内容。
+短线评分流程不再调用云端复核；保留这些变量仅用于读取旧配置和历史兼容，不会发送新研究内容。
 
 ## API 与日常操作
 
@@ -468,6 +465,7 @@ curl http://localhost:8000/health
 | `GET` | `/api/v1/failed-research-runs` | 历史失败的标的研究与事件研报 |
 | `POST` | `/api/v1/research-runs/{run_id}/retry` | 保留原记录并以最新数据重新执行失败标的研究 |
 | `POST` | `/api/v1/event-research-runs/{run_id}/retry` | 重新排队失败事件研报 |
+| `POST` | `/api/v1/conclusions/{recommendation_id}/research` | 复用原结论关联事件并强制重新调研；仍拒绝同标的活动任务 |
 | `GET` | `/api/v1/recommendations` | 五级建议、概率、置信度和论文 |
 | `GET` | `/api/v1/portfolio` | 模拟现金、净值、持仓和加密权重 |
 | `POST` | `/api/v1/paper-orders` | 从已验证看多建议创建模拟订单 |
@@ -490,6 +488,13 @@ Invoke-RestMethod "http://localhost:8000/api/v1/tasks/$($research.task_id)"
 ```
 
 也可以在 Web 的事件卡片中点击候选资产。
+
+部署短线评分版本后，可先预览、再一次性把每个标的最新的旧“证据不足”结论加入普通研究队列；命令保留历史结论且可重复安全执行：
+
+```powershell
+docker compose exec -T api python -m backend.app.legacy_gate_rerun
+docker compose exec -T api python -m backend.app.legacy_gate_rerun --apply
+```
 
 ### 查看日志
 
@@ -520,18 +525,14 @@ docker compose logs --tail 200 api io-worker extract-worker research-worker
 | 分数 | 基础评级 |
 |---:|---|
 | `60…100` | 强烈看多 |
-| `20…59` | 看多 |
-| `-19…19` | 观察 |
-| `-59…-20` | 看空 |
+| `15…59` | 看多 |
+| `-14…14` | 观望 |
+| `-59…-15` | 看空 |
 | `-100…-60` | 强烈看空 |
 
-以下任一条件会强制降级为“观察”：
+评级置信度独立按 `40%A + 25%R + 20%Q + 15%K` 计算。证据不足会限制 `R/Q/K` 并形成质量提示，但不会强制修改五档评级。模拟交易另有安全条件：仅看多或强烈看多且评级置信度至少 55% 才允许开仓。
 
-- 证据完整性检查未通过。
-- 置信度低于 0.55。
-- 本地生成高影响方向，但未通过配置的云端二次复核。
-
-每条建议还包括 bull/base/bear 概率、估值区间、1–6 月催化剂、风险、失效条件和引用证据。
+每条新版建议还包括新闻事实置信度、M/T/I/C 与 A/R/Q/K 的依据及证据 ID、bull/base/bear 概率、风险、失效条件和引用证据。
 
 ### 核心数据类型
 
@@ -611,7 +612,7 @@ docker compose build web
 - 资产映射与统一标识。
 - 时间边界与历史回放。
 - FMP MCP/REST 传输与降级。
-- 定向补证、两轮证据验证、评级门控和研究状态。
+- 短线影响/置信度公式、非阻断证据核验、24 小时冷却、强制重研和研究状态。
 - 模拟仓位、交易成本和风险上限。
 - 检索与向量投影。
 - 自动演进门禁和失败补丁拒绝。
@@ -734,7 +735,7 @@ docker compose --profile mcp up --build -d
 - 加密协议并不都能在 DefiLlama 找到，CCXT 交叉验证也可能受交易所地域或网络限制。
 - CPU 嵌入模型首次运行需要下载；容器缓存被清理后可能再次下载。
 - 当前黄金集仍较小；达到至少 100 条人工事件—标的样本后，映射 precision/recall 才具有稳定统计意义。
-- 云端复核默认关闭，因此绝对分数达到 60 的高影响本地结论会安全降级为“观察”。
+- 证据质量不会阻断评分；置信度较低的看多结果仍不能绕过模拟交易至少 55% 的独立安全条件。
 
 ## 借鉴项目
 

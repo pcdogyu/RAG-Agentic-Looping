@@ -429,10 +429,16 @@ def _public_recommendation(
     payload = recommendation.model_dump(mode="json")
     if payload["model_confidence"] is None:
         payload["model_confidence"] = _model_confidence_from_run(run)
+    short_term_score = recommendation.scoring_version == "short-term-impact-v1"
     score_available = bool(
-        recommendation.direction_verified
-        and recommendation.signal_status
-        not in {SignalStatus.INSUFFICIENT_EVIDENCE, SignalStatus.TECHNICAL_FAILURE}
+        recommendation.signal_status is not SignalStatus.TECHNICAL_FAILURE
+        and (
+            short_term_score
+            or (
+                recommendation.direction_verified
+                and recommendation.signal_status is not SignalStatus.INSUFFICIENT_EVIDENCE
+            )
+        )
     )
     payload["score_available"] = score_available
     if not score_available:

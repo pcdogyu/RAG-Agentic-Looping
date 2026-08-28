@@ -12,9 +12,14 @@ from backend.app.domain import (
     AnalysisStep,
     AssetClass,
     AssetRef,
+    ConfidenceFactors,
+    HorizonUnit,
+    ImpactFactors,
     Market,
     Recommendation,
     ResearchRun,
+    ScoringFactor,
+    SignalStatus,
     Thesis,
     utc_now,
 )
@@ -832,6 +837,66 @@ def test_conclusions_omit_all_scores_when_evidence_is_insufficient(db):
         assert payload["model_rating"] == "bearish"
         assert payload["model_confidence"] == 0.8
         assert payload["confidence"] == 0.16
+
+
+def test_short_term_conclusion_keeps_score_visible_with_evidence_warnings(db):
+    asset = AssetRef(
+        asset_id="equity:XNAS:SHORT",
+        asset_class=AssetClass.EQUITY,
+        market=Market.US,
+        symbol="SHORT",
+        name="Short Term Corp",
+        exchange_or_provider="XNAS",
+    )
+    now = utc_now() - timedelta(minutes=1)
+    run = ResearchRun(asset=asset, as_of=now)
+    recommendation = Recommendation(
+        run_id=run.id,
+        asset=asset,
+        score=-27,
+        raw_score=-27,
+        model_score=-30,
+        rating="bearish",
+        confidence=0.82,
+        bull_probability=0.115,
+        base_probability=0.5,
+        bear_probability=0.385,
+        horizon_days=3,
+        horizon_unit=HorizonUnit.TRADING_SESSIONS,
+        impact_factors=ImpactFactors(
+            direction=-1,
+            magnitude=ScoringFactor(value=0.217, reason="small ETF outflow"),
+            persistence=ScoringFactor(value=0.2, reason="one day only"),
+            representativeness=ScoringFactor(value=0.8, reason="large ETF"),
+            market_confirmation=ScoringFactor(value=0, reason="not available"),
+        ),
+        confidence_factors=ConfidenceFactors(),
+        fact_confidence=0.92,
+        evidence_warnings=["one official source or two independent sources"],
+        thesis=Thesis(summary="A small ETF outflow is mildly bearish."),
+        as_of=now,
+        evidence_complete=False,
+        direction_verified=False,
+        scoring_version="short-term-impact-v1",
+        calibration_version="component-confidence-v1",
+    )
+    run.recommendation = recommendation
+    assert recommendation.signal_status is SignalStatus.DIRECTIONAL
+    save_run(db, run)
+    save_recommendation(db, recommendation)
+
+    with TestClient(app) as client:
+        detail = client.get(f"/api/v1/conclusions/{recommendation.id}")
+
+    assert detail.status_code == 200
+    payload = detail.json()["recommendation"]
+    assert payload["score_available"] is True
+    assert payload["score"] == -27
+    assert payload["rating"] == "bearish"
+    assert payload["horizon_unit"] == "trading_sessions"
+    assert payload["impact_factors"]["magnitude"]["value"] == 0.217
+    assert payload["fact_confidence"] == 0.92
+    assert payload["evidence_warnings"]
 
 
 def _save_target_history_item(

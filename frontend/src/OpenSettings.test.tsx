@@ -4,8 +4,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   availableResearchInstances,
+  ConclusionCard,
   ConclusionScore,
   ConclusionsPage,
+  conclusionResearchPath,
   conclusionReferences,
   factSourceGroupOptions,
   failedResearchAfterBulkRetry,
@@ -20,11 +22,63 @@ import {
   NativeConfigEditor,
   parseFilterKeywords,
   retryAllFailedResearch,
+  researchConclusion,
+  ResearchAgainButton,
+  ShortTermScoreDetails,
   searchSourceLabel,
   SearchPage,
   SourceFilterPage,
   SourcesPage,
+  type Recommendation,
 } from "./AppPages";
+
+const shortTermRecommendation: Recommendation = {
+  id: "recommendation-gold",
+  run_id: "run-gold",
+  asset: { asset_id: "commodity:GOLD", symbol: "GOLD", name: "黄金", market: "COMMODITY" },
+  rating: "bearish",
+  score: -27,
+  confidence: 0.82,
+  fact_confidence: 0.92,
+  evidence_complete: true,
+  directional_evidence_complete: true,
+  signal_status: "directional",
+  raw_score: -27,
+  score_available: true,
+  horizon_days: 3,
+  horizon_unit: "trading_sessions",
+  scoring_version: "short-term-impact-v1",
+  calibration_version: "component-confidence-v1",
+  impact_factors: {
+    direction: -1,
+    magnitude: { value: 0.217, reason: "单日持仓下降 0.1087%", evidence_ids: ["spdr-holdings"] },
+    persistence: { value: 0.2, reason: "只有单日数据", evidence_ids: ["spdr-holdings"] },
+    representativeness: { value: 0.8, reason: "SPDR 是大型黄金 ETF", evidence_ids: ["spdr-official"] },
+    market_confirmation: { value: 0, reason: "没有其他市场确认", evidence_ids: [] },
+  },
+  confidence_factors: {
+    direction_clarity: { value: 1, reason: "减持方向明确", evidence_ids: ["spdr-holdings"] },
+    source_reliability: { value: 0.92, reason: "官方来源可靠", evidence_ids: ["spdr-official"] },
+    magnitude_certainty: { value: 0.8, reason: "变动幅度可计算", evidence_ids: ["spdr-holdings"] },
+    market_context_completeness: { value: 0.2, reason: "趋势确认信息不足", evidence_ids: [] },
+  },
+  evidence_warnings: ["缺少美元和美债收益率同步确认"],
+  as_of: "2026-08-28T00:00:00Z",
+  bull_probability: 0.25,
+  base_probability: 0.5,
+  bear_probability: 0.25,
+  thesis: {
+    summary: "黄金 ETF 小幅流出，短线弱看空。",
+    historical_context: "",
+    financials_and_growth: "",
+    products_or_protocol: "",
+    competition: "",
+    valuation_or_tokenomics: "",
+    catalysts: [],
+    risks: [],
+    invalidation_conditions: [],
+  },
+};
 
 describe("open source and search settings", () => {
   it("labels the conclusion direction score and rating explicitly", () => {
@@ -36,8 +90,29 @@ describe("open source and search settings", () => {
     }));
 
     expect(markup).toContain("发布分：0");
-    expect(markup).toContain("评级：观察");
+    expect(markup).toContain("评级：观望");
     expect(markup).toContain("发布置信度 95% · 资料覆盖完整");
+  });
+
+  it("shows the short-term impact score and both confidence values", () => {
+    const markup = renderToStaticMarkup(createElement(ConclusionScore, {
+      score: -27,
+      rating: "bearish",
+      confidence: 0.82,
+      factConfidence: 0.92,
+      evidenceComplete: false,
+      signalStatus: "directional",
+      horizonDays: 3,
+      horizonUnit: "trading_sessions",
+      scoringVersion: "short-term-impact-v1",
+    }));
+
+    expect(markup).toContain("影响分：-27");
+    expect(markup).toContain("五档评级：看空");
+    expect(markup).toContain("新闻事实置信度 92%");
+    expect(markup).toContain("评级置信度 82%");
+    expect(markup).toContain("未来 1–3 个交易日");
+    expect(markup).not.toContain("暂不评分");
   });
 
   it("does not score a conclusion whose evidence gate is incomplete", () => {
@@ -51,7 +126,7 @@ describe("open source and search settings", () => {
     }));
 
     expect(markup).toContain("暂不评分");
-    expect(markup).toContain("方向证据不足 · 评级：观察");
+    expect(markup).toContain("方向证据不足 · 评级：观望");
     expect(markup).toContain("门禁后参考置信度 0%");
     expect(markup).not.toContain("发布分：0");
   });
@@ -63,11 +138,117 @@ describe("open source and search settings", () => {
       confidence: 0.68,
     }));
 
-    expect(markup).toContain("7B 模型意见（门禁前）");
+    expect(markup).toContain("7B 模型原始意见");
     expect(markup).toContain("看空 / Bearish");
     expect(markup).toContain("强烈看空 / Strongly bearish");
     expect(markup).toContain("68%");
-    expect(markup).toContain("not a published score");
+    expect(markup).toContain("Evidence quality checks may reduce final confidence");
+  });
+
+  it("renders the auditable -27 impact and 82% confidence calculation", () => {
+    const markup = renderToStaticMarkup(createElement(ShortTermScoreDetails, {
+      recommendation: shortTermRecommendation,
+    }));
+
+    expect(markup).toContain("S = D × (45M + 25T + 15I + 15C)");
+    expect(markup).toContain("D = -1");
+    expect(markup).toContain("因子合计 26.765");
+    expect(markup).toContain("四舍五入后为 <strong>-27</strong>");
+    expect(markup).toContain("0.217 × 45 × -1 = -9.765");
+    expect(markup).toContain("0.8 × 15 × -1 = -12");
+    expect(markup).toContain("置信度 = 40%A + 25%R + 20%Q + 15%K");
+    for (const contribution of ["40 / 40", "23 / 25", "16 / 20", "3 / 15"]) {
+      expect(markup).toContain(contribution);
+    }
+    expect(markup).toContain("spdr-official");
+    expect(markup).toContain("缺少美元和美债收益率同步确认");
+  });
+
+  it("normalizes the model typo 官网 to 观望", () => {
+    const markup = renderToStaticMarkup(createElement(ModelOpinion, {
+      direction: "neutral",
+      rating: "官网",
+      confidence: 0.6,
+    }));
+
+    expect(markup).toContain("观望 / Watch");
+    expect(markup).not.toContain("<strong>官网</strong>");
+  });
+
+  it("posts a bodyless force-research request to the selected conclusion", async () => {
+    const calls: Array<{ input: string; init?: RequestInit }> = [];
+    const request = (async (input: string | URL | Request, init?: RequestInit) => {
+      calls.push({ input: String(input), init });
+      return new Response(JSON.stringify({
+        task_id: "task-1",
+        run_id: "run-1",
+        source_recommendation_id: "recommendation/1",
+        status: "queued",
+      }), { status: 202, headers: { "Content-Type": "application/json" } });
+    }) as typeof fetch;
+
+    const payload = await researchConclusion("http://api.example", "recommendation/1", request);
+
+    expect(conclusionResearchPath("recommendation/1")).toBe(
+      "/api/v1/conclusions/recommendation%2F1/research",
+    );
+    expect(calls).toEqual([{
+      input: "http://api.example/api/v1/conclusions/recommendation%2F1/research",
+      init: { method: "POST" },
+    }]);
+    expect(payload.status).toBe("queued");
+  });
+
+  it("surfaces an active research conflict with its run id", async () => {
+    const request = (async () => new Response(JSON.stringify({
+      detail: {
+        code: "research_already_active",
+        message: "该标的已有活动研究",
+        active_run_id: "active-run-1",
+      },
+    }), { status: 409, headers: { "Content-Type": "application/json" } })) as typeof fetch;
+
+    await expect(researchConclusion("", "recommendation-1", request)).rejects.toThrow(
+      "该标的已有活动研究（活动任务 active-run-1）",
+    );
+  });
+
+  it("renders force-research progress, queued, and recoverable error states", () => {
+    const pending = renderToStaticMarkup(createElement(ResearchAgainButton, {
+      state: { status: "pending" }, onResearch: () => undefined,
+    }));
+    const queued = renderToStaticMarkup(createElement(ResearchAgainButton, {
+      state: { status: "queued" }, onResearch: () => undefined,
+    }));
+    const failed = renderToStaticMarkup(createElement(ResearchAgainButton, {
+      state: { status: "error", error: "已有活动研究" }, onResearch: () => undefined,
+    }));
+
+    expect(pending).toContain("重新调研中…");
+    expect(pending).toContain("disabled");
+    expect(queued).toContain("已进入队列");
+    expect(queued).toContain("disabled");
+    expect(failed).toContain("重新调研");
+    expect(failed).toContain('role="alert"');
+    expect(failed).toContain("已有活动研究");
+    expect(failed).not.toContain("disabled");
+  });
+
+  it("keeps conclusion details and force research as sibling buttons", () => {
+    const markup = renderToStaticMarkup(createElement(ConclusionCard, {
+      item: shortTermRecommendation,
+      researchState: { status: "queued" },
+      onOpen: () => undefined,
+      onResearch: () => undefined,
+    }));
+    const firstButton = markup.indexOf("<button");
+    const firstButtonClose = markup.indexOf("</button>", firstButton);
+    const secondButton = markup.indexOf("<button", firstButton + 1);
+
+    expect(markup).toContain('class="conclusion-card"');
+    expect((markup.match(/<button/g) || [])).toHaveLength(2);
+    expect(firstButtonClose).toBeLessThan(secondButton);
+    expect(markup.indexOf("影响分：-27")).toBeLessThan(markup.indexOf("已进入队列"));
   });
 
   it("shows one blocking gate reason before the complete reason list", () => {

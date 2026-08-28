@@ -67,11 +67,27 @@ class Rating(StrEnum):
     BEARISH = "bearish"
     STRONGLY_BEARISH = "strongly_bearish"
 
+    @classmethod
+    def _missing_(cls, value: object) -> Rating | None:
+        if isinstance(value, str) and value.strip().casefold() in {
+            "watch",
+            "neutral",
+            "观望",
+            "官网",
+        }:
+            return cls.WATCH
+        return None
+
 
 class ModelDirection(StrEnum):
     BULLISH = "bullish"
     NEUTRAL = "neutral"
     BEARISH = "bearish"
+
+
+class HorizonUnit(StrEnum):
+    CALENDAR_DAYS = "calendar_days"
+    TRADING_SESSIONS = "trading_sessions"
 
 
 class SignalStatus(StrEnum):
@@ -236,6 +252,39 @@ class ClaimEvidenceAssessment(BaseModel):
     reason: str = ""
 
 
+class ScoringFactor(BaseModel):
+    """One model-proposed scoring input with auditable support."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    value: float = Field(default=0, ge=0, le=1)
+    reason: str = "未提供该因子的可验证依据。"
+    evidence_ids: list[UUID] = Field(default_factory=list)
+
+
+class ImpactFactors(BaseModel):
+    """Inputs to the versioned 1-3 trading-session impact formula."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    direction: int = Field(default=0, ge=-1, le=1)
+    magnitude: ScoringFactor = Field(default_factory=ScoringFactor)
+    persistence: ScoringFactor = Field(default_factory=ScoringFactor)
+    representativeness: ScoringFactor = Field(default_factory=ScoringFactor)
+    market_confirmation: ScoringFactor = Field(default_factory=ScoringFactor)
+
+
+class ConfidenceFactors(BaseModel):
+    """Inputs to the versioned component confidence formula."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    direction_clarity: ScoringFactor = Field(default_factory=ScoringFactor)
+    source_reliability: ScoringFactor = Field(default_factory=ScoringFactor)
+    magnitude_certainty: ScoringFactor = Field(default_factory=ScoringFactor)
+    market_context_completeness: ScoringFactor = Field(default_factory=ScoringFactor)
+
+
 class Recommendation(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     run_id: UUID
@@ -254,6 +303,11 @@ class Recommendation(BaseModel):
     base_probability: float = Field(ge=0, le=1)
     bear_probability: float = Field(ge=0, le=1)
     horizon_days: int = Field(default=90, ge=1, le=730)
+    horizon_unit: HorizonUnit = HorizonUnit.CALENDAR_DAYS
+    impact_factors: ImpactFactors | None = None
+    confidence_factors: ConfidenceFactors | None = None
+    fact_confidence: float | None = Field(default=None, ge=0, le=1)
+    evidence_warnings: list[str] = Field(default_factory=list)
     valuation_low: float | None = None
     valuation_high: float | None = None
     thesis: Thesis
@@ -277,7 +331,13 @@ class Recommendation(BaseModel):
         if abs(total - 1.0) > 0.02:
             raise ValueError("bull/base/bear probabilities must sum to 1")
         if self.signal_status is None:
-            if not self.evidence_complete:
+            if self.scoring_version == "short-term-impact-v1":
+                self.signal_status = (
+                    SignalStatus.NEUTRAL
+                    if abs(self.score) < 15
+                    else SignalStatus.DIRECTIONAL
+                )
+            elif not self.evidence_complete:
                 self.signal_status = SignalStatus.INSUFFICIENT_EVIDENCE
             elif abs(self.score) < 20:
                 self.signal_status = SignalStatus.NEUTRAL
@@ -434,24 +494,32 @@ class EvolutionCandidate(BaseModel):
     created_at: datetime = Field(default_factory=utc_now)
 
 
-def rating_for(score: int, confidence: float, evidence_complete: bool = True) -> Rating:
-    if confidence < 0.55 or not evidence_complete:
-        return Rating.WATCH
+def rating_for(
+    score: int,
+    confidence: float | None = None,
+    evidence_complete: bool = True,
+) -> Rating:
+    """Map the published impact score to five levels without confidence gating.
+
+    ``confidence`` and ``evidence_complete`` remain accepted so older callers do
+    not break while confidence becomes a separate description of uncertainty.
+    """
+
     if score >= 60:
         return Rating.STRONGLY_BULLISH
-    if score >= 20:
+    if score >= 15:
         return Rating.BULLISH
     if score <= -60:
         return Rating.STRONGLY_BEARISH
-    if score <= -20:
+    if score <= -15:
         return Rating.BEARISH
     return Rating.WATCH
 
 
 def model_direction_for(score: int) -> ModelDirection:
-    if score >= 20:
+    if score >= 15:
         return ModelDirection.BULLISH
-    if score <= -20:
+    if score <= -15:
         return ModelDirection.BEARISH
     return ModelDirection.NEUTRAL
 
@@ -461,10 +529,10 @@ def model_rating_for(score: int) -> Rating:
 
     if score >= 60:
         return Rating.STRONGLY_BULLISH
-    if score >= 20:
+    if score >= 15:
         return Rating.BULLISH
     if score <= -60:
         return Rating.STRONGLY_BEARISH
-    if score <= -20:
+    if score <= -15:
         return Rating.BEARISH
     return Rating.WATCH

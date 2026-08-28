@@ -10,6 +10,7 @@ import pytest
 from backend.app.domain import (
     AssetClass,
     AssetRef,
+    HorizonUnit,
     Market,
     Outcome,
     Rating,
@@ -69,6 +70,7 @@ def recommendation(
     *,
     as_of: datetime = datetime(2025, 1, 1, tzinfo=UTC),
     horizon_days: int = 30,
+    horizon_unit: HorizonUnit = HorizonUnit.CALENDAR_DAYS,
     score: int = 40,
 ) -> Recommendation:
     return Recommendation(
@@ -81,6 +83,7 @@ def recommendation(
         base_probability=0.2,
         bear_probability=0.1,
         horizon_days=horizon_days,
+        horizon_unit=horizon_unit,
         thesis=Thesis(summary="frozen test recommendation"),
         as_of=as_of,
         evidence_complete=True,
@@ -147,6 +150,38 @@ def test_outcome_waits_for_first_market_price_after_target_boundary():
     )
 
     assert outcome is None
+
+
+def test_short_term_outcome_uses_third_subsequent_trading_close():
+    target = asset()
+    registry = StaticRegistry(
+        {
+            target.asset_id: [
+                {"date": "2025-01-03", "close": 100},
+                {"date": "2025-01-06", "close": 101},
+                {"date": "2025-01-07", "close": 102},
+                {"date": "2025-01-08", "close": 106},
+                {"date": "2025-01-09", "close": 90},
+            ]
+        },
+        [target],
+    )
+
+    outcome = OutcomeService(registry)._evaluate(
+        recommendation(
+            target,
+            as_of=datetime(2025, 1, 3, tzinfo=UTC),
+            horizon_days=3,
+            horizon_unit=HorizonUnit.TRADING_SESSIONS,
+        ),
+        3,
+        observed_at=datetime(2025, 1, 10, tzinfo=UTC),
+    )
+
+    assert outcome is not None
+    assert outcome.entry_at == datetime(2025, 1, 3, tzinfo=UTC)
+    assert outcome.exit_at == datetime(2025, 1, 8, tzinfo=UTC)
+    assert outcome.raw_return == pytest.approx(0.06)
 
 
 def test_missing_benchmark_is_explicit_without_losing_raw_outcome():

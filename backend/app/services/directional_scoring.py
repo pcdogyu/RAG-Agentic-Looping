@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
+from decimal import ROUND_HALF_UP, Decimal
 
 _ADVERSE_DIRECTION_PATTERNS = tuple(
     re.compile(pattern, re.IGNORECASE)
@@ -72,6 +73,106 @@ class DirectionScore:
     probability_score: int
     event_score: int | None
     factor_score: int | None
+
+
+@dataclass(frozen=True)
+class ShortTermImpactScore:
+    score: int
+    magnitude_contribution: float
+    persistence_contribution: float
+    representativeness_contribution: float
+    market_confirmation_contribution: float
+
+
+@dataclass(frozen=True)
+class RatingConfidenceScore:
+    confidence: float
+    direction_clarity_contribution: float
+    source_reliability_contribution: float
+    magnitude_certainty_contribution: float
+    market_context_completeness_contribution: float
+
+
+def _unit_interval(value: float | None) -> float:
+    return max(0.0, min(1.0, float(value or 0)))
+
+
+def round_half_up(value: float) -> int:
+    """Use conventional half-up rounding instead of Python's bankers rounding."""
+
+    return int(Decimal(str(value)).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+
+def short_term_impact_score(
+    *,
+    direction: int,
+    magnitude: float | None,
+    persistence: float | None,
+    representativeness: float | None,
+    market_confirmation: float | None,
+) -> ShortTermImpactScore:
+    """Score expected impact over the next 1-3 trading sessions.
+
+    Missing factors are treated as zero and values outside the documented
+    interval are clamped. Direction is deliberately strict because silently
+    converting an invalid sign would invert a published investment opinion.
+    """
+
+    if direction not in {-1, 0, 1}:
+        raise ValueError("direction must be -1, 0, or 1")
+    magnitude_contribution = direction * 45 * _unit_interval(magnitude)
+    persistence_contribution = direction * 25 * _unit_interval(persistence)
+    representativeness_contribution = direction * 15 * _unit_interval(
+        representativeness
+    )
+    market_confirmation_contribution = direction * 15 * _unit_interval(
+        market_confirmation
+    )
+    total = (
+        magnitude_contribution
+        + persistence_contribution
+        + representativeness_contribution
+        + market_confirmation_contribution
+    )
+    return ShortTermImpactScore(
+        score=max(-100, min(100, round_half_up(total))),
+        magnitude_contribution=round(magnitude_contribution, 4),
+        persistence_contribution=round(persistence_contribution, 4),
+        representativeness_contribution=round(
+            representativeness_contribution, 4
+        ),
+        market_confirmation_contribution=round(
+            market_confirmation_contribution, 4
+        ),
+    )
+
+
+def rating_confidence_score(
+    *,
+    direction_clarity: float | None,
+    source_reliability: float | None,
+    magnitude_certainty: float | None,
+    market_context_completeness: float | None,
+) -> RatingConfidenceScore:
+    """Return the independently displayed confidence for a five-level rating."""
+
+    direction_contribution = 0.40 * _unit_interval(direction_clarity)
+    source_contribution = 0.25 * _unit_interval(source_reliability)
+    magnitude_contribution = 0.20 * _unit_interval(magnitude_certainty)
+    context_contribution = 0.15 * _unit_interval(market_context_completeness)
+    confidence = (
+        direction_contribution
+        + source_contribution
+        + magnitude_contribution
+        + context_contribution
+    )
+    return RatingConfidenceScore(
+        confidence=round(confidence, 4),
+        direction_clarity_contribution=round(direction_contribution, 4),
+        source_reliability_contribution=round(source_contribution, 4),
+        magnitude_certainty_contribution=round(magnitude_contribution, 4),
+        market_context_completeness_contribution=round(context_contribution, 4),
+    )
 
 
 def _configured_term_strength(text: str, terms: Sequence[str]) -> tuple[int, int, int]:

@@ -59,6 +59,12 @@ from backend.app.services.notifications import notifier
 from backend.app.services.outcomes import OutcomeService
 from backend.app.services.portfolio import PortfolioService
 from backend.app.services.research import ResearchService
+from backend.app.services.research_admission import (
+    ResearchAdmissionError,
+    active_asset_research,
+    asset_research_admission_lock,
+    enforce_asset_research_admission,
+)
 from backend.app.services.research_lifecycle import (
     compact_queued_research_runs,
     reconcile_stale_research_runs,
@@ -1170,6 +1176,75 @@ def enqueue_research(
     market_factor_refresh_days: int | None = None,
     priority: int | None = None,
     model_instance_id: str | None = None,
+    force_research: bool = False,
+    queue_phase: str | None = None,
+) -> tuple[str, ResearchRun]:
+    """Atomically admit and queue one asset research task."""
+
+    with asset_research_admission_lock(db, asset.asset_id):
+        active = active_asset_research(db, asset.asset_id)
+        ordinary_event = (
+            event is not None
+            and not historical_replay
+            and retry_of_run_id is None
+            and market_factor_refresh_days is None
+            and not force_research
+        )
+        mergeable = (
+            get_mergeable_queued_run(
+                db,
+                asset.asset_id,
+                utc_now() - timedelta(hours=settings.research_coalesce_window_hours),
+            )
+            if ordinary_event and active is not None
+            else None
+        )
+        if active is not None and (mergeable is None or mergeable.id != active.id):
+            raise ResearchAdmissionError(
+                "research_already_active",
+                "该标的已有排队中或执行中的研究任务。",
+                run_id=str(active.id),
+            )
+        if active is None:
+            enforce_asset_research_admission(
+                db,
+                asset.asset_id,
+                cooldown_hours=settings.research_asset_cooldown_hours,
+                now=utc_now(),
+                bypass_cooldown=(
+                    retry_of_run_id is not None or force_research
+                ),
+                check_active=False,
+            )
+        return _enqueue_research_locked(
+            db,
+            asset,
+            event,
+            as_of,
+            historical_replay,
+            retry_of_run_id,
+            retry_attempt,
+            market_factor_refresh_days,
+            priority,
+            model_instance_id,
+            force_research,
+            queue_phase,
+        )
+
+
+def _enqueue_research_locked(
+    db,
+    asset: AssetRef,
+    event: NewsEvent | None = None,
+    as_of: datetime | None = None,
+    historical_replay: bool = False,
+    retry_of_run_id: UUID | None = None,
+    retry_attempt: int = 0,
+    market_factor_refresh_days: int | None = None,
+    priority: int | None = None,
+    model_instance_id: str | None = None,
+    force_research: bool = False,
+    queue_phase: str | None = None,
 ) -> tuple[str, ResearchRun]:
     """Persist a visible queued run before handing work to the LLM worker."""
 
@@ -1257,12 +1332,20 @@ def enqueue_research(
                 else []
             ),
             AnalysisStep(
-                phase="research_retry_queue" if retry_of_run_id else "research_queue",
+                phase=(
+                    queue_phase
+                    or ("research_retry_queue" if retry_of_run_id else "research_queue")
+                ),
                 executor="celery",
                 summary=(
                     f"已为历史失败任务创建第 {retry_attempt} 次重新执行。"
                     if retry_of_run_id
-                    else f"已为主标的 {asset.symbol} 创建深度研究任务。"
+                    else (
+                        f"已绕过{settings.research_asset_cooldown_hours}小时冷却，"
+                        f"为主标的 {asset.symbol} 创建重新调研任务。"
+                        if force_research
+                        else f"已为主标的 {asset.symbol} 创建深度研究任务。"
+                    )
                 ),
                 metrics={
                     **(
@@ -1308,6 +1391,41 @@ def enqueue_research(
     return str(task.id), run
 
 
+def reserve_research_run(
+    db,
+    asset: AssetRef,
+    event: NewsEvent | None = None,
+    as_of: datetime | None = None,
+    historical_replay: bool = False,
+) -> ResearchRun:
+    """Reserve a synchronous API research run through the same admission gate."""
+
+    with asset_research_admission_lock(db, asset.asset_id):
+        enforce_asset_research_admission(
+            db,
+            asset.asset_id,
+            cooldown_hours=settings.research_asset_cooldown_hours,
+            now=utc_now(),
+        )
+        run = ResearchRun(
+            event_id=event.id if event else None,
+            trigger_event_ids=[event.id] if event else [],
+            asset=asset,
+            as_of=as_of or utc_now(),
+            historical_replay=historical_replay,
+            analysis_steps=[
+                *(event.analysis_steps if event else []),
+                AnalysisStep(
+                    phase="research_queue",
+                    executor="api",
+                    summary=f"已为主标的 {asset.symbol} 创建同步研究任务。",
+                ),
+            ],
+        )
+        save_run(db, run)
+        return run
+
+
 MARKET_FACTOR_REFRESH_AGES = ((20, 30), (5, 8), (1, 2))
 MARKET_FACTOR_REFRESH_EVENT_DAYS = 45
 MARKET_FACTOR_REFRESH_BATCH_SIZE = 20
@@ -1343,7 +1461,10 @@ def enqueue_event_researches(db, event: NewsEvent, limit: int) -> list[tuple[str
                 or not has_new_cluster_evidence
             ):
                 continue
-        queued.append(enqueue_research(db, candidate.asset, event))
+        try:
+            queued.append(enqueue_research(db, candidate.asset, event))
+        except ResearchAdmissionError:
+            continue
     return queued
 
 
@@ -2717,6 +2838,8 @@ def refresh_event_market_factors() -> dict[str, int]:
                 )
                 queued += 1
                 active.add(key)
+            except ResearchAdmissionError:
+                continue
             except Exception:
                 failed += 1
     return {"queued": queued, "failed": failed}

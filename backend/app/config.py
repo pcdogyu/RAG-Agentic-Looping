@@ -66,6 +66,7 @@ class Settings(BaseSettings):
     research_prompt_evidence_chars: int = Field(default=6000, ge=2000, le=24000)
     research_prompt_context_chars: int = Field(default=1000, ge=1000, le=12000)
     research_coalesce_window_hours: int = Field(default=24, ge=1, le=168)
+    research_asset_cooldown_hours: int = Field(default=24, ge=0, le=720)
     research_heartbeat_seconds: int = Field(default=30, ge=10, le=120)
     research_lease_seconds: int = Field(default=120, ge=30, le=600)
     model_task_heartbeat_seconds: int = Field(default=30, ge=10, le=120)

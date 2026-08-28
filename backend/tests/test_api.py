@@ -21,13 +21,16 @@ from backend.app.domain import (
 )
 from backend.app.main import app
 from backend.app.providers.registry import SEED_ASSETS
+from backend.app.services.research_admission import ResearchAdmissionError
 from backend.app.services.research_queue import build_research_queue
 from backend.app.storage import (
     list_recommendations,
+    list_runs,
     save_event,
     save_event_research_run,
     save_recommendation,
     save_run,
+    upsert_asset,
 )
 
 
@@ -502,6 +505,147 @@ def test_non_failed_research_cannot_be_requeued(db):
         response = client.post(f"/api/v1/research-runs/{run.id}/retry")
 
     assert response.status_code == 409
+
+
+def test_conclusion_can_force_current_research_with_original_event(db, monkeypatch):
+    now = utc_now()
+    event = NewsEvent(
+        news_item_ids=[],
+        headline="Original event",
+        event_type=EventType.OTHER,
+        direct_impact="Original event impact",
+        source_quality=SourceQuality.PROFESSIONAL,
+        published_at=now,
+        observed_at=now,
+        as_of=now,
+    )
+    save_event(db, event)
+    source_run = ResearchRun(
+        asset=SEED_ASSETS[0],
+        event_id=event.id,
+        status=RunStatus.COMPLETED,
+        completed_at=now,
+    )
+    save_run(db, source_run)
+    recommendation = recommendation_for(source_run)
+    save_recommendation(db, recommendation)
+    captured = {}
+
+    def fake_enqueue(_db, asset, queued_event, **kwargs):
+        captured.update(asset=asset, event=queued_event, **kwargs)
+        run = ResearchRun(asset=asset, event_id=queued_event.id if queued_event else None)
+        return "forced-task", run
+
+    monkeypatch.setattr("backend.app.main.enqueue_research", fake_enqueue)
+
+    with TestClient(app) as client:
+        response = client.post(f"/api/v1/conclusions/{recommendation.id}/research")
+
+    assert response.status_code == 202
+    assert response.json() == {
+        "task_id": "forced-task",
+        "run_id": response.json()["run_id"],
+        "source_recommendation_id": str(recommendation.id),
+        "status": "queued",
+    }
+    assert captured["asset"].asset_id == source_run.asset.asset_id
+    assert captured["event"].id == event.id
+    assert captured["historical_replay"] is False
+    assert captured["force_research"] is True
+    assert captured["queue_phase"] == "forced_research_queue"
+    assert "retry_of_run_id" not in captured
+
+
+def test_conclusion_force_research_without_event_uses_current_asset(db, monkeypatch):
+    source_run = ResearchRun(
+        asset=SEED_ASSETS[0],
+        status=RunStatus.INSUFFICIENT_EVIDENCE,
+        completed_at=utc_now(),
+    )
+    save_run(db, source_run)
+    recommendation = recommendation_for(source_run)
+    save_recommendation(db, recommendation)
+    captured = {}
+
+    def fake_enqueue(_db, asset, queued_event, **kwargs):
+        captured.update(asset=asset, event=queued_event, **kwargs)
+        return "forced-task", ResearchRun(asset=asset)
+
+    monkeypatch.setattr("backend.app.main.enqueue_research", fake_enqueue)
+
+    with TestClient(app) as client:
+        response = client.post(f"/api/v1/conclusions/{recommendation.id}/research")
+
+    assert response.status_code == 202
+    assert captured["event"] is None
+
+
+def test_conclusion_force_research_reports_active_run_and_missing_event(
+    db, monkeypatch
+):
+    now = utc_now()
+    missing_event_id = uuid4()
+    source_run = ResearchRun(
+        asset=SEED_ASSETS[0],
+        event_id=missing_event_id,
+        status=RunStatus.COMPLETED,
+        completed_at=now,
+    )
+    save_run(db, source_run)
+    recommendation = recommendation_for(source_run)
+    save_recommendation(db, recommendation)
+
+    with TestClient(app) as client:
+        missing = client.post(f"/api/v1/conclusions/{recommendation.id}/research")
+
+    assert missing.status_code == 409
+    assert missing.json()["detail"] == "source event no longer exists"
+
+    source_run.event_id = None
+    save_run(db, source_run)
+    active_id = uuid4()
+    monkeypatch.setattr(
+        "backend.app.main.enqueue_research",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            ResearchAdmissionError(
+                "research_already_active",
+                "该标的已有排队中或执行中的研究任务。",
+                run_id=str(active_id),
+            )
+        ),
+    )
+    with TestClient(app) as client:
+        active = client.post(f"/api/v1/conclusions/{recommendation.id}/research")
+
+    assert active.status_code == 409
+    assert active.json()["detail"]["code"] == "research_already_active"
+    assert active.json()["detail"]["active_run_id"] == str(active_id)
+
+
+def test_synchronous_research_failure_closes_reserved_run(db, monkeypatch):
+    upsert_asset(db, SEED_ASSETS[0])
+
+    class FailingResearchService:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def run(self, *_args, **_kwargs):
+            raise RuntimeError("checkpoint unavailable")
+
+    monkeypatch.setattr("backend.app.main.ResearchService", FailingResearchService)
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post(
+            "/api/v1/research",
+            json={"asset_id": SEED_ASSETS[0].asset_id, "background": False},
+        )
+
+    assert response.status_code == 500
+    runs = list_runs(db)
+    assert len(runs) == 1
+    assert runs[0].status is RunStatus.FAILED
+    assert runs[0].completed_at is not None
+    assert runs[0].error == "RuntimeError: synchronous research failed"
 
 
 def test_research_queue_aggregates_active_runs_and_applies_status_priority(db):

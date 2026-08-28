@@ -38,12 +38,17 @@ class TelegramNotifier:
             return False
 
     def recommendation(self, value: Recommendation) -> bool:
+        fact_confidence = (
+            value.fact_confidence
+            if value.fact_confidence is not None
+            else value.evidence_strength
+        )
         return self.send(
             f"研究完成：{value.asset.name} ({value.asset.symbol})\n"
             f"状态：{value.signal_status.value}｜评级：{value.rating.value}"
-            f"｜程序分：{value.score}｜置信度：{value.confidence:.0%}\n"
-            f"资料覆盖：{'完整' if value.evidence_complete else '不足'}"
-            f"｜方向门禁：{'通过' if value.directional_evidence_complete else '未通过'}\n"
+            f"｜影响分：{value.score}｜评级置信度：{value.confidence:.0%}\n"
+            f"新闻事实置信度：{fact_confidence:.0%}"
+            f"｜证据质量提示：{len(value.evidence_warnings)} 条\n"
             f"{value.thesis.summary[:800]}\n\n仅用于研究与模拟。"
         )
 

@@ -36,10 +36,21 @@ def test_order_respects_equity_limit(db):
     assert snapshot.cash_usd > snapshot.nav_usd * 0.10
 
 
-def test_incomplete_recommendation_cannot_trade(db):
+def test_incomplete_recommendation_can_trade_when_rating_confidence_is_sufficient(db):
     service = PortfolioService(ProviderRegistry(Settings(fmp_access_token="")))
-    with pytest.raises(PortfolioError):
-        service.create_from_recommendation(db, recommendation(complete=False), price=200)
+    order = service.create_from_recommendation(
+        db,
+        recommendation(complete=False),
+        price=200,
+    )
+
+    assert order.quantity == 40
+
+
+def test_low_confidence_recommendation_cannot_trade(db):
+    service = PortfolioService(ProviderRegistry(Settings(fmp_access_token="")))
+    with pytest.raises(PortfolioError, match="below 55%"):
+        service.create_from_recommendation(db, recommendation(confidence=0.54), price=200)
 
 
 def test_repeated_order_cannot_exceed_single_asset_limit(db):

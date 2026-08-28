@@ -8,6 +8,7 @@ from typing import Any, Literal
 from sqlalchemy.orm import Session
 
 from backend.app.domain import (
+    HorizonUnit,
     Market,
     Outcome,
     Recommendation,
@@ -34,10 +35,10 @@ class BenchmarkResult:
 class OutcomeService:
     """Evaluate each recommendation at the horizon it actually declared.
 
-    ``Recommendation.horizon_days`` is a calendar-day forecast horizon. Prices are
-    aligned to the first available market observation on or after each boundary,
-    so weekends and exchange holidays never shorten or lengthen the label by using
-    an arbitrary final row returned by a provider.
+    Legacy recommendations use a calendar-day forecast horizon. New short-term
+    recommendations use trading sessions and are evaluated at the third close
+    after the entry observation, so weekends and exchange holidays do not shorten
+    the requested market window.
     """
 
     benchmark_symbols = {
@@ -146,6 +147,24 @@ class OutcomeService:
             return []
         return points[entry_index : exit_index + 1]
 
+    @staticmethod
+    def _trading_session_window(
+        points: list[PricePoint], *, start: datetime, sessions: int
+    ) -> list[PricePoint]:
+        """Return entry plus the requested number of subsequent market closes."""
+
+        start = as_utc(start)
+        entry_index = next(
+            (index for index, point in enumerate(points) if point.observed_at >= start),
+            None,
+        )
+        if entry_index is None:
+            return []
+        exit_index = entry_index + sessions
+        if exit_index >= len(points):
+            return []
+        return points[entry_index : exit_index + 1]
+
     def evaluate_due(self, db: Session) -> list[Outcome]:
         existing = {(item.recommendation_id, item.horizon_days) for item in list_outcomes(db)}
         now = utc_now()
@@ -165,7 +184,10 @@ class OutcomeService:
                 horizon = recommendation.horizon_days
                 if (recommendation.id, horizon) in existing:
                     continue
-                if as_utc(recommendation.as_of) + timedelta(days=horizon) > now:
+                if (
+                    recommendation.horizon_unit is HorizonUnit.CALENDAR_DAYS
+                    and as_utc(recommendation.as_of) + timedelta(days=horizon) > now
+                ):
                     continue
                 outcome = self._evaluate(recommendation, horizon, observed_at=now)
                 if outcome:
@@ -190,13 +212,20 @@ class OutcomeService:
         observed_at = as_utc(observed_at or utc_now())
         start = as_utc(recommendation.as_of)
         target = start + timedelta(days=horizon)
-        if target > observed_at:
+        if (
+            recommendation.horizon_unit is HorizonUnit.CALENDAR_DAYS
+            and target > observed_at
+        ):
             return None
 
         provider = self.registry.provider_for(recommendation.asset)
         prices = provider.get_prices(recommendation.asset, start=start, end=observed_at)
         points = self._price_points(prices, not_after=observed_at)
-        window = self._window(points, start=start, target=target)
+        window = (
+            self._trading_session_window(points, start=start, sessions=horizon)
+            if recommendation.horizon_unit is HorizonUnit.TRADING_SESSIONS
+            else self._window(points, start=start, target=target)
+        )
         if len(window) < 2:
             return None
 
@@ -225,7 +254,7 @@ class OutcomeService:
             (forecast - realized) ** 2
             for forecast, realized in zip(predicted, actual, strict=True)
         ) / 3
-        if abs(recommendation.score) < 20:
+        if abs(recommendation.score) < 15:
             direction_correct = abs(raw_return) <= neutral_band
         elif recommendation.score > 0:
             direction_correct = raw_return > neutral_band

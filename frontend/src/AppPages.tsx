@@ -1061,10 +1061,16 @@ export function NewsPage({ apiBase }: { apiBase: string }) {
   </section>;
 }
 
-type Recommendation = {
+type ScoringFactor = {
+  value: number;
+  reason: string;
+  evidence_ids: string[];
+};
+
+export type Recommendation = {
   id: string;
   run_id: string;
-  asset: { symbol: string; name: string; market: string };
+  asset: { asset_id: string; symbol: string; name: string; market: string };
   rating: string;
   score: number | null;
   confidence: number;
@@ -1083,6 +1089,22 @@ type Recommendation = {
   primary_gate_reason?: string | null;
   gate_reasons?: string[];
   horizon_days?: number;
+  horizon_unit?: "calendar_days" | "trading_sessions";
+  impact_factors?: {
+    direction: number;
+    magnitude: ScoringFactor;
+    persistence: ScoringFactor;
+    representativeness: ScoringFactor;
+    market_confirmation: ScoringFactor;
+  };
+  confidence_factors?: {
+    direction_clarity: ScoringFactor;
+    source_reliability: ScoringFactor;
+    magnitude_certainty: ScoringFactor;
+    market_context_completeness: ScoringFactor;
+  };
+  fact_confidence?: number;
+  evidence_warnings?: string[];
   scoring_version?: string;
   calibration_version?: string;
   claim_assessments?: Array<{
@@ -1163,6 +1185,39 @@ export type FailedResearchBulkRetryResponse = {
 };
 
 export const failedResearchBulkRetryPath = "/api/v1/failed-research-runs/retry";
+
+export type ConclusionResearchResponse = {
+  task_id: string;
+  run_id: string;
+  source_recommendation_id: string;
+  status: "queued";
+};
+
+export const conclusionResearchPath = (recommendationId: string) =>
+  `/api/v1/conclusions/${encodeURIComponent(recommendationId)}/research`;
+
+export async function researchConclusion(
+  apiBase: string,
+  recommendationId: string,
+  request: typeof fetch = fetch,
+): Promise<ConclusionResearchResponse> {
+  const response = await request(`${apiBase}${conclusionResearchPath(recommendationId)}`, { method: "POST" });
+  const payload = await response.json() as Partial<ConclusionResearchResponse> & { detail?: unknown };
+  if (!response.ok) {
+    const structured = payload.detail && typeof payload.detail === "object"
+      ? payload.detail as { message?: unknown; active_run_id?: unknown }
+      : null;
+    const message = structured && typeof structured.message === "string" ? structured.message : null;
+    const activeRun = structured && typeof structured.active_run_id === "string" ? structured.active_run_id : null;
+    const detail = typeof payload.detail === "string"
+      ? payload.detail
+      : message
+        ? `${message}${activeRun ? `（活动任务 ${activeRun}）` : ""}`
+        : "重新调研失败";
+    throw new Error(detail);
+  }
+  return payload as ConclusionResearchResponse;
+}
 
 export function failedResearchRetryPath(
   item: Pick<FailedResearch, "kind" | "id">,
@@ -1256,8 +1311,13 @@ export function conclusionReferences(
 }
 
 const ratingLabels: Record<string, string> = {
-  strongly_bullish: "强烈看多", bullish: "看多", watch: "观察", bearish: "看空", strongly_bearish: "强烈看空",
+  strongly_bullish: "强烈看多", bullish: "看多", watch: "观望", bearish: "看空", strongly_bearish: "强烈看空",
 };
+
+export function recommendationRatingLabel(value: string) {
+  const normalized = value.trim() === "官网" ? "watch" : value.trim();
+  return ratingLabels[normalized] || normalized;
+}
 
 const signalStatusLabels: Record<string, string> = {
   technical_failure: "技术失败",
@@ -1275,13 +1335,14 @@ const modelDirectionLabels: Record<string, string> = {
 const modelRatingLabels: Record<string, string> = {
   strongly_bullish: "强烈看多 / Strongly bullish",
   bullish: "看多 / Bullish",
-  watch: "观察 / Watch",
+  watch: "观望 / Watch",
   bearish: "看空 / Bearish",
   strongly_bearish: "强烈看空 / Strongly bearish",
 };
 
 export function ConclusionScore({
   score, rating, confidence, evidenceComplete, directionalEvidenceComplete, signalStatus,
+  factConfidence, horizonDays, horizonUnit, scoringVersion,
 }: {
   score: number | null;
   rating: string;
@@ -1289,20 +1350,27 @@ export function ConclusionScore({
   evidenceComplete: boolean;
   directionalEvidenceComplete?: boolean;
   signalStatus?: string;
+  factConfidence?: number;
+  horizonDays?: number;
+  horizonUnit?: string;
+  scoringVersion?: string;
 }) {
   const resolvedStatus = signalStatus || (
     !evidenceComplete ? "insufficient_evidence" : (Math.abs(score ?? 0) < 20 ? "neutral" : "directional")
   );
+  const shortTerm = scoringVersion === "short-term-impact-v1" || horizonUnit === "trading_sessions";
   const publishedScore = score ?? 0;
   const scoreBlocked = score === null || resolvedStatus === "insufficient_evidence" || resolvedStatus === "technical_failure";
-  const scoreTone = scoreBlocked ? "neutral" : publishedScore <= -20 ? "negative" : publishedScore >= 20 ? "positive" : "neutral";
+  const scoreTone = scoreBlocked ? "neutral" : publishedScore <= -15 ? "negative" : publishedScore >= 15 ? "positive" : "neutral";
   return <div className={`conclusion-score ${scoreTone}`}>
-    <strong>{scoreBlocked ? "暂不评分" : `发布分：${publishedScore > 0 ? "+" : ""}${publishedScore}`}</strong>
-    <span>{signalStatusLabels[resolvedStatus] || resolvedStatus} · 评级：{ratingLabels[rating] || rating}</span>
-    <small>
-      {scoreBlocked ? "门禁后参考置信度" : "发布置信度"} {Math.round(confidence * 100)}% · 资料覆盖{evidenceComplete ? "完整" : "不足"}
-      {directionalEvidenceComplete !== undefined && ` · 方向证据${directionalEvidenceComplete ? "通过" : "未通过"}`}
-    </small>
+    <strong>{scoreBlocked ? "暂不评分" : `${shortTerm ? "影响分" : "发布分"}：${publishedScore > 0 ? "+" : ""}${publishedScore}`}</strong>
+    <span>{signalStatusLabels[resolvedStatus] || resolvedStatus} · {shortTerm ? "五档评级" : "评级"}：{recommendationRatingLabel(rating)}</span>
+    {shortTerm && !scoreBlocked
+      ? <small>新闻事实置信度 {Math.round((factConfidence ?? confidence) * 100)}% · 评级置信度 {Math.round(confidence * 100)}% · 未来 1–{horizonDays ?? 3} 个交易日</small>
+      : <small>
+        {scoreBlocked ? "门禁后参考置信度" : "发布置信度"} {Math.round(confidence * 100)}% · 资料覆盖{evidenceComplete ? "完整" : "不足"}
+        {directionalEvidenceComplete !== undefined && ` · 方向证据${directionalEvidenceComplete ? "通过" : "未通过"}`}
+      </small>}
   </div>;
 }
 
@@ -1317,13 +1385,107 @@ export function ModelOpinion({
 }) {
   if (!direction && !rating && typeof confidence !== "number") return null;
   return <section className="model-opinion">
-    <h3>7B 模型意见（门禁前） / 7B model opinion (pre-gate)</h3>
-    <p>这是模型基于当前输入给出的独立意见，不代表证据门禁已通过，也不是最终发布评分。 / This is the model&apos;s ungated opinion, not a published score.</p>
+    <h3>7B 模型原始意见 / 7B model raw opinion</h3>
+    <p>这是模型基于当前输入给出的独立原始意见；证据质量核验会降低最终置信度，但不会隐藏或归零方向评分。 / Evidence quality checks may reduce final confidence without hiding or zeroing the directional score.</p>
     <div className="model-opinion-grid">
       <span>方向 / Direction<strong>{direction ? modelDirectionLabels[direction] || direction : "未留存 / Not retained"}</strong></span>
-      <span>五档评级 / Rating<strong>{rating ? modelRatingLabels[rating] || rating : "未留存 / Not retained"}</strong></span>
+      <span>五档评级 / Rating<strong>{rating ? modelRatingLabels[rating === "官网" ? "watch" : rating] || recommendationRatingLabel(rating) : "未留存 / Not retained"}</strong></span>
       <span>原始置信度 / Confidence<strong>{typeof confidence === "number" ? `${Math.round(confidence * 100)}%` : "未留存 / Not retained"}</strong></span>
     </div>
+  </section>;
+}
+
+export type ConclusionResearchState = {
+  status: "pending" | "queued" | "error";
+  error?: string;
+};
+
+export function ResearchAgainButton({
+  state,
+  onResearch,
+}: {
+  state?: ConclusionResearchState;
+  onResearch: () => void;
+}) {
+  const pending = state?.status === "pending";
+  const queued = state?.status === "queued";
+  return <div className="conclusion-research-action">
+    <button
+      type="button"
+      className="research-again"
+      disabled={pending || queued}
+      onClick={onResearch}
+    >{pending ? "重新调研中…" : queued ? "已进入队列" : "重新调研"}</button>
+    {state?.status === "error" && <small role="alert">{state.error || "重新调研失败"}</small>}
+  </div>;
+}
+
+function factorValue(value: number) {
+  return Number.isFinite(value) ? String(Number(value.toFixed(3))) : "0";
+}
+
+function signedFactorValue(value: number) {
+  return `${value > 0 ? "+" : ""}${factorValue(value)}`;
+}
+
+function roundHalfUp(value: number) {
+  return value >= 0 ? Math.floor(value + 0.5) : Math.ceil(value - 0.5);
+}
+
+function FactorEvidence({ factor }: { factor: ScoringFactor }) {
+  return <>
+    {factor.reason && <p>{factor.reason}</p>}
+    {!!factor.evidence_ids?.length && <small>证据：{factor.evidence_ids.join("、")}</small>}
+  </>;
+}
+
+export function ShortTermScoreDetails({ recommendation }: { recommendation: Recommendation }) {
+  const impact = recommendation.impact_factors;
+  const confidence = recommendation.confidence_factors;
+  const warnings = recommendation.evidence_warnings || [];
+  if (!impact && !confidence && !warnings.length) return null;
+  const impactDefinitions: Array<[string, string, number, ScoringFactor]> = impact ? [
+    ["M", "变动幅度", 45, impact.magnitude],
+    ["T", "持续性", 25, impact.persistence],
+    ["I", "标的代表性", 15, impact.representativeness],
+    ["C", "市场确认", 15, impact.market_confirmation],
+  ] : [];
+  const confidenceDefinitions: Array<[string, string, number, ScoringFactor]> = confidence ? [
+    ["A", "方向明确度", 40, confidence.direction_clarity],
+    ["R", "事实与来源可靠度", 25, confidence.source_reliability],
+    ["Q", "幅度分类确定性", 20, confidence.magnitude_certainty],
+    ["K", "趋势及市场信息完整度", 15, confidence.market_context_completeness],
+  ] : [];
+  const impactSubtotal = impactDefinitions.reduce((total, [, , weight, factor]) => total + factor.value * weight, 0);
+  const calculatedImpactScore = impact ? roundHalfUp(impact.direction * impactSubtotal) : 0;
+  return <section className="short-term-score-details">
+    {impact && <>
+      <h3>短线影响因子</h3>
+      <p className="score-formula">S = D × (45M + 25T + 15I + 15C)，D = {impact.direction > 0 ? "+1" : impact.direction < 0 ? "-1" : "0"}</p>
+      <p className="score-calculation-summary">因子合计 {factorValue(impactSubtotal)}；乘以方向并四舍五入后为 <strong>{signedFactorValue(calculatedImpactScore)}</strong></p>
+      <div className="score-factor-grid impact-factor-grid">
+        {impactDefinitions.map(([code, label, weight, factor]) => <article key={code}>
+          <span>{code} · {label}</span>
+          <strong>{factorValue(factor.value)} × {weight} × {impact.direction} = {signedFactorValue(factor.value * weight * impact.direction)}</strong>
+          <FactorEvidence factor={factor} />
+        </article>)}
+      </div>
+    </>}
+    {confidence && <>
+      <h3>评级置信度因素</h3>
+      <p className="score-formula">置信度 = 40%A + 25%R + 20%Q + 15%K</p>
+      <div className="score-factor-grid confidence-factor-grid">
+        {confidenceDefinitions.map(([code, label, weight, factor]) => <article key={code}>
+          <span>{code} · {label}</span>
+          <strong>{Math.round(factor.value * weight)} / {weight}</strong>
+          <FactorEvidence factor={factor} />
+        </article>)}
+      </div>
+    </>}
+    {!!warnings.length && <>
+      <h3>证据质量提示</h3>
+      <ul className="evidence-warnings">{warnings.map((warning, index) => <li key={`${warning}-${index}`}>{warning}</li>)}</ul>
+    </>}
   </section>;
 }
 
@@ -1445,20 +1607,66 @@ export function GateReasons({
   </>;
 }
 
+export function recommendationAssetKey(recommendation: Pick<Recommendation, "asset">) {
+  return recommendation.asset.asset_id || `${recommendation.asset.market}:${recommendation.asset.symbol}`;
+}
+
+export function ConclusionCard({
+  item,
+  researchState,
+  onOpen,
+  onResearch,
+}: {
+  item: Recommendation;
+  researchState?: ConclusionResearchState;
+  onOpen: () => void;
+  onResearch: () => void;
+}) {
+  return <article className="conclusion-card">
+    <button type="button" className="conclusion-card-details" onClick={onOpen} aria-label={`查看 ${item.asset.symbol} 研究详情`}>
+      <div className="conclusion-card-copy"><span>{item.asset.market} · {new Date(item.as_of).toLocaleString("zh-CN")}</span><strong>{item.asset.symbol} · {item.asset.name}</strong><p>{item.thesis.summary}</p></div>
+      <ConclusionScore
+        score={item.score}
+        rating={item.rating}
+        confidence={item.confidence}
+        evidenceComplete={item.evidence_complete}
+        directionalEvidenceComplete={item.directional_evidence_complete}
+        signalStatus={item.signal_status}
+        factConfidence={item.fact_confidence}
+        horizonDays={item.horizon_days}
+        horizonUnit={item.horizon_unit}
+        scoringVersion={item.scoring_version}
+      />
+    </button>
+    <ResearchAgainButton state={researchState} onResearch={onResearch} />
+  </article>;
+}
+
 export const changedTargetDesktopColumns = 5;
 
 function changedTargetLabel(kind: "signal_status" | "rating", value: string) {
   return kind === "signal_status"
     ? signalStatusLabels[value] || value
-    : ratingLabels[value] || value;
+    : recommendationRatingLabel(value);
 }
 
-export function ChangedTargetGrid({ items }: { items: ChangedTarget[] }) {
+export function ChangedTargetGrid({
+  items,
+  researchStates = {},
+  onResearch = () => undefined,
+}: {
+  items: ChangedTarget[];
+  researchStates?: Record<string, ConclusionResearchState>;
+  onResearch?: (item: ChangedTarget) => void;
+}) {
   return <div className="target-change-grid" data-columns={changedTargetDesktopColumns}>
     {items.map((item) => <article className="target-change-card" key={item.asset.asset_id}>
       <header>
         <span>{item.asset.market} · {new Date(item.changed_at).toLocaleString("zh-CN")}</span>
-        <strong>{item.asset.symbol}</strong>
+        <div className="target-change-symbol-row">
+          <strong>{item.asset.symbol}</strong>
+          <ResearchAgainButton state={researchStates[item.asset.asset_id]} onResearch={() => onResearch(item)} />
+        </div>
         <small>{item.asset.name}</small>
       </header>
       <div className={`target-change-field ${item.status_changed ? "changed" : "unchanged"}`}>
@@ -1478,19 +1686,21 @@ export function ChangedTargetGrid({ items }: { items: ChangedTarget[] }) {
 }
 
 export function ChangedTargetsContent({
-  items, loading, error, onRetry,
+  items, loading, error, onRetry, researchStates = {}, onResearch = () => undefined,
 }: {
   items: ChangedTarget[];
   loading: boolean;
   error: string;
   onRetry: () => void;
+  researchStates?: Record<string, ConclusionResearchState>;
+  onResearch?: (item: ChangedTarget) => void;
 }) {
   return <>
     {error && <div className="page-error target-change-error"><span>{error}</span><button type="button" onClick={onRetry}>重试</button></div>}
     {!items.length && !error && (loading
       ? <div className="page-message">正在加载标的变化…</div>
       : <div className="page-empty">当前没有状态或评级发生变化的标的。</div>)}
-    {!!items.length && <ChangedTargetGrid items={items} />}
+    {!!items.length && <ChangedTargetGrid items={items} researchStates={researchStates} onResearch={onResearch} />}
   </>;
 }
 
@@ -1500,6 +1710,8 @@ export function ChangedTargetsPage({ apiBase }: { apiBase: string }) {
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState("");
+  const [researchStates, setResearchStates] = useState<Record<string, ConclusionResearchState>>({});
+  const researchInFlight = useRef(new Set<string>());
 
   async function load(append = false) {
     const params = new URLSearchParams({ limit: "50" });
@@ -1530,13 +1742,38 @@ export function ChangedTargetsPage({ apiBase }: { apiBase: string }) {
     setError("");
   }
 
+  async function researchAgain(item: ChangedTarget) {
+    const assetId = item.asset.asset_id;
+    if (researchInFlight.current.has(assetId) || researchStates[assetId]?.status === "queued") return;
+    researchInFlight.current.add(assetId);
+    setResearchStates((current) => ({ ...current, [assetId]: { status: "pending" } }));
+    try {
+      await researchConclusion(apiBase, item.recommendation_id);
+      setResearchStates((current) => ({ ...current, [assetId]: { status: "queued" } }));
+    } catch (reason) {
+      setResearchStates((current) => ({
+        ...current,
+        [assetId]: { status: "error", error: reason instanceof Error ? reason.message : "重新调研失败" },
+      }));
+    } finally {
+      researchInFlight.current.delete(assetId);
+    }
+  }
+
   return <section className="app-page targets-page">
     <PageHeading eyebrow="TARGET CHANGES" title="标的变化" copy="汇总历史结论中状态或评级发生变化的标的；每个标的只展示最新一次真实变化。" />
     <div className="page-toolbar target-change-toolbar">
       <button type="button" disabled={loading || !items.length} onClick={clearCurrentPage}>清除</button>
       <button type="button" disabled={loading} onClick={() => load()}>{loading ? "刷新中…" : "刷新"}</button>
     </div>
-    <ChangedTargetsContent items={items} loading={loading} error={error} onRetry={() => load()} />
+    <ChangedTargetsContent
+      items={items}
+      loading={loading}
+      error={error}
+      onRetry={() => load()}
+      researchStates={researchStates}
+      onResearch={(item) => void researchAgain(item)}
+    />
     {cursor && <button className="load-more" type="button" disabled={loadingMore} onClick={() => load(true)}>{loadingMore ? "正在加载…" : "加载更多"}</button>}
   </section>;
 }
@@ -1556,6 +1793,8 @@ export function ConclusionsPage({ apiBase }: { apiBase: string }) {
   const [retryingAll, setRetryingAll] = useState(false);
   const [retryMessage, setRetryMessage] = useState("");
   const [retryMessageError, setRetryMessageError] = useState(false);
+  const [researchStates, setResearchStates] = useState<Record<string, ConclusionResearchState>>({});
+  const researchInFlight = useRef(new Set<string>());
 
   async function load(append = false) {
     const params = new URLSearchParams({ ...filters, limit: "20" });
@@ -1630,9 +1869,31 @@ export function ConclusionsPage({ apiBase }: { apiBase: string }) {
     const response = await fetch(`${apiBase}/api/v1/conclusions/${item.id}`);
     if (response.ok) setSelected(await response.json() as ConclusionDetail);
   }
+
+  async function researchAgain(item: Recommendation) {
+    const assetId = recommendationAssetKey(item);
+    if (researchInFlight.current.has(assetId) || researchStates[assetId]?.status === "queued") return;
+    researchInFlight.current.add(assetId);
+    setResearchStates((current) => ({ ...current, [assetId]: { status: "pending" } }));
+    try {
+      await researchConclusion(apiBase, item.id);
+      setResearchStates((current) => ({ ...current, [assetId]: { status: "queued" } }));
+    } catch (reason) {
+      setResearchStates((current) => ({
+        ...current,
+        [assetId]: { status: "error", error: reason instanceof Error ? reason.message : "重新调研失败" },
+      }));
+    } finally {
+      researchInFlight.current.delete(assetId);
+    }
+  }
+  const selectedIsShortTerm = !!selected && (
+    selected.recommendation.scoring_version === "short-term-impact-v1"
+    || selected.recommendation.horizon_unit === "trading_sessions"
+  );
   return (
     <section className="app-page conclusions-page">
-      <PageHeading eyebrow="RESEARCH OUTCOMES" title="研究结论" copy="只有资料与方向证据门禁通过后才显示评分；证据不足时标记为暂不评分，不把 0 误当成中性结论。" />
+      <PageHeading eyebrow="RESEARCH OUTCOMES" title="研究结论" copy="新研究按未来 1–3 个交易日评估；证据质量只降低置信度，不再隐藏、归零或强制改成观望。" />
       <form className="page-filters" onSubmit={(e) => { e.preventDefault(); load(); }}>
         <input aria-label="搜索结论" placeholder="标的、代码或核心观点" value={filters.q} onChange={(e) => setFilters({ ...filters, q: e.target.value })} />
         <select aria-label="市场" value={filters.market} onChange={(e) => setFilters({ ...filters, market: e.target.value })}><option value="">全部市场</option><option value="US">美股</option><option value="CN">A股</option><option value="HK">港股</option><option value="CRYPTO">加密</option></select>
@@ -1671,10 +1932,13 @@ export function ConclusionsPage({ apiBase }: { apiBase: string }) {
         </div>
       </section>
       <div className="conclusion-list">
-        {items.map((item) => <button type="button" className="conclusion-card" key={item.id} onClick={() => open(item)}>
-          <div><span>{item.asset.market} · {new Date(item.as_of).toLocaleString("zh-CN")}</span><strong>{item.asset.symbol} · {item.asset.name}</strong><p>{item.thesis.summary}</p></div>
-          <ConclusionScore score={item.score} rating={item.rating} confidence={item.confidence} evidenceComplete={item.evidence_complete} directionalEvidenceComplete={item.directional_evidence_complete} signalStatus={item.signal_status} />
-        </button>)}
+        {items.map((item) => <ConclusionCard
+          key={item.id}
+          item={item}
+          researchState={researchStates[recommendationAssetKey(item)]}
+          onOpen={() => void open(item)}
+          onResearch={() => void researchAgain(item)}
+        />)}
         {!items.length && !error && (loading
           ? <div className="page-message">正在加载研究结论…</div>
           : <div className="page-empty">当前筛选范围内没有最终标的建议。</div>)}
@@ -1683,23 +1947,40 @@ export function ConclusionsPage({ apiBase }: { apiBase: string }) {
       {selected && <div className="modal-backdrop" onClick={() => setSelected(null)}><article className="modal conclusion-modal" onClick={(e) => e.stopPropagation()}>
         <button className="close" onClick={() => setSelected(null)}>×</button>
         <p className="eyebrow">{selected.recommendation.asset.market} · {selected.recommendation.asset.symbol}</p><h2>{selected.recommendation.asset.name}</h2>
-        <ConclusionScore score={selected.recommendation.score} rating={selected.recommendation.rating} confidence={selected.recommendation.confidence} evidenceComplete={selected.recommendation.evidence_complete} directionalEvidenceComplete={selected.recommendation.directional_evidence_complete} signalStatus={selected.recommendation.signal_status} />
-        <p className="score-explanation">通过证据门禁后，评分由情景概率、事件方向和可用研究因子按固定权重计算，再按证据强度和证券映射可信度收缩；门禁未通过时不对外评分。 / A score is published only after all evidence gates pass.</p>
+        <ConclusionScore
+          score={selected.recommendation.score}
+          rating={selected.recommendation.rating}
+          confidence={selected.recommendation.confidence}
+          evidenceComplete={selected.recommendation.evidence_complete}
+          directionalEvidenceComplete={selected.recommendation.directional_evidence_complete}
+          signalStatus={selected.recommendation.signal_status}
+          factConfidence={selected.recommendation.fact_confidence}
+          horizonDays={selected.recommendation.horizon_days}
+          horizonUnit={selected.recommendation.horizon_unit}
+          scoringVersion={selected.recommendation.scoring_version}
+        />
+        <p className="score-explanation">{selectedIsShortTerm
+          ? "影响分按 D × (45M + 25T + 15I + 15C) 计算；证据质量核验只降低置信度，不改变方向或隐藏评分。"
+          : "该历史结论沿用原评分与证据门禁规则；证据不足记录继续暂不评分，供追溯和重新调研。"}</p>
         <ModelOpinion direction={selected.recommendation.model_direction} rating={selected.recommendation.model_rating} confidence={selected.recommendation.model_confidence} />
-        <div className="probability-grid"><span>看多 <strong>{Math.round(selected.recommendation.bull_probability * 100)}%</strong></span><span>基准 <strong>{Math.round(selected.recommendation.base_probability * 100)}%</strong></span><span>看空 <strong>{Math.round(selected.recommendation.bear_probability * 100)}%</strong></span></div>
-        <div className="research-gate-grid">
-          <span>程序原始分<strong>{selected.recommendation.score_available === false || ["technical_failure", "insufficient_evidence"].includes(selected.recommendation.signal_status || "") ? "—" : <>{(selected.recommendation.raw_score ?? selected.recommendation.score ?? 0) > 0 ? "+" : ""}{selected.recommendation.raw_score ?? selected.recommendation.score ?? 0}</>}</strong></span>
-          <span>证据强度<strong>{Math.round((selected.recommendation.evidence_strength ?? (selected.recommendation.evidence_complete ? 1 : 0)) * 100)}%</strong></span>
-          <span>映射可信度<strong>{Math.round((selected.recommendation.mapping_confidence ?? 1) * 100)}%</strong></span>
-          <span>研究期限<strong>{selected.recommendation.horizon_days ?? 90} 天</strong></span>
-        </div>
-        <GateReasons primaryReason={selected.recommendation.primary_gate_reason} allReasons={selected.recommendation.gate_reasons} />
+        {selectedIsShortTerm
+          ? <ShortTermScoreDetails recommendation={selected.recommendation} />
+          : <>
+            <div className="probability-grid"><span>看多 <strong>{Math.round(selected.recommendation.bull_probability * 100)}%</strong></span><span>基准 <strong>{Math.round(selected.recommendation.base_probability * 100)}%</strong></span><span>看空 <strong>{Math.round(selected.recommendation.bear_probability * 100)}%</strong></span></div>
+            <div className="research-gate-grid">
+              <span>程序原始分<strong>{selected.recommendation.score_available === false || ["technical_failure", "insufficient_evidence"].includes(selected.recommendation.signal_status || "") ? "—" : <>{(selected.recommendation.raw_score ?? selected.recommendation.score ?? 0) > 0 ? "+" : ""}{selected.recommendation.raw_score ?? selected.recommendation.score ?? 0}</>}</strong></span>
+              <span>证据强度<strong>{Math.round((selected.recommendation.evidence_strength ?? (selected.recommendation.evidence_complete ? 1 : 0)) * 100)}%</strong></span>
+              <span>映射可信度<strong>{Math.round((selected.recommendation.mapping_confidence ?? 1) * 100)}%</strong></span>
+              <span>研究期限<strong>{selected.recommendation.horizon_days ?? 90} 天</strong></span>
+            </div>
+            <GateReasons primaryReason={selected.recommendation.primary_gate_reason} allReasons={selected.recommendation.gate_reasons} />
+          </>}
         <h3>核心观点</h3><p>{selected.recommendation.thesis.summary}</p>
         {selected.recommendation.thesis.historical_context && <><h3>历史背景</h3><p>{selected.recommendation.thesis.historical_context}</p></>}
         <h3>催化剂</h3><ul>{selected.recommendation.thesis.catalysts.map((item) => <li key={item}>{item}</li>)}</ul>
         <h3>风险</h3><ul>{selected.recommendation.thesis.risks.map((item) => <li key={item}>{item}</li>)}</ul>
         <h3>失效条件</h3><ul>{selected.recommendation.thesis.invalidation_conditions.map((item) => <li key={item}>{item}</li>)}</ul>
-        {!!selected.recommendation.claim_assessments?.length && <><h3>逐观点证据门禁</h3><div className="claim-assessments">{selected.recommendation.claim_assessments.map((item, index) => <article key={`${item.claim_kind}-${index}`}><span>{item.claim_kind} · {item.verdict}</span><strong>{item.claim}</strong><small>复核置信度 {Math.round(item.confidence * 100)}%{item.reason ? ` · ${item.reason}` : ""}</small></article>)}</div></>}
+        {!!selected.recommendation.claim_assessments?.length && <><h3>{selectedIsShortTerm ? "逐观点证据核验" : "逐观点证据门禁"}</h3><div className="claim-assessments">{selected.recommendation.claim_assessments.map((item, index) => <article key={`${item.claim_kind}-${index}`}><span>{item.claim_kind} · {item.verdict}</span><strong>{item.claim}</strong><small>复核置信度 {Math.round(item.confidence * 100)}%{item.reason ? ` · ${item.reason}` : ""}</small></article>)}</div></>}
         {selected.event && <><h3>关联事件</h3><p>{selected.event.headline}</p></>}
         <h3>新闻与证据</h3><div className="evidence-links">{conclusionReferences(selected).map((item) => <a key={`${item.url}-${item.label}`} href={item.url} target="_blank" rel="noreferrer"><strong>{item.label}</strong><span>{item.source}</span></a>)}</div>
       </article></div>}

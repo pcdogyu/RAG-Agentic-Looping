@@ -267,6 +267,48 @@ describe("analysis mapping states", () => {
     expect(markup).toContain("证据支持看多结论");
   });
 
+  it("renders new short-term analysis without legacy evidence-gate fields", () => {
+    const log = {
+      id: "short-term-log",
+      event_id: "event-short-term",
+      run_id: "run-short-term",
+      event_research_run_id: null,
+      status: "completed",
+      updated_at: "2026-08-28T01:00:00Z",
+      news: [],
+      event: { headline: "黄金 ETF 持仓下降", event_type: "fund_flow", direct_impact: "短线偏空", priority: 0.7 },
+      asset: { symbol: "GOLD", name: "黄金", market: "COMMODITY" },
+      models: ["qwen2.5:7b"],
+      steps: [],
+      result: {
+        kind: "asset_recommendation",
+        rating: "watch",
+        score: -8,
+        raw_score: -8,
+        confidence: 0.82,
+        fact_confidence: 0.92,
+        evidence_complete: false,
+        directional_evidence_complete: false,
+        signal_status: "neutral",
+        scoring_version: "short-term-impact-v1",
+        horizon_unit: "trading_sessions",
+        horizon_days: 3,
+        summary: "影响很小，维持观望。",
+      },
+    } satisfies AnalysisLog;
+
+    const markup = renderToStaticMarkup(createElement(AnalysisTraceList, { logs: [log] }));
+
+    expect(markup).toContain("影响分");
+    expect(markup).toContain("观望");
+    expect(markup).toContain("新闻事实置信度");
+    expect(markup).toContain("92%");
+    expect(markup).toContain("评级置信度");
+    expect(markup).toContain("未来 1–3 个交易日");
+    expect(markup).not.toContain("方向证据");
+    expect(markup).not.toContain("程序原始分");
+  });
+
   it("renders a completed neutral event report and its affected scope", () => {
     const log = {
       id: "event-log",
@@ -430,17 +472,25 @@ describe("changed targets page", () => {
       rating_changed: index !== 0,
     }));
 
-    const markup = renderToStaticMarkup(createElement(ChangedTargetGrid, { items }));
+    const markup = renderToStaticMarkup(createElement(ChangedTargetGrid, {
+      items,
+      researchStates: {
+        "equity:XNAS:TARGET0": { status: "queued" },
+      },
+    }));
 
     expect(changedTargetDesktopColumns).toBe(5);
     expect(markup).toContain('class="target-change-grid" data-columns="5"');
     expect((markup.match(/class="target-change-card"/g) || []).length).toBe(5);
     expect(markup).toContain("方向证据不足");
     expect(markup).toContain("方向信号");
-    expect(markup).toContain("观察（未变）");
+    expect(markup).toContain("观望（未变）");
     expect(markup).toContain("方向信号（未变）");
-    expect(markup).toContain("观察");
+    expect(markup).toContain("观望");
     expect(markup).toContain("看空");
+    expect((markup.match(/class="research-again"/g) || []).length).toBe(5);
+    expect(markup).toContain("已进入队列");
+    expect(markup.indexOf("TARGET0")).toBeLessThan(markup.indexOf("已进入队列"));
   });
 
   it("distinguishes loading, empty, and failed states", () => {

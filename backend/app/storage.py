@@ -306,6 +306,56 @@ def list_active_runs(db: Session) -> list[ResearchRun]:
     return [ResearchRun.model_validate(row.payload) for row in rows]
 
 
+def list_active_runs_for_asset(db: Session, asset_id: str) -> list[ResearchRun]:
+    rows = db.scalars(
+        select(ResearchRunRow)
+        .where(
+            ResearchRunRow.asset_id == asset_id,
+            ResearchRunRow.status.in_(
+                (
+                    RunStatus.QUEUED.value,
+                    RunStatus.RUNNING.value,
+                    RunStatus.VERIFYING.value,
+                )
+            ),
+        )
+        .order_by(ResearchRunRow.created_at)
+    ).all()
+    return [ResearchRun.model_validate(row.payload) for row in rows]
+
+
+def get_latest_cooldown_run(
+    db: Session,
+    asset_id: str,
+    *,
+    completed_after: datetime,
+) -> ResearchRun | None:
+    """Return the latest real completed research inside an asset cooldown window."""
+
+    rows = db.scalars(
+        select(ResearchRunRow)
+        .where(
+            ResearchRunRow.asset_id == asset_id,
+            ResearchRunRow.status.in_(
+                (
+                    RunStatus.COMPLETED.value,
+                    RunStatus.INSUFFICIENT_EVIDENCE.value,
+                )
+            ),
+        )
+        .order_by(desc(ResearchRunRow.updated_at))
+    ).all()
+    cutoff = as_utc(completed_after)
+    eligible = []
+    for row in rows:
+        run = ResearchRun.model_validate(row.payload)
+        if run.historical_replay or run.completed_at is None:
+            continue
+        if as_utc(run.completed_at) > cutoff:
+            eligible.append(run)
+    return max(eligible, key=lambda item: as_utc(item.completed_at)) if eligible else None
+
+
 def list_queued_runs(db: Session) -> list[ResearchRun]:
     rows = db.scalars(
         select(ResearchRunRow)
@@ -530,6 +580,61 @@ def save_recommendation(db: Session, recommendation: Recommendation) -> None:
 def get_recommendation_for_run(db: Session, run_id: UUID) -> Recommendation | None:
     row = db.scalar(select(RecommendationRow).where(RecommendationRow.run_id == run_id))
     return Recommendation.model_validate(row.payload) if row else None
+
+
+def get_recommendation(db: Session, recommendation_id: UUID) -> Recommendation | None:
+    row = db.get(RecommendationRow, recommendation_id)
+    return Recommendation.model_validate(row.payload) if row else None
+
+
+def list_latest_legacy_gate_recommendations(
+    db: Session,
+    *,
+    current_scoring_version: str,
+) -> list[Recommendation]:
+    """Return one latest legacy insufficient-evidence conclusion per asset."""
+
+    rows = db.scalars(
+        select(RecommendationRow).order_by(
+            desc(RecommendationRow.as_of),
+            desc(RecommendationRow.id),
+        )
+    ).all()
+    selected: dict[str, Recommendation] = {}
+    for row in rows:
+        recommendation = Recommendation.model_validate(row.payload)
+        status = getattr(recommendation.signal_status, "value", recommendation.signal_status)
+        if (
+            recommendation.scoring_version != current_scoring_version
+            and status == "insufficient_evidence"
+            and recommendation.asset.asset_id not in selected
+        ):
+            selected[recommendation.asset.asset_id] = recommendation
+    return sorted(selected.values(), key=lambda item: (as_utc(item.as_of), str(item.id)))
+
+
+def asset_has_scoring_version(
+    db: Session,
+    asset_id: str,
+    scoring_version: str,
+) -> bool:
+    rows = db.scalars(
+        select(RecommendationRow.payload).where(RecommendationRow.asset_id == asset_id)
+    ).all()
+    return any(
+        str((payload or {}).get("scoring_version") or "") == scoring_version
+        for payload in rows
+    )
+
+
+def asset_has_research_phase(db: Session, asset_id: str, phase: str) -> bool:
+    rows = db.scalars(
+        select(ResearchRunRow.payload).where(ResearchRunRow.asset_id == asset_id)
+    ).all()
+    return any(
+        any(str(step.get("phase") or "") == phase for step in (payload or {}).get("analysis_steps", []))
+        for payload in rows
+    )
 
 
 def list_recommendations(

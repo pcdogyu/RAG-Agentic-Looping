@@ -958,7 +958,9 @@ def test_distinct_events_for_same_asset_share_one_queued_research(db, monkeypatc
     assert runs[1].coalesced_into_run_id == runs[0].id
 
 
-def test_insufficient_run_requeues_when_persistent_cluster_gets_new_evidence(db, monkeypatch):
+def test_insufficient_run_with_new_cluster_evidence_respects_asset_cooldown(
+    db, monkeypatch
+):
     queued_tasks = []
     monkeypatch.setattr(
         worker.research_asset,
@@ -1010,6 +1012,7 @@ def test_insufficient_run_requeues_when_persistent_cluster_gets_new_evidence(db,
     assert first_task is not None
     first_run = list_runs(db)[0]
     first_run.status = RunStatus.INSUFFICIENT_EVIDENCE
+    first_run.completed_at = worker.utc_now()
     first_run.evidence = [
         Evidence(
             run_id=first_run.id,
@@ -1030,11 +1033,11 @@ def test_insufficient_run_requeues_when_persistent_cluster_gets_new_evidence(db,
 
     second_task = worker.enqueue_event_research(db, event)
 
-    assert second_task is not None
-    assert len(queued_tasks) == 2
+    assert second_task is None
+    assert len(queued_tasks) == 1
     assert all(task["queue"] == "research.research-0" for task in queued_tasks)
     assert all(task["kwargs"]["model_instance_id"] == "research-0" for task in queued_tasks)
-    assert len(list_runs(db)) == 2
+    assert len(list_runs(db)) == 1
 
 
 def test_unmapped_event_queues_only_one_visible_7b_mapping_task(db, monkeypatch):

@@ -42,6 +42,10 @@ type Recommendation = {
   signal_status?: "technical_failure" | "insufficient_evidence" | "neutral" | "directional";
   raw_score?: number;
   gate_reasons?: string[];
+  scoring_version?: string;
+  horizon_unit?: "calendar_days" | "trading_sessions";
+  horizon_days?: number;
+  fact_confidence?: number;
   thesis: { summary: string; catalysts: string[]; risks: string[] };
   generated_at: string;
 };
@@ -160,7 +164,7 @@ type DashboardSnapshot = Snapshot & { analysis_logs: AnalysisLog[] };
 const labels: Record<string, string> = {
   strongly_bullish: "强烈看多",
   bullish: "看多",
-  watch: "观察",
+  watch: "观望",
   bearish: "看空",
   strongly_bearish: "强烈看空",
   insufficient_evidence: "证据不足",
@@ -504,7 +508,7 @@ export default function App() {
               <div className="run" key={run.id}>
                 <i className={run.status} />
                 <div><strong>{run.asset.symbol}</strong><span>{run.asset.name}</span></div>
-                <div><strong>{labels[run.status] || run.status}</strong><span>验证 {run.verification_round}/2</span></div>
+                <div><strong>{labels[run.status] || run.status}</strong><span>证据质量核验</span></div>
                 <span className="muted">{time(run.updated_at)}</span>
               </div>
             ))}
@@ -512,7 +516,7 @@ export default function App() {
         </div>
 
         <div className="panel recommendations-panel">
-          <PanelTitle title="最新建议" meta="证据门控评级" />
+          <PanelTitle title="最新建议" meta="短线影响与置信度" />
           <div className="recommendations">
             {snapshot.recommendations.length === 0 && <Empty text="完成一次深度研究后将在这里生成建议。" />}
             {snapshot.recommendations.map((item) => (
@@ -521,15 +525,17 @@ export default function App() {
                   <strong>{item.asset.symbol}</strong>
                   <span>{item.asset.name}</span>
                 </div>
-                <div className={`score ${item.score > 19 ? "positive" : item.score < -19 ? "negative" : "neutral"}`}>
+                <div className={`score ${item.score >= 15 ? "positive" : item.score <= -15 ? "negative" : "neutral"}`}>
                   {item.score > 0 ? "+" : ""}{item.score}
                 </div>
                 <div>
                   <strong>{labels[item.rating] || item.rating}</strong>
                   <span className="muted">置信度 {Math.round(item.confidence * 100)}%</span>
                 </div>
-                <span className={`evidence ${item.evidence_complete ? "verified" : "limited"}`}>
-                  {labels[item.signal_status || ""] || (item.evidence_complete ? "资料覆盖完整" : "资料覆盖不足")}
+                <span className={`evidence ${item.scoring_version === "short-term-impact-v1" || item.evidence_complete ? "verified" : "limited"}`}>
+                  {item.scoring_version === "short-term-impact-v1"
+                    ? `事实置信度 ${Math.round((item.fact_confidence ?? item.confidence) * 100)}%`
+                    : labels[item.signal_status || ""] || (item.evidence_complete ? "资料覆盖完整" : "资料覆盖不足")}
                 </span>
               </button>
             ))}
@@ -544,9 +550,9 @@ export default function App() {
             <p className="eyebrow">{selected.asset.market} · {selected.asset.symbol}</p>
             <h2>{selected.asset.name}</h2>
             <div className="modal-score"><strong>{selected.score}</strong><span>{labels[selected.rating]}</span></div>
-            <p className="muted">
-              {labels[selected.signal_status || ""] || "旧版结论"} · 程序原始分 {selected.raw_score ?? selected.score}
-              {selected.directional_evidence_complete !== undefined && ` · 方向证据${selected.directional_evidence_complete ? "通过" : "未通过"}`}
+            <p className="muted">{selected.scoring_version === "short-term-impact-v1"
+              ? `短线影响 · 新闻事实置信度 ${Math.round((selected.fact_confidence ?? selected.confidence) * 100)}% · 评级置信度 ${Math.round(selected.confidence * 100)}% · 未来 1–${selected.horizon_days ?? 3} 个交易日`
+              : <>{labels[selected.signal_status || ""] || "旧版结论"} · 程序原始分 {selected.raw_score ?? selected.score}{selected.directional_evidence_complete !== undefined && ` · 方向证据${selected.directional_evidence_complete ? "通过" : "未通过"}`}</>}
             </p>
             <p>{selected.thesis.summary}</p>
             <h3>催化剂</h3>

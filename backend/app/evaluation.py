@@ -13,10 +13,8 @@ from backend.app.config import Settings
 from backend.app.domain import AssetRef, NewsEvent, NewsItem, SourceQuality
 from backend.app.providers.registry import ProviderRegistry
 from backend.app.services.directional_scoring import (
-    calibrate_probabilities,
-    deterministic_direction_score,
-    gated_score,
     probabilities_for_score,
+    short_term_impact_score,
 )
 from backend.app.services.events import EventService
 
@@ -185,33 +183,16 @@ def probability_calibration(root: Path) -> dict[str, float | int | str | bool]:
     score_consistency_hits = 0
 
     for record in records:
-        model_probabilities = tuple(
-            float(record.get(f"model_{label}_probability", record[f"{label}_probability"]))
-            for label in labels
-        )
-        evidence_strength = float(record.get("evidence_strength", 1))
-        mapping_confidence = float(record.get("mapping_confidence", 1))
-        calibrated = calibrate_probabilities(
-            *model_probabilities,
-            reliability=evidence_strength * mapping_confidence,
-        )
-        direction = deterministic_direction_score(
-            bull_probability=calibrated[0],
-            base_probability=calibrated[1],
-            bear_probability=calibrated[2],
-            event_direction=record.get("event_direction"),
-            event_relevance=float(record.get("event_relevance", 0)),
-            factor_signal=record.get("factor_signal"),
-            factor_reliability=float(record.get("factor_reliability", 0)),
-        )
-        program_score = gated_score(
-            direction.raw_score,
-            evidence_strength,
-            mapping_confidence,
-        )
+        program_score = short_term_impact_score(
+            direction=int(record.get("direction", 0)),
+            magnitude=float(record.get("magnitude", 0)),
+            persistence=float(record.get("persistence", 0)),
+            representativeness=float(record.get("representativeness", 0)),
+            market_confirmation=float(record.get("market_confirmation", 0)),
+        ).score
         probabilities = probabilities_for_score(
             program_score,
-            base_probability=calibrated[1],
+            base_probability=float(record["base_probability"]),
         )
         if (
             any(not isfinite(value) or value < 0 or value > 1 for value in probabilities)

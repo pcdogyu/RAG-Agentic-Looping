@@ -6,13 +6,18 @@ from hashlib import sha256
 from backend.app.config import Settings
 from backend.app.domain import (
     CandidateAsset,
+    ConfidenceFactors,
     EventType,
     Evidence,
+    HorizonUnit,
+    ImpactFactors,
     NewsEvent,
     NewsItem,
     Rating,
     ResearchRun,
     RunStatus,
+    ScoringFactor,
+    SignalStatus,
     SourceQuality,
 )
 from backend.app.providers.registry import SEED_ASSETS
@@ -91,6 +96,51 @@ class FakeResearchLlm:
             bull_probability=0.6,
             base_probability=0.25,
             bear_probability=0.15,
+            impact_factors=ImpactFactors(
+                direction=1,
+                magnitude=ScoringFactor(
+                    value=0.4,
+                    reason="The disclosed change is material but not extreme.",
+                    evidence_ids=ids[:1],
+                ),
+                persistence=ScoringFactor(
+                    value=0.2,
+                    reason="Only one update is available.",
+                    evidence_ids=ids[:1],
+                ),
+                representativeness=ScoringFactor(
+                    value=0.8,
+                    reason="The event directly concerns the issuer.",
+                    evidence_ids=ids[:1],
+                ),
+                market_confirmation=ScoringFactor(
+                    value=0.2,
+                    reason="Limited market confirmation is available.",
+                    evidence_ids=ids[:1],
+                ),
+            ),
+            confidence_factors=ConfidenceFactors(
+                direction_clarity=ScoringFactor(
+                    value=0.9,
+                    reason="The expected direction is clear.",
+                    evidence_ids=ids[:1],
+                ),
+                source_reliability=ScoringFactor(
+                    value=0.9,
+                    reason="The source is reliable.",
+                    evidence_ids=ids[:1],
+                ),
+                magnitude_certainty=ScoringFactor(
+                    value=0.8,
+                    reason="The disclosed magnitude is measurable.",
+                    evidence_ids=ids[:1],
+                ),
+                market_context_completeness=ScoringFactor(
+                    value=0.6,
+                    reason="Some market context is available.",
+                    evidence_ids=ids[:1],
+                ),
+            ),
         ).model_dump(mode="json")
 
 
@@ -113,7 +163,30 @@ class NeutralResearchLlm(FakeResearchLlm):
                 base_probability=0.5,
                 bear_probability=0.25,
             )
+            for name in (
+                "magnitude",
+                "persistence",
+                "representativeness",
+                "market_confirmation",
+            ):
+                payload["impact_factors"][name]["value"] = 0
         return payload
+
+
+class MissingFactorResearchLlm(FakeResearchLlm):
+    def generate_json(self, **kwargs):
+        payload = super().generate_json(**kwargs)
+        if kwargs.get("schema") is DraftOutput:
+            payload.pop("impact_factors", None)
+            payload.pop("confidence_factors", None)
+        return payload
+
+
+class FailingDraftLlm(FakeResearchLlm):
+    def generate_json(self, **kwargs):
+        if kwargs.get("schema") is DraftOutput:
+            raise TimeoutError("research model unavailable")
+        return super().generate_json(**kwargs)
 
 
 class UnsupportedSemanticLlm(FakeResearchLlm):
@@ -194,6 +267,19 @@ class TargetedRegistry:
     def discover_news(self, **kwargs):
         self.discovery_calls += 1
         return [self.corroborating_news]
+
+
+def test_draft_normalizes_conflicting_factor_direction_and_watch_alias():
+    bearish = DraftOutput(
+        summary="Bearish update",
+        score=-30,
+        rating="官网",
+        impact_factors=ImpactFactors(direction=1),
+    )
+
+    assert bearish.direction.value == "bearish"
+    assert bearish.rating is Rating.BEARISH
+    assert bearish.impact_factors.direction == -1
 
 
 def test_model_fallback_skips_automatic_research_revision(db, tmp_path):
@@ -343,6 +429,16 @@ def test_research_graph_produces_verified_recommendation(db, tmp_path):
     assert run.recommendation is not None
     assert run.recommendation.evidence_complete is True
     assert run.recommendation.rating is Rating.BULLISH
+    assert run.recommendation.score == 38
+    assert run.recommendation.raw_score == 38
+    assert run.recommendation.confidence == 0.835
+    assert run.recommendation.fact_confidence == 0.9
+    assert run.recommendation.horizon_days == 3
+    assert run.recommendation.horizon_unit is HorizonUnit.TRADING_SESSIONS
+    assert run.recommendation.scoring_version == "short-term-impact-v1"
+    assert run.recommendation.calibration_version == "component-confidence-v1"
+    assert run.recommendation.impact_factors is not None
+    assert run.recommendation.confidence_factors is not None
     assert run.recommendation.thesis.evidence_ids
     assert round(
         100
@@ -374,7 +470,7 @@ def test_research_graph_produces_verified_recommendation(db, tmp_path):
     assert strong_run.recommendation is not None
     assert strong_run.recommendation.evidence_complete is True
     # The model's self-reported 80 is retained only for audit and cannot change
-    # the program score derived from the same probabilities and evidence.
+    # the program score derived from the structured factors.
     assert strong_run.recommendation.model_score == 80
     assert strong_run.recommendation.model_direction.value == "bullish"
     assert strong_run.recommendation.model_rating is Rating.STRONGLY_BULLISH
@@ -382,6 +478,26 @@ def test_research_graph_produces_verified_recommendation(db, tmp_path):
     assert strong_run.recommendation.raw_score == run.recommendation.raw_score
     assert strong_run.recommendation.rating is Rating.BULLISH
     assert strong_run.verification_round == 1
+
+
+def test_missing_structured_factors_default_to_zero_without_technical_failure(
+    db, tmp_path
+):
+    run = ResearchService(
+        FakeRegistry(),
+        db,
+        Settings(_env_file=None, reports_dir=tmp_path),
+        MissingFactorResearchLlm(),
+    ).run(SEED_ASSETS[0], historical_replay=True)
+
+    assert run.status is RunStatus.COMPLETED
+    assert run.retryable_reason is None
+    assert run.recommendation is not None
+    assert run.recommendation.score == 0
+    assert run.recommendation.rating is Rating.WATCH
+    assert run.recommendation.signal_status is SignalStatus.NEUTRAL
+    assert run.recommendation.impact_factors is not None
+    assert run.recommendation.impact_factors.magnitude.value == 0
 
 
 def test_final_status_distinguishes_neutral_insufficient_and_technical_failure(
@@ -434,9 +550,12 @@ def test_final_status_distinguishes_neutral_insufficient_and_technical_failure(
     insufficient = ResearchService(
         FakeRegistry(), db, settings, UnsupportedSemanticLlm()
     ).run(asset, event, as_of)
-    technical = ResearchService(
+    verifier_unavailable = ResearchService(
         FakeRegistry(), db, settings, FailingSemanticLlm()
     ).run(asset, event, as_of)
+    technical = ResearchService(FakeRegistry(), db, settings, FailingDraftLlm()).run(
+        asset, event, as_of
+    )
     low_confidence = ResearchService(
         FakeRegistry(), db, settings, LowConfidenceSemanticLlm()
     ).run(asset, event, as_of)
@@ -450,17 +569,24 @@ def test_final_status_distinguishes_neutral_insufficient_and_technical_failure(
     assert neutral.recommendation.raw_score == 0
     assert neutral.recommendation.score == 0
 
-    assert insufficient.status is RunStatus.INSUFFICIENT_EVIDENCE
+    assert insufficient.status is RunStatus.COMPLETED
     assert insufficient.recommendation.evidence_complete is True
     assert insufficient.recommendation.directional_evidence_complete is False
-    assert insufficient.recommendation.signal_status.value == "insufficient_evidence"
-    assert insufficient.recommendation.score == 0
+    assert insufficient.recommendation.signal_status is SignalStatus.DIRECTIONAL
+    assert insufficient.recommendation.score == 38
     assert 0 < insufficient.recommendation.confidence < (
         insufficient.recommendation.model_confidence or 0
     )
-    assert insufficient.recommendation.gate_reasons
-    assert insufficient.recommendation.primary_gate_reason == (
-        insufficient.recommendation.gate_reasons[0]
+    assert insufficient.recommendation.evidence_warnings
+    assert insufficient.recommendation.gate_reasons == []
+    assert insufficient.recommendation.primary_gate_reason is None
+
+    assert verifier_unavailable.status is RunStatus.COMPLETED
+    assert verifier_unavailable.recommendation.score == 38
+    assert verifier_unavailable.retryable_reason is None
+    assert any(
+        "verifier unavailable" in warning
+        for warning in verifier_unavailable.recommendation.evidence_warnings
     )
 
     assert technical.status is RunStatus.FAILED
@@ -469,22 +595,20 @@ def test_final_status_distinguishes_neutral_insufficient_and_technical_failure(
     assert technical.recommendation.confidence == 0
     assert technical.recommendation.bull_probability == 0.2
     assert technical.recommendation.base_probability == 0.6
-    assert technical.retryable_reason.startswith("semantic_verifier_")
+    assert technical.retryable_reason.startswith("model_")
 
-    assert low_confidence.status is RunStatus.INSUFFICIENT_EVIDENCE
-    assert low_confidence.recommendation.signal_status.value == "insufficient_evidence"
+    assert low_confidence.status is RunStatus.COMPLETED
+    assert low_confidence.recommendation.signal_status is SignalStatus.DIRECTIONAL
     assert any(
         "evidence strength" in reason
-        for reason in low_confidence.recommendation.gate_reasons
+        for reason in low_confidence.recommendation.evidence_warnings
     )
 
-    assert contradictory_stance.status is RunStatus.INSUFFICIENT_EVIDENCE
-    assert contradictory_stance.recommendation.signal_status.value == (
-        "insufficient_evidence"
-    )
+    assert contradictory_stance.status is RunStatus.COMPLETED
+    assert contradictory_stance.recommendation.signal_status is SignalStatus.DIRECTIONAL
     assert any(
         "claim stances" in reason
-        for reason in contradictory_stance.recommendation.gate_reasons
+        for reason in contradictory_stance.recommendation.evidence_warnings
     )
 
 
@@ -512,6 +636,9 @@ def test_research_draft_respects_cpu_prompt_budgets(db, tmp_path):
     assert len(llm.prompts) == 1
     assert "必须输出 score 字段" in llm.systems[0]
     assert "-100 到 100" in llm.systems[0]
+    assert "S=D×(45M+25T+15I+15C)" in llm.systems[0]
+    assert "未来 1 至 3 个交易日" in llm.systems[0]
+    assert "证据核验不会改变方向或隐藏评分" in llm.prompts[0]
     assert llm.prompts[0].count("x") <= settings.research_prompt_evidence_chars
     assert llm.prompts[0].count("y") <= settings.research_prompt_context_chars
 
@@ -746,10 +873,13 @@ def test_explicit_historical_replay_skips_live_providers(db, tmp_path, monkeypat
     assert registry.research_calls == 0
     assert run.historical_replay is True
     assert run.evidence == []
-    assert run.status.value == "insufficient_evidence"
+    assert run.status is RunStatus.COMPLETED
+    assert run.recommendation is not None
+    assert run.recommendation.score == 38
+    assert run.recommendation.evidence_warnings
 
 
-def test_verification_gap_triggers_targeted_acquisition_and_reverification(
+def test_verification_gap_is_advisory_and_does_not_trigger_second_research_pass(
     db, tmp_path, monkeypatch
 ):
     as_of = datetime(2025, 1, 31, 12, 0, tzinfo=UTC)
@@ -828,17 +958,21 @@ def test_verification_gap_triggers_targeted_acquisition_and_reverification(
 
     run = ResearchService(registry, db, settings, FakeResearchLlm()).run(asset, event, as_of)
 
-    assert registry.discovery_calls == 1
-    assert 1 <= len(search_calls) <= 3
-    assert all(call.limit == 5 for call in search_calls)
+    assert registry.discovery_calls == 0
+    assert search_calls == []
     assert run.status.value == "completed"
-    assert run.verification_round == 2
-    assert len({item.independent_group for item in run.evidence}) == 3
+    assert run.verification_round == 1
+    assert len({item.independent_group for item in run.evidence}) == 1
+    assert run.recommendation is not None
+    assert run.recommendation.score == 38
+    assert "one official source or two independent sources" in (
+        run.recommendation.evidence_warnings
+    )
     phases = [step.phase for step in run.analysis_steps]
-    assert phases.count("verification") == 2
-    assert phases.count("web_search_verification") == 1
-    assert len([item for item in run.evidence if item.source_name == "Search MCP"]) == 1
-    assert phases.index("targeted_evidence_acquisition") < phases.index("report_revision")
+    assert phases.count("verification") == 1
+    assert "web_search_verification" not in phases
+    assert "targeted_evidence_acquisition" not in phases
+    assert "report_revision" not in phases
     persisted_event = get_event(db, event.id)
     assert persisted_event is not None
-    assert len(persisted_event.news_item_ids) == 2
+    assert len(persisted_event.news_item_ids) == 1

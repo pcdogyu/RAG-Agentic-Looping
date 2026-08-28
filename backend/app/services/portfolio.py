@@ -130,14 +130,10 @@ class PortfolioService:
     ) -> PaperOrder:
         if recommendation.rating not in {Rating.BULLISH, Rating.STRONGLY_BULLISH}:
             raise PortfolioError(
-                "only bullish, evidence-complete recommendations can open a position"
+                "only bullish recommendations can open a position"
             )
-        if (
-            not recommendation.direction_verified
-            or not recommendation.directional_evidence_complete
-            or recommendation.confidence < 0.55
-        ):
-            raise PortfolioError("recommendation does not meet the evidence threshold")
+        if recommendation.confidence < 0.55:
+            raise PortfolioError("recommendation confidence is below 55%")
         if price <= 0:
             raise PortfolioError("price must be positive")
         portfolio = self.snapshot(db)
