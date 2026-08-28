@@ -852,6 +852,24 @@ def _visible_tasks(tasks: list[ModelQueueTask]) -> list[ModelQueueTask]:
     ]
 
 
+def _deduplicate_asset_research_tasks(
+    tasks: list[ModelQueueTask],
+) -> list[ModelQueueTask]:
+    """Keep one visible card per asset; sorted active tasks take precedence."""
+
+    seen_assets: set[str] = set()
+    visible: list[ModelQueueTask] = []
+    for task in tasks:
+        if task.kind != "asset_research" or not task.entity_id:
+            visible.append(task)
+            continue
+        if task.entity_id in seen_assets:
+            continue
+        seen_assets.add(task.entity_id)
+        visible.append(task)
+    return visible
+
+
 def _state(counts: ModelQueueCounts, *, enabled: bool, observable: bool) -> str:
     if not enabled:
         return "disabled"
@@ -960,6 +978,9 @@ def _queue_item(
     ):
         metrics.estimated_clear_ms = ceil(work / capacity) * metrics.average_execution_duration_ms
     visible = _sort_tasks(_visible_tasks(tasks))
+    if queue_id == "research":
+        visible = _deduplicate_asset_research_tasks(visible)
+    visible_task_ids = {task.task_id for task in visible}
     instance_queues: list[ModelQueueInstance] = []
     for raw_instance in raw_instances:
         instance_id = str(raw_instance.get("id") or "unknown")
@@ -981,6 +1002,10 @@ def _queue_item(
             use_recent_throughput=queue_id == "assist",
         )
         instance_visible = _sort_tasks(_visible_tasks(instance_tasks))
+        if queue_id == "research":
+            instance_visible = [
+                task for task in instance_visible if task.task_id in visible_task_ids
+            ]
         instance_queues.append(
             ModelQueueInstance(
                 id=instance_id,

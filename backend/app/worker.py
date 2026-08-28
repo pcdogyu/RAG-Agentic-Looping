@@ -79,7 +79,6 @@ from backend.app.storage import (
     get_event,
     get_event_research_for_event,
     get_event_research_run,
-    get_mergeable_queued_run,
     get_news,
     get_news_by_content_hash,
     get_run,
@@ -1215,16 +1214,40 @@ def enqueue_research(
             and market_factor_refresh_days is None
             and not force_research
         )
-        mergeable = (
-            get_mergeable_queued_run(
-                db,
-                asset.asset_id,
-                utc_now() - timedelta(hours=settings.research_coalesce_window_hours),
+        if active is not None and ordinary_event:
+            if event.id not in active.trigger_event_ids:
+                active.trigger_event_ids.append(event.id)
+                active.analysis_steps.append(
+                    AnalysisStep(
+                        phase="research_coalescing",
+                        executor="celery",
+                        summary=f"已忽略同标的重复入队，并把事件 {event.headline} 关联到现有任务。",
+                        metrics={"trigger_event_id": str(event.id)},
+                    )
+                )
+                save_run(db, active)
+            merged = ResearchRun(
+                event_id=event.id,
+                trigger_event_ids=[event.id],
+                asset=asset,
+                status=RunStatus.COALESCED,
+                as_of=as_of or utc_now(),
+                celery_task_id=active.celery_task_id,
+                coalesced_into_run_id=active.id,
+                completed_at=utc_now(),
+                analysis_steps=[
+                    *event.analysis_steps,
+                    AnalysisStep(
+                        phase="research_coalescing",
+                        executor="celery",
+                        summary=f"同标的已有活动任务，已忽略重复入队并关联到 {active.id}。",
+                        metrics={"canonical_run_id": str(active.id)},
+                    ),
+                ],
             )
-            if ordinary_event and active is not None
-            else None
-        )
-        if active is not None and (mergeable is None or mergeable.id != active.id):
+            save_run(db, merged)
+            return active.celery_task_id or f"research:{active.id}", merged
+        if active is not None:
             raise ResearchAdmissionError(
                 "research_already_active",
                 "该标的已有排队中或执行中的研究任务。",
@@ -1272,50 +1295,6 @@ def _enqueue_research_locked(
     queue_phase: str | None = None,
 ) -> tuple[str, ResearchRun]:
     """Persist a visible queued run before handing work to the LLM worker."""
-
-    if (
-        event
-        and not historical_replay
-        and retry_of_run_id is None
-        and market_factor_refresh_days is None
-    ):
-        canonical = get_mergeable_queued_run(
-            db,
-            asset.asset_id,
-            utc_now() - timedelta(hours=settings.research_coalesce_window_hours),
-        )
-        if canonical is not None and event.id not in canonical.trigger_event_ids:
-            canonical.trigger_event_ids.append(event.id)
-            canonical.analysis_steps.append(
-                AnalysisStep(
-                    phase="research_coalescing",
-                    executor="celery",
-                    summary=f"已把事件 {event.headline} 合并到该标的研究任务。",
-                    metrics={"trigger_event_id": str(event.id)},
-                )
-            )
-            save_run(db, canonical)
-            merged = ResearchRun(
-                event_id=event.id,
-                trigger_event_ids=[event.id],
-                asset=asset,
-                status=RunStatus.COALESCED,
-                as_of=as_of or utc_now(),
-                celery_task_id=canonical.celery_task_id,
-                coalesced_into_run_id=canonical.id,
-                completed_at=utc_now(),
-                analysis_steps=[
-                    *event.analysis_steps,
-                    AnalysisStep(
-                        phase="research_coalescing",
-                        executor="celery",
-                        summary=f"已合并到同标的主研究任务 {canonical.id}。",
-                        metrics={"canonical_run_id": str(canonical.id)},
-                    ),
-                ],
-            )
-            save_run(db, merged)
-            return canonical.celery_task_id or f"research:{canonical.id}", merged
 
     task_id = str(uuid4())
     effective_priority = ASSET_RESEARCH_PRIORITY if priority is None else priority

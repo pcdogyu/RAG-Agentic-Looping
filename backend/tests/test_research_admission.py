@@ -10,7 +10,7 @@ import pytest
 
 from backend.app import worker
 from backend.app.db import SessionLocal
-from backend.app.domain import ResearchRun, RunStatus
+from backend.app.domain import CandidateAsset, NewsEvent, ResearchRun, RunStatus, SourceQuality
 from backend.app.providers.registry import SEED_ASSETS
 from backend.app.services.research_admission import (
     ResearchAdmissionError,
@@ -156,6 +156,52 @@ def test_active_research_blocks_every_admission_override(db, monkeypatch, status
             worker.enqueue_research(db, active.asset, **options)
         assert captured.value.code == "research_already_active"
         assert captured.value.run_id == str(active.id)
+
+
+@pytest.mark.parametrize(
+    "status",
+    [RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.VERIFYING],
+)
+def test_new_headline_for_active_asset_is_coalesced_without_a_second_task(
+    db, monkeypatch, status
+):
+    queued = _patch_research_queue(monkeypatch)
+    active = ResearchRun(
+        asset=SEED_ASSETS[0],
+        status=status,
+        celery_task_id="existing-research-task",
+    )
+    save_run(db, active)
+    observed = datetime(2026, 8, 28, 12, 0, tzinfo=UTC)
+    event = NewsEvent(
+        news_item_ids=[],
+        headline="Apple publishes another update",
+        event_type="other",
+        direct_impact="A new headline maps to the same active asset.",
+        source_quality=SourceQuality.PROFESSIONAL,
+        published_at=observed,
+        observed_at=observed,
+        as_of=observed,
+        candidates=[
+            CandidateAsset(
+                asset=active.asset,
+                relationship="direct",
+                relevance=1,
+                rationale="verified by master data",
+            )
+        ],
+    )
+
+    task_id, merged = worker.enqueue_research(db, active.asset, event)
+
+    runs = list_runs(db)
+    canonical = next(item for item in runs if item.id == active.id)
+    assert task_id == "existing-research-task"
+    assert queued == []
+    assert canonical.status is status
+    assert canonical.trigger_event_ids == [event.id]
+    assert merged.status is RunStatus.COALESCED
+    assert merged.coalesced_into_run_id == active.id
 
 
 def test_sqlite_asset_lock_allows_only_one_concurrent_queue_insert(monkeypatch):
