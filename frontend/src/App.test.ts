@@ -20,6 +20,7 @@ import {
   changedTargetDesktopColumns,
   ChangedTargetGrid,
   ChangedTargetsContent,
+  ChangedTargetsPage,
   factSourceGroupDefinitions,
   formatQueueDuration,
   ModelInferenceQueuePanel,
@@ -450,7 +451,15 @@ describe("shared hash navigation", () => {
 });
 
 describe("changed targets page", () => {
-  it("renders five target cards with changed and unchanged fields", () => {
+  it("labels the page as rating changes", () => {
+    const markup = renderToStaticMarkup(createElement(ChangedTargetsPage, { apiBase: "" }));
+
+    expect(markup).toContain("标的评级变化");
+    expect(markup).toContain("五档评级发生变化");
+    expect(markup).toContain("正在加载标的评级变化");
+  });
+
+  it("renders five target cards with rating changes only", () => {
     const items = Array.from({ length: 5 }, (_, index) => ({
       asset: {
         asset_id: `equity:XNAS:TARGET${index}`,
@@ -462,14 +471,14 @@ describe("changed targets page", () => {
       changed_at: `2026-08-27T0${index}:00:00Z`,
       previous: {
         signal_status: index === 0 ? "insufficient_evidence" : "directional",
-        rating: "watch",
+        rating: index % 2 === 0 ? "watch" : "bearish",
       },
       current: {
         signal_status: "directional",
-        rating: index === 0 ? "watch" : "bearish",
+        rating: index % 2 === 0 ? "bullish" : "strongly_bullish",
       },
       status_changed: index === 0,
-      rating_changed: index !== 0,
+      rating_changed: true,
     }));
 
     const markup = renderToStaticMarkup(createElement(ChangedTargetGrid, {
@@ -482,12 +491,14 @@ describe("changed targets page", () => {
     expect(changedTargetDesktopColumns).toBe(5);
     expect(markup).toContain('class="target-change-grid" data-columns="5"');
     expect((markup.match(/class="target-change-card"/g) || []).length).toBe(5);
-    expect(markup).toContain("方向证据不足");
-    expect(markup).toContain("方向信号");
-    expect(markup).toContain("观望（未变）");
-    expect(markup).toContain("方向信号（未变）");
+    expect(markup).not.toContain("结论状态");
+    expect(markup).not.toContain("方向证据不足");
+    expect(markup).not.toContain("方向信号");
+    expect(markup).not.toContain("未变");
     expect(markup).toContain("观望");
     expect(markup).toContain("看空");
+    expect(markup).toContain("看多");
+    expect(markup).toContain("强烈看多");
     expect((markup.match(/class="research-again"/g) || []).length).toBe(5);
     expect(markup).toContain("已进入队列");
     expect(markup.indexOf("TARGET0")).toBeLessThan(markup.indexOf("已进入队列"));
@@ -501,14 +512,14 @@ describe("changed targets page", () => {
 
     const loading = render(true);
     const empty = render(false);
-    const failed = render(false, "标的变化请求失败");
+    const failed = render(false, "标的评级变化请求失败");
 
-    expect(loading).toContain("正在加载标的变化");
-    expect(loading).not.toContain("当前没有状态或评级发生变化的标的");
-    expect(empty).toContain("当前没有状态或评级发生变化的标的");
-    expect(failed).toContain("标的变化请求失败");
+    expect(loading).toContain("正在加载标的评级变化");
+    expect(loading).not.toContain("当前没有评级发生变化的标的");
+    expect(empty).toContain("当前没有评级发生变化的标的");
+    expect(failed).toContain("标的评级变化请求失败");
     expect(failed).toContain("重试");
-    expect(failed).not.toContain("当前没有状态或评级发生变化的标的");
+    expect(failed).not.toContain("当前没有评级发生变化的标的");
   });
 });
 

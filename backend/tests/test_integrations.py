@@ -926,7 +926,7 @@ def _save_target_history_item(
     return recommendation
 
 
-def test_changed_targets_include_only_latest_real_change_per_asset(db):
+def test_changed_targets_include_only_latest_rating_change_per_asset(db):
     now = utc_now()
     assets = {
         symbol: AssetRef(
@@ -946,7 +946,7 @@ def test_changed_targets_include_only_latest_real_change_per_asset(db):
         rating="watch",
         signal_status="insufficient_evidence",
     )
-    status_latest = _save_target_history_item(
+    _save_target_history_item(
         db,
         assets["STATUS"],
         as_of=now - timedelta(minutes=3),
@@ -990,8 +990,15 @@ def test_changed_targets_include_only_latest_real_change_per_asset(db):
     )
     _save_target_history_item(
         db,
-        assets["INITIAL"],
+        assets["BOTH"],
         as_of=now,
+        rating="strongly_bearish",
+        signal_status="directional",
+    )
+    _save_target_history_item(
+        db,
+        assets["INITIAL"],
+        as_of=now + timedelta(minutes=1),
         rating="bullish",
         signal_status="directional",
     )
@@ -1005,18 +1012,9 @@ def test_changed_targets_include_only_latest_real_change_per_asset(db):
     assert [item["asset"]["symbol"] for item in body["items"]] == [
         "BOTH",
         "RATING",
-        "STATUS",
     ]
     items = {item["asset"]["symbol"]: item for item in body["items"]}
-    assert items["STATUS"] == {
-        "asset": status_latest.asset.model_dump(mode="json"),
-        "recommendation_id": str(status_latest.id),
-        "changed_at": status_latest.as_of.isoformat().replace("+00:00", "Z"),
-        "previous": {"signal_status": "insufficient_evidence", "rating": "watch"},
-        "current": {"signal_status": "neutral", "rating": "watch"},
-        "status_changed": True,
-        "rating_changed": False,
-    }
+    assert "STATUS" not in items
     assert items["RATING"]["recommendation_id"] == str(rating_latest.id)
     assert items["RATING"]["status_changed"] is False
     assert items["RATING"]["rating_changed"] is True
@@ -1027,6 +1025,7 @@ def test_changed_targets_include_only_latest_real_change_per_asset(db):
     }
     assert items["BOTH"]["status_changed"] is True
     assert items["BOTH"]["rating_changed"] is True
+    assert all(item["rating_changed"] is True for item in body["items"])
 
 
 def test_changed_targets_cursor_paginates_unique_assets(db):
@@ -1045,7 +1044,7 @@ def test_changed_targets_cursor_paginates_unique_assets(db):
             asset,
             as_of=now - timedelta(hours=1, minutes=index),
             rating="watch",
-            signal_status="insufficient_evidence",
+            signal_status="directional",
         )
         _save_target_history_item(
             db,

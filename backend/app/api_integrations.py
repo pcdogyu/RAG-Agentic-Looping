@@ -488,10 +488,7 @@ def _latest_changed_targets(db: Session) -> list[tuple[Recommendation, Recommend
     for row in rows:
         current = Recommendation.model_validate(row.payload)
         previous = previous_by_asset.get(row.asset_id)
-        if previous and (
-            previous.signal_status != current.signal_status
-            or previous.rating != current.rating
-        ):
+        if previous and previous.rating != current.rating:
             latest_change_by_asset[row.asset_id] = (previous, current)
         previous_by_asset[row.asset_id] = current
     return sorted(

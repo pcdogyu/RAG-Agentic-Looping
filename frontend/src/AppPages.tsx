@@ -1644,12 +1644,6 @@ export function ConclusionCard({
 
 export const changedTargetDesktopColumns = 5;
 
-function changedTargetLabel(kind: "signal_status" | "rating", value: string) {
-  return kind === "signal_status"
-    ? signalStatusLabels[value] || value
-    : recommendationRatingLabel(value);
-}
-
 export function ChangedTargetGrid({
   items,
   researchStates = {},
@@ -1669,17 +1663,9 @@ export function ChangedTargetGrid({
         </div>
         <small>{item.asset.name}</small>
       </header>
-      <div className={`target-change-field ${item.status_changed ? "changed" : "unchanged"}`}>
-        <span>结论状态</span>
-        {item.status_changed
-          ? <strong>{changedTargetLabel("signal_status", item.previous.signal_status)} → {changedTargetLabel("signal_status", item.current.signal_status)}</strong>
-          : <strong>{changedTargetLabel("signal_status", item.current.signal_status)}（未变）</strong>}
-      </div>
-      <div className={`target-change-field ${item.rating_changed ? "changed" : "unchanged"}`}>
+      <div className="target-change-field changed">
         <span>评级</span>
-        {item.rating_changed
-          ? <strong>{changedTargetLabel("rating", item.previous.rating)} → {changedTargetLabel("rating", item.current.rating)}</strong>
-          : <strong>{changedTargetLabel("rating", item.current.rating)}（未变）</strong>}
+        <strong>{recommendationRatingLabel(item.previous.rating)} → {recommendationRatingLabel(item.current.rating)}</strong>
       </div>
     </article>)}
   </div>;
@@ -1698,8 +1684,8 @@ export function ChangedTargetsContent({
   return <>
     {error && <div className="page-error target-change-error"><span>{error}</span><button type="button" onClick={onRetry}>重试</button></div>}
     {!items.length && !error && (loading
-      ? <div className="page-message">正在加载标的变化…</div>
-      : <div className="page-empty">当前没有状态或评级发生变化的标的。</div>)}
+      ? <div className="page-message">正在加载标的评级变化…</div>
+      : <div className="page-empty">当前没有评级发生变化的标的。</div>)}
     {!!items.length && <ChangedTargetGrid items={items} researchStates={researchStates} onResearch={onResearch} />}
   </>;
 }
@@ -1720,7 +1706,7 @@ export function ChangedTargetsPage({ apiBase }: { apiBase: string }) {
     setError("");
     try {
       const response = await fetch(`${apiBase}/api/v1/changed-targets?${params}`);
-      if (!response.ok) throw new Error("标的变化请求失败");
+      if (!response.ok) throw new Error("标的评级变化请求失败");
       const payload = await response.json() as {
         items: ChangedTarget[];
         next_cursor: string | null;
@@ -1728,7 +1714,7 @@ export function ChangedTargetsPage({ apiBase }: { apiBase: string }) {
       setItems((current) => append ? [...current, ...payload.items] : payload.items);
       setCursor(payload.next_cursor);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "标的变化请求失败");
+      setError(reason instanceof Error ? reason.message : "标的评级变化请求失败");
     } finally {
       if (append) setLoadingMore(false); else setLoading(false);
     }
@@ -1761,7 +1747,7 @@ export function ChangedTargetsPage({ apiBase }: { apiBase: string }) {
   }
 
   return <section className="app-page targets-page">
-    <PageHeading eyebrow="TARGET CHANGES" title="标的变化" copy="汇总历史结论中状态或评级发生变化的标的；每个标的只展示最新一次真实变化。" />
+    <PageHeading eyebrow="RATING CHANGES" title="标的评级变化" copy="汇总历史结论中五档评级发生变化的标的；每个标的只展示最新一次评级变化。" />
     <div className="page-toolbar target-change-toolbar">
       <button type="button" disabled={loading || !items.length} onClick={clearCurrentPage}>清除</button>
       <button type="button" disabled={loading} onClick={() => load()}>{loading ? "刷新中…" : "刷新"}</button>
