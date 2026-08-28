@@ -1524,9 +1524,16 @@ export function ChangedTargetsPage({ apiBase }: { apiBase: string }) {
 
   useEffect(() => { void load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  function clearCurrentPage() {
+    setItems([]);
+    setCursor(null);
+    setError("");
+  }
+
   return <section className="app-page targets-page">
     <PageHeading eyebrow="TARGET CHANGES" title="标的变化" copy="汇总历史结论中状态或评级发生变化的标的；每个标的只展示最新一次真实变化。" />
     <div className="page-toolbar target-change-toolbar">
+      <button type="button" disabled={loading || !items.length} onClick={clearCurrentPage}>清除</button>
       <button type="button" disabled={loading} onClick={() => load()}>{loading ? "刷新中…" : "刷新"}</button>
     </div>
     <ChangedTargetsContent items={items} loading={loading} error={error} onRetry={() => load()} />
