@@ -72,9 +72,11 @@ from backend.app.storage import (
     get_run,
     get_run_for_event_asset,
     list_assets,
+    list_event_research_runs,
     list_events,
     list_evolutions,
     list_outcomes,
+    list_queued_runs,
     list_recommendations,
     list_runs,
     save_event,
@@ -92,6 +94,8 @@ SCAN_PAUSE_KEY = "market-loop:scan:pause"
 SCAN_STATUS_KEY = "market-loop:scan:status"
 NEWS_EXTRACTION_QUEUE_KEY = "market-loop:scan:news-extraction-queue"
 NEWS_EXTRACTION_QUEUE_TTL_SECONDS = 12 * 60 * 60
+RESEARCH_DISPATCH_PREFIX = "market-loop:research:dispatch:"
+RESEARCH_DISPATCH_TTL_SECONDS = 30 * 24 * 60 * 60
 SCAN_VISIBILITY_TIMEOUT_SECONDS = max(
     NEWS_EXTRACTION_QUEUE_TTL_SECONDS,
     settings.scan_interval_minutes * 180,
@@ -269,7 +273,8 @@ def reconcile_research_leases() -> dict[str, int]:
         client = None
     with SessionLocal() as db:
         repaired = reconcile_stale_research_runs(db, client, settings)
-    return {"repaired": repaired}
+        recovery = recover_orphaned_queued_research_runs(db, client, settings)
+    return {"repaired": repaired, **recovery}
 
 
 @celery_app.task(name="market_loop.compact_research_backlog")
@@ -291,6 +296,165 @@ def _record_task_result(kind: str) -> None:
 
 def _redis_client() -> Redis:
     return Redis.from_url(settings.redis_url, socket_connect_timeout=1)
+
+
+def _research_dispatch_key(run_id: str) -> str:
+    return f"{RESEARCH_DISPATCH_PREFIX}{run_id}"
+
+
+def _record_research_dispatch(
+    run_id: str,
+    task_id: str,
+    redis_client: Redis | None = None,
+) -> bool:
+    try:
+        client = redis_client or _redis_client()
+        return bool(
+            client.set(
+                _research_dispatch_key(run_id),
+                task_id,
+                ex=RESEARCH_DISPATCH_TTL_SECONDS,
+            )
+        )
+    except Exception:
+        return False
+
+
+def _research_dispatch_task_id(
+    run_id: str,
+    redis_client: Redis | None,
+) -> str | None:
+    if redis_client is None:
+        return None
+    try:
+        value = redis_client.get(_research_dispatch_key(run_id))
+    except Exception:
+        return None
+    if value is None:
+        return None
+    return value.decode() if isinstance(value, bytes) else str(value)
+
+
+def _clear_research_dispatch(
+    run_id: str,
+    task_id: str,
+    redis_client: Redis | None = None,
+) -> None:
+    try:
+        client = redis_client or _redis_client()
+        if _research_dispatch_task_id(run_id, client) == task_id:
+            client.delete(_research_dispatch_key(run_id))
+    except Exception:
+        return
+
+
+def recover_orphaned_queued_research_runs(
+    db,
+    redis_client: Redis | None,
+    active_settings,
+    *,
+    now: datetime | None = None,
+) -> dict[str, int]:
+    """Republish durable queued runs whose Redis dispatch marker disappeared."""
+
+    if redis_client is None:
+        return {"queued_scanned": 0, "queued_recovered": 0, "recovery_failed": 0}
+
+    current = as_utc(now or utc_now())
+    grace_seconds = max(30, active_settings.research_lease_seconds)
+    cutoff = current - timedelta(seconds=grace_seconds)
+    candidates: list[tuple[str, ResearchRun | EventResearchRun]] = [
+        *(('asset', run) for run in list_queued_runs(db)),
+        *(
+            ('event', run)
+            for run in list_event_research_runs(db, 5_000)
+            if run.status is RunStatus.QUEUED
+        ),
+    ]
+    candidates.sort(key=lambda item: as_utc(item[1].created_at))
+
+    scanned = recovered = failed = 0
+    for kind, run in candidates:
+        if as_utc(run.created_at) > cutoff:
+            continue
+        scanned += 1
+        run_id = str(run.id)
+        if _research_dispatch_task_id(run_id, redis_client) == run.celery_task_id:
+            continue
+
+        task_id = str(uuid4())
+        instance = select_model_instance(
+            "research",
+            task_id=task_id,
+            preferred=run.model_instance_id,
+            settings=active_settings,
+            probe_health=True,
+        )
+        if not _record_research_dispatch(run_id, task_id, redis_client):
+            failed += 1
+            continue
+
+        previous_task_id = run.celery_task_id
+        previous_instance_id = run.model_instance_id
+        previous_step_count = len(run.analysis_steps)
+        run.celery_task_id = task_id
+        run.model_instance_id = instance.id
+        run.analysis_steps.append(
+            AnalysisStep(
+                phase="research_dispatch_recovery",
+                status="queued",
+                executor="research-lifecycle",
+                summary="检测到消息队列中的派发记录已丢失，已自动重新派发研究任务。",
+                metrics={
+                    "previous_task_id": previous_task_id,
+                    "instance_id": instance.id,
+                },
+            )
+        )
+        if kind == "asset":
+            save_run(db, run)
+        else:
+            save_event_research_run(db, run)
+
+        try:
+            if kind == "asset":
+                research_asset.apply_async(
+                    args=[
+                        run.asset.asset_id,
+                        str(run.event_id) if run.event_id else None,
+                        run_id,
+                    ],
+                    kwargs={"model_instance_id": instance.id},
+                    queue=broker_queue_name("research", instance.id),
+                    task_id=task_id,
+                    countdown=1,
+                )
+            else:
+                research_event.apply_async(
+                    args=[str(run.event_id), run_id],
+                    kwargs={"model_instance_id": instance.id},
+                    queue=broker_queue_name("research", instance.id),
+                    task_id=task_id,
+                    countdown=1,
+                )
+        except Exception:
+            _clear_research_dispatch(run_id, task_id, redis_client)
+            run.celery_task_id = previous_task_id
+            run.model_instance_id = previous_instance_id
+            run.analysis_steps = run.analysis_steps[:previous_step_count]
+            if kind == "asset":
+                save_run(db, run)
+            else:
+                save_event_research_run(db, run)
+            failed += 1
+            continue
+        recovered += 1
+
+    return {
+        "queued_scanned": scanned,
+        "queued_recovered": recovered,
+        "recovery_failed": failed,
+    }
 
 
 def _default_scan_status() -> dict[str, Any]:
@@ -1068,6 +1232,7 @@ def enqueue_research(
         ],
     )
     save_run(db, run)
+    dispatch_recorded = _record_research_dispatch(str(run.id), task_id)
     try:
         task = research_asset.apply_async(
             args=[asset.asset_id, str(event.id) if event else None, str(run.id)],
@@ -1077,6 +1242,8 @@ def enqueue_research(
             **({"priority": priority} if priority is not None else {}),
         )
     except Exception as exc:
+        if dispatch_recorded:
+            _clear_research_dispatch(str(run.id), task_id)
         run.status = RunStatus.FAILED
         run.error = f"{type(exc).__name__}: research queue failed"
         run.completed_at = utc_now()
@@ -1318,6 +1485,7 @@ def enqueue_event_report(
         ],
     )
     save_event_research_run(db, run)
+    dispatch_recorded = _record_research_dispatch(str(run.id), task_id)
     try:
         task = research_event.apply_async(
             args=[str(event.id), str(run.id)],
@@ -1326,6 +1494,8 @@ def enqueue_event_report(
             task_id=task_id,
         )
     except Exception as exc:
+        if dispatch_recorded:
+            _clear_research_dispatch(str(run.id), task_id)
         run.status = RunStatus.FAILED
         run.error = f"{type(exc).__name__}: event research queue failed"
         run.analysis_steps.append(
@@ -1382,6 +1552,7 @@ def enqueue_event_research_retry(
         )
     )
     save_event_research_run(db, run)
+    dispatch_recorded = _record_research_dispatch(str(run.id), task_id)
     try:
         task = research_event.apply_async(
             args=[str(event.id), str(run.id)],
@@ -1391,6 +1562,8 @@ def enqueue_event_research_retry(
             **({"priority": priority} if priority is not None else {}),
         )
     except Exception as exc:
+        if dispatch_recorded:
+            _clear_research_dispatch(str(run.id), task_id)
         run.status = RunStatus.FAILED
         run.error = f"{type(exc).__name__}: event research retry queue failed"
         run.analysis_steps.append(
@@ -2203,6 +2376,15 @@ def research_asset(
     registry = ProviderRegistry()
     with SessionLocal() as db:
         queued_run = get_run(db, UUID(run_id)) if run_id else None
+        if (
+            queued_run
+            and queued_run.celery_task_id
+            and str(self.request.id) != queued_run.celery_task_id
+        ):
+            return {
+                **queued_run.model_dump(mode="json"),
+                "superseded_task_id": str(self.request.id),
+            }
         if queued_run and queued_run.status in {
             RunStatus.COALESCED,
             RunStatus.CANCELLED,
