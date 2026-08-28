@@ -31,6 +31,11 @@ def test_default_ollama_roles_keep_extract_and_research_models_resident(
     assert settings.ollama_research_context_length == 16384
     assert settings.ollama_asset_mapping_context_length == 8192
     assert settings.ollama_7b_max_input_tokens == 5000
+    assert settings.ollama_research_max_input_tokens == 3500
+    assert settings.ollama_research_revision_max_input_tokens == 2500
+    assert settings.research_pipeline_concurrency == 4
+    assert settings.research_prompt_evidence_chars == 6000
+    assert settings.research_prompt_context_chars == 1000
     assert settings.ollama_assist_max_output_tokens == 8192
     assert settings.ollama_research_max_output_tokens == 8192
     assert settings.ollama_asset_mapping_max_output_tokens == 1024
@@ -75,4 +80,14 @@ def test_model_task_lease_must_cover_two_heartbeats() -> None:
             _env_file=None,
             model_task_heartbeat_seconds=60,
             model_task_lease_seconds=60,
+        )
+
+
+def test_research_pipeline_concurrency_must_cover_every_instance() -> None:
+    with pytest.raises(ValueError, match="RESEARCH_PIPELINE_CONCURRENCY"):
+        Settings(
+            _env_file=None,
+            ollama_research_base_urls="http://research-0,http://research-1",
+            ollama_research_max_concurrency=2,
+            research_pipeline_concurrency=1,
         )

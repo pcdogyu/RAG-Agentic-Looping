@@ -20,7 +20,10 @@ x-backend: &backend
     OLLAMA_EXTRACT_MAX_CONCURRENCY: ${OLLAMA_EXTRACT_MAX_CONCURRENCY:-1}
     OLLAMA_ASSIST_MAX_CONCURRENCY: ${OLLAMA_ASSIST_MAX_CONCURRENCY:-1}
     OLLAMA_RESEARCH_MAX_CONCURRENCY: ${OLLAMA_RESEARCH_MAX_CONCURRENCY:-2}
+    RESEARCH_PIPELINE_CONCURRENCY: ${RESEARCH_PIPELINE_CONCURRENCY:-4}
     OLLAMA_7B_MAX_INPUT_TOKENS: ${OLLAMA_7B_MAX_INPUT_TOKENS:-5000}
+    OLLAMA_RESEARCH_MAX_INPUT_TOKENS: ${OLLAMA_RESEARCH_MAX_INPUT_TOKENS:-3500}
+    OLLAMA_RESEARCH_REVISION_MAX_INPUT_TOKENS: ${OLLAMA_RESEARCH_REVISION_MAX_INPUT_TOKENS:-2500}
     OLLAMA_ASSIST_CONTEXT_LENGTH: ${OLLAMA_ASSIST_CONTEXT_LENGTH:-16384}
     OLLAMA_RESEARCH_CONTEXT_LENGTH: ${OLLAMA_RESEARCH_CONTEXT_LENGTH:-16384}
     OLLAMA_ASSET_MAPPING_CONTEXT_LENGTH: ${OLLAMA_ASSET_MAPPING_CONTEXT_LENGTH:-8192}
@@ -162,7 +165,7 @@ services:
 
   research-worker:
     <<: *backend
-    command: sh -c 'celery -A backend.app.worker:celery_app worker -Q "$$(python -m backend.app.services.model_instances research)" --concurrency=${OLLAMA_RESEARCH_MAX_CONCURRENCY:-2} --prefetch-multiplier=1 --loglevel=INFO'
+    command: sh -c 'celery -A backend.app.worker:celery_app worker -Q "$$(python -m backend.app.services.model_instances research)" --concurrency=${RESEARCH_PIPELINE_CONCURRENCY:-4} --prefetch-multiplier=1 --loglevel=INFO'
 
   evolution-worker:
     <<: *backend

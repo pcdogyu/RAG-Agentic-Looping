@@ -124,6 +124,28 @@ class DraftOutput(BaseModel):
         return self
 
 
+class DraftRepairOutput(BaseModel):
+    """Sparse second-pass patch; omitted fields retain the first draft."""
+
+    summary: str | None = None
+    historical_context: str | None = None
+    financials_and_growth: str | None = None
+    products_or_protocol: str | None = None
+    competition: str | None = None
+    valuation_or_tokenomics: str | None = None
+    catalysts: list[str] | None = None
+    risks: list[str] | None = None
+    invalidation_conditions: list[str] | None = None
+    evidence_ids: list[str] | None = None
+    score: int | None = Field(default=None, ge=-100, le=100)
+    confidence: float | None = Field(default=None, ge=0, le=1)
+    bull_probability: float | None = Field(default=None, ge=0, le=1)
+    base_probability: float | None = Field(default=None, ge=0, le=1)
+    bear_probability: float | None = Field(default=None, ge=0, le=1)
+    valuation_low: float | None = None
+    valuation_high: float | None = None
+
+
 class VerificationOutput(BaseModel):
     # Historical name retained for API compatibility: this is the structural
     # source/citation gate, not proof of a directional conclusion.
@@ -182,6 +204,7 @@ class ResearchState(TypedDict, total=False):
     verification: dict[str, Any]
     verification_round: int
     acquisition_attempts: int
+    acquired_evidence_count: int
     historical_replay: bool
 
 
@@ -245,7 +268,11 @@ class ResearchService:
                 "finalize": "finalize",
             },
         )
-        graph.add_edge("acquire_evidence", "revise")
+        graph.add_conditional_edges(
+            "acquire_evidence",
+            self._route_after_acquisition,
+            {"revise": "revise", "finalize": "finalize"},
+        )
         graph.add_edge("revise", "verify")
         graph.add_edge("finalize", END)
         return graph.compile(checkpointer=self.checkpointer)
@@ -290,6 +317,7 @@ class ResearchService:
             "events": [item.model_dump(mode="json") for item in trigger_events],
             "verification_round": 0,
             "acquisition_attempts": 0,
+            "acquired_evidence_count": 0,
             "historical_replay": run.historical_replay,
         }
         try:
@@ -780,7 +808,10 @@ class ResearchService:
         )
 
     @staticmethod
-    def _event_prompt_context(event_payload: dict[str, Any] | None) -> dict[str, Any]:
+    def _event_prompt_context(
+        event_payload: dict[str, Any] | None,
+        asset_id: str | None = None,
+    ) -> dict[str, Any]:
         if not event_payload:
             return {}
         event = NewsEvent.model_validate(event_payload)
@@ -800,6 +831,7 @@ class ResearchService:
                     "rationale": item.rationale,
                 }
                 for item in event.candidates
+                if asset_id is None or item.asset.asset_id == asset_id
             ],
         }
 
@@ -811,14 +843,25 @@ class ResearchService:
             if run.asset.asset_class is AssetClass.EQUITY
             else "加密资产：供给解锁、链上活跃、协议费用、TVL、开发治理、流动性、安全监管。"
         )
+        asset_context = {
+            "asset_id": run.asset.asset_id,
+            "asset_class": run.asset.asset_class.value,
+            "market": run.asset.market,
+            "symbol": run.asset.symbol,
+            "name": run.asset.name,
+            "currency": run.asset.currency,
+            "products": run.asset.products[:5],
+            "competitors": run.asset.competitors[:5],
+        }
         prompt = (
-            f"研究对象：{run.asset.model_dump_json()}\n研究截止：{run.as_of.isoformat()}\n"
+            f"研究对象：{json.dumps(asset_context, ensure_ascii=False)}\n"
+            f"研究截止：{run.as_of.isoformat()}\n"
             "触发事件："
-            f"{json.dumps(self._event_prompt_context(state.get('event')), ensure_ascii=False)}\n"
+            f"{json.dumps(self._event_prompt_context(state.get('event'), run.asset.asset_id), ensure_ascii=False)}\n"
             f"程序研究因子：{json.dumps(state.get('factor_summary', {}), ensure_ascii=False, default=str)}\n"
             f"报告模板：{asset_template}\n"
             "证据："
-            f"{compact_evidence(evidence, self.settings.research_prompt_evidence_chars)}\n"
+            f"{compact_evidence(evidence, self.settings.research_prompt_evidence_chars, max_per_group=2)}\n"
             "混合检索上下文："
             f"{compact_json_records(state.get('retrieved_context', []), self.settings.research_prompt_context_chars)}\n"
             "只能引用 evidence_ids 中存在的证据。证据不足时降低 confidence 和 score，不得编造。"
@@ -1053,7 +1096,7 @@ class ResearchService:
                         f"程序待验证方向分：{preview.raw_score}。\n"
                         f"待验证观点：{json.dumps(requested_claims, ensure_ascii=False)}\n"
                         "证据："
-                        f"{compact_evidence(state.get('evidence', []), self.settings.research_prompt_evidence_chars)}\n"
+                        f"{compact_evidence(state.get('evidence', []), self.settings.research_prompt_evidence_chars, max_per_group=2)}\n"
                         "只有每个观点都逐条绑定证据，且证据支持程序方向时，"
                         "direction_supported 才能为 true。不要补充外部事实。"
                     ),
@@ -1244,8 +1287,54 @@ class ResearchService:
             return "acquire_evidence"
         if (
             not verification.evidence_complete
-            or not verification.semantic_evidence_complete
-        ) and can_retry:
+            and self._revision_is_useful(verification)
+            and can_retry
+        ):
+            return "revise"
+        return "finalize"
+
+    @staticmethod
+    def _revision_is_useful(verification: VerificationOutput) -> bool:
+        """Only spend a second Research 7B call on model-repairable structure gaps."""
+
+        if verification.contradictions or verification.unsupported_claims:
+            return False
+        repairable_requirements = {
+            "summary",
+            "products_or_protocol",
+            "valuation_or_tokenomics",
+            "risks",
+            "invalidation_conditions",
+            "evidence citations",
+        }
+        return any(
+            requirement in repairable_requirements
+            for requirement in verification.missing_requirements
+        )
+
+    @staticmethod
+    def _source_gate_can_be_repaired(evidence_payload: list[dict[str, Any]]) -> bool:
+        evidence = [Evidence.model_validate(item) for item in evidence_payload]
+        return any(item.source_quality is SourceQuality.OFFICIAL for item in evidence) or len(
+            independent_evidence_groups(evidence)
+        ) >= 2
+
+    def _route_after_acquisition(
+        self, state: ResearchState
+    ) -> Literal["revise", "finalize"]:
+        run = ResearchRun.model_validate(state["run"])
+        if run.retryable_reason:
+            return "finalize"
+        verification = VerificationOutput.model_validate(state["verification"])
+        if state["verification_round"] >= self.settings.max_verification_rounds:
+            return "finalize"
+        if self._revision_is_useful(verification):
+            return "revise"
+        if (
+            state.get("acquired_evidence_count", 0) > 0
+            and SOURCE_GATE in verification.missing_requirements
+            and self._source_gate_can_be_repaired(state.get("evidence", []))
+        ):
             return "revise"
         return "finalize"
 
@@ -1465,6 +1554,7 @@ class ResearchService:
             "evidence": [item.model_dump(mode="json") for item in evidence],
             "retrieved_context": retrieved_context,
             "acquisition_attempts": attempts,
+            "acquired_evidence_count": added_count,
         }
 
     @staticmethod
@@ -1524,14 +1614,18 @@ class ResearchService:
             "valid_evidence_ids": sorted(valid_evidence_ids),
             "independent_source_lineages": source_lineages,
         }
+        current_payload = current.model_dump(
+            mode="json",
+            exclude={"direction", "rating"},
+        )
         prompt = (
-            f"当前报告：{current.model_dump_json()}\n验证结果：{verification.model_dump_json()}\n"
+            f"当前报告：{json.dumps(current_payload, ensure_ascii=False, separators=(',', ':'))}\n"
             f"本轮修复清单：{json.dumps(repair_requirements, ensure_ascii=False)}\n"
             "触发事件："
-            f"{json.dumps(self._event_prompt_context(state.get('event')), ensure_ascii=False)}\n"
+            f"{json.dumps(self._event_prompt_context(state.get('event'), run.asset.asset_id), ensure_ascii=False)}\n"
             f"程序研究因子：{json.dumps(state.get('factor_summary', {}), ensure_ascii=False, default=str)}\n"
             "可用证据："
-            f"{compact_evidence(state.get('evidence', []), self.settings.research_prompt_evidence_chars)}\n"
+            f"{compact_evidence(state.get('evidence', []), min(self.settings.research_prompt_evidence_chars, 4000), max_per_group=2)}\n"
             "逐项修复清单中的缺失章节。能够由证据支持时必须填写；无法支持时不得留空，"
             f"应明确写明“{INSUFFICIENT_EVIDENCE_MARKER}”并保持低置信度和中性分数。"
             "每个重要事实和方向观点都必须绑定 valid_evidence_ids 中实际支持它的证据；"
@@ -1539,10 +1633,11 @@ class ResearchService:
             "同一原始报道的转载、改写或聚合副本只算一个独立来源，不能用来满足两份独立来源要求。"
             "官方文件必须与所支持的具体观点直接相关；例如 Form 4 或持股变动文件不能支持"
             "AI 基础设施受益观点，除非该观点本身就是该持股交易。"
+            "只返回需要更新的字段；不需要修改的字段返回 null。"
         )
         revision_error: str | None = None
         try:
-            revised = self.llm.generate_json(
+            repair_payload = self.llm.generate_json(
                 model=self.settings.ollama_research_model,
                 lane="research",
                 system=(
@@ -1554,12 +1649,26 @@ class ResearchService:
                     f"{DIRECTION_SCORE_INSTRUCTION}"
                 ),
                 prompt=prompt,
-                schema=DraftOutput,
+                schema=DraftRepairOutput,
                 operation="report_revision",
                 entity_type="research_run",
                 entity_id=run.id,
+                max_input_tokens=self.settings.ollama_research_revision_max_input_tokens,
+                max_output_tokens=min(
+                    self.settings.ollama_research_max_output_tokens,
+                    1024,
+                ),
             )
-            revised_output = DraftOutput.model_validate(revised)
+            repair = DraftRepairOutput.model_validate(repair_payload)
+            updates = repair.model_dump(exclude_none=True)
+            repaired_evidence_ids = updates.pop("evidence_ids", None)
+            merged = current.model_dump(mode="json")
+            merged.update(updates)
+            if repaired_evidence_ids is not None:
+                merged["evidence_ids"] = list(
+                    dict.fromkeys([*current.evidence_ids, *repaired_evidence_ids])
+                )
+            revised_output = DraftOutput.model_validate(merged)
             run.retryable_reason = None
         except Exception as exc:
             revision_error = type(exc).__name__
@@ -1639,6 +1748,27 @@ class ResearchService:
         run = ResearchRun.model_validate(state["run"])
         draft = DraftOutput.model_validate(state["draft"])
         verification = VerificationOutput.model_validate(state["verification"])
+        self._mark_unresolved_revision_sections(draft, verification)
+        if (
+            not verification.evidence_complete
+            or not verification.semantic_evidence_complete
+        ) and not any(step.phase == "report_revision" for step in run.analysis_steps):
+            run.analysis_steps.append(
+                AnalysisStep(
+                    phase="report_revision_skipped",
+                    status="completed",
+                    executor="evidence-gate",
+                    model="evidence-gate:v1",
+                    summary=(
+                        "当前缺口不能由再次生成安全修复，已跳过完整 7B 修订并按证据门禁定稿。"
+                    ),
+                    metrics={
+                        "missing_requirements": verification.missing_requirements,
+                        "unsupported_claims": verification.unsupported_claims,
+                        "contradictions": verification.contradictions,
+                    },
+                )
+            )
         event = NewsEvent.model_validate(state["event"]) if state.get("event") else None
         event_direction, event_relevance, mapping_confidence = self._direction_inputs(
             run,
@@ -1727,7 +1857,7 @@ class ResearchService:
                         f"复核高影响程序评分 {candidate_score}：{draft.model_dump_json()}\n"
                         f"验证结果：{verification.model_dump_json()}\n"
                         "证据："
-                        f"{compact_evidence(state.get('evidence', []), self.settings.research_prompt_evidence_chars)}\n"
+                        f"{compact_evidence(state.get('evidence', []), self.settings.research_prompt_evidence_chars, max_per_group=2)}\n"
                         "只判断给定证据是否支持该方向与置信度，不补充外部事实。"
                     ),
                     CloudVerification,

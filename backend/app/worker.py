@@ -94,6 +94,8 @@ from backend.app.storage import (
 
 settings = get_settings()
 DEFAULT_MODEL_TASK_PRIORITY = 5
+ASSET_RESEARCH_PRIORITY = 3
+EVENT_RESEARCH_PRIORITY = 7
 SCAN_GATE_KEY = "market-loop:scan:active"
 SCAN_LOCK_KEY = "market-loop:scan:lock"
 SCAN_PAUSE_KEY = "market-loop:scan:pause"
@@ -444,6 +446,11 @@ def recover_orphaned_queued_research_runs(
                 metrics={
                     "previous_task_id": previous_task_id,
                     "instance_id": instance.id,
+                    "priority": (
+                        ASSET_RESEARCH_PRIORITY
+                        if kind == "asset"
+                        else EVENT_RESEARCH_PRIORITY
+                    ),
                 },
             )
         )
@@ -464,6 +471,7 @@ def recover_orphaned_queued_research_runs(
                     queue=broker_queue_name("research", instance.id),
                     task_id=task_id,
                     countdown=1,
+                    priority=ASSET_RESEARCH_PRIORITY,
                 )
             else:
                 research_event.apply_async(
@@ -472,6 +480,7 @@ def recover_orphaned_queued_research_runs(
                     queue=broker_queue_name("research", instance.id),
                     task_id=task_id,
                     countdown=1,
+                    priority=EVENT_RESEARCH_PRIORITY,
                 )
         except Exception:
             _clear_research_dispatch(run_id, task_id, redis_client)
@@ -1200,6 +1209,7 @@ def enqueue_research(
             return canonical.celery_task_id or f"research:{canonical.id}", merged
 
     task_id = str(uuid4())
+    effective_priority = ASSET_RESEARCH_PRIORITY if priority is None else priority
     instance = select_model_instance(
         "research",
         task_id=task_id,
@@ -1255,6 +1265,7 @@ def enqueue_research(
                         else {}
                     ),
                     "instance_id": instance.id,
+                    "priority": effective_priority,
                 },
             ),
         ],
@@ -1267,7 +1278,7 @@ def enqueue_research(
             kwargs={"model_instance_id": instance.id},
             queue=broker_queue_name("research", instance.id),
             task_id=task_id,
-            **({"priority": priority} if priority is not None else {}),
+            priority=effective_priority,
         )
     except Exception as exc:
         if dispatch_recorded:
@@ -1645,7 +1656,10 @@ def enqueue_event_report(
                 executor="celery",
                 model=settings.ollama_research_model,
                 summary="未找到经主数据验证的证券标的，已创建中性事件研报任务。",
-                metrics={"instance_id": instance.id},
+                metrics={
+                    "instance_id": instance.id,
+                    "priority": EVENT_RESEARCH_PRIORITY,
+                },
             ),
         ],
     )
@@ -1657,6 +1671,7 @@ def enqueue_event_report(
             kwargs={"model_instance_id": instance.id},
             queue=broker_queue_name("research", instance.id),
             task_id=task_id,
+            priority=EVENT_RESEARCH_PRIORITY,
         )
     except Exception as exc:
         if dispatch_recorded:
@@ -1686,6 +1701,7 @@ def enqueue_event_research_retry(
 ) -> tuple[str, EventResearchRun]:
     """Reset the event's unique durable report row and queue a fresh manual attempt."""
 
+    effective_priority = EVENT_RESEARCH_PRIORITY if priority is None else priority
     run.status = RunStatus.QUEUED
     run.as_of = utc_now()
     run.verification_round = 0
@@ -1713,7 +1729,10 @@ def enqueue_event_research_retry(
             executor="celery",
             model=settings.ollama_research_model,
             summary=f"已为历史失败事件研报创建第 {run.retry_count} 次重新执行。",
-            metrics={"retry_count": run.retry_count},
+            metrics={
+                "retry_count": run.retry_count,
+                "priority": effective_priority,
+            },
         )
     )
     save_event_research_run(db, run)
@@ -1724,7 +1743,7 @@ def enqueue_event_research_retry(
             kwargs={"model_instance_id": instance.id},
             queue=broker_queue_name("research", instance.id),
             task_id=task_id,
-            **({"priority": priority} if priority is not None else {}),
+            priority=effective_priority,
         )
     except Exception as exc:
         if dispatch_recorded:

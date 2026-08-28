@@ -407,8 +407,11 @@ curl http://localhost:8000/health
 | `RSS_FEED_URLS` | 可选，逗号分隔 | 有授权的专业新闻 Feed |
 | `OFFICIAL_RSS_FEED_URLS` | 可选，逗号分隔 | 交易所、监管机构或公司 IR 官方 Feed |
 | `AKSHARE_IPV4_ONLY` | `false` | 无 IPv6 出口的服务器可设为 `true`，避免交易所接口误走 IPv6 |
-| `RESEARCH_PROMPT_EVIDENCE_CHARS` | `12000` | 研究草稿和修订时最多传入的证据字符数 |
-| `RESEARCH_PROMPT_CONTEXT_CHARS` | `4000` | 研究草稿最多传入的检索上下文字符数 |
+| `RESEARCH_PIPELINE_CONCURRENCY` | `4` | 研究流水线并发数；与 Ollama 推理并发独立，用于重叠检索、门禁和模型阶段 |
+| `OLLAMA_RESEARCH_MAX_INPUT_TOKENS` | `3500` | Research 7B 单次调用的完整提示词上限 |
+| `OLLAMA_RESEARCH_REVISION_MAX_INPUT_TOKENS` | `2500` | Research 7B 定向修订调用的提示词上限 |
+| `RESEARCH_PROMPT_EVIDENCE_CHARS` | `6000` | 研究草稿和修订时最多传入的证据字符数 |
+| `RESEARCH_PROMPT_CONTEXT_CHARS` | `1000` | 研究草稿最多传入的检索上下文字符数 |
 | `TELEGRAM_BOT_TOKEN` | 可选，默认空 | Telegram 通知 Token |
 | `TELEGRAM_CHAT_ID` | 可选，默认空 | Telegram 目标会话 |
 

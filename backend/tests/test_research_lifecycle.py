@@ -149,6 +149,11 @@ def test_recovers_queued_runs_when_redis_dispatch_markers_are_missing(
     assert stored_asset.analysis_steps[-1].phase == "research_dispatch_recovery"
     assert stored_event.analysis_steps[-1].phase == "research_dispatch_recovery"
     assert all(kwargs["queue"] == "research.research-0" for _, kwargs in published)
+    priorities = {kind: kwargs["priority"] for kind, kwargs in published}
+    assert priorities == {
+        "asset": worker.ASSET_RESEARCH_PRIORITY,
+        "event": worker.EVENT_RESEARCH_PRIORITY,
+    }
 
     repeated = worker.recover_orphaned_queued_research_runs(
         db,

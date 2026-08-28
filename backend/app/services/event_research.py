@@ -292,7 +292,7 @@ class EventResearchService:
         prompt = (
             f"事件：{event.model_dump_json(exclude={'analysis_steps', 'candidates'})}\n"
             f"研究截止：{run.as_of.isoformat()}\n"
-            f"证据：{compact_evidence(run.evidence, self.settings.research_prompt_evidence_chars)}\n"
+            f"证据：{compact_evidence(run.evidence, self.settings.research_prompt_evidence_chars, max_per_group=2)}\n"
             "生成不绑定证券的中性事件研报。区分事实、情景和未知；不得给个股评级、方向分数或交易指令。"
             "只能引用给定 evidence_ids；证据不足时降低 confidence 并列入 unresolved_questions。"
         )
@@ -319,7 +319,7 @@ class EventResearchService:
         prompt = (
             f"事件：{event.headline}\n当前草稿：{draft.model_dump_json()}\n"
             f"缺失：{missing}\n矛盾：{contradictions}\n"
-            f"证据：{compact_evidence(run.evidence, self.settings.research_prompt_evidence_chars)}\n"
+            f"证据：{compact_evidence(run.evidence, self.settings.research_prompt_evidence_chars, max_per_group=2)}\n"
             "只修复结构或引用问题。不能通过编造补足独立来源，无法确认的内容写入待验证问题。"
         )
         payload = self.llm.generate_json(

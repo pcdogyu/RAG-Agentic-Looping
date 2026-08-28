@@ -19,11 +19,8 @@ EVIDENCE_FIELDS = (
     "id",
     "claim",
     "source_name",
-    "source_url",
     "source_quality",
     "published_at",
-    "observed_at",
-    "as_of",
     "excerpt",
     "independent_group",
     "numeric_value",
@@ -57,7 +54,12 @@ def compact_json_records(records: list[Any], char_limit: int) -> str:
     return json.dumps(selected, ensure_ascii=False)
 
 
-def compact_evidence(records: list[Any], char_limit: int) -> str:
+def compact_evidence(
+    records: list[Any],
+    char_limit: int,
+    *,
+    max_per_group: int | None = None,
+) -> str:
     values: list[dict[str, Any]] = []
     for record in records:
         raw = _json_value(record)
@@ -71,6 +73,20 @@ def compact_evidence(records: list[Any], char_limit: int) -> str:
             str(item.get("published_at", "")),
         )
     )
+    if max_per_group is not None:
+        selected: list[dict[str, Any]] = []
+        group_counts: dict[str, int] = {}
+        for index, item in enumerate(values):
+            group = str(
+                item.get("independent_group")
+                or item.get("id")
+                or f"ungrouped:{index}"
+            )
+            if group_counts.get(group, 0) >= max_per_group:
+                continue
+            selected.append(item)
+            group_counts[group] = group_counts.get(group, 0) + 1
+        values = selected
     return compact_json_records(values, char_limit)
 
 

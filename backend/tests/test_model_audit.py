@@ -388,7 +388,7 @@ def test_same_7b_model_keeps_assist_and_research_lanes_isolated(monkeypatch):
             return FakeResponse(
                 {
                     "message": {"content": '{"answer":"ok"}'},
-                    "prompt_eval_count": 4321,
+                    "prompt_eval_count": 2000,
                 }
             )
 
@@ -398,7 +398,7 @@ def test_same_7b_model_keeps_assist_and_research_lanes_isolated(monkeypatch):
 
     def fit_prompt(**kwargs):
         prompt_budgets.append(kwargs["max_tokens"])
-        return ([{"role": "user", "content": "bounded"}], 4321)
+        return ([{"role": "user", "content": "bounded"}], 2000)
 
     monkeypatch.setattr(gateway.prompt_budget, "fit", fit_prompt)
 
@@ -441,7 +441,12 @@ def test_same_7b_model_keeps_assist_and_research_lanes_isolated(monkeypatch):
         "num_predict": 1024,
         "num_thread": 8,
     }
-    assert prompt_budgets == [settings.ollama_7b_max_input_tokens] * 3 + [2048]
+    assert prompt_budgets == [
+        settings.ollama_7b_max_input_tokens,
+        settings.ollama_research_max_input_tokens,
+        settings.ollama_research_max_input_tokens,
+        2048,
+    ]
 
 
 def test_bound_research_task_keeps_instance_affinity(monkeypatch):

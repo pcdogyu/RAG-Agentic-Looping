@@ -49,17 +49,22 @@ class Settings(BaseSettings):
     ollama_extract_max_concurrency: int = Field(default=1, ge=1, le=16)
     ollama_assist_max_concurrency: int = Field(default=1, ge=1, le=16)
     ollama_research_max_concurrency: int = Field(default=2, ge=1, le=16)
+    research_pipeline_concurrency: int = Field(default=4, ge=1, le=32)
     ollama_code_max_concurrency: int = Field(default=1, ge=1, le=16)
     ollama_max_output_tokens: int = Field(default=1024, ge=64, le=8192)
     ollama_assist_max_output_tokens: int = Field(default=8192, ge=64, le=8192)
     ollama_research_max_output_tokens: int = Field(default=8192, ge=64, le=8192)
     ollama_asset_mapping_max_output_tokens: int = Field(default=1024, ge=64, le=8192)
     ollama_7b_max_input_tokens: int = Field(default=5000, ge=512, le=16384)
+    ollama_research_max_input_tokens: int = Field(default=3500, ge=512, le=16384)
+    ollama_research_revision_max_input_tokens: int = Field(
+        default=2500, ge=512, le=16384
+    )
     ollama_7b_tokenizer: str = "Qwen/Qwen2.5-7B-Instruct"
     ollama_7b_tokenizer_revision: str = "a09a35458c702b33eeacc393d103063234e8bc28"
     ollama_keep_alive: str = "-1"
-    research_prompt_evidence_chars: int = Field(default=8000, ge=2000, le=24000)
-    research_prompt_context_chars: int = Field(default=2000, ge=1000, le=12000)
+    research_prompt_evidence_chars: int = Field(default=6000, ge=2000, le=24000)
+    research_prompt_context_chars: int = Field(default=1000, ge=1000, le=12000)
     research_coalesce_window_hours: int = Field(default=24, ge=1, le=168)
     research_heartbeat_seconds: int = Field(default=30, ge=10, le=120)
     research_lease_seconds: int = Field(default=120, ge=30, le=600)
@@ -167,6 +172,11 @@ class Settings(BaseSettings):
                     f"OLLAMA_{lane.upper()}_MAX_CONCURRENCY must be at least "
                     f"the configured instance count ({len(urls)})"
                 )
+        if self.research_pipeline_concurrency < len(self.ollama_research_urls):
+            raise ValueError(
+                "RESEARCH_PIPELINE_CONCURRENCY must be at least the configured "
+                f"research instance count ({len(self.ollama_research_urls)})"
+            )
         if self.model_task_lease_seconds < self.model_task_heartbeat_seconds * 2:
             raise ValueError(
                 "MODEL_TASK_LEASE_SECONDS must be at least twice MODEL_TASK_HEARTBEAT_SECONDS"

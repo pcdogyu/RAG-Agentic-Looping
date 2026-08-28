@@ -7,6 +7,7 @@ from backend.app.config import Settings
 from backend.app.domain import (
     CandidateAsset,
     EventType,
+    Evidence,
     NewsEvent,
     NewsItem,
     Rating,
@@ -18,6 +19,7 @@ from backend.app.providers.registry import SEED_ASSETS
 from backend.app.services.mcp_registry import SearchResult
 from backend.app.services.research import (
     DraftOutput,
+    DraftRepairOutput,
     ResearchService,
     SemanticVerificationOutput,
     VerificationOutput,
@@ -156,10 +158,12 @@ class CapturingResearchLlm(FakeResearchLlm):
     def __init__(self):
         self.prompts = []
         self.systems = []
+        self.calls = []
 
     def generate_json(self, *, prompt, system, **kwargs):
         self.prompts.append(prompt)
         self.systems.append(system)
+        self.calls.append(kwargs)
         return super().generate_json(prompt=prompt, **kwargs)
 
 
@@ -214,6 +218,72 @@ def test_model_fallback_skips_automatic_research_revision(db, tmp_path):
             "verification_round": 1,
             "acquisition_attempts": 0,
             "historical_replay": False,
+        }
+    )
+    service._close_checkpointer()
+
+    assert route == "finalize"
+
+
+def test_semantic_only_gap_skips_full_research_revision(db, tmp_path):
+    service = ResearchService(
+        FakeRegistry(),
+        db,
+        Settings(_env_file=None, reports_dir=tmp_path),
+        FakeResearchLlm(),
+    )
+    run = ResearchRun(asset=SEED_ASSETS[0])
+
+    route = service._route_after_verification(
+        {
+            "run": run.model_dump(mode="json"),
+            "verification": VerificationOutput(
+                evidence_complete=True,
+                semantic_evidence_complete=False,
+                missing_requirements=["unsupported claim: summary"],
+            ).model_dump(mode="json"),
+            "verification_round": 1,
+            "acquisition_attempts": 0,
+            "historical_replay": False,
+        }
+    )
+    service._close_checkpointer()
+
+    assert route == "finalize"
+
+
+def test_acquisition_without_independent_sources_skips_full_revision(db, tmp_path):
+    service = ResearchService(
+        FakeRegistry(),
+        db,
+        Settings(_env_file=None, reports_dir=tmp_path),
+        FakeResearchLlm(),
+    )
+    run = ResearchRun(asset=SEED_ASSETS[0])
+    observed = datetime(2026, 8, 28, tzinfo=UTC)
+    evidence = Evidence(
+        run_id=run.id,
+        claim="Single aggregated story",
+        source_name="Aggregator",
+        source_url="https://example.com/story",
+        source_quality=SourceQuality.AGGREGATOR,
+        published_at=observed,
+        observed_at=observed,
+        as_of=observed,
+        excerpt="Single aggregated story",
+        independent_group="story:one",
+    )
+
+    route = service._route_after_acquisition(
+        {
+            "run": run.model_dump(mode="json"),
+            "verification": VerificationOutput(
+                evidence_complete=False,
+                missing_requirements=["one official source or two independent sources"],
+            ).model_dump(mode="json"),
+            "verification_round": 1,
+            "acquired_evidence_count": 1,
+            "evidence": [evidence.model_dump(mode="json")],
         }
     )
     service._close_checkpointer()
@@ -480,6 +550,11 @@ def test_research_revision_recalculates_required_direction_score(db, tmp_path):
     assert "valid_evidence_ids" in llm.prompts[0]
     assert "转载、改写或聚合副本只算一个独立来源" in llm.prompts[0]
     assert "Form 4 或持股变动文件不能支持" in llm.prompts[0]
+    assert llm.calls[0]["schema"] is DraftRepairOutput
+    assert llm.calls[0]["max_input_tokens"] == (
+        settings.ollama_research_revision_max_input_tokens
+    )
+    assert llm.calls[0]["max_output_tokens"] == 1024
     assert "score" in DraftOutput.model_json_schema()["required"]
 
 

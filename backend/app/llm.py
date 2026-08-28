@@ -344,6 +344,11 @@ class LlmGateway:
             return self.settings.ollama_research_max_output_tokens
         return self.settings.ollama_max_output_tokens
 
+    def _max_input_tokens_for(self, lane: LlmLane) -> int:
+        if lane == "research":
+            return self.settings.ollama_research_max_input_tokens
+        return self.settings.ollama_7b_max_input_tokens
+
     def _context_length_for(self, lane: LlmLane) -> int:
         if lane == "assist":
             return self.settings.ollama_assist_context_length
@@ -376,17 +381,18 @@ class LlmGateway:
     ) -> dict[str, Any]:
         resolved_lane = self._resolve_lane(model, lane)
         schema_hint = schema.model_json_schema() if schema else {"type": "object"}
+        input_token_limit = (
+            max_input_tokens
+            if max_input_tokens is not None
+            else self._max_input_tokens_for(resolved_lane)
+        )
         if resolved_lane in {"assist", "research"}:
             try:
                 messages, estimated_prompt_tokens = self.prompt_budget.fit(
                     system=system,
                     prompt=prompt,
                     schema_payload=schema_hint,
-                    max_tokens=(
-                        max_input_tokens
-                        if max_input_tokens is not None
-                        else self.settings.ollama_7b_max_input_tokens
-                    ),
+                    max_tokens=input_token_limit,
                 )
             except Exception as exc:
                 raise LlmError(f"7B prompt budget enforcement failed: {exc}") from exc
@@ -484,11 +490,11 @@ class LlmGateway:
                 if (
                     resolved_lane in {"assist", "research"}
                     and isinstance(actual_prompt_tokens, int)
-                    and actual_prompt_tokens > self.settings.ollama_7b_max_input_tokens
+                    and actual_prompt_tokens > input_token_limit
                 ):
                     raise LlmError(
                         f"Ollama evaluated {actual_prompt_tokens} prompt tokens; "
-                        f"limit is {self.settings.ollama_7b_max_input_tokens}"
+                        f"limit is {input_token_limit}"
                     )
                 content = response_data.get("message", {}).get("content", "")
                 try:
@@ -528,6 +534,7 @@ class LlmGateway:
                         "endpoint": endpoint_id,
                         "lane": resolved_lane,
                         "estimated_prompt_tokens": estimated_prompt_tokens,
+                        "input_token_limit": input_token_limit,
                     },
                     entity_type=entity_type,
                     entity_id=str(entity_id) if entity_id is not None else None,
@@ -555,6 +562,7 @@ class LlmGateway:
                         "endpoint": endpoint_id,
                         "lane": resolved_lane,
                         "estimated_prompt_tokens": estimated_prompt_tokens,
+                        "input_token_limit": input_token_limit,
                     },
                     entity_type=entity_type,
                     entity_id=str(entity_id) if entity_id is not None else None,

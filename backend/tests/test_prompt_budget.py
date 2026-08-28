@@ -65,3 +65,26 @@ def test_compact_evidence_prioritizes_official_numeric_records():
 
     assert "official" in compacted
     assert "73.72" in compacted
+
+
+def test_compact_evidence_limits_duplicate_source_lineages_and_omits_transport_fields():
+    records = [
+        {
+            "id": f"story-{index}",
+            "source_quality": "professional",
+            "claim": f"claim-{index}",
+            "source_url": f"https://example.com/{index}",
+            "observed_at": "2026-08-28T00:00:00Z",
+            "as_of": "2026-08-28T00:00:00Z",
+            "independent_group": "same-story",
+        }
+        for index in range(4)
+    ]
+
+    compacted = compact_evidence(records, 2000, max_per_group=2)
+
+    assert compacted.count("same-story") == 2
+    assert "story-2" not in compacted
+    assert "source_url" not in compacted
+    assert "observed_at" not in compacted
+    assert "as_of" not in compacted
