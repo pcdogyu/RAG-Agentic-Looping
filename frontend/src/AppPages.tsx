@@ -1073,6 +1073,9 @@ type Recommendation = {
   direction_verified?: boolean;
   signal_status?: "technical_failure" | "insufficient_evidence" | "neutral" | "directional";
   model_score?: number | null;
+  model_direction?: "bullish" | "neutral" | "bearish" | null;
+  model_rating?: string | null;
+  model_confidence?: number | null;
   raw_score?: number | null;
   score_available?: boolean;
   evidence_strength?: number;
@@ -1250,6 +1253,20 @@ const signalStatusLabels: Record<string, string> = {
   directional: "方向信号",
 };
 
+const modelDirectionLabels: Record<string, string> = {
+  bullish: "看多 / Bullish",
+  neutral: "中性 / Neutral",
+  bearish: "看空 / Bearish",
+};
+
+const modelRatingLabels: Record<string, string> = {
+  strongly_bullish: "强烈看多 / Strongly bullish",
+  bullish: "看多 / Bullish",
+  watch: "观察 / Watch",
+  bearish: "看空 / Bearish",
+  strongly_bearish: "强烈看空 / Strongly bearish",
+};
+
 export function ConclusionScore({
   score, rating, confidence, evidenceComplete, directionalEvidenceComplete, signalStatus,
 }: {
@@ -1270,10 +1287,129 @@ export function ConclusionScore({
     <strong>{scoreBlocked ? "暂不评分" : `发布分：${publishedScore > 0 ? "+" : ""}${publishedScore}`}</strong>
     <span>{signalStatusLabels[resolvedStatus] || resolvedStatus} · 评级：{ratingLabels[rating] || rating}</span>
     <small>
-      置信度 {Math.round(confidence * 100)}% · 资料覆盖{evidenceComplete ? "完整" : "不足"}
+      {scoreBlocked ? "门禁后参考置信度" : "发布置信度"} {Math.round(confidence * 100)}% · 资料覆盖{evidenceComplete ? "完整" : "不足"}
       {directionalEvidenceComplete !== undefined && ` · 方向证据${directionalEvidenceComplete ? "通过" : "未通过"}`}
     </small>
   </div>;
+}
+
+export function ModelOpinion({
+  direction,
+  rating,
+  confidence,
+}: {
+  direction?: string | null;
+  rating?: string | null;
+  confidence?: number | null;
+}) {
+  if (!direction && !rating && typeof confidence !== "number") return null;
+  return <section className="model-opinion">
+    <h3>7B 模型意见（门禁前） / 7B model opinion (pre-gate)</h3>
+    <p>这是模型基于当前输入给出的独立意见，不代表证据门禁已通过，也不是最终发布评分。 / This is the model&apos;s ungated opinion, not a published score.</p>
+    <div className="model-opinion-grid">
+      <span>方向 / Direction<strong>{direction ? modelDirectionLabels[direction] || direction : "未留存 / Not retained"}</strong></span>
+      <span>五档评级 / Rating<strong>{rating ? modelRatingLabels[rating] || rating : "未留存 / Not retained"}</strong></span>
+      <span>原始置信度 / Confidence<strong>{typeof confidence === "number" ? `${Math.round(confidence * 100)}%` : "未留存 / Not retained"}</strong></span>
+    </div>
+  </section>;
+}
+
+export type GateReasonExplanation = {
+  title: string;
+  explanation: string;
+};
+
+const gateReasonExplanations: Record<string, GateReasonExplanation> = {
+  summary: {
+    title: "核心观点缺失 / Summary missing",
+    explanation: "报告没有形成可由证据验证的核心结论，因此不能发布方向评分。 / No evidence-verifiable core conclusion was produced, so no directional score can be published.",
+  },
+  products_or_protocol: {
+    title: "产品、主营业务或协议影响缺失 / Products, business, or protocol impact missing",
+    explanation: "股票场景中此项指产品或主营业务，不是要求存在区块链协议。报告需要说明事件如何影响收入、成本、订单、用户或竞争力；该部分为空或仅写证据不足时会被过滤。 / For equities, this means products or core business, not a blockchain protocol. The report must explain the event&apos;s effect on revenue, costs, orders, users, or competitiveness.",
+  },
+  valuation_or_tokenomics: {
+    title: "估值或代币经济分析缺失 / Valuation or tokenomics analysis missing",
+    explanation: "股票需要估值影响分析，加密资产需要代币经济分析；没有证据支持的相关分析时不发布评分。 / Equities require valuation impact analysis and crypto assets require tokenomics analysis; unsupported or missing analysis blocks publication.",
+  },
+  risks: {
+    title: "风险分析缺失 / Risks missing",
+    explanation: "报告未给出可验证的反向风险，无法判断观点是否只考虑了单边信息。 / The report lacks verifiable downside risks, so the system cannot confirm that the thesis considered both sides.",
+  },
+  invalidation_conditions: {
+    title: "失效条件缺失 / Invalidation conditions missing",
+    explanation: "报告未说明出现什么事实时应推翻当前观点，因此观点不可检验。 / The report does not state which facts would invalidate the thesis, making it non-falsifiable.",
+  },
+  "evidence citations": {
+    title: "缺少证据引用 / Evidence citations missing",
+    explanation: "结论没有绑定到可追溯的证据记录，无法核验观点来源。 / The conclusion is not linked to traceable evidence records, so its source cannot be verified.",
+  },
+  "one official source or two independent sources": {
+    title: "来源数量或独立性不足 / One official source or two independent sources required",
+    explanation: "至少需要一个直接相关的官方来源，或两个相互独立的来源；同一报道的转载不算两个来源。 / At least one directly relevant official source or two independent sources are required; syndicated copies count as one source.",
+  },
+  "claim-level evidence strength is below the publication threshold": {
+    title: "观点级证据强度低于发布门槛 / Claim-level evidence strength below publication threshold",
+    explanation: "逐条观点的证据覆盖率、来源质量或复核置信度不足，系统保留研究内容但不发布方向评分。 / Claim coverage, source quality, or verification confidence is insufficient; the research is retained without a published directional score.",
+  },
+  "direction weakened below the publication threshold after evidence gating": {
+    title: "门禁折减后方向强度不足 / Direction below publication threshold after evidence gating",
+    explanation: "方向信号经过证据强度和标的映射可信度折减后低于看多或看空门槛，因此不发布方向评分。 / After evidence-strength and asset-mapping adjustments, the signal falls below the bullish or bearish publication threshold.",
+  },
+  "claim stances do not support the deterministic direction": {
+    title: "观点立场不支持程序方向 / Claim stances do not support the deterministic direction",
+    explanation: "逐观点证据的多空倾向与程序计算方向不一致，方向复核未通过。 / Evidence-backed claim stances do not align with the calculated direction, so directional verification failed.",
+  },
+  "semantic evidence verifier unavailable": {
+    title: "语义证据复核不可用 / Semantic evidence verifier unavailable",
+    explanation: "负责逐观点核验证据的模型或服务未完成复核，当前不能发布评分。 / The claim-level verification model or service did not complete, so a score cannot be published.",
+  },
+  "high-impact independent cloud review rejected": {
+    title: "高影响独立复核未通过 / High-impact independent review rejected",
+    explanation: "高影响方向需要额外独立复核，本次复核未批准。 / High-impact directions require an additional independent review, which did not approve this conclusion.",
+  },
+  "high-impact cloud verifier unavailable": {
+    title: "高影响独立复核不可用 / High-impact independent verifier unavailable",
+    explanation: "高影响结论所需的独立复核服务不可用，因此按保守规则不发布。 / The independent verifier required for a high-impact conclusion was unavailable, so publication was blocked.",
+  },
+  "point-in-time boundary violation": {
+    title: "时间边界违规 / Point-in-time boundary violation",
+    explanation: "证据晚于研究截止时间，存在使用未来信息的风险。 / Evidence is later than the research cutoff, creating look-ahead risk.",
+  },
+};
+
+export function explainGateReason(reason: string): GateReasonExplanation {
+  const exact = gateReasonExplanations[reason];
+  if (exact) return exact;
+  if (reason.startsWith("asset mapping confidence ")) return {
+    title: "标的映射可信度不足 / Asset mapping confidence below threshold",
+    explanation: "事件与该证券之间的映射可信度低于 65%，不足以发布该标的的方向评分。 / Confidence that the event maps to this security is below 65%, so its directional score is withheld.",
+  };
+  if (reason.startsWith("unsupported claim:") || reason.startsWith("contradicted claim:")) return {
+    title: "观点缺少支持或存在矛盾 / Unsupported or contradicted claim",
+    explanation: "至少一条重要观点没有被引用证据支持，或与证据相矛盾。 / At least one material claim is unsupported by, or contradicts, its cited evidence.",
+  };
+  if (reason.startsWith("unknown evidence ids:")) return {
+    title: "引用了无效证据 / Unknown evidence citation",
+    explanation: "报告引用了当前研究记录中不存在的证据 ID，无法完成追溯。 / The report cites evidence IDs that do not exist in this research record.",
+  };
+  if (/^(model|semantic_verifier|cloud_verifier)_/.test(reason)) return {
+    title: "研究依赖发生技术错误 / Research dependency failed",
+    explanation: "模型或复核服务发生技术异常，本次结果按失败处理且不发布评分。 / A model or verification dependency failed; this run is treated as a technical failure with no published score.",
+  };
+  return {
+    title: "其他门禁原因 / Other gate reason",
+    explanation: "该原因尚无专用翻译，请结合下方原始原因排查。 / No dedicated translation is available yet; use the raw reason below for diagnosis.",
+  };
+}
+
+function GateReasonItem({ reason }: { reason: string }) {
+  const detail = explainGateReason(reason);
+  return <li>
+    <strong>{detail.title}</strong>
+    <span>{detail.explanation}</span>
+    <code>{reason}</code>
+  </li>;
 }
 
 export function GateReasons({
@@ -1287,11 +1423,11 @@ export function GateReasons({
   const blockingReason = primaryReason || reasons[0];
   if (!blockingReason) return null;
   return <>
-    <h3>门禁原因</h3>
-    <ul className="gate-reasons"><li>{blockingReason}</li></ul>
+    <h3>门禁原因 / Primary gate reason</h3>
+    <ul className="gate-reasons"><GateReasonItem reason={blockingReason} /></ul>
     {!!reasons.length && <>
-      <h3>所有门禁原因</h3>
-      <ul className="gate-reasons">{reasons.map((item) => <li key={item}>{item}</li>)}</ul>
+      <h3>所有门禁原因 / All gate reasons</h3>
+      <ul className="gate-reasons">{reasons.map((item) => <GateReasonItem key={item} reason={item} />)}</ul>
     </>}
   </>;
 }
@@ -1506,7 +1642,8 @@ export function ConclusionsPage({ apiBase }: { apiBase: string }) {
         <button className="close" onClick={() => setSelected(null)}>×</button>
         <p className="eyebrow">{selected.recommendation.asset.market} · {selected.recommendation.asset.symbol}</p><h2>{selected.recommendation.asset.name}</h2>
         <ConclusionScore score={selected.recommendation.score} rating={selected.recommendation.rating} confidence={selected.recommendation.confidence} evidenceComplete={selected.recommendation.evidence_complete} directionalEvidenceComplete={selected.recommendation.directional_evidence_complete} signalStatus={selected.recommendation.signal_status} />
-        <p className="score-explanation">通过证据门禁后，评分由情景概率、事件方向和可用研究因子按固定权重计算，再按证据强度和证券映射可信度收缩；门禁未通过时不对外评分。</p>
+        <p className="score-explanation">通过证据门禁后，评分由情景概率、事件方向和可用研究因子按固定权重计算，再按证据强度和证券映射可信度收缩；门禁未通过时不对外评分。 / A score is published only after all evidence gates pass.</p>
+        <ModelOpinion direction={selected.recommendation.model_direction} rating={selected.recommendation.model_rating} confidence={selected.recommendation.model_confidence} />
         <div className="probability-grid"><span>看多 <strong>{Math.round(selected.recommendation.bull_probability * 100)}%</strong></span><span>基准 <strong>{Math.round(selected.recommendation.base_probability * 100)}%</strong></span><span>看空 <strong>{Math.round(selected.recommendation.bear_probability * 100)}%</strong></span></div>
         <div className="research-gate-grid">
           <span>程序原始分<strong>{selected.recommendation.score_available === false || ["technical_failure", "insufficient_evidence"].includes(selected.recommendation.signal_status || "") ? "—" : <>{(selected.recommendation.raw_score ?? selected.recommendation.score ?? 0) > 0 ? "+" : ""}{selected.recommendation.raw_score ?? selected.recommendation.score ?? 0}</>}</strong></span>

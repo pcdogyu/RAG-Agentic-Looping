@@ -17,9 +17,10 @@ from backend.app.db import (
     IntegrationSettingRow,
     McpSourceRow,
     RecommendationRow,
+    ResearchRunRow,
     get_db,
 )
-from backend.app.domain import Recommendation, SignalStatus, utc_now
+from backend.app.domain import Recommendation, ResearchRun, SignalStatus, utc_now
 from backend.app.services.fact_sources import (
     BUILTIN_SOURCE_GROUPS,
     FACT_SOURCE_GROUPS,
@@ -409,8 +410,25 @@ def _decode_cursor(cursor: str) -> tuple[datetime, UUID]:
         raise HTTPException(status_code=422, detail="invalid cursor") from exc
 
 
-def _public_recommendation(recommendation: Recommendation) -> dict[str, Any]:
+def _model_confidence_from_run(run: ResearchRun | None) -> float | None:
+    if run is None:
+        return None
+    for step in reversed(run.analysis_steps):
+        if step.phase not in {"report_revision", "report_drafting"}:
+            continue
+        value = step.metrics.get("confidence")
+        if isinstance(value, int | float) and 0 <= value <= 1:
+            return float(value)
+    return None
+
+
+def _public_recommendation(
+    recommendation: Recommendation,
+    run: ResearchRun | None = None,
+) -> dict[str, Any]:
     payload = recommendation.model_dump(mode="json")
+    if payload["model_confidence"] is None:
+        payload["model_confidence"] = _model_confidence_from_run(run)
     score_available = bool(
         recommendation.direction_verified
         and recommendation.signal_status
@@ -421,6 +439,20 @@ def _public_recommendation(recommendation: Recommendation) -> dict[str, Any]:
         payload["score"] = None
         payload["model_score"] = None
         payload["raw_score"] = None
+        if (
+            recommendation.signal_status is SignalStatus.INSUFFICIENT_EVIDENCE
+            and payload["confidence"] == 0
+            and isinstance(payload["model_confidence"], int | float)
+        ):
+            payload["confidence"] = round(
+                min(
+                    payload["model_confidence"]
+                    * max(0.2, recommendation.evidence_strength)
+                    * max(0.5, recommendation.mapping_confidence),
+                    0.54,
+                ),
+                4,
+            )
     return payload
 
 
@@ -429,7 +461,7 @@ def _conclusion_detail(db: Session, recommendation: Recommendation) -> dict[str,
     event = get_event(db, run.event_id) if run and run.event_id else None
     news = [get_news(db, item_id) for item_id in event.news_item_ids] if event else []
     return {
-        "recommendation": _public_recommendation(recommendation),
+        "recommendation": _public_recommendation(recommendation, run),
         "run": run.model_dump(mode="json") if run else None,
         "event": event.model_dump(mode="json") if event else None,
         "news": [item.model_dump(mode="json") for item in news if item],
@@ -555,9 +587,22 @@ def list_conclusions(
         items.append(recommendation)
     has_more = len(rows) > limit
     items = items[:limit]
+    run_ids = {item.run_id for item in items}
+    run_rows = (
+        db.scalars(select(ResearchRunRow).where(ResearchRunRow.id.in_(run_ids))).all()
+        if run_ids
+        else []
+    )
+    runs_by_id = {
+        row.id: ResearchRun.model_validate(row.payload)
+        for row in run_rows
+    }
     next_cursor = _encode_cursor(items[-1].as_of, items[-1].id) if has_more and items else None
     return {
-        "items": [_public_recommendation(item) for item in items],
+        "items": [
+            _public_recommendation(item, runs_by_id.get(item.run_id))
+            for item in items
+        ],
         "next_cursor": next_cursor,
     }
 

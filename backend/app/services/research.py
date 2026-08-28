@@ -12,7 +12,7 @@ from uuid import UUID, uuid4
 
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.orm import Session
 
 from backend.app.config import Settings, get_settings
@@ -23,8 +23,10 @@ from backend.app.domain import (
     ClaimEvidenceAssessment,
     ClaimVerdict,
     Evidence,
+    ModelDirection,
     NewsEvent,
     NewsItem,
+    Rating,
     Recommendation,
     ResearchRun,
     RunStatus,
@@ -32,6 +34,8 @@ from backend.app.domain import (
     SourceQuality,
     Thesis,
     as_utc,
+    model_direction_for,
+    model_rating_for,
     rating_for,
     utc_now,
 )
@@ -83,6 +87,9 @@ DIRECTION_SCORE_INSTRUCTION = (
     "score 必须由给定证据推导，并与核心观点、催化剂、风险、置信度及"
     " bull_probability/base_probability/bear_probability 保持一致；证据越弱，"
     "分数应越接近 0 且置信度越低。不得省略 score，不得为追求非零分数编造事实。"
+    "同时必须输出 direction（bullish、neutral、bearish 三选一）和 rating（"
+    "strongly_bullish、bullish、watch、bearish、strongly_bearish 五选一），"
+    "并与 score 的上述区间严格一致。confidence 是模型对自身意见的原始置信度。"
     "该 score 只作为模型意见留档，最终分数由程序依据概率、事件映射、市场因子和证据门禁计算。"
 )
 
@@ -99,12 +106,22 @@ class DraftOutput(BaseModel):
     invalidation_conditions: list[str] = Field(default_factory=list)
     evidence_ids: list[str] = Field(default_factory=list)
     score: int = Field(ge=-100, le=100)
+    direction: ModelDirection | None = None
+    rating: Rating | None = None
     confidence: float = Field(default=0.3, ge=0, le=1)
     bull_probability: float = Field(default=0.33, ge=0, le=1)
     base_probability: float = Field(default=0.34, ge=0, le=1)
     bear_probability: float = Field(default=0.33, ge=0, le=1)
     valuation_low: float | None = None
     valuation_high: float | None = None
+
+    @model_validator(mode="after")
+    def normalize_model_opinion(self) -> DraftOutput:
+        # Score is the single source of truth. Normalizing these redundant
+        # labels prevents a small model from returning contradictory fields.
+        self.direction = model_direction_for(self.score)
+        self.rating = model_rating_for(self.score)
+        return self
 
 
 class VerificationOutput(BaseModel):
@@ -843,6 +860,8 @@ class ResearchService:
                 metrics={
                     "confidence": draft_output.confidence,
                     "score": draft_output.score,
+                    "direction": draft_output.direction.value,
+                    "rating": draft_output.rating.value,
                     "citation_count": len(draft_output.evidence_ids),
                 },
             )
@@ -1580,6 +1599,8 @@ class ResearchService:
                 metrics={
                     "confidence": revised_output.confidence,
                     "score": revised_output.score,
+                    "direction": revised_output.direction.value,
+                    "rating": revised_output.rating.value,
                     "requested_repairs": verification.missing_requirements,
                     "invalid_evidence_ids_removed": invalid_evidence_ids,
                     "independent_source_lineages": len(source_lineages),
@@ -1783,9 +1804,20 @@ class ResearchService:
             verification.evidence_strength,
             mapping_confidence,
         )
-        confidence = round(
-            confidence_ceiling if final_gate else min(confidence_ceiling, 0.54), 4
-        )
+        if final_gate:
+            confidence = round(confidence_ceiling, 4)
+        elif technical_failure:
+            confidence = 0.0
+        else:
+            # A failed evidence gate with zero measured strength must lower
+            # confidence, not erase a valid 7B opinion. The floor represents
+            # severe uncertainty and is never enough to publish a score.
+            evidence_discount = max(0.2, verification.evidence_strength)
+            mapping_discount = max(0.5, mapping_confidence)
+            confidence = round(
+                min(draft.confidence * evidence_discount * mapping_discount, 0.54),
+                4,
+            )
         valid_evidence_ids = {str(item.id): item.id for item in run.evidence}
         thesis_evidence_ids = [
             valid_evidence_ids[item]
@@ -1806,11 +1838,17 @@ class ResearchService:
             invalidation_conditions=draft.invalidation_conditions,
             evidence_ids=list(dict.fromkeys(thesis_evidence_ids)),
         )
+        model_opinion_available = not (
+            run.retryable_reason and run.retryable_reason.startswith("model_")
+        )
         recommendation = Recommendation(
             run_id=run.id,
             asset=run.asset,
             score=score,
-            model_score=draft.score,
+            model_score=draft.score if model_opinion_available else None,
+            model_direction=draft.direction if model_opinion_available else None,
+            model_rating=draft.rating if model_opinion_available else None,
+            model_confidence=draft.confidence if model_opinion_available else None,
             raw_score=direction_score.raw_score,
             rating=rating_for(
                 score,
@@ -1865,6 +1903,9 @@ class ResearchService:
                     "rating": recommendation.rating.value,
                     "signal_status": signal_status.value,
                     "model_score": draft.score,
+                    "model_direction": draft.direction.value,
+                    "model_rating": draft.rating.value,
+                    "model_confidence": draft.confidence,
                     "raw_score": direction_score.raw_score,
                     "score": score,
                     "confidence": confidence,
@@ -1895,6 +1936,21 @@ class ResearchService:
         path = self.settings.reports_dir / f"{run.asset.symbol}_{run.id}.md"
         recommendation = run.recommendation
         assert recommendation is not None
+        model_direction = (
+            recommendation.model_direction.value
+            if recommendation.model_direction
+            else "unavailable"
+        )
+        model_rating = (
+            recommendation.model_rating.value
+            if recommendation.model_rating
+            else "unavailable"
+        )
+        model_confidence = (
+            f"{recommendation.model_confidence:.0%}"
+            if recommendation.model_confidence is not None
+            else "unavailable"
+        )
         citations = "\n".join(
             f"- [{item.source_name}]({item.source_url}) — {item.claim}" for item in run.evidence
         )
@@ -1909,6 +1965,8 @@ class ResearchService:
             f"- 信号状态：{recommendation.signal_status.value}\n"
             f"- 程序原始分 / 发布分：{recommendation.raw_score} / {recommendation.score}\n"
             f"- 模型意见分（仅审计）：{recommendation.model_score}\n"
+            f"- 7B 模型方向 / 五档评级：{model_direction} / {model_rating}\n"
+            f"- 7B 模型原始置信度：{model_confidence}\n"
             f"- 置信度：{recommendation.confidence:.0%}\n"
             f"- 截止时间：{run.as_of.isoformat()}\n"
             f"- 资料覆盖：{'完整' if recommendation.evidence_complete else '不足'}\n"

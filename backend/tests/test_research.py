@@ -306,6 +306,9 @@ def test_research_graph_produces_verified_recommendation(db, tmp_path):
     # The model's self-reported 80 is retained only for audit and cannot change
     # the program score derived from the same probabilities and evidence.
     assert strong_run.recommendation.model_score == 80
+    assert strong_run.recommendation.model_direction.value == "bullish"
+    assert strong_run.recommendation.model_rating is Rating.STRONGLY_BULLISH
+    assert strong_run.recommendation.model_confidence == 0.85
     assert strong_run.recommendation.raw_score == run.recommendation.raw_score
     assert strong_run.recommendation.rating is Rating.BULLISH
     assert strong_run.verification_round == 1
@@ -382,6 +385,9 @@ def test_final_status_distinguishes_neutral_insufficient_and_technical_failure(
     assert insufficient.recommendation.directional_evidence_complete is False
     assert insufficient.recommendation.signal_status.value == "insufficient_evidence"
     assert insufficient.recommendation.score == 0
+    assert 0 < insufficient.recommendation.confidence < (
+        insufficient.recommendation.model_confidence or 0
+    )
     assert insufficient.recommendation.gate_reasons
     assert insufficient.recommendation.primary_gate_reason == (
         insufficient.recommendation.gate_reasons[0]
@@ -390,6 +396,7 @@ def test_final_status_distinguishes_neutral_insufficient_and_technical_failure(
     assert technical.status is RunStatus.FAILED
     assert technical.recommendation.signal_status.value == "technical_failure"
     assert technical.recommendation.score == 0
+    assert technical.recommendation.confidence == 0
     assert technical.recommendation.bull_probability == 0.2
     assert technical.recommendation.base_probability == 0.6
     assert technical.retryable_reason.startswith("semantic_verifier_")

@@ -68,6 +68,12 @@ class Rating(StrEnum):
     STRONGLY_BEARISH = "strongly_bearish"
 
 
+class ModelDirection(StrEnum):
+    BULLISH = "bullish"
+    NEUTRAL = "neutral"
+    BEARISH = "bearish"
+
+
 class SignalStatus(StrEnum):
     """Final state of the directional research pipeline.
 
@@ -238,6 +244,9 @@ class Recommendation(BaseModel):
     # `model_score` is retained only for audit. `raw_score` and `score` are
     # calculated by deterministic program logic.
     model_score: int | None = Field(default=None, ge=-100, le=100)
+    model_direction: ModelDirection | None = None
+    model_rating: Rating | None = None
+    model_confidence: float | None = Field(default=None, ge=0, le=1)
     raw_score: int = Field(default=0, ge=-100, le=100)
     rating: Rating
     confidence: float = Field(ge=0, le=1)
@@ -278,6 +287,11 @@ class Recommendation(BaseModel):
             # Backward-compatible read of recommendations stored before raw
             # and final scores were separated.
             self.raw_score = self.score
+        if self.model_score is not None:
+            # Backfill display-safe model opinion labels for recommendations
+            # stored before these fields were introduced.
+            self.model_direction = model_direction_for(self.model_score)
+            self.model_rating = model_rating_for(self.model_score)
         if (
             self.evidence_complete
             and not self.claim_assessments
@@ -423,6 +437,28 @@ class EvolutionCandidate(BaseModel):
 def rating_for(score: int, confidence: float, evidence_complete: bool = True) -> Rating:
     if confidence < 0.55 or not evidence_complete:
         return Rating.WATCH
+    if score >= 60:
+        return Rating.STRONGLY_BULLISH
+    if score >= 20:
+        return Rating.BULLISH
+    if score <= -60:
+        return Rating.STRONGLY_BEARISH
+    if score <= -20:
+        return Rating.BEARISH
+    return Rating.WATCH
+
+
+def model_direction_for(score: int) -> ModelDirection:
+    if score >= 20:
+        return ModelDirection.BULLISH
+    if score <= -20:
+        return ModelDirection.BEARISH
+    return ModelDirection.NEUTRAL
+
+
+def model_rating_for(score: int) -> Rating:
+    """Map the 7B model's audit score to five ungated opinion levels."""
+
     if score >= 60:
         return Rating.STRONGLY_BULLISH
     if score >= 20:

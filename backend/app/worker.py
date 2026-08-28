@@ -2796,6 +2796,17 @@ def _evolution_failure_cases(db) -> list[dict[str, Any]]:
                     "score": recommendation.score,
                     "raw_score": recommendation.raw_score,
                     "model_score": recommendation.model_score,
+                    "model_direction": (
+                        recommendation.model_direction.value
+                        if recommendation.model_direction
+                        else None
+                    ),
+                    "model_rating": (
+                        recommendation.model_rating.value
+                        if recommendation.model_rating
+                        else None
+                    ),
+                    "model_confidence": recommendation.model_confidence,
                     "probabilities": [
                         recommendation.bull_probability,
                         recommendation.base_probability,

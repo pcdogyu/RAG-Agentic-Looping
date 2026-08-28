@@ -13,7 +13,9 @@ import {
   failedResearchRetryPath,
   firstUnhealthyGroup,
   GateReasons,
+  explainGateReason,
   isSearchSource,
+  ModelOpinion,
   NativeConfigEditor,
   parseFilterKeywords,
   retryAllFailedResearch,
@@ -34,7 +36,7 @@ describe("open source and search settings", () => {
 
     expect(markup).toContain("发布分：0");
     expect(markup).toContain("评级：观察");
-    expect(markup).toContain("置信度 95% · 资料覆盖完整");
+    expect(markup).toContain("发布置信度 95% · 资料覆盖完整");
   });
 
   it("does not score a conclusion whose evidence gate is incomplete", () => {
@@ -49,7 +51,22 @@ describe("open source and search settings", () => {
 
     expect(markup).toContain("暂不评分");
     expect(markup).toContain("方向证据不足 · 评级：观察");
+    expect(markup).toContain("门禁后参考置信度 0%");
     expect(markup).not.toContain("发布分：0");
+  });
+
+  it("shows the 7B opinion independently from the publication gate", () => {
+    const markup = renderToStaticMarkup(createElement(ModelOpinion, {
+      direction: "bearish",
+      rating: "strongly_bearish",
+      confidence: 0.68,
+    }));
+
+    expect(markup).toContain("7B 模型意见（门禁前）");
+    expect(markup).toContain("看空 / Bearish");
+    expect(markup).toContain("强烈看空 / Strongly bearish");
+    expect(markup).toContain("68%");
+    expect(markup).toContain("not a published score");
   });
 
   it("shows one blocking gate reason before the complete reason list", () => {
@@ -62,11 +79,16 @@ describe("open source and search settings", () => {
       ],
     }));
 
-    expect((markup.match(/<h3>门禁原因<\/h3>/g) || [])).toHaveLength(1);
-    expect((markup.match(/<h3>所有门禁原因<\/h3>/g) || [])).toHaveLength(1);
+    expect((markup.match(/门禁原因 \/ Primary gate reason/g) || [])).toHaveLength(1);
+    expect((markup.match(/所有门禁原因 \/ All gate reasons/g) || [])).toHaveLength(1);
     expect(markup.indexOf("门禁原因")).toBeLessThan(markup.indexOf("所有门禁原因"));
     expect(markup.match(/claim-level evidence strength/g)).toHaveLength(2);
     expect(markup.match(/products_or_protocol/g)).toHaveLength(1);
+    expect(markup).toContain("产品、主营业务或协议影响缺失");
+    expect(markup).toContain("For equities, this means products or core business");
+    expect(explainGateReason("products_or_protocol").explanation).toContain(
+      "不是要求存在区块链协议",
+    );
   });
 
   it("deduplicates a news item repeated as evidence", () => {

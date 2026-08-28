@@ -445,6 +445,12 @@ h1 span { color: var(--mint); font-weight: 400; }
 .conclusion-score.negative > strong { color: var(--red); }
 .conclusion-score > span, .conclusion-score > small { font-size: 13px; }
 .score-explanation { margin: 10px 0 18px; color: var(--muted); font-size: 13px; }
+.model-opinion { margin: 16px 0; padding: 14px; border: 1px solid rgba(88,214,255,.35); border-radius: 10px; background: rgba(88,214,255,.05); }
+.model-opinion h3 { margin-top: 0; color: var(--cyan); }
+.model-opinion > p { margin: 0 0 12px; color: var(--muted); font-size: 11px; line-height: 1.65; }
+.model-opinion-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.model-opinion-grid span { display: grid; gap: 5px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; color: var(--muted); font-size: 10px; background: var(--panel); }
+.model-opinion-grid strong { color: var(--cyan); font: 500 14px "DM Mono", monospace; }
 .conclusion-modal { width: min(900px, calc(100vw - 32px)); max-height: calc(100vh - 40px); overflow-y: auto; }
 .probability-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 16px 0; }
 .probability-grid span { display: grid; gap: 4px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; color: var(--muted); }
@@ -452,7 +458,12 @@ h1 span { color: var(--mint); font-weight: 400; }
 .research-gate-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 12px 0 18px; }
 .research-gate-grid span { display: grid; gap: 5px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; color: var(--muted); font-size: 10px; }
 .research-gate-grid strong { color: var(--text); font: 500 15px "DM Mono", monospace; }
-.gate-reasons { color: var(--amber); }
+.gate-reasons { display: grid; gap: 8px; padding-left: 22px; color: var(--amber); }
+.gate-reasons li { padding: 10px 12px; border: 1px solid rgba(246,201,107,.28); border-radius: 8px; background: rgba(246,201,107,.04); }
+.gate-reasons strong, .gate-reasons span, .gate-reasons code { display: block; }
+.gate-reasons strong { color: var(--amber); font-size: 12px; }
+.gate-reasons span { margin-top: 5px; color: var(--secondary); font-size: 11px; line-height: 1.65; }
+.gate-reasons code { margin-top: 6px; color: var(--muted); font-size: 9px; overflow-wrap: anywhere; }
 .claim-assessments { display: grid; gap: 8px; }
 .claim-assessments article { display: grid; gap: 5px; padding: 11px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--soft-hover); }
 .claim-assessments span, .claim-assessments small { color: var(--muted); font-size: 10px; }
@@ -658,6 +669,7 @@ h1 span { color: var(--mint); font-weight: 400; }
   .target-change-error { align-items: stretch; flex-direction: column; }
   .conclusion-score { text-align: left; }
   .research-gate-grid { grid-template-columns: repeat(2, 1fr); }
+  .model-opinion-grid { grid-template-columns: 1fr; }
   .failed-research-item { grid-template-columns: 1fr; }
   .failed-research-item > button { justify-self: start; }
   .source-card-main { flex-direction: column; }

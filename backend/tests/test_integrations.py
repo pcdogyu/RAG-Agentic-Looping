@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from backend.app.config import Settings
 from backend.app.db import IntegrationSettingRow, McpSourceRow
 from backend.app.domain import (
+    AnalysisStep,
     AssetClass,
     AssetRef,
     Market,
@@ -787,6 +788,15 @@ def test_conclusions_omit_all_scores_when_evidence_is_insufficient(db):
     )
     now = utc_now() - timedelta(minutes=1)
     run = ResearchRun(asset=asset, as_of=now)
+    run.analysis_steps.append(
+        AnalysisStep(
+            phase="report_drafting",
+            executor="ollama",
+            model="qwen2.5:7b",
+            summary="7B draft completed",
+            metrics={"confidence": 0.8},
+        )
+    )
     recommendation = Recommendation(
         run_id=run.id,
         asset=asset,
@@ -801,6 +811,7 @@ def test_conclusions_omit_all_scores_when_evidence_is_insufficient(db):
         thesis=Thesis(summary="Evidence is still incomplete"),
         as_of=now,
         evidence_complete=False,
+        evidence_strength=0,
     )
     run.recommendation = recommendation
     save_run(db, run)
@@ -817,6 +828,10 @@ def test_conclusions_omit_all_scores_when_evidence_is_insufficient(db):
         assert payload["score"] is None
         assert payload["model_score"] is None
         assert payload["raw_score"] is None
+        assert payload["model_direction"] == "bearish"
+        assert payload["model_rating"] == "bearish"
+        assert payload["model_confidence"] == 0.8
+        assert payload["confidence"] == 0.16
 
 
 def _save_target_history_item(
