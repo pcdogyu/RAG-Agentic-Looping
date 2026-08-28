@@ -83,7 +83,13 @@ def test_health_lists_dedicated_assist_and_research_instances(monkeypatch):
     )
     monkeypatch.setattr(
         "backend.app.main.settings.ollama_research_base_urls",
-        "http://research-0.invalid,http://research-1.invalid",
+        (
+            "http://research-0.invalid,http://research-1.invalid,"
+            "http://research-2.invalid"
+        ),
+    )
+    monkeypatch.setattr(
+        "backend.app.main.settings.ollama_research_max_concurrency", 3
     )
     monkeypatch.setattr(
         "backend.app.main.httpx.get",
@@ -104,11 +110,12 @@ def test_health_lists_dedicated_assist_and_research_instances(monkeypatch):
         "assist-0",
         "research-0",
         "research-1",
+        "research-2",
         "code-0",
     }.issubset(instances)
     assert all(
         instances[item]["model_available"]
-        for item in ("assist-0", "research-0", "research-1")
+        for item in ("assist-0", "research-0", "research-1", "research-2")
     )
     assert not instances["extract-0"]["model_available"]
     assert not instances["code-0"]["model_available"]

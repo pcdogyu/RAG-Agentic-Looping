@@ -53,6 +53,28 @@ def test_instance_configuration_splits_capacity_and_keeps_legacy_queue():
     assert broker_queue_name("assist", "assist-1") == "mapping.assist-1"
 
 
+def test_three_research_endpoints_get_independent_capacity_and_queues():
+    settings = Settings(
+        _env_file=None,
+        ollama_research_base_urls=(
+            "http://r0.invalid,http://r1.invalid,http://r2.invalid"
+        ),
+        ollama_research_max_concurrency=3,
+        research_pipeline_concurrency=6,
+    )
+
+    instances = configured_model_instances("research", settings)
+
+    assert [(item.id, item.capacity) for item in instances] == [
+        ("research-0", 1),
+        ("research-1", 1),
+        ("research-2", 1),
+    ]
+    assert worker_queue_names("research", settings) == (
+        "research,research.research-0,research.research-1,research.research-2"
+    )
+
+
 def test_instance_configuration_rejects_more_endpoints_than_capacity():
     with pytest.raises(ValidationError, match="instance count"):
         Settings(

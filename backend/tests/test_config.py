@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from backend.app.config import Settings
@@ -51,13 +53,18 @@ def test_research_urls_use_pool_or_main_fallback() -> None:
     pooled = Settings(
         _env_file=None,
         ollama_base_url="http://main:11434",
-        ollama_research_base_urls=" http://research-0:11435, http://research-1:11436/ ",
+        ollama_research_base_urls=(
+            " http://research-0:11435, http://research-1:11436/, "
+            "http://research-2:11439/ "
+        ),
+        ollama_research_max_concurrency=3,
     )
 
     assert fallback.ollama_research_urls == ["http://main:11434"]
     assert pooled.ollama_research_urls == [
         "http://research-0:11435",
         "http://research-1:11436",
+        "http://research-2:11439",
     ]
 
 
@@ -91,3 +98,16 @@ def test_research_pipeline_concurrency_must_cover_every_instance() -> None:
             ollama_research_max_concurrency=2,
             research_pipeline_concurrency=1,
         )
+
+
+def test_research_host_script_defines_three_ten_cpu_numa_local_instances() -> None:
+    script = (
+        Path(__file__).resolve().parents[2]
+        / "infra"
+        / "ollama"
+        / "run-research-from-env.sh"
+    ).read_text(encoding="utf-8")
+
+    assert 'host="172.17.0.1:11435"\n    cpus="0-9"\n    node="0"' in script
+    assert 'host="172.17.0.1:11436"\n    cpus="20-29"\n    node="1"' in script
+    assert 'host="172.17.0.1:11439"\n    cpus="30-39"\n    node="1"' in script

@@ -835,6 +835,7 @@ describe("research queue page", () => {
         instances: [
           { id: "research-0", healthy: true, model_available: true },
           { id: "research-1", healthy: true, model_available: true },
+          { id: "research-2", healthy: true, model_available: true },
         ],
       }),
       overviewQueue({
@@ -860,7 +861,7 @@ describe("research queue page", () => {
       "extract-0", "extract-1", "assist-0", "assist-1",
     ]);
     expect(rightColumn.map(({ instance }) => instance.id)).toEqual([
-      "research-0", "research-1", "code-0",
+      "research-0", "research-1", "research-2", "code-0",
     ]);
   });
 

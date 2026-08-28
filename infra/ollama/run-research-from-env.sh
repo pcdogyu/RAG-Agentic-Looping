@@ -29,12 +29,17 @@ read_project_value() {
 case "$instance" in
   0)
     host="172.17.0.1:11435"
-    cpus="0-7"
+    cpus="0-9"
     node="0"
     ;;
   1)
     host="172.17.0.1:11436"
-    cpus="20-27"
+    cpus="20-29"
+    node="1"
+    ;;
+  2)
+    host="172.17.0.1:11439"
+    cpus="30-39"
     node="1"
     ;;
   *)

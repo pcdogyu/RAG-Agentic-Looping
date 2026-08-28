@@ -207,7 +207,7 @@ stateDiagram-v2
 | 模型 | 默认配置变量 | 作用 | 本机 Ollama 显示大小 | 是否必需 |
 |---|---|---|---:|---|
 | `qwen2.5:3b` | `OLLAMA_EXTRACT_MODEL` | 新闻抽取、分类、实体识别和初筛 | 约 1.9 GB | 是 |
-| `qwen2.5:14b` | `OLLAMA_RESEARCH_MODEL` | 标的映射、研究综合、矛盾检查、两轮验证和中文报告 | 约 9 GB | 是 |
+| `qwen2.5:7b` | `OLLAMA_ASSIST_MODEL` / `OLLAMA_RESEARCH_MODEL` | 股票映射、研究综合、矛盾检查、验证和中文报告 | 约 4.7 GB，另需上下文内存 | 是 |
 | `qwen2.5-coder:7b` | `OLLAMA_CODE_MODEL` | 演进假设、补丁和测试生成 | 约 4.7 GB | 仅启用演进时 |
 | `intfloat/multilingual-e5-small` | `EMBEDDING_MODEL` | CPU 多语言向量检索，384 维 | 首次研究自动下载 | 是 |
 
@@ -215,13 +215,13 @@ stateDiagram-v2
 
 ### 推理与显存策略
 
-- Ollama 运行在宿主机，容器通过 `host.docker.internal:11434` 调用。
-- 每个请求通过 `OLLAMA_KEEP_ALIVE` 控制模型驻留；默认 `0` 会在完成后卸载，CPU 部署可设为 `5m` 减少重复加载。
+- Ollama 运行在宿主机；Research 使用 `11435`、`11436`、`11439` 三个独立端点。
+- 每个请求通过 `OLLAMA_KEEP_ALIVE` 控制模型驻留；生产 CPU 实例使用 `-1` 保持单模型常驻，避免重复加载。
 - `OLLAMA_NUM_THREADS` 默认 `0` 由 Ollama 自动选择；虚拟化或多 NUMA 主机应按实测设置，避免线程过多反而拖慢推理。
 - `OLLAMA_MAX_OUTPUT_TOKENS` 限制单次结构化输出，避免异常生成长期占用推理槽。
-- Redis 锁 `market-loop:gpu` 将 API 和所有 Worker 的 Ollama 调用限制为全局单并发。
-- `extract-worker` 并发和预取均固定为 1，保证逐篇抽取与事件聚类顺序；`research-worker` 并发为 2、预取为 1。
-- CPU 推理可以运行，但完整扫描与 14B 深研会明显变慢，不作为性能目标。
+- Redis 按实例维护推理槽位和任务亲和；三个 Research 端点各自保持单并发，不互相阻塞。
+- 三个 Research 端点分别绑定 10 个 CPU，每端点单推理并发；`research-worker` 使用 6 个流水线槽位、预取为 1，以重叠检索、证据门禁和模型等待。
+- CPU 推理可以运行，但完整扫描和三路 7B 深研仍需持续观察 NUMA 竞争与系统负载。
 
 ### 推荐运行环境
 
@@ -290,7 +290,7 @@ docker context use desktop-linux
 
 ```powershell
 ollama pull qwen2.5:3b
-ollama pull qwen2.5:14b
+ollama pull qwen2.5:7b
 ollama pull qwen2.5-coder:7b
 ollama list
 ```
@@ -407,7 +407,10 @@ curl http://localhost:8000/health
 | `RSS_FEED_URLS` | 可选，逗号分隔 | 有授权的专业新闻 Feed |
 | `OFFICIAL_RSS_FEED_URLS` | 可选，逗号分隔 | 交易所、监管机构或公司 IR 官方 Feed |
 | `AKSHARE_IPV4_ONLY` | `false` | 无 IPv6 出口的服务器可设为 `true`，避免交易所接口误走 IPv6 |
-| `RESEARCH_PIPELINE_CONCURRENCY` | `4` | 研究流水线并发数；与 Ollama 推理并发独立，用于重叠检索、门禁和模型阶段 |
+| `OLLAMA_RESEARCH_BASE_URLS` | `11435,11436,11439` | 三个 Research 7B 宿主机端点，逗号分隔 |
+| `OLLAMA_RESEARCH_NUM_THREADS` | `10` | 每个 Research 7B 请求使用的 CPU 线程数 |
+| `OLLAMA_RESEARCH_MAX_CONCURRENCY` | `3` | Research 模型总推理并发，每实例保持 1 路 |
+| `RESEARCH_PIPELINE_CONCURRENCY` | `6` | 研究流水线并发数；与 Ollama 推理并发独立，用于重叠检索、门禁和模型阶段 |
 | `OLLAMA_RESEARCH_MAX_INPUT_TOKENS` | `3500` | Research 7B 单次调用的完整提示词上限 |
 | `OLLAMA_RESEARCH_REVISION_MAX_INPUT_TOKENS` | `2500` | Research 7B 定向修订调用的提示词上限 |
 | `RESEARCH_PROMPT_EVIDENCE_CHARS` | `6000` | 研究草稿和修订时最多传入的证据字符数 |
@@ -423,7 +426,7 @@ curl http://localhost:8000/health
 | `REDIS_URL` | `redis://redis:6379/0` | Celery、缓存和锁 |
 | `OLLAMA_BASE_URL` | `http://host.docker.internal:11434` | 容器访问宿主机 Ollama 的地址 |
 | `OLLAMA_EXTRACT_MODEL` | `qwen2.5:3b` | 新闻事件抽取模型 |
-| `OLLAMA_RESEARCH_MODEL` | `qwen2.5:14b` | 标的映射、深研和验证模型 |
+| `OLLAMA_RESEARCH_MODEL` | `qwen2.5:7b` | 标的深研和验证模型 |
 | `OLLAMA_CODE_MODEL` | `qwen2.5-coder:7b` | 自动演进模型 |
 | `OLLAMA_NUM_THREADS` | `0` | 单次推理线程数；`0` 表示由 Ollama 自动选择 |
 | `OLLAMA_MAX_OUTPUT_TOKENS` | `1024` | 单次结构化输出 token 上限 |
