@@ -137,35 +137,65 @@ class AkShareProvider:
     def _matches(asset: AssetRef, normalized_query: str) -> bool:
         symbol = _normalize_security_text(asset.symbol)
         name = _normalize_security_text(asset.name)
-        return normalized_query == symbol or (len(name) >= 2 and name in normalized_query)
+        symbol_matches = normalized_query == symbol
+        if symbol.isdigit() and len(symbol) == 5 and normalized_query.isdigit():
+            symbol_matches = normalized_query.zfill(5) == symbol
+        return symbol_matches or (len(name) >= 2 and name in normalized_query)
 
     def _listed_assets(self) -> list[AssetRef]:
-        key = cache.key("akshare-security-master", {"version": 1})
+        a_share_key = cache.key("akshare-a-share-security-master", {"version": 2})
+        hk_share_key = cache.key("akshare-hk-share-security-master", {"version": 2})
+        a_share_payload = cache.get(a_share_key)
+        hk_share_payload = cache.get(hk_share_key)
+        if a_share_payload and hk_share_payload:
+            return [
+                AssetRef.model_validate(item)
+                for item in [*a_share_payload, *hk_share_payload]
+            ]
+        try:
+            import akshare as ak
+        except Exception as exc:
+            self.last_errors.append(f"import: {type(exc).__name__}")
+            return [
+                AssetRef.model_validate(item)
+                for item in [*(a_share_payload or []), *(hk_share_payload or [])]
+            ]
 
-        def loader() -> list[dict[str, Any]]:
+        def market_master(
+            key: str,
+            cached_payload: list[dict[str, Any]] | None,
+            error_label: str,
+            loader,
+            normalizer,
+        ) -> list[dict[str, Any]]:
+            if cached_payload:
+                return cached_payload
             try:
-                import akshare as ak
+                with _request_address_family(self.settings.akshare_ipv4_only):
+                    payload = normalizer(loader())
             except Exception as exc:
-                self.last_errors.append(f"import: {type(exc).__name__}")
+                self.last_errors.append(f"{error_label}: {type(exc).__name__}")
                 return []
-
-            records: list[dict[str, Any]] = []
-            with _request_address_family(self.settings.akshare_ipv4_only):
-                try:
-                    records.extend(self._a_share_records(ak.stock_info_a_code_name()))
-                except Exception as exc:
-                    self.last_errors.append(f"a-share-master: {type(exc).__name__}")
-                try:
-                    records.extend(self._hk_share_records(ak.stock_hk_spot_em()))
-                except Exception as exc:
-                    self.last_errors.append(f"hk-share-master: {type(exc).__name__}")
-            return records
-
-        payload = cache.get(key)
-        if not payload:
-            payload = loader()
             if payload:
                 cache.set(key, payload, 24 * 60 * 60)
+            return payload
+
+        payload = [
+            *market_master(
+                a_share_key,
+                a_share_payload,
+                "a-share-master",
+                ak.stock_info_a_code_name,
+                self._a_share_records,
+            ),
+            *market_master(
+                hk_share_key,
+                hk_share_payload,
+                "hk-share-master",
+                ak.stock_hk_spot_em,
+                self._hk_share_records,
+            ),
+        ]
         return [AssetRef.model_validate(item) for item in payload]
 
     @staticmethod

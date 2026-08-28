@@ -60,6 +60,7 @@ KEYWORD_TYPES = {
 class EventService:
     _relationship_priority = {
         "direct": 4,
+        "product_owner": 3,
         "issuer": 3,
         "cross_listing_issuer": 2,
         "entity": 1,
@@ -222,7 +223,9 @@ class EventService:
     def extract(self, item: NewsItem) -> NewsEvent:
         prompt = (
             "从新闻元数据中提取一个可投资研究事件。不要补充新闻中没有的事实。"
-            "影响方向只表示初步假设，不是投资建议。\n"
+            "影响方向只表示初步假设，不是投资建议。"
+            "entities 必须保留新闻明确出现的公司、品牌和品牌产品名称，"
+            "即使新闻没有给出证券代码。\n"
             f"标题：{item.title}\n摘要：{item.summary[:3000]}\n"
             f"来源：{item.source}\n已标注代码：{item.symbols}"
         )
@@ -350,6 +353,22 @@ class EventService:
                     identity_basis=identity_basis,
                 )
 
+        product_owner_count = 0
+        for asset, product in self.registry.resolve_product_owners(source_text):
+            candidate = CandidateAsset(
+                asset=asset,
+                relationship="product_owner",
+                impact_direction=extracted.impact_direction,
+                relevance=0.85,
+                rationale=f"主数据确认新闻中的 {product} 归属于 {asset.name}",
+                mapping_confidence=0.99,
+                identity_basis=["source_product", "product_owner_master", product],
+            )
+            previous = candidates.get(asset.asset_id)
+            if previous is None or candidate.relevance > previous.relevance:
+                candidates[asset.asset_id] = candidate
+                product_owner_count += 1
+
         quality_factor = {
             SourceQuality.OFFICIAL: 1.0,
             SourceQuality.PRIMARY: 0.9,
@@ -373,6 +392,7 @@ class EventService:
                 ),
                 metrics={
                     "candidate_count": len(candidates),
+                    "product_owner_count": product_owner_count,
                     "provider_errors": self.registry.mapping_errors,
                 },
             )

@@ -91,17 +91,17 @@ def test_akshare_builds_and_resolves_cn_hk_security_master(monkeypatch):
 def test_akshare_does_not_cache_an_empty_security_master(monkeypatch):
     class FakeCache:
         def __init__(self):
-            self.value = []
+            self.values = {}
             self.set_calls = []
 
         def key(self, namespace, value):
             return f"{namespace}:{value['version']}"
 
         def get(self, key):
-            return self.value
+            return self.values.get(key, [])
 
         def set(self, key, value, ttl_seconds):
-            self.value = value
+            self.values[key] = value
             self.set_calls.append((key, ttl_seconds))
 
     calls = 0
@@ -130,7 +130,55 @@ def test_akshare_does_not_cache_an_empty_security_master(monkeypatch):
 
     assets = provider._listed_assets()
     assert [(item.symbol, item.name) for item in assets] == [("600499", "科达制造")]
-    assert fake_cache.set_calls == [("akshare-security-master:1", 24 * 60 * 60)]
+    assert fake_cache.set_calls == [
+        ("akshare-a-share-security-master:2", 24 * 60 * 60)
+    ]
+
+
+def test_akshare_partial_a_share_cache_does_not_poison_hk_master(monkeypatch):
+    class FakeCache:
+        def __init__(self):
+            self.values = {}
+
+        def key(self, namespace, value):
+            return f"{namespace}:{value['version']}"
+
+        def get(self, key):
+            return self.values.get(key)
+
+        def set(self, key, value, _ttl_seconds):
+            self.values[key] = value
+
+    calls = {"a": 0, "hk": 0}
+
+    def a_share_master():
+        calls["a"] += 1
+        return SecurityFrame([{"code": "600499", "name": "科达制造"}])
+
+    def hk_share_master():
+        calls["hk"] += 1
+        if calls["hk"] == 1:
+            raise RuntimeError("temporary HK upstream failure")
+        return SecurityFrame([{"代码": "9988", "名称": "阿里巴巴-W"}])
+
+    monkeypatch.setattr(
+        "backend.app.providers.akshare_provider.cache",
+        FakeCache(),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "akshare",
+        SimpleNamespace(
+            stock_info_a_code_name=a_share_master,
+            stock_hk_spot_em=hk_share_master,
+        ),
+    )
+    provider = AkShareProvider()
+
+    assert [item.symbol for item in provider._listed_assets()] == ["600499"]
+    assert [item.symbol for item in provider._listed_assets()] == ["600499", "09988"]
+    assert calls == {"a": 1, "hk": 2}
+    assert provider.resolve_assets("9988")[0].symbol == "09988"
 
 
 def test_akshare_collects_a_share_business_financial_and_valuation_data(monkeypatch):

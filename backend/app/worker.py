@@ -2358,11 +2358,13 @@ def resolve_event_assets(self, event_id: str, model_instance_id: str | None = No
                         summary=(
                             f"{settings.ollama_assist_model} 提出 "
                             f"{mapping_result.proposed_count} 个候选，"
+                            f"主数据产品归属补全 {mapping_result.master_derived_count} 个，"
                             f"主数据验证通过 {len(event.candidates)} 个、拒绝 "
                             f"{mapping_result.rejected_count} 个。"
                         ),
                         metrics={
                             "proposed_count": mapping_result.proposed_count,
+                            "master_derived_count": mapping_result.master_derived_count,
                             "verified_count": len(event.candidates),
                             "rejected_count": mapping_result.rejected_count,
                             "provider_errors": registry.mapping_errors,

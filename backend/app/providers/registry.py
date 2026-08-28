@@ -76,6 +76,30 @@ SEED_ASSETS = [
         exchange_or_provider="coingecko",
         aliases=["ethereum", "以太坊"],
     ),
+    AssetRef(
+        asset_id="equity:XHKG:09988",
+        asset_class=AssetClass.EQUITY,
+        market=Market.HK,
+        symbol="09988",
+        name="Alibaba Group Holding Limited",
+        exchange_or_provider="XHKG",
+        currency="HKD",
+        aliases=["阿里巴巴", "阿里巴巴集团", "Alibaba", "Alibaba Group"],
+        products=["阿里云", "Alibaba Cloud"],
+        issuer_id="curated:alibaba-group",
+        lot_size=100,
+    ),
+    AssetRef(
+        asset_id="equity:NYSE:BABA",
+        asset_class=AssetClass.EQUITY,
+        market=Market.US,
+        symbol="BABA",
+        name="Alibaba Group Holding Limited",
+        exchange_or_provider="NYSE",
+        aliases=["阿里巴巴", "阿里巴巴集团", "Alibaba", "Alibaba Group"],
+        products=["阿里云", "Alibaba Cloud"],
+        issuer_id="curated:alibaba-group",
+    ),
 ]
 
 
@@ -84,6 +108,16 @@ _AMBIGUOUS_ISSUER_NAMES = {
     # unsafe without an explicit ticker because an ordinary topic mention is
     # not evidence that the issuer itself is involved.
     "机器人",
+}
+_AMBIGUOUS_PRODUCT_NAMES = {
+    # These values exist on legacy seed rows but are product categories rather
+    # than unique branded products. They must never imply issuer ownership.
+    "game",
+    "games",
+    "mac",
+    "services",
+    "云服务",
+    "游戏",
 }
 _LATIN_CORPORATE_SUFFIXES = {
     "adr",
@@ -174,6 +208,12 @@ def explicit_symbol_present(text: str, symbol: str, *, allow_bare: bool = False)
     normalized_symbol = normalize_security_text(symbol)
     if not normalized_symbol:
         return False
+    if normalized_symbol.isdigit() and len(normalized_symbol) == 5:
+        # Hong Kong listings are stored as five digits, while news and users
+        # commonly omit the leading zero (09988 -> 9988, 00700 -> 700).
+        variants = {normalized_symbol, normalized_symbol.lstrip("0") or "0"}
+        if any(security_token_present(normalized_text, value) for value in variants):
+            return True
     if not _is_short_ticker(normalized_symbol):
         return security_token_present(normalized_text, normalized_symbol)
     if allow_bare and normalized_text == normalized_symbol:
@@ -264,6 +304,31 @@ def _name_present(text: str, name: str) -> bool:
 
 def query_mentions_issuer(query: str, asset: AssetRef) -> bool:
     return any(_name_present(query, term) for term in _issuer_terms(asset))
+
+
+def listing_symbols_equal(left: str, right: str) -> bool:
+    normalized_left = normalize_security_text(left)
+    normalized_right = normalize_security_text(right)
+    if normalized_left == normalized_right:
+        return True
+    if not (normalized_left.isdigit() and normalized_right.isdigit()):
+        return False
+    lengths = {len(normalized_left), len(normalized_right)}
+    return max(lengths) == 5 and normalized_left.zfill(5) == normalized_right.zfill(5)
+
+
+def query_mentions_product(query: str, asset: AssetRef) -> str | None:
+    """Return the exact master-data product mentioned by a query, if any."""
+
+    for product in asset.products:
+        normalized_product = compact_security_text(product)
+        if (
+            normalized_product
+            and normalized_product not in _AMBIGUOUS_PRODUCT_NAMES
+            and text_contains_term(query, product)
+        ):
+            return product
+    return None
 
 
 def query_mentions_asset(query: str, asset: AssetRef) -> bool:
@@ -396,7 +461,28 @@ class ProviderRegistry:
             return default
 
     def add_assets(self, assets: Iterable[AssetRef]) -> None:
-        self._assets.update({asset.asset_id: asset for asset in assets})
+        for asset in assets:
+            existing = self._assets.get(asset.asset_id)
+            if existing is None:
+                self._assets[asset.asset_id] = asset
+                continue
+            # Curated seed metadata supplies stable aliases, product ownership,
+            # and issuer linkage to older/provider-created rows. Preserve the
+            # stored listing fields while filling and merging those identities.
+            self._assets[asset.asset_id] = asset.model_copy(
+                update={
+                    "aliases": list(dict.fromkeys([*existing.aliases, *asset.aliases])),
+                    "products": list(dict.fromkeys([*existing.products, *asset.products])),
+                    "competitors": list(
+                        dict.fromkeys([*existing.competitors, *asset.competitors])
+                    ),
+                    "issuer_id": existing.issuer_id or asset.issuer_id,
+                    "primary_listing_asset_id": (
+                        existing.primary_listing_asset_id
+                        or asset.primary_listing_asset_id
+                    ),
+                }
+            )
 
     def refresh_crypto_universe(self) -> list[AssetRef]:
         assets = self.crypto.top_assets(20)
@@ -408,6 +494,25 @@ class ProviderRegistry:
 
     def get_asset(self, asset_id: str) -> AssetRef | None:
         return self._assets.get(asset_id)
+
+    def resolve_product_owners(self, query: str) -> list[tuple[AssetRef, str]]:
+        """Resolve only explicit, master-verified branded product ownership.
+
+        A matched product expands to sibling listings with the same issuer so
+        the model never needs to guess ADR/HK codes independently.
+        """
+
+        direct_matches = [
+            (asset, product)
+            for asset in self._assets.values()
+            if (product := query_mentions_product(query, asset)) is not None
+        ]
+        resolved: dict[str, tuple[AssetRef, str]] = {}
+        for owner, product in direct_matches:
+            for asset in self._assets.values():
+                if self.same_issuer(owner, asset):
+                    resolved[asset.asset_id] = (asset, product)
+        return list(resolved.values())
 
     @staticmethod
     def query_mentions_asset(query: str, asset: AssetRef) -> bool:

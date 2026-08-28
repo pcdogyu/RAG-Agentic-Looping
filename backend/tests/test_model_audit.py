@@ -20,6 +20,7 @@ from backend.app.model_audit import (
     detect_language,
     persist_model_audit,
 )
+from backend.app.services.asset_mapping import AssetMappingOutput
 from backend.app.services.model_instances import model_instance_affinity
 from backend.app.storage import save_event, save_news
 
@@ -317,6 +318,38 @@ def test_gateway_retries_invalid_json_once(monkeypatch):
         prompt="prompt",
         schema=AuditOutput,
     ) == {"answer": "ok"}
+    assert client.calls == 2
+
+
+def test_gateway_retries_mapping_output_without_candidate_reason(monkeypatch):
+    settings = Settings(ollama_base_url="http://ollama.invalid")
+    gateway = LlmGateway(settings)
+
+    class EmptyThenExplainedClient:
+        def __init__(self):
+            self.calls = 0
+
+        def post(self, *args, **kwargs):
+            self.calls += 1
+            content = (
+                "{}"
+                if self.calls == 1
+                else '{"candidates":[],"no_asset_reason":"没有明确标的"}'
+            )
+            return FakeResponse({"message": {"content": content}})
+
+    client = EmptyThenExplainedClient()
+    gateway.client = client
+    monkeypatch.setattr("backend.app.llm.sleep", lambda _: None)
+    monkeypatch.setattr(gateway.gpu, "acquire", lambda *args, **kwargs: _null_context())
+
+    assert gateway.generate_json(
+        model="qwen2.5:7b",
+        lane="assist",
+        system="system",
+        prompt="prompt",
+        schema=AssetMappingOutput,
+    )["no_asset_reason"] == "没有明确标的"
     assert client.calls == 2
 
 

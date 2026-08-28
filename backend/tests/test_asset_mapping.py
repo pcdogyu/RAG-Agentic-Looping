@@ -2,8 +2,12 @@ import json
 from datetime import UTC, datetime
 from hashlib import sha256
 
+import pytest
+from pydantic import ValidationError
+
 from backend.app.config import Settings
 from backend.app.domain import AssetClass, AssetRef, Market, NewsEvent, NewsItem, SourceQuality
+from backend.app.providers.registry import ProviderRegistry
 from backend.app.services.asset_mapping import (
     AssetMappingOutput,
     AssetMappingService,
@@ -164,6 +168,107 @@ def test_mapping_news_prompt_caps_each_summary_and_total_body() -> None:
     assert payload
     assert all(len(item["summary"]) <= 2000 for item in payload)
     assert set(payload[0]) == {"title", "symbols", "summary"}
+
+
+def test_empty_mapping_output_requires_a_reason_for_gateway_retry() -> None:
+    with pytest.raises(ValidationError, match="no_asset_reason"):
+        AssetMappingOutput.model_validate({})
+
+    output = AssetMappingOutput.model_validate(
+        {"candidates": [], "no_asset_reason": "新闻没有明确可交易标的"}
+    )
+    assert output.no_asset_reason == "新闻没有明确可交易标的"
+
+
+def test_verified_alibaba_cloud_product_maps_both_listings() -> None:
+    observed = datetime(2026, 8, 28, 14, 0, tzinfo=UTC)
+    settings = Settings(
+        fmp_access_token="",
+        fmp_mcp_url="",
+        fmp_enabled=False,
+        akshare_asset_master_enabled=False,
+    )
+    registry = ProviderRegistry(settings)
+    news = NewsItem(
+        source="Example",
+        source_quality=SourceQuality.PROFESSIONAL,
+        title="阿里云位居中国企业级智能客服市场份额第一",
+        summary="IDC 发布市场份额报告。",
+        url="https://example.com/alibaba-cloud",
+        published_at=observed,
+        observed_at=observed,
+        as_of=observed,
+        content_hash=sha256(b"alibaba-cloud").hexdigest(),
+    )
+    event = NewsEvent(
+        news_item_ids=[news.id],
+        headline=news.title,
+        event_type="product",
+        entities=["阿里云"],
+        direct_impact=news.summary,
+        source_quality=news.source_quality,
+        published_at=observed,
+        observed_at=observed,
+        as_of=observed,
+    )
+
+    class InvalidEmptyLlm:
+        @staticmethod
+        def generate_json(**_kwargs):
+            return {}
+
+    result = AssetMappingService(registry, settings, InvalidEmptyLlm()).map_event(
+        event, [news]
+    )
+
+    assert [item.asset.symbol for item in result.candidates] == ["09988", "BABA"]
+    assert {item.relationship for item in result.candidates} == {"product_owner"}
+    assert all(item.mapping_confidence == 0.99 for item in result.candidates)
+    assert result.proposed_count == 0
+    assert result.master_derived_count == 2
+    assert result.no_asset_reason == ""
+    assert registry.resolve_assets("9988")[0].symbol == "09988"
+
+
+def test_generic_product_category_does_not_imply_an_issuer() -> None:
+    settings = Settings(
+        fmp_access_token="",
+        fmp_mcp_url="",
+        fmp_enabled=False,
+        akshare_asset_master_enabled=False,
+    )
+    registry = ProviderRegistry(settings)
+
+    assert registry.resolve_product_owners("企业云服务市场继续增长") == []
+    assert registry.resolve_product_owners("游戏行业收入增长") == []
+
+
+def test_curated_product_metadata_survives_an_older_persisted_listing() -> None:
+    settings = Settings(
+        fmp_access_token="",
+        fmp_mcp_url="",
+        fmp_enabled=False,
+        akshare_asset_master_enabled=False,
+    )
+    stale_baba = AssetRef(
+        asset_id="equity:NYSE:BABA",
+        asset_class=AssetClass.EQUITY,
+        market=Market.US,
+        symbol="BABA",
+        name="Alibaba Group Holding Limited",
+        exchange_or_provider="NYSE",
+        issuer_id="fmp:stale-provider-id",
+    )
+
+    registry = ProviderRegistry(settings, assets=[stale_baba])
+    refreshed = registry.get_asset(stale_baba.asset_id)
+
+    assert refreshed is not None
+    assert refreshed.issuer_id == "curated:alibaba-group"
+    assert refreshed.products == ["阿里云", "Alibaba Cloud"]
+    assert [
+        asset.symbol for asset, _product in registry.resolve_product_owners("阿里云")
+    ] == ["09988", "BABA"]
 
 
 def test_7b_mapping_rejects_substring_ticker_and_generic_issuer_name():

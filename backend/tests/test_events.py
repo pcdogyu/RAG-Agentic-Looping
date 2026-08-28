@@ -76,6 +76,42 @@ def test_extracts_event_and_maps_asset():
     assert event.analysis_steps[-1].metrics["candidate_count"] == 1
 
 
+def test_product_owner_master_maps_alibaba_cloud_to_hk_and_us_listings(monkeypatch):
+    settings = Settings(
+        fmp_access_token="",
+        fmp_mcp_url="",
+        fmp_enabled=False,
+        akshare_asset_master_enabled=False,
+    )
+    registry = ProviderRegistry(settings)
+    monkeypatch.setattr(registry.crypto, "resolve_assets", lambda _query: [])
+    observed = datetime(2026, 8, 28, 14, 36, tzinfo=UTC)
+    item = NewsItem(
+        source="金十",
+        source_quality=SourceQuality.PROFESSIONAL,
+        title="阿里云位居中国企业级智能客服市场份额第一",
+        summary="IDC 发布《中国企业级智能客服市场份额2025》。",
+        url="https://example.com/alibaba-cloud-share",
+        published_at=observed,
+        observed_at=observed,
+        as_of=observed,
+        content_hash=sha256(b"alibaba-cloud-share").hexdigest(),
+    )
+
+    event = EventService(
+        registry,
+        settings,
+        StaticExtractLlm(entities=["阿里云"], search_queries=["阿里云"]),
+    ).extract(item)
+
+    assert [candidate.asset.symbol for candidate in event.candidates] == ["09988", "BABA"]
+    assert {candidate.relationship for candidate in event.candidates} == {"product_owner"}
+    assert all(
+        "product_owner_master" in candidate.identity_basis
+        for candidate in event.candidates
+    )
+
+
 def test_explicit_adverse_news_corrects_an_incorrect_positive_model_direction():
     settings = Settings(fmp_access_token="", fmp_mcp_url="")
     registry = ProviderRegistry(settings)
