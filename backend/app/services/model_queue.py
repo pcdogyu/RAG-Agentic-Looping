@@ -854,8 +854,21 @@ def _visible_tasks(tasks: list[ModelQueueTask]) -> list[ModelQueueTask]:
 
 def _deduplicate_asset_research_tasks(
     tasks: list[ModelQueueTask],
+    all_tasks: list[ModelQueueTask],
 ) -> list[ModelQueueTask]:
     """Keep one visible card per asset; sorted active tasks take precedence."""
+
+    latest_terminal_by_asset: dict[str, ModelQueueTask] = {}
+    for task in all_tasks:
+        if (
+            task.kind != "asset_research"
+            or not task.entity_id
+            or task.status not in FAILED_STATUSES | COMPLETED_STATUSES
+        ):
+            continue
+        current = latest_terminal_by_asset.get(task.entity_id)
+        if current is None or task.updated_at > current.updated_at:
+            latest_terminal_by_asset[task.entity_id] = task
 
     seen_assets: set[str] = set()
     visible: list[ModelQueueTask] = []
@@ -864,6 +877,13 @@ def _deduplicate_asset_research_tasks(
             visible.append(task)
             continue
         if task.entity_id in seen_assets:
+            continue
+        latest_terminal = latest_terminal_by_asset.get(task.entity_id)
+        if (
+            task.status in FAILED_STATUSES
+            and latest_terminal is not None
+            and latest_terminal.status in COMPLETED_STATUSES
+        ):
             continue
         seen_assets.add(task.entity_id)
         visible.append(task)
@@ -979,7 +999,7 @@ def _queue_item(
         metrics.estimated_clear_ms = ceil(work / capacity) * metrics.average_execution_duration_ms
     visible = _sort_tasks(_visible_tasks(tasks))
     if queue_id == "research":
-        visible = _deduplicate_asset_research_tasks(visible)
+        visible = _deduplicate_asset_research_tasks(visible, tasks)
     visible_task_ids = {task.task_id for task in visible}
     instance_queues: list[ModelQueueInstance] = []
     for raw_instance in raw_instances:

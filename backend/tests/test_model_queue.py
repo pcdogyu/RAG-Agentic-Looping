@@ -991,3 +991,42 @@ def test_research_queue_shows_each_asset_only_once_with_active_task_first(db):
     assert asset_tasks[0].status == "queued"
     assert research.counts.queued == 1
     assert research.counts.failed == 1
+
+
+def test_research_queue_hides_old_failure_after_newer_success(db):
+    now = datetime(2026, 8, 26, 8, 0, tzinfo=UTC)
+    asset = SEED_ASSETS[0]
+    failed = ResearchRun(
+        asset=asset,
+        status=RunStatus.FAILED,
+        created_at=now - timedelta(minutes=20),
+        completed_at=now - timedelta(minutes=10),
+        error="historical failure",
+    )
+    save_run(db, failed)
+    completed = ResearchRun(
+        asset=asset,
+        status=RunStatus.COMPLETED,
+        created_at=now - timedelta(minutes=8),
+        completed_at=now - timedelta(minutes=2),
+    )
+    completed.updated_at = failed.updated_at + timedelta(seconds=1)
+    save_run(db, completed)
+
+    overview = build_model_queue_overview(
+        db,
+        extraction_queue=_empty_extraction(now),
+        inference_statuses={
+            lane: _inference() for lane in ("extract", "research", "assist", "code")
+        },
+        threads={"extract": 4, "research": 16, "assist": 4, "code": 4},
+        limit=500,
+        settings=Settings(_env_file=None),
+        redis_client=FakeRedis(),
+        generated_at=now,
+    )
+
+    research = overview.queues[1]
+    assert [task for task in research.tasks if task.entity_id == asset.asset_id] == []
+    assert research.counts.completed == 1
+    assert research.counts.failed == 1
