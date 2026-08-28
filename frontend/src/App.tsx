@@ -422,10 +422,11 @@ export default function App() {
       <div className="header-actions">
         <div className="health-cluster">
           <div
-            className={`status ${healthTracking.ollama.state === "available" ? "online" : healthTracking.ollama.state}`}
+            className={`model-status ${healthTracking.ollama.state}`}
             aria-label={`Ollama ${ollamaStateLabels[healthTracking.ollama.state]}`}
           >
-            <i /> Ollama
+            <i />
+            <span>Ollama</span>
           </div>
           <div className="model-statuses" aria-label="千问模型连接状态">
             {ollamaModels.map((model) => (
