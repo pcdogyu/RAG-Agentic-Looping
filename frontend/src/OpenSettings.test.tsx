@@ -7,12 +7,16 @@ import {
   ConclusionsPage,
   conclusionReferences,
   factSourceGroupOptions,
+  failedResearchAfterBulkRetry,
+  failedResearchBulkRetryMessage,
+  failedResearchBulkRetryPath,
   failedResearchRetryPath,
   firstUnhealthyGroup,
   GateReasons,
   isSearchSource,
   NativeConfigEditor,
   parseFilterKeywords,
+  retryAllFailedResearch,
   searchSourceLabel,
   SearchPage,
   SourceFilterPage,
@@ -106,12 +110,52 @@ describe("open source and search settings", () => {
     expect(markup).toContain("正在加载历史失败研究…");
     expect(markup).toContain("正在加载研究结论…");
     expect(markup).not.toContain("当前筛选范围内没有最终标的建议。");
+    expect(markup).toContain("全部重试");
+    expect(markup.indexOf(">全部重试<")).toBeLessThan(markup.indexOf(">刷新<"));
+    expect(failedResearchBulkRetryPath).toBe(
+      "/api/v1/failed-research-runs/retry",
+    );
     expect(failedResearchRetryPath({ kind: "asset", id: "asset-run" })).toBe(
       "/api/v1/research-runs/asset-run/retry",
     );
     expect(failedResearchRetryPath({ kind: "event", id: "event-run" })).toBe(
       "/api/v1/event-research-runs/event-run/retry",
     );
+  });
+
+  it("posts one direct bulk retry request and formats the partial result", async () => {
+    const calls: Array<{ input: string; method: string | undefined }> = [];
+    const request = (async (input: string | URL | Request, init?: RequestInit) => {
+      calls.push({ input: String(input), method: init?.method });
+      return new Response(JSON.stringify({
+        requested: 5,
+        retried: 3,
+        skipped: 1,
+        failed: 1,
+        results: [],
+      }), { status: 202, headers: { "Content-Type": "application/json" } });
+    }) as typeof fetch;
+
+    const payload = await retryAllFailedResearch("http://api.example", request);
+
+    expect(calls).toEqual([{
+      input: "http://api.example/api/v1/failed-research-runs/retry",
+      method: "POST",
+    }]);
+    expect(failedResearchBulkRetryMessage(payload)).toBe(
+      "批量重试完成：已排队 3 条，跳过 1 条，失败 1 条。",
+    );
+    const remaining = failedResearchAfterBulkRetry([
+      { kind: "asset", id: "queued", status: "failed", asset: null, event: null, error: null, updated_at: "2026-08-28T00:00:00Z", retry_count: 0, latest_retry: null },
+      { kind: "event", id: "failed", status: "failed", asset: null, event: null, error: null, updated_at: "2026-08-28T00:00:01Z", retry_count: 0, latest_retry: null },
+    ], {
+      ...payload,
+      results: [
+        { kind: "asset", source_run_id: "queued", run_id: "retry", task_id: "task", status: "queued", detail: null },
+        { kind: "event", source_run_id: "failed", run_id: null, task_id: null, status: "failed", detail: "broker error" },
+      ],
+    });
+    expect(remaining.map((item) => item.id)).toEqual(["failed"]);
   });
 
   it("shows MCP management controls without an administrator unlock", () => {

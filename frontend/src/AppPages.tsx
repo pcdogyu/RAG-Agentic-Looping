@@ -1144,10 +1144,53 @@ export type FailedResearch = {
   latest_retry: { id: string; status: string; updated_at: string } | null;
 };
 
+export type FailedResearchBulkRetryResponse = {
+  requested: number;
+  retried: number;
+  skipped: number;
+  failed: number;
+  results: Array<{
+    kind: "asset" | "event";
+    source_run_id: string;
+    run_id: string | null;
+    task_id: string | null;
+    status: "queued" | "skipped" | "failed";
+    detail: string | null;
+  }>;
+};
+
+export const failedResearchBulkRetryPath = "/api/v1/failed-research-runs/retry";
+
 export function failedResearchRetryPath(item: Pick<FailedResearch, "kind" | "id">) {
   return item.kind === "asset"
     ? `/api/v1/research-runs/${item.id}/retry`
     : `/api/v1/event-research-runs/${item.id}/retry`;
+}
+
+export async function retryAllFailedResearch(
+  apiBase: string,
+  request: typeof fetch = fetch,
+): Promise<FailedResearchBulkRetryResponse> {
+  const response = await request(`${apiBase}${failedResearchBulkRetryPath}`, { method: "POST" });
+  const payload = await response.json() as FailedResearchBulkRetryResponse & { detail?: string };
+  if (!response.ok) throw new Error(payload.detail || "全部重试失败");
+  return payload;
+}
+
+export function failedResearchBulkRetryMessage(payload: FailedResearchBulkRetryResponse) {
+  return `批量重试完成：已排队 ${payload.retried} 条，跳过 ${payload.skipped} 条，失败 ${payload.failed} 条。`;
+}
+
+export function failedResearchAfterBulkRetry(
+  items: FailedResearch[],
+  payload: FailedResearchBulkRetryResponse,
+) {
+  const queuedIds = new Set(
+    payload.results
+      .filter((item) => item.status === "queued")
+      .map((item) => item.source_run_id),
+  );
+  return items.filter((item) => !queuedIds.has(item.id));
 }
 
 function canonicalReferenceUrl(value: string): string {
@@ -1353,7 +1396,9 @@ export function ConclusionsPage({ apiBase }: { apiBase: string }) {
   const [failedItems, setFailedItems] = useState<FailedResearch[]>([]);
   const [failuresLoading, setFailuresLoading] = useState(true);
   const [retryingId, setRetryingId] = useState("");
+  const [retryingAll, setRetryingAll] = useState(false);
   const [retryMessage, setRetryMessage] = useState("");
+  const [retryMessageError, setRetryMessageError] = useState(false);
 
   async function load(append = false) {
     const params = new URLSearchParams({ ...filters, limit: "20" });
@@ -1379,6 +1424,7 @@ export function ConclusionsPage({ apiBase }: { apiBase: string }) {
       setFailedItems(await response.json() as FailedResearch[]);
     } catch (reason) {
       setRetryMessage(reason instanceof Error ? reason.message : "失败研究记录请求失败");
+      setRetryMessageError(true);
     } finally {
       setFailuresLoading(false);
     }
@@ -1386,16 +1432,32 @@ export function ConclusionsPage({ apiBase }: { apiBase: string }) {
   useEffect(() => { load(); loadFailures(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function retry(item: FailedResearch) {
-    setRetryingId(item.id); setRetryMessage("");
+    setRetryingId(item.id); setRetryMessage(""); setRetryMessageError(false);
     try {
       const response = await fetch(`${apiBase}${failedResearchRetryPath(item)}`, { method: "POST" });
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.detail || "重新执行失败");
       setRetryMessage(`已重新排队：${item.asset?.symbol || item.event?.headline || item.id}`);
+      setRetryMessageError(false);
       await loadFailures();
     } catch (reason) {
       setRetryMessage(reason instanceof Error ? reason.message : "重新执行失败");
+      setRetryMessageError(true);
     } finally { setRetryingId(""); }
+  }
+
+  async function retryAll() {
+    setRetryingAll(true); setRetryMessage(""); setRetryMessageError(false);
+    try {
+      const payload = await retryAllFailedResearch(apiBase);
+      setFailedItems((current) => failedResearchAfterBulkRetry(current, payload));
+      setRetryMessage(failedResearchBulkRetryMessage(payload));
+      setRetryMessageError(payload.failed > 0);
+      await loadFailures();
+    } catch (reason) {
+      setRetryMessage(reason instanceof Error ? reason.message : "全部重试失败");
+      setRetryMessageError(true);
+    } finally { setRetryingAll(false); }
   }
 
   async function open(item: Recommendation) {
@@ -1414,15 +1476,15 @@ export function ConclusionsPage({ apiBase }: { apiBase: string }) {
       </form>
       {error && <div className="page-error">{error}</div>}
       <section className="failed-research-panel">
-        <div className="failed-research-heading"><div><p className="eyebrow">RETRY QUEUE</p><h3>历史失败研究</h3></div><button type="button" onClick={loadFailures}>刷新</button></div>
+        <div className="failed-research-heading"><div><p className="eyebrow">RETRY QUEUE</p><h3>历史失败研究</h3></div><div className="failed-research-actions"><button type="button" disabled={retryingAll || !!retryingId || failuresLoading || !failedItems.length} onClick={retryAll}>{retryingAll ? "全部重试中…" : "全部重试"}</button><button type="button" disabled={retryingAll || failuresLoading} onClick={loadFailures}>刷新</button></div></div>
         <p className="failed-research-copy">重新执行会创建新任务，保留原失败记录，并使用当前数据源和模型配置。</p>
-        {retryMessage && <div className={retryMessage.includes("失败") ? "page-error" : "page-message"}>{retryMessage}</div>}
+        {retryMessage && <div className={retryMessageError ? "page-error" : "page-message"}>{retryMessage}</div>}
         <div className="failed-research-list">
           {failedItems.map((item) => {
             const retryActive = ["queued", "running", "verifying"].includes(item.latest_retry?.status || "");
             return <article key={`${item.kind}-${item.id}`} className="failed-research-item">
               <div><span>{item.kind === "asset" ? "标的研究" : "事件研报"} · {new Date(item.updated_at).toLocaleString("zh-CN")}</span><strong>{item.asset ? `${item.asset.symbol} · ${item.asset.name}` : item.event?.headline || item.id}</strong><p>{item.error || "未记录错误详情"}</p>{item.latest_retry && <small>最近重跑：{item.latest_retry.status} · {new Date(item.latest_retry.updated_at).toLocaleString("zh-CN")}</small>}</div>
-              <button type="button" disabled={retryingId === item.id || retryActive} onClick={() => retry(item)}>{retryingId === item.id ? "正在排队…" : retryActive ? "重跑中" : "重新执行"}</button>
+              <button type="button" disabled={retryingAll || retryingId === item.id || retryActive} onClick={() => retry(item)}>{retryingId === item.id ? "正在排队…" : retryActive ? "重跑中" : "重新执行"}</button>
             </article>;
           })}
           {!failedItems.length && !retryMessage && (failuresLoading

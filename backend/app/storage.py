@@ -377,6 +377,25 @@ def list_retries_for_run(db: Session, run_id: UUID) -> list[ResearchRun]:
     return retries
 
 
+def list_retryable_run_lineages(
+    db: Session,
+) -> tuple[list[ResearchRun], dict[UUID, list[ResearchRun]]]:
+    """Load retryable asset runs and all retry children in one database scan."""
+
+    rows = db.scalars(
+        select(ResearchRunRow).order_by(desc(ResearchRunRow.created_at))
+    ).all()
+    originals: list[ResearchRun] = []
+    retries: dict[UUID, list[ResearchRun]] = {}
+    for row in rows:
+        run = ResearchRun.model_validate(row.payload)
+        if run.retry_of_run_id is not None:
+            retries.setdefault(run.retry_of_run_id, []).append(run)
+        elif run.status is RunStatus.FAILED or run.retryable_reason is not None:
+            originals.append(run)
+    return originals, retries
+
+
 def get_run_for_event_asset(
     db: Session, event_id: UUID, asset_id: str
 ) -> ResearchRun | None:
@@ -456,9 +475,9 @@ def list_failed_event_research_runs(
 
 
 def list_retryable_event_research_runs(
-    db: Session, limit: int = 100
+    db: Session, limit: int | None = 100
 ) -> list[EventResearchRun]:
-    rows = db.scalars(
+    query = (
         select(EventResearchRunRow)
         .where(
             EventResearchRunRow.status.in_(
@@ -466,14 +485,28 @@ def list_retryable_event_research_runs(
             )
         )
         .order_by(desc(EventResearchRunRow.updated_at))
-        .limit(limit * 2)
-    ).all()
+    )
+    if limit is not None:
+        query = query.limit(limit * 2)
+    rows = db.scalars(query).all()
     values = [EventResearchRun.model_validate(row.payload) for row in rows]
-    return [
+    retryable = [
         run
         for run in values
         if run.status is RunStatus.FAILED or run.retryable_reason is not None
-    ][:limit]
+    ]
+    return retryable[:limit] if limit is not None else retryable
+
+
+def list_recommendation_run_ids(db: Session) -> set[UUID]:
+    return set(db.scalars(select(RecommendationRow.run_id)).all())
+
+
+def get_events_by_ids(db: Session, event_ids: set[UUID]) -> dict[UUID, NewsEvent]:
+    if not event_ids:
+        return {}
+    rows = db.scalars(select(EventRow).where(EventRow.id.in_(event_ids))).all()
+    return {row.id: NewsEvent.model_validate(row.payload) for row in rows}
 
 
 def save_recommendation(db: Session, recommendation: Recommendation) -> None:

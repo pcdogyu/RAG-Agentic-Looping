@@ -1,6 +1,8 @@
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
+from uuid import uuid4
 
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from backend.app.domain import (
@@ -237,9 +239,11 @@ def test_failed_asset_research_is_hidden_when_result_already_exists(db):
 
     with TestClient(app) as client:
         response = client.get("/api/v1/failed-research-runs")
+        bulk = client.post("/api/v1/failed-research-runs/retry")
 
     assert response.status_code == 200
     assert response.json() == []
+    assert bulk.json()["requested"] == 0
 
 
 def test_failed_asset_research_is_hidden_while_retry_is_active(db):
@@ -259,9 +263,146 @@ def test_failed_asset_research_is_hidden_while_retry_is_active(db):
 
     with TestClient(app) as client:
         response = client.get("/api/v1/failed-research-runs")
+        bulk = client.post("/api/v1/failed-research-runs/retry")
 
     assert response.status_code == 200
     assert response.json() == []
+    assert bulk.json()["requested"] == 0
+
+
+def test_bulk_failed_research_retry_includes_every_kind_beyond_page_limit(
+    db, monkeypatch
+):
+    originals = []
+    for index in range(51):
+        asset = SEED_ASSETS[0].model_copy(
+            update={
+                "asset_id": f"test:bulk:{index:02d}",
+                "symbol": f"B{index:02d}",
+                "name": f"Bulk asset {index:02d}",
+            }
+        )
+        run = ResearchRun(
+            asset=asset,
+            status=RunStatus.FAILED,
+            error="TimeoutError: model timed out",
+        )
+        save_run(db, run)
+        originals.append(run)
+
+    now = utc_now()
+    event = NewsEvent(
+        news_item_ids=[],
+        headline="Bulk retry event",
+        event_type=EventType.OTHER,
+        direct_impact="Event report retry",
+        source_quality=SourceQuality.PROFESSIONAL,
+        published_at=now,
+        observed_at=now,
+        as_of=now,
+    )
+    save_event(db, event)
+    event_run = EventResearchRun(
+        event_id=event.id,
+        status=RunStatus.FAILED,
+        error="TimeoutError: event report timed out",
+    )
+    save_event_research_run(db, event_run)
+    queued_order = []
+
+    def fake_enqueue_asset(_db, asset, queued_event, **kwargs):
+        queued_order.append(("asset", kwargs["retry_of_run_id"]))
+        retry = ResearchRun(
+            asset=asset,
+            event_id=queued_event.id if queued_event else None,
+            status=RunStatus.QUEUED,
+            retry_of_run_id=kwargs["retry_of_run_id"],
+            retry_attempt=kwargs["retry_attempt"],
+        )
+        save_run(_db, retry)
+        return f"asset-task-{retry.id}", retry
+
+    def fake_enqueue_event(_db, queued_event, queued_run):
+        queued_order.append(("event", queued_run.id))
+        queued_run.status = RunStatus.QUEUED
+        queued_run.retry_count += 1
+        save_event_research_run(_db, queued_run)
+        return f"event-task-{queued_run.id}", queued_run
+
+    def fail_lineage_scan(*_args, **_kwargs):
+        raise AssertionError("bulk retry must reuse the shared lineage snapshot")
+
+    monkeypatch.setattr("backend.app.main.enqueue_research", fake_enqueue_asset)
+    monkeypatch.setattr(
+        "backend.app.main.enqueue_event_research_retry", fake_enqueue_event
+    )
+    monkeypatch.setattr("backend.app.main.list_retries_for_run", fail_lineage_scan)
+
+    with TestClient(app) as client:
+        visible = client.get("/api/v1/failed-research-runs?limit=50")
+        response = client.post("/api/v1/failed-research-runs/retry")
+        remaining = client.get("/api/v1/failed-research-runs?limit=200")
+        repeated = client.post("/api/v1/failed-research-runs/retry")
+
+    assert len(visible.json()) == 50
+    assert response.status_code == 202
+    assert response.json()["requested"] == 52
+    assert response.json()["retried"] == 52
+    assert response.json()["skipped"] == 0
+    assert response.json()["failed"] == 0
+    assert queued_order[0] == ("asset", originals[0].id)
+    assert queued_order[-1] == ("event", event_run.id)
+    assert remaining.json() == []
+    assert repeated.json()["requested"] == 0
+    assert repeated.json()["results"] == []
+
+
+def test_bulk_failed_research_retry_continues_after_skips_and_failures(db, monkeypatch):
+    runs = []
+    for index in range(3):
+        run = ResearchRun(
+            asset=SEED_ASSETS[0].model_copy(
+                update={
+                    "asset_id": f"test:partial:{index}",
+                    "symbol": f"P{index}",
+                }
+            ),
+            status=RunStatus.FAILED,
+            error="model timeout",
+        )
+        save_run(db, run)
+        runs.append(run)
+
+    calls = []
+
+    def fake_retry(run_id, _db, _known_retries):
+        calls.append(run_id)
+        if run_id == runs[0].id:
+            raise HTTPException(409, "retry already active")
+        if run_id == runs[1].id:
+            raise RuntimeError("broker unavailable")
+        return {
+            "task_id": "queued-task",
+            "run_id": str(uuid4()),
+            "status": "queued",
+        }
+
+    monkeypatch.setattr("backend.app.main._queue_asset_research_retry", fake_retry)
+
+    with TestClient(app) as client:
+        response = client.post("/api/v1/failed-research-runs/retry")
+
+    assert response.status_code == 202
+    assert calls == [item.id for item in runs]
+    assert response.json()["requested"] == 3
+    assert response.json()["retried"] == 1
+    assert response.json()["skipped"] == 1
+    assert response.json()["failed"] == 1
+    assert [item["status"] for item in response.json()["results"]] == [
+        "skipped",
+        "failed",
+        "queued",
+    ]
 
 
 def test_recommendation_save_is_idempotent_for_run(db):

@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from threading import Condition, Lock, Thread
 from time import monotonic
+from typing import Literal
 from uuid import UUID, uuid4
 
 import httpx
@@ -37,6 +38,7 @@ from backend.app.providers.registry import ProviderRegistry
 from backend.app.services.events import EventService
 from backend.app.services.evolution import EvolutionError, EvolutionService
 from backend.app.services.fact_sources import get_effective_settings
+from backend.app.services.failed_research import failed_research_candidates
 from backend.app.services.mcp_registry import seed_integrations
 from backend.app.services.model_instances import (
     broker_queue_name,
@@ -69,7 +71,6 @@ from backend.app.storage import (
     get_event,
     get_event_research_run,
     get_news,
-    get_recommendation_for_run,
     get_run,
     list_active_runs,
     list_assets,
@@ -81,8 +82,6 @@ from backend.app.storage import (
     list_recent_events,
     list_recommendations,
     list_retries_for_run,
-    list_retryable_event_research_runs,
-    list_retryable_runs,
     list_runs,
     normalize_legacy_akshare_timestamps,
     save_evolution,
@@ -117,6 +116,7 @@ _model_queue_snapshot: tuple[float, ModelQueueOverviewResponse] | None = None
 _model_queue_refreshing = False
 _model_queue_snapshot_lock = Lock()
 _model_queue_snapshot_ready = Condition(_model_queue_snapshot_lock)
+_failed_research_retry_lock = Lock()
 
 
 def _build_model_queue_snapshot() -> ModelQueueOverviewResponse:
@@ -329,6 +329,23 @@ class ModelTaskRetryRequest(BaseModel):
     kind: str
     entity_id: str | None = None
     instance_id: str | None = None
+
+
+class FailedResearchRetryResult(BaseModel):
+    kind: Literal["asset", "event"]
+    source_run_id: UUID
+    run_id: UUID | None = None
+    task_id: str | None = None
+    status: Literal["queued", "skipped", "failed"]
+    detail: str | None = None
+
+
+class FailedResearchRetryResponse(BaseModel):
+    requested: int
+    retried: int
+    skipped: int
+    failed: int
+    results: list[FailedResearchRetryResult]
 
 
 @app.get("/health")
@@ -1138,69 +1155,15 @@ def research_run(run_id: UUID, db: Session = Depends(get_db)):
 def failed_research_runs(
     limit: int = Query(default=50, ge=1, le=200), db: Session = Depends(get_db)
 ):
-    items: list[dict] = []
-    active_statuses = {RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.VERIFYING}
-    for run in list_retryable_runs(db, min(limit * 4, 800)):
-        if run.retry_of_run_id is not None:
-            continue
-        retries = list_retries_for_run(db, run.id)
-        latest_retry = retries[0] if retries else None
-        if run.retryable_reason is None and get_recommendation_for_run(db, run.id):
-            continue
-        if any(
-            retry.retryable_reason is None and get_recommendation_for_run(db, retry.id)
-            for retry in retries
-        ):
-            continue
-        if latest_retry and latest_retry.status in active_statuses:
-            continue
-        event = get_event(db, run.event_id) if run.event_id else None
-        items.append(
-            {
-                "kind": "asset",
-                "id": str(run.id),
-                "status": run.status.value,
-                "asset": run.asset.model_dump(mode="json"),
-                "event": (
-                    {"id": str(event.id), "headline": event.headline} if event else None
-                ),
-                "error": run.error or run.retryable_reason,
-                "updated_at": run.updated_at.isoformat(),
-                "retry_count": len(retries),
-                "latest_retry": (
-                    {
-                        "id": str(latest_retry.id),
-                        "status": latest_retry.status.value,
-                        "updated_at": latest_retry.updated_at.isoformat(),
-                    }
-                    if latest_retry
-                    else None
-                ),
-            }
-        )
-    for run in list_retryable_event_research_runs(db, limit):
-        event = get_event(db, run.event_id)
-        items.append(
-            {
-                "kind": "event",
-                "id": str(run.id),
-                "status": run.status.value,
-                "asset": None,
-                "event": (
-                    {"id": str(event.id), "headline": event.headline} if event else None
-                ),
-                "error": run.error or run.retryable_reason,
-                "updated_at": run.updated_at.isoformat(),
-                "retry_count": run.retry_count,
-                "latest_retry": None,
-            }
-        )
-    items.sort(key=lambda item: item["updated_at"], reverse=True)
-    return items[:limit]
+    candidates = failed_research_candidates(db)
+    return [item.api_item() for item in reversed(candidates)][:limit]
 
 
-@app.post("/api/v1/research-runs/{run_id}/retry", status_code=202)
-def retry_research_run(run_id: UUID, db: Session = Depends(get_db)):
+def _queue_asset_research_retry(
+    run_id: UUID,
+    db: Session,
+    known_retries: tuple[ResearchRun, ...] | None = None,
+) -> dict:
     original = get_run(db, run_id)
     if not original:
         raise HTTPException(404, "run not found")
@@ -1208,7 +1171,11 @@ def retry_research_run(run_id: UUID, db: Session = Depends(get_db)):
         raise HTTPException(409, "only failed or model-degraded research runs can be retried")
     if original.retry_of_run_id is not None:
         raise HTTPException(409, "retry the original failed research run")
-    retries = list_retries_for_run(db, original.id)
+    retries = (
+        list_retries_for_run(db, original.id)
+        if known_retries is None
+        else known_retries
+    )
     active_statuses = {RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.VERIFYING}
     if any(item.status in active_statuses for item in retries):
         raise HTTPException(409, "a retry is already queued or running")
@@ -1234,8 +1201,7 @@ def retry_research_run(run_id: UUID, db: Session = Depends(get_db)):
     }
 
 
-@app.post("/api/v1/event-research-runs/{run_id}/retry", status_code=202)
-def retry_event_research_run(run_id: UUID, db: Session = Depends(get_db)):
+def _queue_event_research_retry(run_id: UUID, db: Session) -> dict:
     run = get_event_research_run(db, run_id)
     if not run:
         raise HTTPException(404, "event research run not found")
@@ -1253,6 +1219,81 @@ def retry_event_research_run(run_id: UUID, db: Session = Depends(get_db)):
         "retry_count": run.retry_count,
         "status": "queued",
     }
+
+
+@app.post(
+    "/api/v1/failed-research-runs/retry",
+    response_model=FailedResearchRetryResponse,
+    status_code=202,
+)
+def retry_failed_research_runs(db: Session = Depends(get_db)):
+    with _failed_research_retry_lock:
+        candidates = failed_research_candidates(db)
+        results: list[FailedResearchRetryResult] = []
+        for candidate in candidates:
+            try:
+                queued = (
+                    _queue_asset_research_retry(
+                        candidate.source_run_id,
+                        db,
+                        candidate.retries,
+                    )
+                    if candidate.kind == "asset"
+                    else _queue_event_research_retry(candidate.source_run_id, db)
+                )
+                results.append(
+                    FailedResearchRetryResult(
+                        kind=candidate.kind,
+                        source_run_id=candidate.source_run_id,
+                        run_id=UUID(queued["run_id"]),
+                        task_id=queued["task_id"],
+                        status="queued",
+                    )
+                )
+            except HTTPException as exc:
+                db.rollback()
+                results.append(
+                    FailedResearchRetryResult(
+                        kind=candidate.kind,
+                        source_run_id=candidate.source_run_id,
+                        status="skipped",
+                        detail=str(exc.detail),
+                    )
+                )
+            except Exception as exc:
+                db.rollback()
+                logger.exception(
+                    "bulk failed-research retry could not enqueue %s %s",
+                    candidate.kind,
+                    candidate.source_run_id,
+                )
+                results.append(
+                    FailedResearchRetryResult(
+                        kind=candidate.kind,
+                        source_run_id=candidate.source_run_id,
+                        status="failed",
+                        detail=f"{type(exc).__name__}: research retry queue failed",
+                    )
+                )
+        return FailedResearchRetryResponse(
+            requested=len(candidates),
+            retried=sum(item.status == "queued" for item in results),
+            skipped=sum(item.status == "skipped" for item in results),
+            failed=sum(item.status == "failed" for item in results),
+            results=results,
+        )
+
+
+@app.post("/api/v1/research-runs/{run_id}/retry", status_code=202)
+def retry_research_run(run_id: UUID, db: Session = Depends(get_db)):
+    with _failed_research_retry_lock:
+        return _queue_asset_research_retry(run_id, db)
+
+
+@app.post("/api/v1/event-research-runs/{run_id}/retry", status_code=202)
+def retry_event_research_run(run_id: UUID, db: Session = Depends(get_db)):
+    with _failed_research_retry_lock:
+        return _queue_event_research_retry(run_id, db)
 
 
 @app.get("/api/v1/event-research-runs", response_model=list[EventResearchRun])
