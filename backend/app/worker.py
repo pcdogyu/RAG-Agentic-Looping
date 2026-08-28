@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta
 from functools import wraps
+from threading import Event, Thread
 from time import sleep
 from typing import Any
 from uuid import UUID, uuid4
@@ -44,9 +45,14 @@ from backend.app.services.model_instances import (
     update_instance_assignment,
 )
 from backend.app.services.model_queue import (
+    ACTIVE_STATUSES,
     RECENT_EXECUTION_WINDOW,
+    cancel_model_task,
+    list_model_task_records,
     model_task_is_cancelled,
     record_model_task,
+    stale_model_task_records,
+    touch_model_task,
     update_model_task,
 )
 from backend.app.services.notifications import notifier
@@ -160,6 +166,11 @@ celery_app.conf.update(
             "schedule": 5 * 60,
             "options": {"queue": "io"},
         },
+        "reconcile-asset-mapping-leases": {
+            "task": "market_loop.reconcile_asset_mapping_leases",
+            "schedule": 60,
+            "options": {"queue": "io"},
+        },
         "evolve-from-failures": {
             "task": "market_loop.dispatch_evolve_from_outcomes",
             "schedule": 7 * 24 * 60 * 60,
@@ -200,21 +211,20 @@ def model_instance_task(lane: ModelLane):
                 probe_health=bool(routing_key),
             )
             target_queue = broker_queue_name(lane, selected.id)
-            if routing_key and not all(
-                instance_health(selected, lane_model(settings, lane))
-            ):
+            if routing_key and not all(instance_health(selected, lane_model(settings, lane))):
                 update_instance_assignment(
                     lane,
                     task_id,
                     status="retrying",
                     instance_id=selected.id,
                 )
-                update_model_task(
-                    lane,
-                    task_id,
-                    status="retrying",
-                    instance_id=selected.id,
-                )
+                if lane in {"extract", "assist", "code"}:
+                    update_model_task(
+                        lane,
+                        task_id,
+                        status="retrying",
+                        instance_id=selected.id,
+                    )
                 raise self.retry(
                     kwargs={**kwargs, "model_instance_id": selected.id},
                     queue=target_queue,
@@ -233,6 +243,27 @@ def model_instance_task(lane: ModelLane):
                 status="running",
                 instance_id=selected.id,
             )
+            heartbeat_stop = Event()
+            heartbeat_thread = None
+            if lane in {"extract", "assist", "code"}:
+                update_model_task(
+                    lane,
+                    task_id,
+                    status="running",
+                    instance_id=selected.id,
+                )
+
+                def refresh_lease() -> None:
+                    while not heartbeat_stop.wait(settings.model_task_heartbeat_seconds):
+                        if not touch_model_task(lane, task_id, instance_id=selected.id):
+                            break
+
+                heartbeat_thread = Thread(
+                    target=refresh_lease,
+                    name=f"model-task-heartbeat-{lane}-{task_id}",
+                    daemon=True,
+                )
+                heartbeat_thread.start()
             try:
                 with model_instance_affinity(lane, selected.id, task_id=task_id):
                     result = function(
@@ -247,6 +278,10 @@ def model_instance_task(lane: ModelLane):
             except Exception:
                 update_instance_assignment(lane, task_id, status="failed")
                 raise
+            finally:
+                heartbeat_stop.set()
+                if heartbeat_thread is not None:
+                    heartbeat_thread.join(timeout=1)
             update_instance_assignment(lane, task_id, status="completed")
             return result
 
@@ -587,9 +622,7 @@ def get_news_extraction_queue(limit: int = 200) -> dict[str, Any]:
         public_items: list[dict[str, Any]] = []
         for stored_item in payload.get("items", []):
             item = dict(stored_item)
-            queue_duration, execution_duration = _news_extraction_item_durations(
-                item, generated_at
-            )
+            queue_duration, execution_duration = _news_extraction_item_durations(item, generated_at)
             item["queue_duration_ms"] = queue_duration
             item["execution_duration_ms"] = execution_duration
             item.pop("attempt_started_at", None)
@@ -676,9 +709,9 @@ def clear_news_extraction_queue(
             task_ids.append(str(task_id))
         active_attempt = _elapsed_ms(item.get("attempt_started_at"), now)
         if active_attempt is not None:
-            item["execution_duration_ms"] = max(
-                0, int(item.get("execution_duration_ms") or 0)
-            ) + active_attempt
+            item["execution_duration_ms"] = (
+                max(0, int(item.get("execution_duration_ms") or 0)) + active_attempt
+            )
         item.update(
             status="cancelled",
             updated_at=now.isoformat(),
@@ -747,9 +780,9 @@ def cancel_news_extraction_task(
             revoked.append(str(item["task_id"]))
         active_attempt = _elapsed_ms(item.get("attempt_started_at"), now)
         if active_attempt is not None:
-            item["execution_duration_ms"] = max(
-                0, int(item.get("execution_duration_ms") or 0)
-            ) + active_attempt
+            item["execution_duration_ms"] = (
+                max(0, int(item.get("execution_duration_ms") or 0)) + active_attempt
+            )
         item.update(
             status="cancelled",
             updated_at=now.isoformat(),
@@ -840,9 +873,9 @@ def _update_news_extraction_item(
         elif status in {"retrying", "completed", "failed"}:
             active_attempt = _elapsed_ms(item.get("attempt_started_at"), now)
             if active_attempt is not None:
-                item["execution_duration_ms"] = max(
-                    0, int(item.get("execution_duration_ms") or 0)
-                ) + active_attempt
+                item["execution_duration_ms"] = (
+                    max(0, int(item.get("execution_duration_ms") or 0)) + active_attempt
+                )
             item["attempt_started_at"] = None
             if status in {"completed", "failed"}:
                 item["completed_at"] = now.isoformat()
@@ -888,8 +921,8 @@ def _finish_news_extraction_queue(
     if payload.get("state") == "cancelled":
         return payload
     counts = _news_extraction_counts(payload)
-    payload["state"] = "failed" if error else (
-        "completed_with_errors" if counts["failed"] else "completed"
+    payload["state"] = (
+        "failed" if error else ("completed_with_errors" if counts["failed"] else "completed")
     )
     payload["error"] = error
     _write_news_extraction_queue(client, payload)
@@ -914,9 +947,7 @@ def _claim_scan_gate(client: Redis, task_id: str) -> bool:
         return False
     if client.set(SCAN_GATE_KEY, task_id, nx=True, ex=SCAN_GATE_TTL_SECONDS):
         return True
-    return _decode(client.get(SCAN_GATE_KEY)) == task_id and _renew_scan_gate(
-        client, task_id
-    )
+    return _decode(client.get(SCAN_GATE_KEY)) == task_id and _renew_scan_gate(client, task_id)
 
 
 def _require_scan_gate(client: Redis, task_id: str) -> None:
@@ -970,9 +1001,7 @@ def _complete_scan(
         current=int(result.get("discovered", 0)),
         total=int(result.get("discovered", 0)),
         last_completed_at=completed_at.isoformat(),
-        next_scan_at=(
-            completed_at + timedelta(minutes=settings.scan_interval_minutes)
-        ).isoformat(),
+        next_scan_at=(completed_at + timedelta(minutes=settings.scan_interval_minutes)).isoformat(),
         last_result=result,
         last_error=None,
     )
@@ -1002,9 +1031,7 @@ def request_scan_pause() -> dict[str, Any]:
         raise RuntimeError("no active scan")
     status = _read_scan_status(client)
     paused_from_phase = (
-        status.get("paused_from_phase")
-        if status.get("state") == "paused"
-        else status.get("phase")
+        status.get("paused_from_phase") if status.get("state") == "paused" else status.get("phase")
     )
     client.set(SCAN_PAUSE_KEY, task_id, ex=SCAN_GATE_TTL_SECONDS)
     return _update_scan_status(
@@ -1277,9 +1304,7 @@ def _due_market_factor_refresh_session(
     return None
 
 
-def enqueue_event_researches(
-    db, event: NewsEvent, limit: int
-) -> list[tuple[str, ResearchRun]]:
+def enqueue_event_researches(db, event: NewsEvent, limit: int) -> list[tuple[str, ResearchRun]]:
     """Queue distinct event-assets in relevance order, up to the requested limit."""
 
     queued: list[tuple[str, ResearchRun]] = []
@@ -1291,9 +1316,7 @@ def enqueue_event_researches(
                 for news_id in event.news_item_ids
                 if (item := get_news(db, news_id)) is not None
             }
-            researched_urls = {
-                canonicalize_url(item.source_url) for item in existing.evidence
-            }
+            researched_urls = {canonicalize_url(item.source_url) for item in existing.evidence}
             has_new_cluster_evidence = bool(event_urls - researched_urls)
             if (
                 existing.status is not RunStatus.INSUFFICIENT_EVIDENCE
@@ -1332,8 +1355,7 @@ def enqueue_asset_mapping(
     if not force and (
         event.candidates
         or any(
-            step.phase == "asset_mapping_queue"
-            and step.status in {"queued", "completed"}
+            step.phase == "asset_mapping_queue" and step.status in {"queued", "completed"}
             for step in event.analysis_steps
         )
     ):
@@ -1354,8 +1376,7 @@ def enqueue_asset_mapping(
             executor="celery",
             model=settings.ollama_assist_model,
             summary=(
-                f"确定性映射未找到标的，已创建 {settings.ollama_assist_model} "
-                "二次标的发现任务。"
+                f"确定性映射未找到标的，已创建 {settings.ollama_assist_model} 二次标的发现任务。"
             ),
             metrics={"instance_id": instance.id},
         ),
@@ -1394,14 +1415,157 @@ def enqueue_asset_mapping(
                 executor="celery",
                 model=settings.ollama_assist_model,
                 summary=(
-                    f"{settings.ollama_assist_model} 标的发现任务入队失败"
-                    f"（{type(exc).__name__}）。"
+                    f"{settings.ollama_assist_model} 标的发现任务入队失败（{type(exc).__name__}）。"
                 ),
             ),
         )
         save_event(db, event)
         raise
     return str(task.id)
+
+
+def _asset_mapping_is_terminal(event: NewsEvent) -> bool:
+    if event.candidates:
+        return True
+    queue_step = next(
+        (step for step in reversed(event.analysis_steps) if step.phase == "asset_mapping_queue"),
+        None,
+    )
+    mapping_step = next(
+        (step for step in reversed(event.analysis_steps) if step.phase == "asset_mapping"),
+        None,
+    )
+    return bool(
+        (queue_step and queue_step.status == "completed")
+        or (mapping_step and mapping_step.status in {"completed", "unmapped"})
+    )
+
+
+def _revoke_model_task(task_id: str) -> None:
+    celery_app.control.revoke(task_id, terminate=False)
+
+
+@celery_app.task(name="market_loop.reconcile_asset_mapping_leases")
+def reconcile_asset_mapping_leases() -> dict[str, int | str]:
+    """Replace abandoned mapping tasks without duplicating live or finished work."""
+
+    try:
+        client = _redis_client()
+        client.ping()
+    except Exception:
+        return {
+            "status": "redis_unavailable",
+            "stale": 0,
+            "requeued": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "failed": 0,
+        }
+
+    stale = stale_model_task_records(
+        "assist",
+        lease_seconds=settings.model_task_lease_seconds,
+        redis_client=client,
+    )
+    result = {
+        "status": "completed",
+        "stale": len(stale),
+        "requeued": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "failed": 0,
+    }
+    if not stale:
+        return result
+
+    init_db()
+    for stale_task in stale:
+        lock_key = f"market-loop:model-task-recovery:assist:{stale_task.task_id}"
+        try:
+            acquired = client.set(
+                lock_key,
+                "1",
+                nx=True,
+                ex=max(60, settings.model_task_lease_seconds),
+            )
+        except Exception:
+            result["failed"] += 1
+            continue
+        if not acquired:
+            result["skipped"] += 1
+            continue
+        try:
+            current_records = list_model_task_records("assist", redis_client=client)
+            current = next(
+                (item for item in current_records if item.task_id == stale_task.task_id),
+                None,
+            )
+            cutoff = utc_now() - timedelta(seconds=settings.model_task_lease_seconds)
+            if (
+                current is None
+                or current.status not in {"running", "generating", "testing", "merging"}
+                or current.updated_at > cutoff
+                or not current.entity_id
+            ):
+                result["skipped"] += 1
+                continue
+
+            replacement = next(
+                (
+                    item
+                    for item in current_records
+                    if item.task_id != current.task_id
+                    and item.entity_id == current.entity_id
+                    and item.status in ACTIVE_STATUSES
+                ),
+                None,
+            )
+            with SessionLocal() as db:
+                try:
+                    event = get_event(db, UUID(current.entity_id))
+                except ValueError:
+                    event = None
+                if event is None or _asset_mapping_is_terminal(event):
+                    if cancel_model_task("assist", current.task_id, redis_client=client):
+                        _revoke_model_task(current.task_id)
+                        result["cancelled"] += 1
+                    else:
+                        result["skipped"] += 1
+                    continue
+                if replacement is not None:
+                    if cancel_model_task("assist", current.task_id, redis_client=client):
+                        _revoke_model_task(current.task_id)
+                        result["cancelled"] += 1
+                    else:
+                        result["skipped"] += 1
+                    continue
+
+                try:
+                    replacement_id = enqueue_asset_mapping(
+                        db,
+                        event,
+                        force=True,
+                        priority=DEFAULT_MODEL_TASK_PRIORITY,
+                    )
+                except Exception:
+                    result["failed"] += 1
+                    continue
+                if not replacement_id:
+                    result["skipped"] += 1
+                    continue
+                if cancel_model_task("assist", current.task_id, redis_client=client):
+                    _revoke_model_task(current.task_id)
+                    result["requeued"] += 1
+                else:
+                    cancel_model_task("assist", replacement_id, redis_client=client)
+                    _revoke_model_task(replacement_id)
+                    result["skipped"] += 1
+        finally:
+            try:
+                client.delete(lock_key)
+            except Exception:
+                pass
+    return result
 
 
 def enqueue_news_extraction_retry(
@@ -1779,9 +1943,7 @@ def scan_news(self) -> dict:
                 phase="retrying",
                 last_error=f"{type(exc).__name__}",
             )
-            raise self.retry(
-                exc=exc, countdown=min(60, 2 ** (self.request.retries + 1))
-            ) from exc
+            raise self.retry(exc=exc, countdown=min(60, 2 ** (self.request.retries + 1))) from exc
         failed_at = utc_now()
         _update_scan_status(
             client,
@@ -1905,9 +2067,7 @@ def extract_news_item(
 
 @celery_app.task(bind=True, name="market_loop.retry_news_item", max_retries=2)
 @model_instance_task("extract")
-def retry_news_item(
-    self, news_id: str, model_instance_id: str | None = None
-) -> dict[str, Any]:
+def retry_news_item(self, news_id: str, model_instance_id: str | None = None) -> dict[str, Any]:
     """Retry one durable news item independently and queue its downstream work."""
 
     task_id = str(self.request.id or f"news:{news_id}")
@@ -1943,13 +2103,9 @@ def retry_news_item(
             if settings.auto_research:
                 for event in events:
                     if event.candidates:
-                        research_queued += int(
-                            enqueue_event_research(db, event) is not None
-                        )
+                        research_queued += int(enqueue_event_research(db, event) is not None)
                     else:
-                        mapping_queued += int(
-                            enqueue_asset_mapping(db, event) is not None
-                        )
+                        mapping_queued += int(enqueue_asset_mapping(db, event) is not None)
         update_model_task(
             "extract",
             task_id,
@@ -2115,9 +2271,7 @@ def finalize_news_extraction(
 
 @celery_app.task(bind=True, name="market_loop.resolve_event_assets", max_retries=2)
 @model_instance_task("assist")
-def resolve_event_assets(
-    self, event_id: str, model_instance_id: str | None = None
-) -> dict:
+def resolve_event_assets(self, event_id: str, model_instance_id: str | None = None) -> dict:
     task_id = str(self.request.id or f"event:{event_id}")
     if model_task_is_cancelled("assist", task_id):
         return {"status": "cancelled", "event_id": event_id}
@@ -2223,9 +2377,7 @@ def resolve_event_assets(
                         ),
                         "verified_count": len(event.candidates),
                         "rejected_count": (
-                            mapping_result.rejected_count
-                            if mapping_result is not None
-                            else 0
+                            mapping_result.rejected_count if mapping_result is not None else 0
                         ),
                     },
                 )
@@ -2435,9 +2587,7 @@ def research_asset(
                     portfolio = PortfolioService(registry)
                     price = portfolio.current_price(run.recommendation)
                     if price > 0:
-                        order = portfolio.create_from_recommendation(
-                            db, run.recommendation, price
-                        )
+                        order = portfolio.create_from_recommendation(db, run.recommendation, price)
                         notifier.send(
                             f"模拟仓位变化：{order.side.value} {order.asset.symbol} "
                             f"{order.quantity:g} @ {order.price:g} {order.currency}"
@@ -2542,9 +2692,7 @@ def seed_assets() -> dict:
     return {"assets": count}
 
 
-def _run_evolution_failures(
-    failures: list[dict], *, task_id: str, source: str
-) -> dict:
+def _run_evolution_failures(failures: list[dict], *, task_id: str, source: str) -> dict:
     update_model_task(
         "code",
         task_id,
@@ -2595,8 +2743,7 @@ def _run_evolution_failures(
                 ),
             )
             notifier.send(
-                f"演进结果：{result.status.value}\n分支：{result.branch}"
-                f"\n假设：{result.hypothesis}"
+                f"演进结果：{result.status.value}\n分支：{result.branch}\n假设：{result.hypothesis}"
             )
             return result.model_dump(mode="json")
     except Exception as exc:
@@ -2613,9 +2760,7 @@ def _run_evolution_failures(
 def _evolution_failure_cases(db) -> list[dict[str, Any]]:
     """Join outcomes to the mapping, evidence and scoring context needed to fix code."""
 
-    recommendations = {
-        item.id: item for item in list_recommendations(db, limit=50_000)
-    }
+    recommendations = {item.id: item for item in list_recommendations(db, limit=50_000)}
     runs = list_runs(db, limit=50_000)
     runs_by_id = {item.id: item for item in runs}
     events = {item.id: item for item in list_events(db, limit=5000)}
@@ -2777,9 +2922,7 @@ def dispatch_evolve_from_outcomes() -> dict[str, str]:
 
 @celery_app.task(bind=True, name="market_loop.evolve_from_outcomes")
 @model_instance_task("code")
-def evolve_from_outcomes(
-    self, model_instance_id: str | None = None
-) -> dict:
+def evolve_from_outcomes(self, model_instance_id: str | None = None) -> dict:
     task_id = str(self.request.id or uuid4())
     if model_task_is_cancelled("code", task_id):
         return {"status": "cancelled"}
@@ -2793,17 +2936,13 @@ def evolve_from_outcomes(
         instance_id=model_instance_id,
     )
     if not settings.evolution_enabled:
-        update_model_task(
-            "code", task_id, status="completed", source="automatic"
-        )
+        update_model_task("code", task_id, status="completed", source="automatic")
         return {"status": "disabled"}
     init_db()
     with SessionLocal() as db:
         failures = _evolution_failure_cases(db)
         if not failures:
-            update_model_task(
-                "code", task_id, status="completed", source="automatic"
-            )
+            update_model_task("code", task_id, status="completed", source="automatic")
             return {"status": "no-failures"}
     return _run_evolution_failures(failures, task_id=task_id, source="automatic")
 
@@ -2925,8 +3064,7 @@ def monitor_health() -> dict:
         latest_news = db.scalar(select(func.max(NewsRow.observed_at)))
     stale = bool(
         latest_news
-        and (utc_now() - as_utc(latest_news)).total_seconds()
-        > settings.scan_interval_minutes * 180
+        and (utc_now() - as_utc(latest_news)).total_seconds() > settings.scan_interval_minutes * 180
     )
     unhealthy = (total >= 10 and failure_rate > 0.10) or stale
     rolled_back = False

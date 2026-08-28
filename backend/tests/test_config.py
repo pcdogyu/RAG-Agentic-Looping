@@ -1,3 +1,5 @@
+import pytest
+
 from backend.app.config import Settings
 
 
@@ -27,9 +29,13 @@ def test_default_ollama_roles_keep_extract_and_research_models_resident(
     assert settings.ollama_max_loaded_models == 2
     assert settings.ollama_assist_context_length == 16384
     assert settings.ollama_research_context_length == 16384
+    assert settings.ollama_asset_mapping_context_length == 8192
     assert settings.ollama_7b_max_input_tokens == 5000
     assert settings.ollama_assist_max_output_tokens == 8192
     assert settings.ollama_research_max_output_tokens == 8192
+    assert settings.ollama_asset_mapping_max_output_tokens == 1024
+    assert settings.model_task_heartbeat_seconds == 30
+    assert settings.model_task_lease_seconds == 180
     assert settings.ollama_max_queue == 256
     assert settings.ollama_load_timeout == "10m"
     assert settings.ollama_keep_alive == "-1"
@@ -61,3 +67,12 @@ def test_direction_lexicons_parse_supported_separators_and_remove_duplicates() -
     assert settings.direction_positive_lexicon == ["上涨", "积极进展"]
     assert settings.direction_neutral_lexicon == ["持平", "维持不变"]
     assert settings.direction_negative_lexicon == ["下跌", "临床失败", "利空"]
+
+
+def test_model_task_lease_must_cover_two_heartbeats() -> None:
+    with pytest.raises(ValueError, match="MODEL_TASK_LEASE_SECONDS"):
+        Settings(
+            _env_file=None,
+            model_task_heartbeat_seconds=60,
+            model_task_lease_seconds=60,
+        )

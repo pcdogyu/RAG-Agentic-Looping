@@ -32,12 +32,11 @@ class Settings(BaseSettings):
     ollama_code_model: str = "qwen2.5-coder:7b"
     ollama_timeout_seconds: int = 240
     ollama_research_timeout_seconds: int = Field(default=900, ge=30, le=3600)
-    ollama_research_validation_retry_timeout_seconds: int = Field(
-        default=300, ge=30, le=900
-    )
+    ollama_research_validation_retry_timeout_seconds: int = Field(default=300, ge=30, le=900)
     ollama_context_length: int = Field(default=8192, ge=512, le=262144)
     ollama_assist_context_length: int = Field(default=16384, ge=512, le=262144)
     ollama_research_context_length: int = Field(default=16384, ge=512, le=262144)
+    ollama_asset_mapping_context_length: int = Field(default=8192, ge=512, le=262144)
     ollama_num_parallel: int = Field(default=2, ge=1, le=16)
     ollama_max_loaded_models: int = Field(default=2, ge=1, le=16)
     ollama_max_queue: int = Field(default=256, ge=1, le=65536)
@@ -54,6 +53,7 @@ class Settings(BaseSettings):
     ollama_max_output_tokens: int = Field(default=1024, ge=64, le=8192)
     ollama_assist_max_output_tokens: int = Field(default=8192, ge=64, le=8192)
     ollama_research_max_output_tokens: int = Field(default=8192, ge=64, le=8192)
+    ollama_asset_mapping_max_output_tokens: int = Field(default=1024, ge=64, le=8192)
     ollama_7b_max_input_tokens: int = Field(default=5000, ge=512, le=16384)
     ollama_7b_tokenizer: str = "Qwen/Qwen2.5-7B-Instruct"
     ollama_7b_tokenizer_revision: str = "a09a35458c702b33eeacc393d103063234e8bc28"
@@ -63,6 +63,8 @@ class Settings(BaseSettings):
     research_coalesce_window_hours: int = Field(default=24, ge=1, le=168)
     research_heartbeat_seconds: int = Field(default=30, ge=10, le=120)
     research_lease_seconds: int = Field(default=120, ge=30, le=600)
+    model_task_heartbeat_seconds: int = Field(default=30, ge=10, le=120)
+    model_task_lease_seconds: int = Field(default=180, ge=60, le=900)
     model_audit_enabled: bool = True
     model_audit_retention_days: int = Field(default=90, ge=1, le=3650)
     embedding_model: str = "intfloat/multilingual-e5-small"
@@ -144,11 +146,7 @@ class Settings(BaseSettings):
 
     @staticmethod
     def _ollama_urls(configured: str, fallback: str) -> list[str]:
-        values = [
-            value.strip().rstrip("/")
-            for value in configured.split(",")
-            if value.strip()
-        ]
+        values = [value.strip().rstrip("/") for value in configured.split(",") if value.strip()]
         return values or [fallback.rstrip("/")]
 
     @property
@@ -169,6 +167,10 @@ class Settings(BaseSettings):
                     f"OLLAMA_{lane.upper()}_MAX_CONCURRENCY must be at least "
                     f"the configured instance count ({len(urls)})"
                 )
+        if self.model_task_lease_seconds < self.model_task_heartbeat_seconds * 2:
+            raise ValueError(
+                "MODEL_TASK_LEASE_SECONDS must be at least twice MODEL_TASK_HEARTBEAT_SECONDS"
+            )
         return self
 
     @property

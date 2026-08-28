@@ -20,6 +20,8 @@ from backend.app.services.model_queue import (
     list_model_task_records,
     model_task_is_cancelled,
     record_model_task,
+    stale_model_task_records,
+    touch_model_task,
     update_model_task,
 )
 from backend.app.storage import save_event, save_evolution, save_run
@@ -87,35 +89,39 @@ def _empty_extraction(now: datetime):
 def test_cancel_model_tasks_is_lane_scoped_and_terminal_safe():
     redis = FakeRedis()
     record_model_task(
-        "assist", task_id="mapping-active", kind="asset_mapping", title="宏观新闻",
+        "assist",
+        task_id="mapping-active",
+        kind="asset_mapping",
+        title="宏观新闻",
         redis_client=redis,
     )
     record_model_task(
-        "assist", task_id="mapping-done", kind="asset_mapping", title="已完成映射",
+        "assist",
+        task_id="mapping-done",
+        kind="asset_mapping",
+        title="已完成映射",
         redis_client=redis,
     )
-    update_model_task(
-        "assist", "mapping-done", status="completed", redis_client=redis
-    )
+    update_model_task("assist", "mapping-done", status="completed", redis_client=redis)
     record_model_task(
-        "code", task_id="code-active", kind="code_evolution", title="代码演进",
+        "code",
+        task_id="code-active",
+        kind="code_evolution",
+        title="代码演进",
         redis_client=redis,
     )
 
     result = cancel_model_tasks("assist", redis_client=redis)
-    update_model_task(
-        "assist", "mapping-active", status="completed", redis_client=redis
-    )
+    update_model_task("assist", "mapping-active", status="completed", redis_client=redis)
 
     assert result.cancelled == 1
     assert result.celery_task_ids == ["mapping-active"]
-    assert model_task_is_cancelled(
-        "assist", "mapping-active", redis_client=redis
-    )
+    assert model_task_is_cancelled("assist", "mapping-active", redis_client=redis)
     assert not model_task_is_cancelled("code", "code-active", redis_client=redis)
-    assert json.loads(redis.hget("market-loop:model-queue:assist:tasks", "mapping-done"))[
-        "status"
-    ] == "completed"
+    assert (
+        json.loads(redis.hget("market-loop:model-queue:assist:tasks", "mapping-done"))["status"]
+        == "completed"
+    )
 
 
 def test_clear_model_tasks_includes_failed_without_revoking_terminal_task():
@@ -134,13 +140,9 @@ def test_clear_model_tasks_includes_failed_without_revoking_terminal_task():
         title="失败映射",
         redis_client=redis,
     )
-    update_model_task(
-        "assist", "mapping-failed", status="failed", redis_client=redis
-    )
+    update_model_task("assist", "mapping-failed", status="failed", redis_client=redis)
 
-    result = cancel_model_tasks(
-        "assist", include_failed=True, redis_client=redis
-    )
+    result = cancel_model_tasks("assist", include_failed=True, redis_client=redis)
 
     assert result.cancelled == 2
     assert result.celery_task_ids == ["mapping-active"]
@@ -192,9 +194,7 @@ def test_overview_splits_tasks_and_inference_counts_by_instance(db):
         queued_at=now,
         redis_client=redis,
     )
-    update_model_task(
-        "assist", "mapping-1", status="failed", redis_client=redis
-    )
+    update_model_task("assist", "mapping-1", status="failed", redis_client=redis)
     settings = Settings(
         _env_file=None,
         ollama_assist_base_urls="http://a0.invalid,http://a1.invalid",
@@ -319,9 +319,7 @@ def test_cancel_one_extract_task_only_supersedes_the_selected_attempt():
 
     assert cancel_model_task("extract", "extract-old", redis_client=redis)
     assert model_task_is_cancelled("extract", "extract-old", redis_client=redis)
-    assert not model_task_is_cancelled(
-        "extract", "extract-other", redis_client=redis
-    )
+    assert not model_task_is_cancelled("extract", "extract-other", redis_client=redis)
 
 
 def test_tracked_extract_retry_is_merged_into_extraction_overview(db):
@@ -378,7 +376,9 @@ def test_extraction_summary_keeps_completed_counts_and_recorded_metrics(db):
     overview = build_model_queue_overview(
         db,
         extraction_queue=extraction,
-        inference_statuses={lane: _inference() for lane in ("extract", "research", "assist", "code")},
+        inference_statuses={
+            lane: _inference() for lane in ("extract", "research", "assist", "code")
+        },
         threads={"extract": 4, "research": 16, "assist": 4, "code": 4},
         limit=500,
         settings=Settings(_env_file=None),
@@ -404,7 +404,9 @@ def test_one_database_source_failure_stays_local_to_its_queue(db, monkeypatch):
     overview = build_model_queue_overview(
         db,
         extraction_queue=_empty_extraction(now),
-        inference_statuses={lane: _inference() for lane in ("extract", "research", "assist", "code")},
+        inference_statuses={
+            lane: _inference() for lane in ("extract", "research", "assist", "code")
+        },
         threads={"extract": 4, "research": 16, "assist": 4, "code": 4},
         limit=500,
         settings=Settings(_env_file=None),
@@ -465,6 +467,66 @@ def test_assist_task_lifecycle_preserves_business_metadata_and_redacts_error():
     assert item.metrics["verified_count"] == 1
     assert "cloud-secret-value" not in (item.error or "")
     assert "[REDACTED]" in (item.error or "")
+
+
+def test_running_task_heartbeat_renews_lease_and_never_revives_terminal_task():
+    redis = FakeRedis()
+    started_at = datetime(2026, 8, 26, 8, 0, tzinfo=UTC)
+    record_model_task(
+        "assist",
+        task_id="mapping-heartbeat",
+        kind="asset_mapping",
+        title="租约测试",
+        queued_at=started_at,
+        redis_client=redis,
+    )
+    update_model_task(
+        "assist",
+        "mapping-heartbeat",
+        status="running",
+        instance_id="assist-0",
+        occurred_at=started_at,
+        redis_client=redis,
+    )
+
+    assert touch_model_task(
+        "assist",
+        "mapping-heartbeat",
+        occurred_at=started_at + timedelta(seconds=150),
+        redis_client=redis,
+    )
+    assert (
+        stale_model_task_records(
+            "assist",
+            lease_seconds=180,
+            now=started_at + timedelta(seconds=200),
+            redis_client=redis,
+        )
+        == []
+    )
+    assert [
+        item.task_id
+        for item in stale_model_task_records(
+            "assist",
+            lease_seconds=180,
+            now=started_at + timedelta(seconds=331),
+            redis_client=redis,
+        )
+    ] == ["mapping-heartbeat"]
+
+    update_model_task(
+        "assist",
+        "mapping-heartbeat",
+        status="completed",
+        occurred_at=started_at + timedelta(seconds=332),
+        redis_client=redis,
+    )
+    assert not touch_model_task(
+        "assist",
+        "mapping-heartbeat",
+        occurred_at=started_at + timedelta(seconds=400),
+        redis_client=redis,
+    )
 
 
 def test_terminal_task_records_expire_after_24_hours():
@@ -623,7 +685,131 @@ def test_estimated_clear_time_uses_capacity_and_average_execution(db):
 
     assist = overview.queues[2]
     assert assist.metrics.average_execution_duration_ms == 2 * 60 * 1000
+    assert assist.metrics.throughput_per_hour == 30
     assert assist.metrics.estimated_clear_ms == 3 * 2 * 60 * 1000
+
+
+def test_assist_throughput_uses_first_and_last_completion_in_four_hour_window(db):
+    now = datetime(2026, 8, 26, 8, 0, tzinfo=UTC)
+    redis = FakeRedis({"mapping": 3})
+    for task_id, completed_at, instance_id in (
+        ("completed-old", now - timedelta(hours=5), "assist-0"),
+        ("completed-first", now - timedelta(hours=3), "assist-0"),
+        ("completed-last", now - timedelta(hours=1), "assist-1"),
+    ):
+        record_model_task(
+            "assist",
+            task_id=task_id,
+            kind="asset_mapping",
+            title=task_id,
+            instance_id=instance_id,
+            queued_at=completed_at - timedelta(minutes=3),
+            redis_client=redis,
+        )
+        update_model_task(
+            "assist",
+            task_id,
+            status="running",
+            occurred_at=completed_at - timedelta(minutes=2),
+            redis_client=redis,
+        )
+        update_model_task(
+            "assist",
+            task_id,
+            status="completed",
+            occurred_at=completed_at,
+            redis_client=redis,
+        )
+
+    overview = build_model_queue_overview(
+        db,
+        extraction_queue=_empty_extraction(now),
+        inference_statuses={
+            "extract": _inference(),
+            "research": _inference(),
+            "assist": {
+                **_inference(capacity=2),
+                "instance_count": 2,
+                "per_instance_concurrency": 1,
+                "instances": [
+                    {
+                        "id": "assist-0",
+                        "healthy": True,
+                        "model_available": True,
+                        "capacity": 1,
+                        "available": 1,
+                    },
+                    {
+                        "id": "assist-1",
+                        "healthy": True,
+                        "model_available": True,
+                        "capacity": 1,
+                        "available": 1,
+                    },
+                ],
+            },
+            "code": _inference(),
+        },
+        threads={"extract": 4, "research": 16, "assist": 4, "code": 4},
+        limit=500,
+        settings=Settings(
+            _env_file=None,
+            ollama_assist_base_urls="http://assist-0.invalid,http://assist-1.invalid",
+            ollama_assist_max_concurrency=2,
+        ),
+        redis_client=redis,
+        generated_at=now,
+    )
+
+    assist = overview.queues[2]
+    assert assist.metrics.throughput_per_hour == 0.5
+    assert assist.metrics.estimated_clear_ms == 6 * 60 * 60 * 1000
+    assert [item.metrics.throughput_per_hour for item in assist.instances] == [30, 30]
+
+
+def test_assist_without_recent_completions_keeps_throughput_and_clear_unknown(db):
+    now = datetime(2026, 8, 26, 8, 0, tzinfo=UTC)
+    redis = FakeRedis({"mapping": 3})
+    record_model_task(
+        "assist",
+        task_id="failed-only",
+        kind="asset_mapping",
+        title="失败样本",
+        queued_at=now - timedelta(minutes=4),
+        redis_client=redis,
+    )
+    update_model_task(
+        "assist",
+        "failed-only",
+        status="running",
+        occurred_at=now - timedelta(minutes=3),
+        redis_client=redis,
+    )
+    update_model_task(
+        "assist",
+        "failed-only",
+        status="failed",
+        occurred_at=now - timedelta(minutes=1),
+        redis_client=redis,
+    )
+
+    overview = build_model_queue_overview(
+        db,
+        extraction_queue=_empty_extraction(now),
+        inference_statuses={
+            lane: _inference() for lane in ("extract", "research", "assist", "code")
+        },
+        threads={"extract": 4, "research": 16, "assist": 4, "code": 4},
+        limit=500,
+        settings=Settings(_env_file=None),
+        redis_client=redis,
+        generated_at=now,
+    )
+
+    assist = overview.queues[2]
+    assert assist.metrics.average_execution_duration_ms == 2 * 60 * 1000
+    assert assist.metrics.throughput_per_hour is None
+    assert assist.metrics.estimated_clear_ms is None
 
 
 def test_research_metrics_exclude_active_duration_and_expose_instances(db):

@@ -566,7 +566,9 @@ export function UnifiedModelQueuePanel({
       <span>重试/验证<strong>{secondary}</strong></span>
       <span>完成/失败<strong>{activeInstance.counts.completed}/{activeInstance.counts.failed}</strong></span>
       <span title={`样本 ${activeInstance.metrics.queue_duration_sample_count}`}>平均排队<strong>{formatQueueDuration(activeInstance.metrics.average_queue_duration_ms)}</strong></span>
-      <span title={`近 4 小时终态样本 ${activeInstance.metrics.execution_duration_sample_count}`}>近4h平均执行<strong>{formatQueueDuration(activeInstance.metrics.average_execution_duration_ms)}</strong></span>
+      {queue.id === "assist"
+        ? <span title="过去 4 小时完成任务的实际吞吐">近4h吞吐<strong>{activeInstance.metrics.throughput_per_hour === null ? "—" : `${activeInstance.metrics.throughput_per_hour.toFixed(1)}/时`}</strong></span>
+        : <span title={`近 4 小时终态样本 ${activeInstance.metrics.execution_duration_sample_count}`}>近4h平均执行<strong>{formatQueueDuration(activeInstance.metrics.average_execution_duration_ms)}</strong></span>}
     </div>
     <div className={`model-queue-runtime ${queue.id === "research" ? "research" : "standard"}`}>
       <span>模型等待<strong>{activeInstance.counts.waiting_for_model}</strong></span>

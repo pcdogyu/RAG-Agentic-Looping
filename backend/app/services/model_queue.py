@@ -243,9 +243,7 @@ def cancel_model_tasks(
         failed_cutoff = now_value - MODEL_TASK_RETENTION
         task_ids: list[str] = []
         cancelled = 0
-        clearable_statuses = ACTIVE_STATUSES | (
-            FAILED_STATUSES if include_failed else set()
-        )
+        clearable_statuses = ACTIVE_STATUSES | (FAILED_STATUSES if include_failed else set())
         for field, raw in client.hgetall(key).items():
             task_id = field.decode() if isinstance(field, bytes) else str(field)
             value = raw.decode() if isinstance(raw, bytes) else raw
@@ -283,9 +281,7 @@ def cancel_model_tasks(
             if status in ACTIVE_STATUSES:
                 task_ids.append(str(payload.get("task_id") or task_id))
         client.expire(key, MODEL_TASK_KEY_TTL_SECONDS)
-        return ModelTaskCancellationResult(
-            cancelled=cancelled, celery_task_ids=task_ids
-        )
+        return ModelTaskCancellationResult(cancelled=cancelled, celery_task_ids=task_ids)
     except Exception:
         return ModelTaskCancellationResult()
 
@@ -377,24 +373,28 @@ def update_model_task(
             "assist": "股票映射任务",
             "code": "代码演进任务",
         }[lane]
-        payload = json.loads(raw) if raw else {
-            "task_id": task_id,
-            "instance_id": instance_id,
-            "kind": default_kind,
-            "entity_id": entity_id,
-            "title": title or default_title,
-            "subtitle": subtitle or "",
-            "source": source,
-            "status": "queued",
-            "attempt": 1,
-            "task_count": 1,
-            "queued_at": now.isoformat(),
-            "started_at": None,
-            "completed_at": None,
-            "updated_at": now.isoformat(),
-            "error": None,
-            "metrics": {},
-        }
+        payload = (
+            json.loads(raw)
+            if raw
+            else {
+                "task_id": task_id,
+                "instance_id": instance_id,
+                "kind": default_kind,
+                "entity_id": entity_id,
+                "title": title or default_title,
+                "subtitle": subtitle or "",
+                "source": source,
+                "status": "queued",
+                "attempt": 1,
+                "task_count": 1,
+                "queued_at": now.isoformat(),
+                "started_at": None,
+                "completed_at": None,
+                "updated_at": now.isoformat(),
+                "error": None,
+                "metrics": {},
+            }
+        )
         if payload.get("status") == "cancelled":
             return
         payload["status"] = status
@@ -432,6 +432,44 @@ def update_model_task(
         return
 
 
+def touch_model_task(
+    lane: TrackedModelLane,
+    task_id: str,
+    *,
+    instance_id: str | None = None,
+    occurred_at: datetime | None = None,
+    redis_client: Redis | None = None,
+) -> bool:
+    """Refresh a running task lease without reviving terminal work."""
+
+    now = as_utc(occurred_at or utc_now())
+    try:
+        client = redis_client or _redis_client()
+        key = _task_hash_key(lane)
+        raw = client.hget(key, task_id)
+        if not raw:
+            return False
+        value = raw.decode() if isinstance(raw, bytes) else raw
+        payload = json.loads(value)
+        if payload.get("status") not in RUNNING_STATUSES:
+            return False
+        payload["updated_at"] = now.isoformat()
+        if instance_id is not None:
+            payload["instance_id"] = instance_id
+        client.hset(key, task_id, json.dumps(payload, ensure_ascii=False))
+        client.expire(key, MODEL_TASK_KEY_TTL_SECONDS)
+        update_instance_assignment(
+            lane,
+            task_id,
+            status=str(payload["status"]),
+            instance_id=payload.get("instance_id"),
+            redis_client=client,
+        )
+        return True
+    except Exception:
+        return False
+
+
 def _parse_datetime(value: Any) -> datetime | None:
     if not value:
         return None
@@ -461,11 +499,7 @@ def _task_from_payload(payload: dict[str, Any], now: datetime) -> ModelQueueTask
     execution_end = completed_at or (now if status in RUNNING_STATUSES else None)
     return ModelQueueTask(
         task_id=str(payload.get("task_id") or "unknown"),
-        instance_id=(
-            str(payload["instance_id"])
-            if payload.get("instance_id")
-            else None
-        ),
+        instance_id=(str(payload["instance_id"]) if payload.get("instance_id") else None),
         kind=str(payload.get("kind") or "task"),
         entity_id=str(payload["entity_id"]) if payload.get("entity_id") else None,
         title=str(payload.get("title") or "未命名任务"),
@@ -510,9 +544,7 @@ def list_model_task_records(
             if item.status not in ACTIVE_STATUSES and item.updated_at < cutoff:
                 expired.append(item.task_id)
                 continue
-            assigned = instance_assignment(
-                lane, item.task_id, redis_client=client
-            )
+            assigned = instance_assignment(lane, item.task_id, redis_client=client)
             if assigned:
                 item = item.model_copy(update={"instance_id": assigned})
             records.append(item)
@@ -521,6 +553,24 @@ def list_model_task_records(
         return records
     except Exception:
         return []
+
+
+def stale_model_task_records(
+    lane: TrackedModelLane,
+    *,
+    lease_seconds: int,
+    now: datetime | None = None,
+    redis_client: Redis | None = None,
+) -> list[ModelQueueTask]:
+    """Return running tasks whose last heartbeat is older than the lease."""
+
+    generated_at = as_utc(now or utc_now())
+    cutoff = generated_at - timedelta(seconds=max(1, lease_seconds))
+    return [
+        item
+        for item in list_model_task_records(lane, now=generated_at, redis_client=redis_client)
+        if item.status in RUNNING_STATUSES and item.updated_at <= cutoff
+    ]
 
 
 def _latest_step(event: NewsEvent, phase: str) -> AnalysisStep | None:
@@ -640,9 +690,7 @@ def _evolution_candidate_tasks(
                 queue_duration_ms=0 if status == "testing" else None,
                 execution_duration_ms=None,
                 error=(
-                    "代码演进候选被拒绝或回滚。"
-                    if status in {"rejected", "rolled_back"}
-                    else None
+                    "代码演进候选被拒绝或回滚。" if status in {"rejected", "rolled_back"} else None
                 ),
                 metrics={
                     "target_metric": candidate.target_metric,
@@ -699,6 +747,7 @@ def _metrics(
     *,
     generated_at: datetime,
     use_throughput: bool = False,
+    use_recent_throughput: bool = False,
 ) -> ModelQueueMetrics:
     queue_durations = [
         item.queue_duration_ms for item in tasks if item.queue_duration_ms is not None
@@ -733,13 +782,39 @@ def _metrics(
         for item in tasks
         if item.status in COMPLETED_STATUSES and item.completed_at is not None
     ]
-    throughput_per_hour = len(completed) / 24 if use_throughput and completed else None
+    recent_completed = sorted(
+        (
+            item
+            for item in completed
+            if as_utc(item.completed_at or item.updated_at) >= recent_execution_cutoff
+        ),
+        key=lambda item: as_utc(item.completed_at or item.updated_at),
+    )
+    throughput_per_hour = None
+    if use_recent_throughput:
+        if len(recent_completed) >= 2:
+            elapsed_hours = (
+                as_utc(recent_completed[-1].completed_at or recent_completed[-1].updated_at)
+                - as_utc(recent_completed[0].completed_at or recent_completed[0].updated_at)
+            ).total_seconds() / 3600
+            if elapsed_hours > 0:
+                throughput_per_hour = (len(recent_completed) - 1) / elapsed_hours
+        elif (
+            len(recent_completed) == 1
+            and recent_completed[0].execution_duration_ms
+            and recent_completed[0].execution_duration_ms > 0
+        ):
+            throughput_per_hour = 60 * 60 * 1000 / recent_completed[0].execution_duration_ms
+    elif use_throughput and completed:
+        throughput_per_hour = len(completed) / 24
     estimated_clear = None
     if throughput_per_hour and work > 0:
         estimated_clear = ceil(work / throughput_per_hour * 60 * 60 * 1000)
-    elif average_execution is not None and capacity > 0 and work > 0:
+    elif not use_recent_throughput and average_execution is not None and capacity > 0 and work > 0:
         estimated_clear = ceil(work / capacity) * average_execution
-    ordered_execution = sorted(execution_durations)
+    ordered_execution = sorted(
+        recent_execution_durations if use_recent_throughput else execution_durations
+    )
 
     def percentile(ratio: float) -> int | None:
         if not ordered_execution:
@@ -764,15 +839,11 @@ def _metrics(
 
 def _visible_tasks(tasks: list[ModelQueueTask]) -> list[ModelQueueTask]:
     return [
-        item
-        for item in tasks
-        if item.status in ACTIVE_STATUSES or item.status in FAILED_STATUSES
+        item for item in tasks if item.status in ACTIVE_STATUSES or item.status in FAILED_STATUSES
     ]
 
 
-def _state(
-    counts: ModelQueueCounts, *, enabled: bool, observable: bool
-) -> str:
+def _state(counts: ModelQueueCounts, *, enabled: bool, observable: bool) -> str:
     if not enabled:
         return "disabled"
     if not observable:
@@ -841,11 +912,7 @@ def _queue_item(
         )
         if instance_id not in instance_ids and instance_ids:
             instance_id = instance_ids[sum(task.task_id.encode("utf-8")) % len(instance_ids)]
-        if (
-            redis_client is not None
-            and instance_id
-            and task.instance_id != instance_id
-        ):
+        if redis_client is not None and instance_id and task.instance_id != instance_id:
             record_instance_assignment(
                 queue_id,
                 task.task_id,
@@ -869,21 +936,20 @@ def _queue_item(
         capacity,
         generated_at=generated_at,
         use_throughput=queue_id == "research",
+        use_recent_throughput=queue_id == "assist",
     )
     for field, value in (metric_overrides or {}).items():
         if hasattr(metrics, field):
             setattr(metrics, field, value)
     work = counts.queued + counts.retrying + counts.running + counts.verifying
     if (
-        not metrics.throughput_per_hour
-        and
-        metrics.average_execution_duration_ms is not None
+        queue_id != "assist"
+        and not metrics.throughput_per_hour
+        and metrics.average_execution_duration_ms is not None
         and capacity > 0
         and work > 0
     ):
-        metrics.estimated_clear_ms = (
-            ceil(work / capacity) * metrics.average_execution_duration_ms
-        )
+        metrics.estimated_clear_ms = ceil(work / capacity) * metrics.average_execution_duration_ms
     visible = _sort_tasks(_visible_tasks(tasks))
     instance_queues: list[ModelQueueInstance] = []
     for raw_instance in raw_instances:
@@ -894,9 +960,7 @@ def _queue_item(
             instance_counts.running,
             max(0, int(raw_instance.get("running") or 0)),
         )
-        instance_counts.waiting_for_model = max(
-            0, int(raw_instance.get("queued") or 0)
-        )
+        instance_counts.waiting_for_model = max(0, int(raw_instance.get("queued") or 0))
         instance_capacity = max(0, int(raw_instance.get("capacity") or 0))
         instance_observable = bool(raw_instance.get("observable", observable))
         instance_metrics = _metrics(
@@ -905,6 +969,7 @@ def _queue_item(
             instance_capacity,
             generated_at=generated_at,
             use_throughput=queue_id == "research",
+            use_recent_throughput=queue_id == "assist",
         )
         instance_visible = _sort_tasks(_visible_tasks(instance_tasks))
         instance_queues.append(
@@ -966,6 +1031,14 @@ def _queue_item(
                 instance_total = aggregate_total
             setattr(counts, field, instance_total)
         for instance in instance_queues:
+            instance.metrics = _metrics(
+                [item for item in tasks if item.instance_id == instance.id],
+                instance.counts,
+                instance.capacity,
+                generated_at=generated_at,
+                use_throughput=queue_id == "research",
+                use_recent_throughput=queue_id == "assist",
+            )
             instance.total_tasks = sum(
                 (
                     instance.counts.queued,
@@ -979,11 +1052,15 @@ def _queue_item(
             instance.state = _state(
                 instance.counts,
                 enabled=enabled,
-                observable=(
-                    instance.observable
-                    and instance.healthy
-                    and instance.model_available
-                ),
+                observable=(instance.observable and instance.healthy and instance.model_available),
+            )
+        if queue_id == "assist":
+            metrics = _metrics(
+                tasks,
+                counts,
+                capacity,
+                generated_at=generated_at,
+                use_recent_throughput=True,
             )
     return ModelQueueItem(
         id=queue_id,
@@ -1078,16 +1155,10 @@ def _research_tasks(
         run
         for run in runs
         if run.status in {RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.VERIFYING}
-        and (
-            run.status is RunStatus.QUEUED
-            or live_run_ids is None
-            or str(run.id) in live_run_ids
-        )
+        and (run.status is RunStatus.QUEUED or live_run_ids is None or str(run.id) in live_run_ids)
     ]
     failed_runs = [
-        run
-        for run in runs
-        if run.status is RunStatus.FAILED and as_utc(run.updated_at) >= cutoff
+        run for run in runs if run.status is RunStatus.FAILED and as_utc(run.updated_at) >= cutoff
     ]
     terminal_runs = [
         run
@@ -1099,17 +1170,14 @@ def _research_tasks(
 
     def research_instance(run: ResearchRun | EventResearchRun) -> str | None:
         return (
-            (
-                instance_assignment(
-                    "research",
-                    run.celery_task_id or str(run.id),
-                    redis_client=redis_client,
-                )
-                if redis_client is not None
-                else None
+            instance_assignment(
+                "research",
+                run.celery_task_id or str(run.id),
+                redis_client=redis_client,
             )
-            or run.model_instance_id
-        )
+            if redis_client is not None
+            else None
+        ) or run.model_instance_id
 
     tasks = [
         ModelQueueTask(
@@ -1217,11 +1285,7 @@ def _research_tasks(
             continue
         event = event_map.get(str(run.event_id))
         started_step = next(
-            (
-                step
-                for step in run.analysis_steps
-                if step.status in {"running", "verifying"}
-            ),
+            (step for step in run.analysis_steps if step.status in {"running", "verifying"}),
             None,
         )
         started_at = as_utc(started_step.occurred_at) if started_step else None
@@ -1312,9 +1376,11 @@ def build_model_queue_overview(
         candidates = []
         source_errors["code"] = "代码演进候选状态暂时不可用。"
 
-    extract_records = list_model_task_records(
-        "extract", now=now, redis_client=client
-    ) if client is not None else []
+    extract_records = (
+        list_model_task_records("extract", now=now, redis_client=client)
+        if client is not None
+        else []
+    )
     extract_tasks = _merge_tasks(
         extract_records,
         _extraction_tasks(extraction_queue, now, redis_client=client),
@@ -1330,13 +1396,15 @@ def build_model_queue_overview(
         live_run_ids=research_live_ids,
         redis_client=client,
     )
-    assist_records = list_model_task_records(
-        "assist", now=now, redis_client=client
-    ) if client is not None else []
+    assist_records = (
+        list_model_task_records("assist", now=now, redis_client=client)
+        if client is not None
+        else []
+    )
     assist_tasks = _merge_tasks(assist_records, _event_mapping_tasks(events, now))
-    code_records = list_model_task_records(
-        "code", now=now, redis_client=client
-    ) if client is not None else []
+    code_records = (
+        list_model_task_records("code", now=now, redis_client=client) if client is not None else []
+    )
     code_tasks = _merge_tasks(
         code_records,
         _evolution_candidate_tasks(candidates, now, redis_client=client),

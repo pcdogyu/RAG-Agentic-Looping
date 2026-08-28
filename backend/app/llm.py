@@ -106,11 +106,7 @@ class GpuSemaphore:
         """Return the cross-process waiting/running state for one model lane."""
         lane, configured_capacity = self._lane(model, lane)
         slots = tuple(
-            sorted(
-                available_slots
-                if available_slots is not None
-                else range(configured_capacity)
-            )
+            sorted(available_slots if available_slots is not None else range(configured_capacity))
         )
         capacity = len(slots)
         if self._redis is None:
@@ -127,8 +123,7 @@ class GpuSemaphore:
             self._redis.zremrangebyscore(waiting_key, "-inf", time())
             queued = int(self._redis.zcard(waiting_key))
             running = sum(
-                int(bool(self._redis.exists(f"market-loop:llm:{lane}:{slot}")))
-                for slot in slots
+                int(bool(self._redis.exists(f"market-loop:llm:{lane}:{slot}"))) for slot in slots
             )
         except Exception:
             return {
@@ -170,11 +165,7 @@ class GpuSemaphore:
         instance_id: str | None = None,
     ) -> Iterator[int]:
         lane, capacity = self._lane(model, lane)
-        slots = tuple(
-            sorted(
-                available_slots if available_slots is not None else range(capacity)
-            )
-        )
+        slots = tuple(sorted(available_slots if available_slots is not None else range(capacity)))
         if not slots:
             raise LlmError(f"no healthy {lane} inference endpoint")
         if self._redis:
@@ -233,9 +224,7 @@ class GpuSemaphore:
         try:
             slot = slot_queue.get(timeout=timeout)
         except Exception as exc:
-            raise LlmError(
-                f"timed out waiting for the local {lane} inference slot"
-            ) from exc
+            raise LlmError(f"timed out waiting for the local {lane} inference slot") from exc
         try:
             yield slot
         finally:
@@ -273,9 +262,7 @@ class LlmGateway:
         result: list[dict[str, Any]] = []
         slots = self._instance_slots(instances)
         for instance in instances:
-            healthy, model_available = instance_health(
-                instance, model, client=self.client
-            )
+            healthy, model_available = instance_health(instance, model, client=self.client)
             inference = self.gpu.queue_status(
                 model,
                 slots[instance.id],
@@ -288,11 +275,7 @@ class LlmGateway:
                     "healthy": healthy,
                     "model_available": model_available,
                     "capacity": instance.capacity,
-                    "available": (
-                        inference["available"]
-                        if healthy and model_available
-                        else 0
-                    ),
+                    "available": (inference["available"] if healthy and model_available else 0),
                     "queued": inference["queued"],
                     "running": inference["running"],
                     "observable": inference["observable"],
@@ -387,6 +370,9 @@ class LlmGateway:
         operation: str = "generate_json",
         entity_type: str | None = None,
         entity_id: UUID | str | None = None,
+        max_input_tokens: int | None = None,
+        context_length: int | None = None,
+        max_output_tokens: int | None = None,
     ) -> dict[str, Any]:
         resolved_lane = self._resolve_lane(model, lane)
         schema_hint = schema.model_json_schema() if schema else {"type": "object"}
@@ -396,7 +382,11 @@ class LlmGateway:
                     system=system,
                     prompt=prompt,
                     schema_payload=schema_hint,
-                    max_tokens=self.settings.ollama_7b_max_input_tokens,
+                    max_tokens=(
+                        max_input_tokens
+                        if max_input_tokens is not None
+                        else self.settings.ollama_7b_max_input_tokens
+                    ),
                 )
             except Exception as exc:
                 raise LlmError(f"7B prompt budget enforcement failed: {exc}") from exc
@@ -419,8 +409,16 @@ class LlmGateway:
             try:
                 options: dict[str, int | float] = {
                     "temperature": temperature,
-                    "num_ctx": self._context_length_for(resolved_lane),
-                    "num_predict": self._max_output_tokens_for(resolved_lane),
+                    "num_ctx": (
+                        context_length
+                        if context_length is not None
+                        else self._context_length_for(resolved_lane)
+                    ),
+                    "num_predict": (
+                        max_output_tokens
+                        if max_output_tokens is not None
+                        else self._max_output_tokens_for(resolved_lane)
+                    ),
                 }
                 num_threads = self._num_threads_for(resolved_lane)
                 if num_threads:
@@ -438,9 +436,7 @@ class LlmGateway:
                 }
                 if preferred_id not in ready_ids:
                     if not ready_ids:
-                        raise LlmError(
-                            f"no healthy {resolved_lane} inference endpoint"
-                        )
+                        raise LlmError(f"no healthy {resolved_lane} inference endpoint")
                     if affinity is None:
                         ordered_ids = sorted(ready_ids)
                         cursor = self._endpoint_cursor.get(resolved_lane, 0)
@@ -477,9 +473,7 @@ class LlmGateway:
                             "messages": messages,
                             "format": schema_hint,
                             "stream": False,
-                            "keep_alive": serialize_keep_alive(
-                                self.settings.ollama_keep_alive
-                            ),
+                            "keep_alive": serialize_keep_alive(self.settings.ollama_keep_alive),
                             "options": options,
                         },
                         timeout=request_timeout,
@@ -568,7 +562,11 @@ class LlmGateway:
                 )
                 if isinstance(exc, httpx.HTTPError) and endpoint_id:
                     failed_spec = next(
-                        (item for item in configured_model_instances(resolved_lane, self.settings) if item.id == endpoint_id),
+                        (
+                            item
+                            for item in configured_model_instances(resolved_lane, self.settings)
+                            if item.id == endpoint_id
+                        ),
                         None,
                     )
                     if failed_spec is not None:

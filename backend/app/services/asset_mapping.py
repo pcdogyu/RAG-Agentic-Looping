@@ -57,6 +57,29 @@ def normalize_listing_symbol(value: str) -> str:
     return unicodedata.normalize("NFKC", value).strip().casefold()
 
 
+def compact_mapping_news(news_items: list[NewsItem], *, max_chars: int = 12_000) -> str:
+    """Keep mapping evidence focused while preserving valid JSON."""
+
+    payloads: list[dict[str, object]] = []
+    for item in news_items:
+        candidate: dict[str, object] = {
+            "title": item.title,
+            "symbols": item.symbols,
+            "summary": item.summary[:2000],
+        }
+        while True:
+            encoded = json.dumps([*payloads, candidate], ensure_ascii=False, separators=(",", ":"))
+            overflow = len(encoded) - max_chars
+            if overflow <= 0:
+                payloads.append(candidate)
+                break
+            summary = str(candidate["summary"])
+            if not summary:
+                return json.dumps(payloads, ensure_ascii=False, separators=(",", ":"))
+            candidate["summary"] = summary[: max(0, len(summary) - overflow)]
+    return json.dumps(payloads, ensure_ascii=False, separators=(",", ":"))
+
+
 class AssetMappingService:
     minimum_confidence = 0.60
 
@@ -76,6 +99,17 @@ class AssetMappingService:
             + [f"{item.title}\n{item.summary}" for item in news_items]
         )
         source_symbols = [symbol for item in news_items for symbol in item.symbols]
+        event_payload = {
+            "headline": event.headline,
+            "event_type": event.event_type.value,
+            "entities": event.entities,
+        }
+        event_json = json.dumps(event_payload, ensure_ascii=False, separators=(",", ":"))
+        evidence_chars = 12_000
+        news_payload = compact_mapping_news(
+            news_items,
+            max_chars=max(2, evidence_chars - len(event_json) - len("事件：\n新闻：")),
+        )
         prompt = (
             "从给定新闻中找出被明确提及、可交易且直接相关的股票或高流动性加密资产。"
             "只做名称到证券代码的消歧，不得推荐行业受益股、ETF、指数或新闻未提及的代理标的。"
@@ -83,8 +117,8 @@ class AssetMappingService:
             "提供 symbol 时必须与主数据中的具体上市代码完全一致，不得改选同发行人的其他上市代码。"
             "机器人等同时是行业通用词的简称，原文没有明确代码或完整发行人身份时不得映射。"
             "不知道代码时保留空字符串。\n"
-            f"事件：{event.model_dump_json(exclude={'analysis_steps', 'candidates'})}\n"
-            f"新闻：{json.dumps([item.model_dump(mode='json') for item in news_items], ensure_ascii=False)[:18000]}"
+            f"事件：{event_json}\n"
+            f"新闻：{news_payload}"
         )
         payload = self.llm.generate_json(
             model=self.settings.ollama_assist_model,
@@ -96,6 +130,8 @@ class AssetMappingService:
             operation="asset_mapping",
             entity_type="news_event",
             entity_id=event.id,
+            context_length=self.settings.ollama_asset_mapping_context_length,
+            max_output_tokens=self.settings.ollama_asset_mapping_max_output_tokens,
         )
         output = AssetMappingOutput.model_validate(payload)
         candidates: dict[str, CandidateAsset] = {}

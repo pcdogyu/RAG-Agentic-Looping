@@ -168,9 +168,7 @@ def test_model_queue_status_counts_waiters_and_running_slots():
 def test_gateway_queue_status_exposes_instance_topology():
     settings = Settings(
         ollama_assist_base_url="http://assist.invalid",
-        ollama_research_base_urls=(
-            "http://research-0.invalid,http://research-1.invalid"
-        ),
+        ollama_research_base_urls=("http://research-0.invalid,http://research-1.invalid"),
         ollama_assist_max_concurrency=1,
         ollama_research_max_concurrency=2,
     )
@@ -209,7 +207,9 @@ def test_model_semaphore_enforces_independent_local_capacities():
         with semaphore.acquire(settings.ollama_research_model, timeout=0.01, lane="research"):
             with semaphore.acquire(settings.ollama_research_model, timeout=0.01, lane="research"):
                 with pytest.raises(LlmError, match="local research"):
-                    with semaphore.acquire(settings.ollama_research_model, timeout=0.01, lane="research"):
+                    with semaphore.acquire(
+                        settings.ollama_research_model, timeout=0.01, lane="research"
+                    ):
                         pass
 
 
@@ -253,9 +253,7 @@ def test_model_semaphore_renews_short_redis_lease(monkeypatch):
     semaphore._redis = FakeRedis()
     monkeypatch.setattr("backend.app.llm.INFERENCE_LOCK_HEARTBEAT_SECONDS", 0.01)
 
-    with semaphore.acquire(
-        semaphore.settings.ollama_research_model, timeout=0.1, lane="research"
-    ):
+    with semaphore.acquire(semaphore.settings.ollama_research_model, timeout=0.1, lane="research"):
         time_module.sleep(0.035)
 
     assert lock.extensions >= 2
@@ -284,9 +282,7 @@ def test_gateway_does_not_retry_transport_failures(monkeypatch):
     monkeypatch.setattr(gateway.gpu, "acquire", lambda *args, **kwargs: _null_context())
 
     with pytest.raises(httpx.ConnectError):
-        gateway.generate_json(
-            model="qwen2.5:7b", lane="assist", system="system", prompt="prompt"
-        )
+        gateway.generate_json(model="qwen2.5:7b", lane="assist", system="system", prompt="prompt")
 
     with SessionLocal() as db:
         rows = list(db.scalars(select(ModelCallAuditRow).order_by(ModelCallAuditRow.attempt)))
@@ -362,9 +358,7 @@ def test_research_pool_routes_one_slot_per_endpoint(monkeypatch):
         "http://research-0.invalid/api/chat",
         "http://research-1.invalid/api/chat",
     ]
-    assert all(
-        item[1]["json"]["options"]["num_predict"] == 1024 for item in client.urls
-    )
+    assert all(item[1]["json"]["options"]["num_predict"] == 1024 for item in client.urls)
     assert all(item[1]["timeout"] == 900 for item in client.urls)
 
 
@@ -400,11 +394,13 @@ def test_same_7b_model_keeps_assist_and_research_lanes_isolated(monkeypatch):
 
     gateway.client = LaneClient()
     monkeypatch.setattr("backend.app.llm.persist_model_audit", lambda **_kwargs: None)
-    monkeypatch.setattr(
-        gateway.prompt_budget,
-        "fit",
-        lambda **_kwargs: ([{"role": "user", "content": "bounded"}], 4321),
-    )
+    prompt_budgets = []
+
+    def fit_prompt(**kwargs):
+        prompt_budgets.append(kwargs["max_tokens"])
+        return ([{"role": "user", "content": "bounded"}], 4321)
+
+    monkeypatch.setattr(gateway.prompt_budget, "fit", fit_prompt)
 
     for lane in ("assist", "research", "research"):
         assert gateway.generate_json(
@@ -415,18 +411,37 @@ def test_same_7b_model_keeps_assist_and_research_lanes_isolated(monkeypatch):
             schema=AuditOutput,
         ) == {"answer": "ok"}
 
+    assert gateway.generate_json(
+        model="qwen2.5:7b",
+        lane="assist",
+        system="system",
+        prompt="mapping prompt",
+        schema=AuditOutput,
+        max_input_tokens=2048,
+        context_length=8192,
+        max_output_tokens=1024,
+    ) == {"answer": "ok"}
+
     assert [request[0] for request in gateway.client.requests] == [
         "http://assist.invalid/api/chat",
         "http://research-0.invalid/api/chat",
         "http://research-1.invalid/api/chat",
+        "http://assist.invalid/api/chat",
     ]
-    for _, request in gateway.client.requests:
+    for _, request in gateway.client.requests[:3]:
         assert request["json"]["options"] == {
             "temperature": 0.1,
             "num_ctx": 16384,
             "num_predict": 8192,
             "num_thread": 8,
         }
+    assert gateway.client.requests[-1][1]["json"]["options"] == {
+        "temperature": 0.1,
+        "num_ctx": 8192,
+        "num_predict": 1024,
+        "num_thread": 8,
+    }
+    assert prompt_budgets == [settings.ollama_7b_max_input_tokens] * 3 + [2048]
 
 
 def test_bound_research_task_keeps_instance_affinity(monkeypatch):

@@ -765,6 +765,8 @@ describe("research queue page", () => {
 
     expect(markup).toContain("qwen2.5:7b 股票映射队列");
     expect(markup).toContain("完成/失败<strong>8/2</strong>");
+    expect(markup).toContain("近4h吞吐<strong>2.5/时</strong>");
+    expect(markup).not.toContain("近4h平均执行");
     expect(markup).toContain("最长等待<strong>4分0秒</strong>");
     expect(markup).toContain("预计清空<strong>12分0秒</strong>");
     expect(markup).not.toContain("实例个数");

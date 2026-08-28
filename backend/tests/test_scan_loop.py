@@ -1,6 +1,7 @@
 import json
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
+from time import sleep
 from types import SimpleNamespace
 
 import pytest
@@ -34,6 +35,9 @@ class FakeRedis:
     def get(self, key):
         return self.data.get(key)
 
+    def ping(self):
+        return True
+
     def set(self, key, value, nx=False, ex=None):
         if nx and key in self.data:
             return False
@@ -64,26 +68,17 @@ def test_scan_visibility_and_gate_cover_long_running_tasks():
     assert expected == 12 * 60 * 60
     assert worker.SCAN_GATE_TTL_SECONDS >= expected
     assert worker.celery_app.conf.broker_transport_options["visibility_timeout"] == expected
-    assert (
-        worker.celery_app.conf.result_backend_transport_options["visibility_timeout"]
-        == expected
-    )
+    assert worker.celery_app.conf.result_backend_transport_options["visibility_timeout"] == expected
     assert worker.celery_app.conf.visibility_timeout == expected
     assert worker.NEWS_EXTRACTION_QUEUE_TTL_SECONDS == 12 * 60 * 60
     assert worker.celery_app.conf.task_routes["market_loop.extract_news_item"] == {
         "queue": "extract"
     }
-    assert worker.celery_app.conf.task_routes["market_loop.retry_news_item"] == {
-        "queue": "extract"
-    }
-    assert worker.celery_app.conf.task_routes["market_loop.research_asset"] == {
-        "queue": "research"
-    }
+    assert worker.celery_app.conf.task_routes["market_loop.retry_news_item"] == {"queue": "extract"}
+    assert worker.celery_app.conf.task_routes["market_loop.research_asset"] == {"queue": "research"}
     assert worker.celery_app.conf.task_default_priority == 5
     assert worker.celery_app.conf.task_queue_max_priority == 9
-    assert worker.celery_app.conf.broker_transport_options["priority_steps"] == list(
-        range(10)
-    )
+    assert worker.celery_app.conf.broker_transport_options["priority_steps"] == list(range(10))
 
 
 def test_instance_task_delays_when_every_instance_is_offline(monkeypatch):
@@ -118,6 +113,36 @@ def test_instance_task_delays_when_every_instance_is_offline(monkeypatch):
     assert retry_options["queue"] == "extract.extract-0"
     assert retry_options["countdown"] == 30
     assert retry_options["max_retries"] == 1_000_000
+
+
+def test_instance_task_refreshes_running_model_task_lease(monkeypatch):
+    selected = SimpleNamespace(id="extract-0")
+    touches = []
+
+    class FakeTask:
+        request = SimpleNamespace(
+            id="heartbeat-task",
+            delivery_info={"routing_key": "extract.extract-0"},
+        )
+
+    def business_task(_self, **_kwargs):
+        sleep(0.04)
+        return "completed"
+
+    monkeypatch.setattr(worker.settings, "model_task_heartbeat_seconds", 0.01)
+    monkeypatch.setattr(worker, "select_model_instance", lambda *_args, **_kwargs: selected)
+    monkeypatch.setattr(worker, "instance_health", lambda *_args, **_kwargs: (True, True))
+    monkeypatch.setattr(worker, "update_instance_assignment", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(worker, "update_model_task", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        worker,
+        "touch_model_task",
+        lambda *_args, **_kwargs: touches.append(True) or True,
+    )
+    wrapped = worker.model_instance_task("extract")(business_task)
+
+    assert wrapped(FakeTask(), model_instance_id="extract-0") == "completed"
+    assert len(touches) >= 2
 
 
 def test_periodic_evolution_dispatch_uses_an_instance_queue(monkeypatch):
@@ -225,7 +250,10 @@ def test_clear_news_extraction_queue_cancels_active_and_failed_items():
     }
     assert payload["state"] == "cancelled"
     assert [item["status"] for item in payload["items"]] == [
-        "cancelled", "cancelled", "completed", "cancelled",
+        "cancelled",
+        "cancelled",
+        "completed",
+        "cancelled",
     ]
     assert redis.get(worker.SCAN_GATE_KEY) is None
 
@@ -257,13 +285,26 @@ def test_news_extraction_timing_accumulates_attempts_without_retry_wait(monkeypa
     )
 
     current["now"] = queued_at + timedelta(seconds=10)
-    worker._update_news_extraction_item(redis, "scan-1", "00000000-0000-0000-0000-000000000001", "running", attempt=1)
+    worker._update_news_extraction_item(
+        redis, "scan-1", "00000000-0000-0000-0000-000000000001", "running", attempt=1
+    )
     current["now"] = queued_at + timedelta(seconds=30)
-    worker._update_news_extraction_item(redis, "scan-1", "00000000-0000-0000-0000-000000000001", "retrying", attempt=1, error="temporary")
+    worker._update_news_extraction_item(
+        redis,
+        "scan-1",
+        "00000000-0000-0000-0000-000000000001",
+        "retrying",
+        attempt=1,
+        error="temporary",
+    )
     current["now"] = queued_at + timedelta(seconds=50)
-    worker._update_news_extraction_item(redis, "scan-1", "00000000-0000-0000-0000-000000000001", "running", attempt=2)
+    worker._update_news_extraction_item(
+        redis, "scan-1", "00000000-0000-0000-0000-000000000001", "running", attempt=2
+    )
     current["now"] = queued_at + timedelta(seconds=80)
-    worker._update_news_extraction_item(redis, "scan-1", "00000000-0000-0000-0000-000000000001", "completed", attempt=2)
+    worker._update_news_extraction_item(
+        redis, "scan-1", "00000000-0000-0000-0000-000000000001", "completed", attempt=2
+    )
 
     stored = worker._read_news_extraction_queue(redis)["items"][0]
     assert stored["queue_duration_ms"] == 10000
@@ -646,7 +687,9 @@ def test_scan_loop_waits_until_due_and_bootstraps_without_state(monkeypatch):
     redis = FakeRedis()
     calls = []
     monkeypatch.setattr(worker, "_redis_client", lambda: redis)
-    monkeypatch.setattr(worker, "enqueue_scan", lambda: (calls.append("queued") or "task-1", "queued"))
+    monkeypatch.setattr(
+        worker, "enqueue_scan", lambda: (calls.append("queued") or "task-1", "queued")
+    )
 
     result = worker.ensure_scan_loop.run()
     assert result["status"] == "queued"
@@ -774,9 +817,7 @@ def test_each_event_queues_only_its_primary_asset_and_unmapped_is_auditable(db, 
     assert list_runs(db)[0].asset.asset_id == SEED_ASSETS[0].asset_id
     assert list_runs(db)[0].historical_replay is False
 
-    unmapped = event.model_copy(
-        update={"id": None, "headline": "Unmapped event", "candidates": []}
-    )
+    unmapped = event.model_copy(update={"id": None, "headline": "Unmapped event", "candidates": []})
     # Let Pydantic allocate a valid new ID rather than persisting a null key.
     unmapped = NewsEvent(**{**unmapped.model_dump(exclude={"id"}), "news_item_ids": [news.id]})
     save_event(db, unmapped)
@@ -957,10 +998,7 @@ def test_insufficient_run_requeues_when_persistent_cluster_gets_new_evidence(db,
     assert second_task is not None
     assert len(queued_tasks) == 2
     assert all(task["queue"] == "research.research-0" for task in queued_tasks)
-    assert all(
-        task["kwargs"]["model_instance_id"] == "research-0"
-        for task in queued_tasks
-    )
+    assert all(task["kwargs"]["model_instance_id"] == "research-0" for task in queued_tasks)
     assert len(list_runs(db)) == 2
 
 
@@ -997,6 +1035,152 @@ def test_unmapped_event_queues_only_one_visible_7b_mapping_task(db, monkeypatch)
     assert event.analysis_steps[-1].phase == "asset_mapping_queue"
     assert event.analysis_steps[-1].status == "queued"
     assert event.analysis_steps[-1].model == "qwen2.5:7b"
+
+
+def test_stale_mapping_recovery_is_idempotent_and_requeues_once(db, monkeypatch):
+    observed = datetime(2026, 8, 22, 12, 0, tzinfo=UTC)
+    event = NewsEvent(
+        news_item_ids=[],
+        headline="Abandoned mapping event",
+        event_type="other",
+        direct_impact="Mapping still required.",
+        source_quality=SourceQuality.PROFESSIONAL,
+        published_at=observed,
+        observed_at=observed,
+        as_of=observed,
+    )
+    save_event(db, event)
+    stale_task = SimpleNamespace(
+        task_id="stale-mapping",
+        entity_id=str(event.id),
+        status="running",
+        updated_at=worker.utc_now() - timedelta(minutes=10),
+    )
+    active = {"value": True}
+    queued = []
+    revoked = []
+    redis = FakeRedis()
+
+    monkeypatch.setattr(worker, "_redis_client", lambda: redis)
+    monkeypatch.setattr(
+        worker,
+        "stale_model_task_records",
+        lambda *_args, **_kwargs: [stale_task] if active["value"] else [],
+    )
+    monkeypatch.setattr(
+        worker,
+        "list_model_task_records",
+        lambda *_args, **_kwargs: [stale_task] if active["value"] else [],
+    )
+    monkeypatch.setattr(
+        worker,
+        "enqueue_asset_mapping",
+        lambda *_args, **kwargs: queued.append(kwargs) or "replacement-task",
+    )
+
+    def cancel(_lane, task_id, **_kwargs):
+        if task_id == "stale-mapping" and active["value"]:
+            active["value"] = False
+            return True
+        return task_id == "replacement-task"
+
+    monkeypatch.setattr(worker, "cancel_model_task", cancel)
+    monkeypatch.setattr(worker, "_revoke_model_task", revoked.append)
+
+    first = worker.reconcile_asset_mapping_leases.run()
+    second = worker.reconcile_asset_mapping_leases.run()
+
+    assert first["requeued"] == 1
+    assert second["stale"] == 0
+    assert len(queued) == 1
+    assert queued[0]["force"] is True
+    assert revoked == ["stale-mapping"]
+
+
+def test_stale_mapping_recovery_cancels_terminal_event_without_requeue(db, monkeypatch):
+    observed = datetime(2026, 8, 22, 12, 0, tzinfo=UTC)
+    event = NewsEvent(
+        news_item_ids=[],
+        headline="Already unmapped event",
+        event_type="other",
+        direct_impact="No asset exists.",
+        source_quality=SourceQuality.PROFESSIONAL,
+        published_at=observed,
+        observed_at=observed,
+        as_of=observed,
+        analysis_steps=[
+            AnalysisStep(
+                phase="asset_mapping",
+                status="unmapped",
+                executor="ollama+provider-registry",
+                summary="No verified security.",
+            )
+        ],
+    )
+    save_event(db, event)
+    stale_task = SimpleNamespace(
+        task_id="terminal-stale",
+        entity_id=str(event.id),
+        status="running",
+        updated_at=worker.utc_now() - timedelta(minutes=10),
+    )
+    redis = FakeRedis()
+    revoked = []
+
+    monkeypatch.setattr(worker, "_redis_client", lambda: redis)
+    monkeypatch.setattr(worker, "stale_model_task_records", lambda *_args, **_kwargs: [stale_task])
+    monkeypatch.setattr(worker, "list_model_task_records", lambda *_args, **_kwargs: [stale_task])
+    monkeypatch.setattr(worker, "cancel_model_task", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(worker, "_revoke_model_task", revoked.append)
+    monkeypatch.setattr(
+        worker,
+        "enqueue_asset_mapping",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("terminal event was requeued")
+        ),
+    )
+
+    result = worker.reconcile_asset_mapping_leases.run()
+
+    assert result["cancelled"] == 1
+    assert result["requeued"] == 0
+    assert revoked == ["terminal-stale"]
+
+
+def test_stale_mapping_recovery_does_nothing_when_redis_is_unavailable(monkeypatch):
+    monkeypatch.setattr(
+        worker,
+        "_redis_client",
+        lambda: (_ for _ in ()).throw(ConnectionError("redis unavailable")),
+    )
+
+    result = worker.reconcile_asset_mapping_leases.run()
+
+    assert result["status"] == "redis_unavailable"
+    assert result["requeued"] == 0
+
+
+def test_cancelled_mapping_message_redelivery_stops_before_database_work(monkeypatch):
+    selected = SimpleNamespace(id="assist-0")
+    monkeypatch.setattr(worker, "select_model_instance", lambda *_args, **_kwargs: selected)
+    monkeypatch.setattr(worker, "update_instance_assignment", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(worker, "update_model_task", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(worker, "model_task_is_cancelled", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        worker,
+        "init_db",
+        lambda: (_ for _ in ()).throw(AssertionError("cancelled task reached database")),
+    )
+
+    result = worker.resolve_event_assets.run(
+        "00000000-0000-0000-0000-000000000001",
+        model_instance_id="assist-0",
+    )
+
+    assert result == {
+        "status": "cancelled",
+        "event_id": "00000000-0000-0000-0000-000000000001",
+    }
 
 
 def test_standalone_news_retry_is_recorded_and_sent_with_requested_priority(
@@ -1087,8 +1271,9 @@ def test_7b_mapping_task_persists_candidates_and_queues_top_three(db, monkeypatc
     monkeypatch.setattr(
         worker.research_asset,
         "apply_async",
-        lambda *, args, **kwargs: queued_assets.append(args[0])
-        or SimpleNamespace(id=f"research-{len(queued_assets)}"),
+        lambda *, args, **kwargs: (
+            queued_assets.append(args[0]) or SimpleNamespace(id=f"research-{len(queued_assets)}")
+        ),
     )
 
     result = worker.resolve_event_assets.run(str(event.id))

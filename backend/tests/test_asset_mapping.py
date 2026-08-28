@@ -1,9 +1,14 @@
+import json
 from datetime import UTC, datetime
 from hashlib import sha256
 
 from backend.app.config import Settings
 from backend.app.domain import AssetClass, AssetRef, Market, NewsEvent, NewsItem, SourceQuality
-from backend.app.services.asset_mapping import AssetMappingOutput, AssetMappingService
+from backend.app.services.asset_mapping import (
+    AssetMappingOutput,
+    AssetMappingService,
+    compact_mapping_news,
+)
 
 
 class StaticRegistry:
@@ -127,9 +132,38 @@ def test_7b_mapping_accepts_only_mentioned_master_verified_assets():
 
     assert mapping_llm.last_request["model"] == "qwen2.5:7b"
     assert mapping_llm.last_request["operation"] == "asset_mapping"
+    assert mapping_llm.last_request["context_length"] == 8192
+    assert mapping_llm.last_request["max_output_tokens"] == 1024
+    assert '"direct_impact"' not in mapping_llm.last_request["prompt"]
     assert [item.asset.symbol for item in result.candidates] == ["300308", "001337"]
     assert result.proposed_count == 4
     assert result.rejected_count == 2
+
+
+def test_mapping_news_prompt_caps_each_summary_and_total_body() -> None:
+    observed = datetime(2026, 8, 22, 12, 0, tzinfo=UTC)
+    items = [
+        NewsItem(
+            source="Example",
+            title=f"新闻 {index}",
+            summary="证据" * 2000,
+            symbols=[f"T{index}"],
+            url=f"https://example.com/{index}",
+            published_at=observed,
+            observed_at=observed,
+            as_of=observed,
+            content_hash=sha256(f"mapping-{index}".encode()).hexdigest(),
+        )
+        for index in range(10)
+    ]
+
+    compact = compact_mapping_news(items)
+    payload = json.loads(compact)
+
+    assert len(compact) <= 12_000
+    assert payload
+    assert all(len(item["summary"]) <= 2000 for item in payload)
+    assert set(payload[0]) == {"title", "symbols", "summary"}
 
 
 def test_7b_mapping_rejects_substring_ticker_and_generic_issuer_name():
