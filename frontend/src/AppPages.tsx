@@ -786,7 +786,7 @@ export function QueuePage({ apiBase }: { apiBase: string }) {
     const activeCount = instance.counts.queued + instance.counts.running
       + instance.counts.retrying + instance.counts.verifying;
     const clearableCount = activeCount + instance.counts.failed;
-    if (!clearableCount || !window.confirm(`确认清空 ${queue.model} ${instance.id} 当前 ${clearableCount} 项${queue.purpose}任务（含 ${instance.counts.failed} 项失败任务）？正在执行的任务会立即停止，未完成进度不会保留；后续扫描或调度仍可产生新任务。`)) return;
+    if (!clearableCount) return;
     const actionId = `${queue.id}:${instance.id}`;
     setClearingQueueId(actionId);
     setActionMessage("");
