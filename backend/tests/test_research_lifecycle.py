@@ -103,7 +103,7 @@ def test_recovers_queued_runs_when_redis_dispatch_markers_are_missing(
     )
     event_run = EventResearchRun(
         event_id=uuid4(),
-        celery_task_id="lost-event-task",
+        celery_task_id=None,
         model_instance_id="research-0",
         created_at=now - timedelta(minutes=5),
     )
@@ -145,7 +145,7 @@ def test_recovers_queued_runs_when_redis_dispatch_markers_are_missing(
     }
     assert {kind for kind, _kwargs in published} == {"asset", "event"}
     assert stored_asset.celery_task_id != "lost-asset-task"
-    assert stored_event.celery_task_id != "lost-event-task"
+    assert stored_event.celery_task_id is not None
     assert stored_asset.analysis_steps[-1].phase == "research_dispatch_recovery"
     assert stored_event.analysis_steps[-1].phase == "research_dispatch_recovery"
     assert all(kwargs["queue"] == "research.research-0" for _, kwargs in published)

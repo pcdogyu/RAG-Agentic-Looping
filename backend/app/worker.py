@@ -379,7 +379,8 @@ def recover_orphaned_queued_research_runs(
             continue
         scanned += 1
         run_id = str(run.id)
-        if _research_dispatch_task_id(run_id, redis_client) == run.celery_task_id:
+        dispatched_task_id = _research_dispatch_task_id(run_id, redis_client)
+        if dispatched_task_id is not None and dispatched_task_id == run.celery_task_id:
             continue
 
         task_id = str(uuid4())
