@@ -1418,6 +1418,50 @@ def test_stale_mapping_recovery_is_idempotent_and_requeues_once(db, monkeypatch)
     assert revoked == ["stale-mapping"]
 
 
+def test_stale_retrying_mapping_is_requeued(db, monkeypatch):
+    observed = datetime(2026, 8, 22, 12, 0, tzinfo=UTC)
+    event = NewsEvent(
+        news_item_ids=[],
+        headline="Retry was lost after worker restart",
+        event_type="other",
+        direct_impact="Mapping still required.",
+        source_quality=SourceQuality.PROFESSIONAL,
+        published_at=observed,
+        observed_at=observed,
+        as_of=observed,
+    )
+    save_event(db, event)
+    stale_task = SimpleNamespace(
+        task_id="stale-retrying-mapping",
+        entity_id=str(event.id),
+        status="retrying",
+        updated_at=worker.utc_now() - timedelta(minutes=10),
+    )
+    redis = FakeRedis()
+    queued = []
+
+    monkeypatch.setattr(worker, "_redis_client", lambda: redis)
+    monkeypatch.setattr(
+        worker, "stale_model_task_records", lambda *_args, **_kwargs: [stale_task]
+    )
+    monkeypatch.setattr(
+        worker, "list_model_task_records", lambda *_args, **_kwargs: [stale_task]
+    )
+    monkeypatch.setattr(
+        worker,
+        "enqueue_asset_mapping",
+        lambda *_args, **kwargs: queued.append(kwargs) or "replacement-task",
+    )
+    monkeypatch.setattr(worker, "cancel_model_task", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(worker, "_revoke_model_task", lambda *_args: None)
+
+    result = worker.reconcile_asset_mapping_leases.run()
+
+    assert result["requeued"] == 1
+    assert len(queued) == 1
+    assert queued[0]["force"] is True
+
+
 def test_stale_mapping_recovery_cancels_terminal_event_without_requeue(db, monkeypatch):
     observed = datetime(2026, 8, 22, 12, 0, tzinfo=UTC)
     event = NewsEvent(

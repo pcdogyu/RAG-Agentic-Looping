@@ -1752,7 +1752,8 @@ def reconcile_asset_mapping_leases() -> dict[str, int | str]:
             cutoff = utc_now() - timedelta(seconds=settings.model_task_lease_seconds)
             if (
                 current is None
-                or current.status not in {"running", "generating", "testing", "merging"}
+                or current.status
+                not in {"running", "retrying", "generating", "testing", "merging"}
                 or current.updated_at > cutoff
                 or not current.entity_id
             ):

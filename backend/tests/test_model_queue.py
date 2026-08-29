@@ -603,6 +603,43 @@ def test_running_task_heartbeat_renews_lease_and_never_revives_terminal_task():
     )
 
 
+def test_retrying_task_becomes_stale_after_lease_expires():
+    redis = FakeRedis()
+    started_at = datetime(2026, 8, 26, 8, 0, tzinfo=UTC)
+    record_model_task(
+        "assist",
+        task_id="mapping-retrying",
+        kind="asset_mapping",
+        title="重试租约测试",
+        queued_at=started_at,
+        redis_client=redis,
+    )
+    update_model_task(
+        "assist",
+        "mapping-retrying",
+        status="retrying",
+        attempt=2,
+        occurred_at=started_at + timedelta(seconds=30),
+        redis_client=redis,
+    )
+
+    assert stale_model_task_records(
+        "assist",
+        lease_seconds=180,
+        now=started_at + timedelta(seconds=209),
+        redis_client=redis,
+    ) == []
+    assert [
+        item.task_id
+        for item in stale_model_task_records(
+            "assist",
+            lease_seconds=180,
+            now=started_at + timedelta(seconds=210),
+            redis_client=redis,
+        )
+    ] == ["mapping-retrying"]
+
+
 def test_terminal_task_records_expire_after_24_hours():
     redis = FakeRedis()
     queued_at = datetime(2026, 8, 24, 8, 0, tzinfo=UTC)

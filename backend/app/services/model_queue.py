@@ -51,6 +51,7 @@ ACTIVE_STATUSES = {
     "proposed",
 }
 RUNNING_STATUSES = {"running", "generating", "testing", "merging"}
+LEASED_STATUSES = RUNNING_STATUSES | {"retrying"}
 FAILED_STATUSES = {"failed", "rejected", "rolled_back"}
 COMPLETED_STATUSES = {"completed", "merged", "unmapped", "insufficient_evidence"}
 STATUS_PRIORITY = {
@@ -562,14 +563,14 @@ def stale_model_task_records(
     now: datetime | None = None,
     redis_client: Redis | None = None,
 ) -> list[ModelQueueTask]:
-    """Return running tasks whose last heartbeat is older than the lease."""
+    """Return in-flight tasks whose last heartbeat or retry update is stale."""
 
     generated_at = as_utc(now or utc_now())
     cutoff = generated_at - timedelta(seconds=max(1, lease_seconds))
     return [
         item
         for item in list_model_task_records(lane, now=generated_at, redis_client=redis_client)
-        if item.status in RUNNING_STATUSES and item.updated_at <= cutoff
+        if item.status in LEASED_STATUSES and item.updated_at <= cutoff
     ]
 
 
