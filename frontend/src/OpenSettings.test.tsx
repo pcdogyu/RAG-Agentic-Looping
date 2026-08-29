@@ -402,12 +402,17 @@ describe("open source and search settings", () => {
   it("shows failed research recovery and builds kind-specific retry paths", () => {
     const markup = renderToStaticMarkup(createElement(ConclusionsPage, { apiBase: "" }));
 
+    expect(markup).toContain('class="conclusions-split" data-layout="65-35"');
+    expect(markup).toContain('class="research-results-panel successful-research-panel"');
+    expect(markup).toContain('class="research-results-panel failed-research-panel"');
+    expect(markup).toContain("成功研究");
     expect(markup).toContain("历史失败研究");
     expect(markup).toContain("重新执行会创建新任务");
     expect(markup).toContain("正在加载历史失败研究…");
     expect(markup).toContain("正在加载研究结论…");
     expect(markup).not.toContain("当前筛选范围内没有最终标的建议。");
     expect(markup).toContain("全部重试");
+    expect(markup.indexOf(">成功研究<")).toBeLessThan(markup.indexOf(">历史失败研究<"));
     expect(markup.indexOf(">全部重试<")).toBeLessThan(markup.indexOf(">刷新<"));
     expect(failedResearchBulkRetryPath).toBe(
       "/api/v1/failed-research-runs/retry",

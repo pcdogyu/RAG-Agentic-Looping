@@ -2298,51 +2298,58 @@ export function ConclusionsPage({ apiBase }: { apiBase: string }) {
         <select aria-label="证据状态" value={filters.evidence_status} onChange={(e) => setFilters({ ...filters, evidence_status: e.target.value })}><option value="">全部资料覆盖</option><option value="complete">资料覆盖完整</option><option value="incomplete">资料覆盖不足</option></select>
         <button disabled={loading}>{loading ? "筛选中…" : "筛选"}</button>
       </form>
-      {error && <div className="page-error">{error}</div>}
-      <section className="failed-research-panel">
-        <div className="failed-research-heading"><div><p className="eyebrow">RETRY QUEUE</p><h3>历史失败研究</h3></div><div className="failed-research-actions"><button type="button" disabled={retryingAll || !!retryingId || failuresLoading || !failedItems.length} onClick={retryAll}>{retryingAll ? "全部重试中…" : "全部重试"}</button><button type="button" disabled={retryingAll || failuresLoading} onClick={loadFailures}>刷新</button></div></div>
-        <p className="failed-research-copy">重新执行会创建新任务，保留原失败记录，并使用当前数据源和模型配置。</p>
-        {retryMessage && <div className={retryMessageError ? "page-error" : "page-message"}>{retryMessage}</div>}
-        <div className="failed-research-list">
-          {failedItems.map((item) => {
-            const retryActive = ["queued", "running", "verifying"].includes(item.latest_retry?.status || "");
-            return <article key={`${item.kind}-${item.id}`} className="failed-research-item">
-              <div><span>{item.kind === "asset" ? "标的研究" : "事件研报"} · {new Date(item.updated_at).toLocaleString("zh-CN")}</span><strong>{item.asset ? `${item.asset.symbol} · ${item.asset.name}` : item.event?.headline || item.id}</strong><p>{item.error || "未记录错误详情"}</p>{item.latest_retry && <small>最近重跑：{item.latest_retry.status} · {new Date(item.latest_retry.updated_at).toLocaleString("zh-CN")}</small>}</div>
-              <div className="failed-research-controls">
-                <button type="button" disabled={retryingAll || retryingId === item.id || retryActive} onClick={() => retry(item)}>{retryingId === item.id ? "正在排队…" : retryActive ? "重跑中" : "重新执行"}</button>
-                <div className="failed-research-queues" aria-label={`可用研究队列 ${researchInstances.length} 个`}>
-                  <span>可用队列 {researchInstances.length}</span>
-                  {researchInstances.map((instance) => <button
-                    type="button"
-                    key={instance.id}
-                    title={`送入 ${instance.id}；当前排队 ${instance.counts.queued} 条`}
-                    disabled={retryingAll || retryingId === item.id || retryActive}
-                    onClick={() => retry(item, instance.id)}
-                  >{instance.id}</button>)}
+      <div className="conclusions-split" data-layout="65-35">
+        <section className="research-results-panel successful-research-panel">
+          <div className="research-results-heading"><div><p className="eyebrow">SUCCESSFUL RESEARCH</p><h3>成功研究</h3></div></div>
+          <div className="research-results-scroll successful-research-scroll">
+            {error && <div className="page-error">{error}</div>}
+            <div className="conclusion-list">
+              {items.map((item) => item.kind === "asset" && item.recommendation
+                ? <ConclusionCard
+                  key={`${item.kind}-${item.id}`}
+                  item={item.recommendation}
+                  researchState={researchStates[recommendationAssetKey(item.recommendation)]}
+                  onOpen={() => void open(item)}
+                  onResearch={() => void researchAgain(item.recommendation as Recommendation)}
+                />
+                : <EventConclusionCard key={`${item.kind}-${item.id}`} item={item} onOpen={() => void open(item)} />)}
+              {!items.length && !error && (loading
+                ? <div className="page-message">正在加载研究结论…</div>
+                : <div className="page-empty">当前筛选范围内没有事件或标的结论。</div>)}
+            </div>
+            {cursor && <button className="load-more" type="button" disabled={loadingMore} onClick={() => void load(true)}>{loadingMore ? "正在加载…" : "加载更多"}</button>}
+          </div>
+        </section>
+        <section className="research-results-panel failed-research-panel">
+          <div className="research-results-heading failed-research-heading"><div><p className="eyebrow">RETRY QUEUE</p><h3>历史失败研究</h3></div><div className="failed-research-actions"><button type="button" disabled={retryingAll || !!retryingId || failuresLoading || !failedItems.length} onClick={retryAll}>{retryingAll ? "全部重试中…" : "全部重试"}</button><button type="button" disabled={retryingAll || failuresLoading} onClick={loadFailures}>刷新</button></div></div>
+          <p className="failed-research-copy">重新执行会创建新任务，保留原失败记录，并使用当前数据源和模型配置。</p>
+          {retryMessage && <div className={retryMessageError ? "page-error" : "page-message"}>{retryMessage}</div>}
+          <div className="research-results-scroll failed-research-list">
+            {failedItems.map((item) => {
+              const retryActive = ["queued", "running", "verifying"].includes(item.latest_retry?.status || "");
+              return <article key={`${item.kind}-${item.id}`} className="failed-research-item">
+                <div><span>{item.kind === "asset" ? "标的研究" : "事件研报"} · {new Date(item.updated_at).toLocaleString("zh-CN")}</span><strong>{item.asset ? `${item.asset.symbol} · ${item.asset.name}` : item.event?.headline || item.id}</strong><p>{item.error || "未记录错误详情"}</p>{item.latest_retry && <small>最近重跑：{item.latest_retry.status} · {new Date(item.latest_retry.updated_at).toLocaleString("zh-CN")}</small>}</div>
+                <div className="failed-research-controls">
+                  <button type="button" disabled={retryingAll || retryingId === item.id || retryActive} onClick={() => retry(item)}>{retryingId === item.id ? "正在排队…" : retryActive ? "重跑中" : "重新执行"}</button>
+                  <div className="failed-research-queues" aria-label={`可用研究队列 ${researchInstances.length} 个`}>
+                    <span>可用队列 {researchInstances.length}</span>
+                    {researchInstances.map((instance) => <button
+                      type="button"
+                      key={instance.id}
+                      title={`送入 ${instance.id}；当前排队 ${instance.counts.queued} 条`}
+                      disabled={retryingAll || retryingId === item.id || retryActive}
+                      onClick={() => retry(item, instance.id)}
+                    >{instance.id}</button>)}
+                  </div>
                 </div>
-              </div>
-            </article>;
-          })}
-          {!failedItems.length && !retryMessage && (failuresLoading
-            ? <div className="page-message">正在加载历史失败研究…</div>
-            : <div className="page-empty">当前没有失败研究。</div>)}
-        </div>
-      </section>
-      <div className="conclusion-list">
-        {items.map((item) => item.kind === "asset" && item.recommendation
-          ? <ConclusionCard
-            key={`${item.kind}-${item.id}`}
-            item={item.recommendation}
-            researchState={researchStates[recommendationAssetKey(item.recommendation)]}
-            onOpen={() => void open(item)}
-            onResearch={() => void researchAgain(item.recommendation as Recommendation)}
-          />
-          : <EventConclusionCard key={`${item.kind}-${item.id}`} item={item} onOpen={() => void open(item)} />)}
-        {!items.length && !error && (loading
-          ? <div className="page-message">正在加载研究结论…</div>
-          : <div className="page-empty">当前筛选范围内没有事件或标的结论。</div>)}
+              </article>;
+            })}
+            {!failedItems.length && !retryMessage && (failuresLoading
+              ? <div className="page-message">正在加载历史失败研究…</div>
+              : <div className="page-empty">当前没有失败研究。</div>)}
+          </div>
+        </section>
       </div>
-      {cursor && <button className="load-more" type="button" disabled={loadingMore} onClick={() => void load(true)}>{loadingMore ? "正在加载…" : "加载更多"}</button>}
       {selectedAsset && <ConclusionDetailModal detail={selectedAsset} onClose={() => setSelectedAsset(null)} />}
       {selectedEvent && <EventConclusionDetailModal detail={selectedEvent} onClose={() => setSelectedEvent(null)} />}
     </section>
