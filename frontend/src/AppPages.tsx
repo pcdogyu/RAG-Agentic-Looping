@@ -1321,7 +1321,7 @@ export type TargetChange = {
   changed_at: string;
   previous: { rating: string; direction_score: number | null; rating_confidence: number | null };
   current: { rating: string; direction_score: number | null; rating_confidence: number | null };
-  latest: { rating: string; direction_score: number | null; rating_confidence: number | null };
+  latest: { rating: string; direction_score: number | null; rating_confidence: number | null; news_confidence: number | null };
   latest_detail: { kind: "event" | "asset"; id: string; researched_at: string };
   change_detail_id: string;
 };
@@ -2134,6 +2134,7 @@ export function TargetChangeGrid({
   return <div className="target-change-grid unified-target-change-grid" data-columns={changedTargetDesktopColumns}>
     {items.map((item) => {
       const score = item.latest.direction_score;
+      const newsConfidence = item.latest.news_confidence;
       const confidence = item.latest.rating_confidence;
       return <article className={`target-change-card ${item.kind}`} key={item.key}>
         <header>
@@ -2153,9 +2154,9 @@ export function TargetChangeGrid({
             </button>
           </div>
         </header>
-        <div className="target-change-field changed"><span>评级变化</span><strong>{recommendationRatingLabel(item.previous.rating)} → {recommendationRatingLabel(item.current.rating)}</strong></div>
+        <div className="target-change-field changed"><span>评级变化</span><div className="target-change-rating-row"><strong>{recommendationRatingLabel(item.previous.rating)} → {recommendationRatingLabel(item.current.rating)}</strong><b className={score === null ? "neutral" : score < 0 ? "negative" : score > 0 ? "positive" : "neutral"} title="最新方向分">{score === null ? "—" : `${score > 0 ? "+" : ""}${score}`}</b></div></div>
         <div className={`target-change-latest${onResearch ? " with-research" : ""}`}>
-          <span>最新方向分<strong>{score === null ? "—" : `${score > 0 ? "+" : ""}${score}`}</strong></span>
+          <span>新闻可信度<strong>{newsConfidence === null ? "—" : `${Math.round(newsConfidence * 100)}%`}</strong></span>
           <span>评级置信度<strong>{confidence === null ? "—" : `${Math.round(confidence * 100)}%`}</strong></span>
           {onResearch && <ResearchAgainButton state={researchStates[targetChangeResearchKey(item)]} onResearch={() => onResearch(item)} />}
         </div>

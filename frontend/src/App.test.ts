@@ -601,7 +601,7 @@ describe("changed targets page", () => {
       changed_at: `2026-08-28T0${index}:00:00Z`,
       previous: { rating: "watch", direction_score: 0, rating_confidence: 0.5 },
       current: { rating: "bullish", direction_score: 45, rating_confidence: 0.7 },
-      latest: { rating: "bullish", direction_score: 58, rating_confidence: 0.81 },
+      latest: { rating: "bullish", direction_score: 58, rating_confidence: 0.81, news_confidence: 0.76 },
       latest_detail: { kind: kind === "macro" ? "event" : "asset", id: `${kind}-detail-${index}`, researched_at: `2026-08-29T0${index}:00:00Z` },
       change_detail_id: `${kind}-change-${index}`,
     })) as TargetChange[];
@@ -630,7 +630,10 @@ describe("changed targets page", () => {
     expect(targetChangeResearchKey(assetItems[0])).toBe("asset:asset-0");
     expect(markup).toContain("评级变化");
     expect(markup).toContain("最新方向分");
+    expect(markup).toContain("新闻可信度");
     expect(markup).toContain("评级置信度");
+    expect(markup).toContain("+58");
+    expect(markup).toContain("76%");
     expect(markup).toContain('title="Target 0 Corp"');
     expect(markup).toContain('aria-label="查看 能源行业 0 最新研究"');
     expect(markup).toContain('aria-label="查看 TARGET0 最新研究"');

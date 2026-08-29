@@ -53,6 +53,7 @@ def recommendation(
     rating: Rating,
     score: int,
     as_of,
+    news_confidence: float = 0.72,
 ) -> tuple[Recommendation, ResearchRun]:
     run = ResearchRun(asset=target, status=RunStatus.COMPLETED, as_of=as_of)
     item = Recommendation(
@@ -64,6 +65,7 @@ def recommendation(
         rating=rating,
         confidence=0.72,
         rating_confidence=0.72,
+        news_confidence=news_confidence,
         bull_probability=0.6 if score > 0 else 0.2,
         base_probability=0.2,
         bear_probability=0.2 if score > 0 else 0.6,
@@ -84,6 +86,7 @@ def event_run(
     status: RunStatus,
     impacts: list[TargetImpact],
     report: bool = True,
+    news_confidence: float = 0.67,
 ) -> EventResearchRun:
     now = utc_now()
     event = NewsEvent(
@@ -104,6 +107,7 @@ def event_run(
             EventReport(
                 summary=f"{name} report",
                 confidence=0.61,
+                news_confidence=news_confidence,
                 evidence_complete=status is RunStatus.COMPLETED,
                 impacts=impacts,
             )
@@ -322,6 +326,7 @@ def test_target_changes_split_macro_and_assets_and_link_latest_research(db):
     assert macro_items[0]["previous"]["rating"] == "watch"
     assert macro_items[0]["current"]["rating"] == "bearish"
     assert macro_items[0]["latest"]["direction_score"] == -55
+    assert macro_items[0]["latest"]["news_confidence"] == 0.67
     assert macro_items[0]["change_detail_id"] == str(changed_macro.id)
     assert macro_items[0]["latest_detail"]["id"] == str(latest_macro.id)
     assert all("SECURITY" not in item["label"] for item in macro_items)
@@ -330,6 +335,7 @@ def test_target_changes_split_macro_and_assets_and_link_latest_research(db):
     assert len(asset_items) == 1
     assert asset_items[0]["current"]["rating"] == "bullish"
     assert asset_items[0]["latest"]["direction_score"] == 55
+    assert asset_items[0]["latest"]["news_confidence"] == 0.72
     assert asset_items[0]["latest_detail"]["id"] == str(latest_asset.id)
 
 

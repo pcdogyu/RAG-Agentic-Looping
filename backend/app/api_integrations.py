@@ -1183,7 +1183,14 @@ def _macro_target_changes(db: Session) -> list[dict[str, Any]]:
                 "changed_at": changed_at,
                 "previous": _impact_state(previous),
                 "current": _impact_state(current),
-                "latest": _impact_state(latest),
+                "latest": {
+                    **_impact_state(latest),
+                    "news_confidence": (
+                        latest_run.report.news_confidence
+                        if latest_run.report
+                        else None
+                    ),
+                },
                 "latest_detail": {
                     "kind": "event",
                     "id": latest_run.id,
@@ -1223,6 +1230,7 @@ def _asset_target_changes(db: Session) -> list[dict[str, Any]]:
                 "rating": latest.rating.value,
                 "direction_score": latest.direction_score,
                 "rating_confidence": latest.rating_confidence,
+                "news_confidence": latest.news_confidence,
             },
             "latest_detail": {
                 "kind": "asset",
