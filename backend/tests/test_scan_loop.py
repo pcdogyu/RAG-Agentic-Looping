@@ -335,6 +335,85 @@ def test_clear_news_extraction_queue_cancels_active_and_failed_items():
     assert redis.get(worker.SCAN_GATE_KEY) is None
 
 
+def test_clear_news_extraction_instance_releases_active_scan_gate():
+    redis = FakeRedis()
+    now = datetime(2026, 8, 26, 8, 0, tzinfo=UTC).isoformat()
+    entries = [
+        {
+            "task_id": "task-completed",
+            "news_id": "news-completed",
+            "title": "completed",
+            "instance_id": "extract-1",
+            "status": "completed",
+            "queued_at": now,
+            "updated_at": now,
+        },
+        {
+            "task_id": "task-running",
+            "news_id": "news-running",
+            "title": "running",
+            "instance_id": "extract-0",
+            "status": "running",
+            "queued_at": now,
+            "updated_at": now,
+        },
+    ]
+    worker._initialize_news_extraction_queue(redis, "scan-1", entries, {})
+    worker._update_scan_status(
+        redis,
+        state="running",
+        task_id="scan-1",
+        phase="extracting",
+        current=1,
+        total=2,
+    )
+    redis.set(worker.SCAN_GATE_KEY, "scan-1")
+
+    result = worker.clear_news_extraction_queue(redis, instance_id="extract-0")
+    payload = worker._read_news_extraction_queue(redis)
+    scan_status = worker._read_scan_status(redis)
+
+    assert result == {
+        "cancelled": 1,
+        "celery_task_ids": ["task-running"],
+    }
+    assert payload["state"] == "cancelled"
+    assert [item["status"] for item in payload["items"]] == [
+        "completed",
+        "cancelled",
+    ]
+    assert scan_status["state"] == "cancelled"
+    assert scan_status["current"] == 2
+    assert scan_status["total"] == 2
+    assert redis.get(worker.SCAN_GATE_KEY) is None
+
+
+def test_clear_empty_extraction_instance_keeps_active_scan_gate():
+    redis = FakeRedis()
+    now = datetime(2026, 8, 26, 8, 0, tzinfo=UTC).isoformat()
+    entries = [
+        {
+            "task_id": "task-running",
+            "news_id": "news-running",
+            "title": "running",
+            "instance_id": "extract-1",
+            "status": "running",
+            "queued_at": now,
+            "updated_at": now,
+        }
+    ]
+    worker._initialize_news_extraction_queue(redis, "scan-1", entries, {})
+    redis.set(worker.SCAN_GATE_KEY, "scan-1")
+
+    result = worker.clear_news_extraction_queue(redis, instance_id="extract-0")
+    payload = worker._read_news_extraction_queue(redis)
+
+    assert result == {"cancelled": 0, "celery_task_ids": []}
+    assert payload["state"] == "running"
+    assert payload["items"][0]["status"] == "running"
+    assert redis.get(worker.SCAN_GATE_KEY) == b"scan-1"
+
+
 def test_news_extraction_timing_accumulates_attempts_without_retry_wait(monkeypatch):
     redis = FakeRedis()
     monkeypatch.setattr(worker, "_redis_client", lambda: redis)

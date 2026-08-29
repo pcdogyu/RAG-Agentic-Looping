@@ -783,9 +783,17 @@ def clear_news_extraction_queue(
                 redis_client=client,
             )
     remaining = _news_extraction_counts(payload)
+    scan_task_id = payload.get("scan_task_id")
+    owns_scan_gate = bool(
+        scan_task_id and _decode(client.get(SCAN_GATE_KEY)) == scan_task_id
+    )
+    # Every scan batch is a Celery chord. Revoking or purging even one active
+    # header task prevents its finalizer from running, so an instance-scoped
+    # clear must also abort the batch and release its scan lease.
+    abort_scan = instance_id is None or bool(task_ids and owns_scan_gate)
     payload["state"] = (
         "cancelled"
-        if instance_id is None
+        if abort_scan
         else "running"
         if remaining["running"]
         else "retrying"
@@ -798,18 +806,20 @@ def clear_news_extraction_queue(
     )
     payload["error"] = None
     _write_news_extraction_queue(client, payload)
-    scan_task_id = payload.get("scan_task_id")
-    if scan_task_id and instance_id is None:
+    if scan_task_id and abort_scan:
+        terminal_items = sum(
+            item.get("status") in {"completed", "failed", "cancelled"}
+            for item in payload.get("items", [])
+        )
         _update_scan_status(
             client,
             state="cancelled",
             phase="extracting",
-            current=int(payload.get("total_items") or 0) - len(task_ids),
+            current=terminal_items,
             total=int(payload.get("total_items") or 0),
         )
-        if _decode(client.get(SCAN_GATE_KEY)) == scan_task_id:
-            client.delete(SCAN_GATE_KEY)
-        client.delete(SCAN_PAUSE_KEY)
+        _clear_scan_gate(client, scan_task_id)
+        _clear_scan_pause(client, scan_task_id)
     return {"cancelled": cancelled, "celery_task_ids": task_ids}
 
 
