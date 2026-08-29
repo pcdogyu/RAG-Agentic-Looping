@@ -198,11 +198,20 @@ class AkShareProvider:
                 hk_share_key,
                 hk_share_payload,
                 "hk-share-master",
-                ak.stock_hk_spot_em,
+                lambda: self._hk_security_frame(ak),
                 self._hk_share_records,
             ),
         ]
         return [AssetRef.model_validate(item) for item in payload]
+
+    @staticmethod
+    def _hk_security_frame(ak: Any):
+        """Use Sina's complete HK directory when Eastmoney closes the connection."""
+
+        try:
+            return ak.stock_hk_spot_em()
+        except Exception:
+            return ak.stock_hk_spot()
 
     @staticmethod
     def _a_share_records(frame: Any) -> list[dict[str, Any]]:
@@ -246,7 +255,13 @@ class AkShareProvider:
         output: list[dict[str, Any]] = []
         for row in frame.to_dict(orient="records"):
             raw_code = str(row.get("代码") or row.get("code") or "").strip()
-            name = str(row.get("名称") or row.get("name") or "").strip()
+            name = str(
+                row.get("名称")
+                or row.get("中文名称")
+                or row.get("英文名称")
+                or row.get("name")
+                or ""
+            ).strip()
             if not raw_code or not name or not raw_code.isdigit():
                 continue
             code = raw_code.zfill(5)

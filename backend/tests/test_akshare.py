@@ -181,6 +181,30 @@ def test_akshare_partial_a_share_cache_does_not_poison_hk_master(monkeypatch):
     assert provider.resolve_assets("9988")[0].symbol == "09988"
 
 
+def test_akshare_hk_master_falls_back_to_sina_directory(monkeypatch):
+    calls = []
+    monkeypatch.setitem(
+        sys.modules,
+        "akshare",
+        SimpleNamespace(
+            stock_info_a_code_name=lambda: SecurityFrame([]),
+            stock_hk_spot_em=lambda: (_ for _ in ()).throw(
+                ConnectionError("Eastmoney closed the connection")
+            ),
+            stock_hk_spot=lambda: calls.append("sina")
+            or SecurityFrame(
+                [{"代码": "1", "中文名称": "长和", "英文名称": "CKH HOLDINGS"}]
+            ),
+        ),
+    )
+    provider = AkShareProvider()
+
+    assets = provider._listed_assets()
+
+    assert calls == ["sina"]
+    assert [(item.symbol, item.name) for item in assets] == [("00001", "长和")]
+
+
 def test_akshare_collects_a_share_business_financial_and_valuation_data(monkeypatch):
     calls = []
 
