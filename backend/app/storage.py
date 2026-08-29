@@ -86,10 +86,10 @@ def get_asset(db: Session, asset_id: str) -> AssetRef | None:
     return asset_from_row(row) if row else None
 
 
-def save_news(db: Session, item: NewsItem) -> bool:
+def news_row_from_item(item: NewsItem) -> NewsRow:
     item = enrich_news_lineage(item)
     payload = item.model_dump(mode="json")
-    row = NewsRow(
+    return NewsRow(
         id=item.id,
         source=item.source,
         source_quality=item.source_quality.value,
@@ -104,6 +104,10 @@ def save_news(db: Session, item: NewsItem) -> bool:
         symbols=item.symbols,
         raw_metadata=payload["raw_metadata"],
     )
+
+
+def save_news(db: Session, item: NewsItem) -> bool:
+    row = news_row_from_item(item)
     db.add(row)
     try:
         db.commit()

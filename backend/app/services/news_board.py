@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
-from backend.app.db import EventResearchRunRow, EventRow, NewsRow, ResearchRunRow
+from backend.app.db import EventResearchRunRow, EventRow, NewsProcessingRow, NewsRow, ResearchRunRow
 from backend.app.domain import (
     EventResearchRun,
     NewsEvent,
@@ -19,8 +19,19 @@ from backend.app.domain import (
     as_utc,
     utc_now,
 )
+from backend.app.services.news_processing import (
+    DISPATCH_FAILED,
+    DISPATCH_PENDING,
+    EXTRACTION_FAILED,
+    QUEUED,
+    RETRYING,
+    RUNNING,
+    processing_rows_by_news,
+)
 
 NewsProcessingStatus = Literal[
+    "dispatch_pending",
+    "queued",
     "extracting",
     "mapping",
     "researching",
@@ -28,18 +39,22 @@ NewsProcessingStatus = Literal[
     "completed",
     "insufficient_evidence",
     "failed",
+    "orphaned",
     "pending",
 ]
 
 STATUS_PRIORITY: dict[NewsProcessingStatus, int] = {
     "pending": 0,
-    "failed": 1,
-    "insufficient_evidence": 2,
-    "completed": 3,
-    "extracting": 4,
-    "mapping": 5,
-    "researching": 6,
-    "revising": 7,
+    "orphaned": 1,
+    "failed": 2,
+    "insufficient_evidence": 3,
+    "completed": 4,
+    "dispatch_pending": 5,
+    "queued": 6,
+    "extracting": 7,
+    "mapping": 8,
+    "researching": 9,
+    "revising": 10,
 }
 
 
@@ -67,6 +82,8 @@ class NewsBoardItem(BaseModel):
     observed_at: datetime
     status: NewsProcessingStatus
     status_updated_at: datetime
+    status_detail: str | None = None
+    retryable: bool = False
     events: list[NewsBoardEvent] = Field(default_factory=list)
     assets: list[NewsBoardAsset] = Field(default_factory=list)
 
@@ -141,6 +158,21 @@ def _extraction_candidates(
     return result
 
 
+def _durable_processing_status(
+    row: NewsProcessingRow,
+) -> tuple[NewsProcessingStatus, datetime] | None:
+    updated_at = as_utc(row.updated_at)
+    if row.status == DISPATCH_PENDING:
+        return "dispatch_pending", updated_at
+    if row.status == QUEUED:
+        return "queued", updated_at
+    if row.status in {RUNNING, RETRYING}:
+        return "extracting", updated_at
+    if row.status in {DISPATCH_FAILED, EXTRACTION_FAILED}:
+        return "failed", updated_at
+    return None
+
+
 def build_news_board(
     db: Session,
     *,
@@ -210,6 +242,7 @@ def build_news_board(
             runs_by_event[run.event_id].append(run)
 
     extraction_by_news = _extraction_candidates(extraction_items or [])
+    processing_by_news = processing_rows_by_news(db, selected_ids)
     sources: list[NewsBoardSource] = []
     for source, latest, rows, error in grouped_rows:
         items: list[NewsBoardItem] = []
@@ -223,11 +256,29 @@ def build_news_board(
             extraction = extraction_by_news.get(row.id)
             if extraction:
                 status_candidates.append(extraction)
+            durable_processing = processing_by_news.get(row.id)
+            if durable_processing and (
+                durable_status := _durable_processing_status(durable_processing)
+            ):
+                status_candidates.append(durable_status)
             for event in events:
                 status_candidates.append(_event_status(event))
                 for run in runs_by_event.get(event.id, []):
                     status_candidates.append((_run_status(run), as_utc(run.updated_at)))
             status, status_updated_at = _choose_status(status_candidates, row.observed_at)
+            if not events and not status_candidates:
+                status = "orphaned"
+                status_updated_at = as_utc(row.observed_at)
+            retryable = status in {"orphaned", "failed"}
+            status_detail = None
+            if durable_processing and durable_processing.last_error:
+                status_detail = durable_processing.last_error
+            elif status == "orphaned":
+                status_detail = "新闻已入库，但没有抽取任务或关联事件。"
+            elif status == "dispatch_pending":
+                status_detail = "新闻已持久化，等待可靠派发到抽取队列。"
+            elif status == "queued":
+                status_detail = "抽取任务已创建，等待模型实例执行。"
 
             assets: dict[str, NewsBoardAsset] = {}
             for event in events:
@@ -250,6 +301,8 @@ def build_news_board(
                     observed_at=as_utc(row.observed_at),
                     status=status,
                     status_updated_at=status_updated_at,
+                    status_detail=status_detail,
+                    retryable=retryable,
                     events=[
                         NewsBoardEvent(
                             id=event.id,

@@ -167,7 +167,7 @@ def test_news_board_projects_pipeline_states_and_status_priority(db):
     statuses = {item.title: item.status for item in payload.sources[0].items}
 
     assert statuses == {
-        "pending": "pending",
+        "pending": "orphaned",
         "extracting": "extracting",
         "mapping": "mapping",
         "researching": "researching",
@@ -212,7 +212,9 @@ def test_news_board_api_remains_available_when_extraction_registry_is_unavailabl
         response = client.get("/api/v1/news-board?per_source=50")
 
     assert response.status_code == 200
-    assert response.json()["sources"][0]["items"][0]["status"] == "pending"
+    item = response.json()["sources"][0]["items"][0]
+    assert item["status"] == "orphaned"
+    assert item["retryable"] is True
     with TestClient(app) as client:
         invalid = client.get("/api/v1/news-board?per_source=51")
     assert invalid.status_code == 422

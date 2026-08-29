@@ -351,13 +351,18 @@ h1 span { color: var(--mint); font-weight: 400; }
 .news-event-type { color: var(--mint); font: 500 9px "DM Mono", monospace; letter-spacing: .1em; text-transform: uppercase; }
 .news-processing-status { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 9px; white-space: nowrap; }
 .news-processing-status i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; box-shadow: 0 0 7px currentColor; }
+.news-processing-status.dispatch_pending, .news-processing-status.queued { color: var(--cyan); }
 .news-processing-status.extracting { color: var(--cyan); }
 .news-processing-status.mapping { color: var(--amber); }
 .news-processing-status.researching { color: var(--cyan); }
 .news-processing-status.revising { color: var(--mint); }
 .news-processing-status.completed { color: var(--mint); }
-.news-processing-status.insufficient_evidence, .news-processing-status.pending { color: var(--amber); }
+.news-processing-status.insufficient_evidence, .news-processing-status.pending, .news-processing-status.orphaned { color: var(--amber); }
 .news-processing-status.failed { color: var(--red); }
+.news-processing-detail { color: var(--muted); font-size: 9px; line-height: 1.5; }
+.news-retry-action { display: flex; align-items: center; gap: 8px; }
+.news-retry-action button { width: fit-content; padding: 7px 10px; font-size: 10px; }
+.news-retry-action small { color: var(--red); font-size: 9px; }
 .news-board-item h4 { margin: 0; font-size: 14px; line-height: 1.55; }
 .news-board-item h4 a { display: -webkit-box; overflow: hidden; color: var(--text); text-decoration: none; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
 .news-board-item h4 a:hover { color: var(--mint); }

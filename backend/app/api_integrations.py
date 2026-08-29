@@ -219,6 +219,29 @@ def rescan_source_filter_log(log_id: UUID, db: Db) -> dict[str, Any]:
     }
 
 
+@router.post("/api/v1/news/{news_id}/retry", status_code=202)
+def retry_news_processing(news_id: UUID, db: Db) -> dict[str, str]:
+    """Durably retry one orphaned or failed news item by its stable ID."""
+
+    news = get_news(db, news_id)
+    if news is None:
+        raise HTTPException(status_code=404, detail="news item not found")
+    try:
+        from backend.app.worker import enqueue_durable_news_retry
+
+        queued = enqueue_durable_news_retry(news_id, force_asset_mapping=True)
+    except RuntimeError as exc:
+        detail = str(exc)
+        status_code = 409 if "already active" in detail else 503
+        raise HTTPException(status_code=status_code, detail=detail) from exc
+    return {
+        "status": "queued",
+        "task_id": queued["task_id"],
+        "news_id": queued["news_id"],
+        "title": news.title,
+    }
+
+
 def _apply_source(row: McpSourceRow, payload: SourceInput, *, creating: bool = False) -> None:
     was_enabled = bool(row.enabled)
     connection_changed = creating or any(

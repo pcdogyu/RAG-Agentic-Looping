@@ -82,6 +82,60 @@ class NewsRow(Base):
     raw_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
+class NewsProcessingRow(Base):
+    """Durable lifecycle for one news item's extraction work."""
+
+    __tablename__ = "news_processing"
+
+    news_id: Mapped[UUID] = mapped_column(GUID(), primary_key=True)
+    status: Mapped[str] = mapped_column(String(40), index=True)
+    scan_task_id: Mapped[str | None] = mapped_column(String(160), nullable=True, index=True)
+    celery_task_id: Mapped[str | None] = mapped_column(
+        String(160), nullable=True, index=True
+    )
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    queued_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    heartbeat_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, index=True
+    )
+
+
+class NewsProcessingOutboxRow(Base):
+    """Transactional intent to publish one standalone extraction task."""
+
+    __tablename__ = "news_processing_outbox"
+
+    id: Mapped[UUID] = mapped_column(GUID(), primary_key=True, default=uuid4)
+    news_id: Mapped[UUID] = mapped_column(GUID(), unique=True, index=True)
+    status: Mapped[str] = mapped_column(String(40), index=True, default="pending")
+    force_asset_mapping: Mapped[bool] = mapped_column(Boolean, default=False)
+    dispatch_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    available_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, index=True
+    )
+    dispatched_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, index=True
+    )
+
+
 class NewsFilterLogRow(Base):
     __tablename__ = "news_filter_logs"
 

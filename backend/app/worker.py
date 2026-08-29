@@ -6,7 +6,7 @@ from functools import wraps
 from threading import Event, Thread
 from time import sleep
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from celery import Celery, chord
 from celery.exceptions import Ignore, Retry, SoftTimeLimitExceeded
@@ -57,6 +57,30 @@ from backend.app.services.model_queue import (
     touch_model_task,
     update_model_task,
 )
+from backend.app.services.news_processing import (
+    COMPLETED as NEWS_PROCESSING_COMPLETED,
+)
+from backend.app.services.news_processing import (
+    EXTRACTION_FAILED as NEWS_PROCESSING_FAILED,
+)
+from backend.app.services.news_processing import (
+    RETRYING as NEWS_PROCESSING_RETRYING,
+)
+from backend.app.services.news_processing import (
+    RUNNING as NEWS_PROCESSING_RUNNING,
+)
+from backend.app.services.news_processing import (
+    claim_news_dispatches,
+    mark_news_dispatch_failed,
+    mark_news_dispatched,
+    mark_news_processing,
+    mark_scan_news_queued,
+    request_news_retry,
+    stage_news_for_extraction,
+)
+from backend.app.services.news_processing import (
+    recover_orphaned_news as recover_orphaned_news_rows,
+)
 from backend.app.services.notifications import notifier
 from backend.app.services.outcomes import OutcomeService
 from backend.app.services.portfolio import PortfolioService
@@ -95,7 +119,6 @@ from backend.app.storage import (
     list_runs,
     save_event,
     save_event_research_run,
-    save_news,
     save_run,
     upsert_asset,
 )
@@ -119,6 +142,7 @@ SCAN_VISIBILITY_TIMEOUT_SECONDS = max(
     settings.scan_interval_minutes * 180,
 )
 SCAN_GATE_TTL_SECONDS = SCAN_VISIBILITY_TIMEOUT_SECONDS
+SCAN_HEARTBEAT_STALE_SECONDS = max(600, settings.model_task_lease_seconds * 2)
 celery_app = Celery("market-loop", broker=settings.redis_url, backend=settings.redis_url)
 celery_app.conf.update(
     task_serializer="json",
@@ -185,6 +209,11 @@ celery_app.conf.update(
         },
         "reconcile-asset-mapping-leases": {
             "task": "market_loop.reconcile_asset_mapping_leases",
+            "schedule": 60,
+            "options": {"queue": "io"},
+        },
+        "recover-orphaned-news": {
+            "task": "market_loop.recover_orphaned_news",
             "schedule": 60,
             "options": {"queue": "io"},
         },
@@ -565,6 +594,7 @@ def _default_scan_status() -> dict[str, Any]:
         "current": 0,
         "total": 0,
         "started_at": None,
+        "heartbeat_at": None,
         "last_completed_at": None,
         "next_scan_at": None,
         "last_result": None,
@@ -884,6 +914,8 @@ def cancel_news_extraction_task(
 def _update_scan_status(client: Redis, **updates: Any) -> dict[str, Any]:
     payload = _read_scan_status(client)
     payload.update(updates)
+    if payload.get("state") in {"queued", "running", "retrying", "paused"}:
+        payload["heartbeat_at"] = utc_now().isoformat()
     client.set(SCAN_STATUS_KEY, json.dumps(payload, ensure_ascii=False, default=str))
     return payload
 
@@ -1791,10 +1823,12 @@ def enqueue_news_extraction_retry(
     priority: int | None = None,
     model_instance_id: str | None = None,
     force_asset_mapping: bool = False,
+    task_id: str | None = None,
+    source: str = "manual",
 ) -> str:
     """Queue a standalone extraction attempt without reopening a completed scan."""
 
-    task_id = str(uuid4())
+    task_id = task_id or str(uuid4())
     instance = select_model_instance(
         "extract",
         task_id=task_id,
@@ -1809,7 +1843,7 @@ def enqueue_news_extraction_retry(
         entity_id=str(news.id),
         title=news.title,
         subtitle=news.source,
-        source="manual",
+        source=source,
         instance_id=instance.id,
     )
     try:
@@ -1832,6 +1866,85 @@ def enqueue_news_extraction_retry(
         )
         raise
     return str(task.id)
+
+
+def dispatch_news_processing_outbox(
+    *,
+    limit: int = 50,
+    news_ids: set[UUID] | None = None,
+) -> dict[str, Any]:
+    """Publish claimed database outbox rows and persist their broker task IDs."""
+
+    init_db()
+    with SessionLocal() as db:
+        claims = claim_news_dispatches(db, limit=limit, news_ids=news_ids)
+    queued: list[dict[str, str]] = []
+    failed = 0
+    for claim in claims:
+        deterministic_task_id = str(
+            uuid5(
+                NAMESPACE_URL,
+                f"news-processing:{claim.outbox_id}:{claim.dispatch_attempt}",
+            )
+        )
+        try:
+            with SessionLocal() as db:
+                news = get_news(db, claim.news_id)
+            if news is None:
+                raise ValueError(f"unknown news item: {claim.news_id}")
+            task_id = enqueue_news_extraction_retry(
+                news,
+                force_asset_mapping=claim.force_asset_mapping,
+                task_id=deterministic_task_id,
+                source="durable_outbox",
+            )
+            with SessionLocal() as db:
+                mark_news_dispatched(db, claim, task_id)
+            queued.append({"news_id": str(claim.news_id), "task_id": task_id})
+        except Exception as exc:
+            failed += 1
+            with SessionLocal() as db:
+                mark_news_dispatch_failed(
+                    db,
+                    claim,
+                    f"{type(exc).__name__}: {exc}",
+                )
+    return {"claimed": len(claims), "queued": queued, "failed": failed}
+
+
+def enqueue_durable_news_retry(
+    news_id: UUID,
+    *,
+    force_asset_mapping: bool = True,
+) -> dict[str, str]:
+    """Create and immediately dispatch a durable manual retry intent."""
+
+    init_db()
+    with SessionLocal() as db:
+        request_news_retry(
+            db,
+            news_id,
+            force_asset_mapping=force_asset_mapping,
+        )
+    result = dispatch_news_processing_outbox(limit=1, news_ids={news_id})
+    if not result["queued"]:
+        raise RuntimeError("news retry could not be dispatched")
+    return result["queued"][0]
+
+
+@celery_app.task(name="market_loop.recover_orphaned_news")
+def recover_orphaned_news() -> dict[str, Any]:
+    """Recover news rows stranded outside the provider lookback window."""
+
+    init_db()
+    with SessionLocal() as db:
+        recovery = recover_orphaned_news_rows(
+            db,
+            limit=100,
+            stale_seconds=SCAN_HEARTBEAT_STALE_SECONDS,
+        )
+    dispatch = dispatch_news_processing_outbox(limit=50)
+    return {**recovery, **dispatch}
 
 
 def enqueue_event_report(
@@ -2091,11 +2204,48 @@ def enqueue_event_research_refresh(
     return str(task.id), run
 
 
+def _recover_stale_scan_gate(client: Redis, *, now: datetime | None = None) -> bool:
+    """Release a scan lease whose worker stopped refreshing durable progress."""
+
+    task_id = _decode(client.get(SCAN_GATE_KEY))
+    if not task_id:
+        return False
+    status = _read_scan_status(client)
+    if status.get("state") == "paused":
+        return False
+    heartbeat = _parse_timestamp(status.get("heartbeat_at")) or _parse_timestamp(
+        status.get("started_at")
+    )
+    current = as_utc(now or utc_now())
+    if heartbeat is None or current - heartbeat <= timedelta(
+        seconds=SCAN_HEARTBEAT_STALE_SECONDS
+    ):
+        return False
+
+    queue_payload = _read_news_extraction_queue(client)
+    if queue_payload.get("scan_task_id") == task_id:
+        queue_payload["state"] = "interrupted"
+        queue_payload["error"] = "scan heartbeat expired"
+        _write_news_extraction_queue(client, queue_payload)
+    _update_scan_status(
+        client,
+        state="interrupted",
+        task_id=task_id,
+        phase="interrupted",
+        next_scan_at=None,
+        last_error="scan heartbeat expired",
+    )
+    _clear_scan_gate(client, task_id)
+    _clear_scan_pause(client, task_id)
+    return True
+
+
 @celery_app.task(name="market_loop.ensure_scan_loop")
 def ensure_scan_loop() -> dict:
     """Start immediately when uninitialized, then ten minutes after completion."""
 
     client = _redis_client()
+    recovered = _recover_stale_scan_gate(client)
     active = _decode(client.get(SCAN_GATE_KEY))
     if active:
         return {"status": "active", "task_id": active}
@@ -2104,22 +2254,30 @@ def ensure_scan_loop() -> dict:
     if next_scan_at and utc_now() < next_scan_at:
         return {"status": "waiting", "next_scan_at": next_scan_at.isoformat()}
     task_id, enqueue_status = enqueue_scan()
-    return {"status": enqueue_status, "task_id": task_id}
+    return {"status": enqueue_status, "task_id": task_id, "recovered_stale": recovered}
 
 
-def _persist_news_for_extraction(db, items: list[NewsItem]) -> list[NewsItem]:
+def _persist_news_for_extraction(
+    db,
+    items: list[NewsItem],
+    *,
+    scan_task_id: str | None = None,
+) -> list[NewsItem]:
     processed_ids = event_news_item_ids(db)
     pending: list[NewsItem] = []
     seen_ids: set[UUID] = set()
     for discovered in items:
         item = enrich_news_lineage(discovered)
-        if not save_news(db, item):
-            stored = get_news_by_content_hash(db, item.content_hash)
-            if stored is None:
-                continue
+        stored = get_news_by_content_hash(db, item.content_hash)
+        if stored is not None:
             item = stored
         if item.id in processed_ids or item.id in seen_ids:
             continue
+        item = stage_news_for_extraction(
+            db,
+            item,
+            scan_task_id=scan_task_id,
+        )
         seen_ids.add(item.id)
         pending.append(item)
     return pending
@@ -2161,6 +2319,16 @@ def _build_news_extraction_workflow(
     _initialize_news_extraction_queue(client, scan_task_id, entries, metadata)
     if not items:
         return [], None
+    init_db()
+    with SessionLocal() as db:
+        mark_scan_news_queued(
+            db,
+            scan_task_id,
+            [
+                (item.id, task_id)
+                for item, task_id in zip(items, task_ids, strict=True)
+            ],
+        )
     header = [
         extract_news_item.s(
             scan_task_id,
@@ -2226,7 +2394,11 @@ def scan_news(self) -> dict:
         with SessionLocal() as db:
             accepted_items, filtered_count = filter_news_items(db, items)
         with SessionLocal() as db:
-            pending_items = _persist_news_for_extraction(db, accepted_items)
+            pending_items = _persist_news_for_extraction(
+                db,
+                accepted_items,
+                scan_task_id=task_id,
+            )
         for error in registry.last_errors:
             notifier.send(f"数据源故障：{error}")
         _require_scan_gate(client, task_id)
@@ -2363,6 +2535,14 @@ def extract_news_item(
             news = get_news(db, UUID(news_id))
             if news is None:
                 raise ValueError(f"unknown news item: {news_id}")
+            mark_news_processing(
+                db,
+                news.id,
+                NEWS_PROCESSING_RUNNING,
+                task_id=str(self.request.id),
+                scan_task_id=scan_task_id,
+                attempt_count=attempt,
+            )
             registry = ProviderRegistry(assets=list_assets(db))
             events = EventService(registry).ingest(db, [news])
             provider_errors = list(registry.last_errors)
@@ -2372,6 +2552,14 @@ def extract_news_item(
                     events,
                     tolerate_errors=True,
                 )
+            )
+            mark_news_processing(
+                db,
+                news.id,
+                NEWS_PROCESSING_COMPLETED,
+                task_id=str(self.request.id),
+                scan_task_id=scan_task_id,
+                attempt_count=attempt,
             )
         updated = _update_news_extraction_item(
             client,
@@ -2401,6 +2589,21 @@ def extract_news_item(
         return {"status": "superseded", "news_id": news_id, "event_ids": []}
     except Exception as exc:
         retrying = self.request.retries < self.max_retries
+        with SessionLocal() as db:
+            if get_news(db, UUID(news_id)) is not None:
+                mark_news_processing(
+                    db,
+                    UUID(news_id),
+                    (
+                        NEWS_PROCESSING_RETRYING
+                        if retrying
+                        else NEWS_PROCESSING_FAILED
+                    ),
+                    task_id=str(self.request.id),
+                    scan_task_id=scan_task_id,
+                    attempt_count=self.request.retries + 1,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
         _update_news_extraction_item(
             client,
             scan_task_id,
@@ -2449,6 +2652,13 @@ def retry_news_item(
             news = get_news(db, UUID(news_id))
             if news is None:
                 raise ValueError(f"unknown news item: {news_id}")
+            mark_news_processing(
+                db,
+                news.id,
+                NEWS_PROCESSING_RUNNING,
+                task_id=task_id,
+                attempt_count=attempt,
+            )
             update_model_task(
                 "extract",
                 task_id,
@@ -2464,6 +2674,13 @@ def retry_news_item(
                 db,
                 events,
                 force_asset_mapping=force_asset_mapping,
+            )
+            mark_news_processing(
+                db,
+                news.id,
+                NEWS_PROCESSING_COMPLETED,
+                task_id=task_id,
+                attempt_count=attempt,
             )
         update_model_task(
             "extract",
@@ -2485,6 +2702,20 @@ def retry_news_item(
         }
     except Exception as exc:
         retrying = self.request.retries < self.max_retries
+        with SessionLocal() as db:
+            if get_news(db, UUID(news_id)) is not None:
+                mark_news_processing(
+                    db,
+                    UUID(news_id),
+                    (
+                        NEWS_PROCESSING_RETRYING
+                        if retrying
+                        else NEWS_PROCESSING_FAILED
+                    ),
+                    task_id=task_id,
+                    attempt_count=attempt,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
         update_model_task(
             "extract",
             task_id,

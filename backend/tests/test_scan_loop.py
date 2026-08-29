@@ -978,6 +978,51 @@ def test_scan_loop_waits_until_due_and_bootstraps_without_state(monkeypatch):
     assert calls == []
 
 
+def test_scan_loop_releases_a_stale_heartbeat_before_enqueuing(monkeypatch):
+    redis = FakeRedis()
+    calls = []
+    stale_at = worker.utc_now() - timedelta(
+        seconds=worker.SCAN_HEARTBEAT_STALE_SECONDS + 1
+    )
+    redis.set(worker.SCAN_GATE_KEY, "stale-scan")
+    redis.set(
+        worker.SCAN_STATUS_KEY,
+        json.dumps(
+            {
+                **worker._default_scan_status(),
+                "state": "running",
+                "task_id": "stale-scan",
+                "phase": "extracting",
+                "started_at": stale_at.isoformat(),
+                "heartbeat_at": stale_at.isoformat(),
+            }
+        ),
+    )
+    worker._initialize_news_extraction_queue(
+        redis,
+        "stale-scan",
+        [],
+        {"discovered": 1},
+    )
+    monkeypatch.setattr(worker, "_redis_client", lambda: redis)
+    monkeypatch.setattr(
+        worker,
+        "enqueue_scan",
+        lambda: (calls.append("queued") or "replacement-scan", "queued"),
+    )
+
+    result = worker.ensure_scan_loop.run()
+
+    assert result == {
+        "status": "queued",
+        "task_id": "replacement-scan",
+        "recovered_stale": True,
+    }
+    assert calls == ["queued"]
+    assert redis.get(worker.SCAN_GATE_KEY) is None
+    assert worker._read_news_extraction_queue(redis)["state"] == "interrupted"
+
+
 def test_active_scan_can_be_paused_and_resumed(monkeypatch):
     redis = FakeRedis()
     monkeypatch.setattr(worker, "_redis_client", lambda: redis)

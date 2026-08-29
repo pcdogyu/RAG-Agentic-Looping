@@ -918,6 +918,8 @@ export function QueuePage({ apiBase }: { apiBase: string }) {
 }
 
 export type NewsBoardStatus =
+  | "dispatch_pending"
+  | "queued"
   | "extracting"
   | "mapping"
   | "researching"
@@ -925,6 +927,7 @@ export type NewsBoardStatus =
   | "completed"
   | "insufficient_evidence"
   | "failed"
+  | "orphaned"
   | "pending";
 
 export type NewsBoardItem = {
@@ -937,6 +940,8 @@ export type NewsBoardItem = {
   observed_at: string;
   status: NewsBoardStatus;
   status_updated_at: string;
+  status_detail?: string | null;
+  retryable?: boolean;
   events: Array<{ id: string; headline: string; event_type: string; priority: number }>;
   assets: Array<{ asset_id: string; symbol: string; name: string; market: string }>;
 };
@@ -957,6 +962,8 @@ type NewsBoardResponse = {
 };
 
 export const newsBoardStatusLabels: Record<NewsBoardStatus, string> = {
+  dispatch_pending: "待入队",
+  queued: "已入队",
   extracting: "抽取中",
   mapping: "股票映射中",
   researching: "研究中",
@@ -964,6 +971,7 @@ export const newsBoardStatusLabels: Record<NewsBoardStatus, string> = {
   completed: "已完成",
   insufficient_evidence: "证据不足",
   failed: "失败",
+  orphaned: "入队中断",
   pending: "待处理",
 };
 
@@ -988,7 +996,13 @@ const sourceQualityLabels: Record<string, string> = {
   social: "社交来源",
 };
 
-export function NewsSourcePanel({ group }: { group: NewsBoardSource }) {
+type NewsRetryState = { status: "pending" | "queued" | "error"; error?: string };
+
+export function NewsSourcePanel({ group, retryStates = {}, onRetry }: {
+  group: NewsBoardSource;
+  retryStates?: Record<string, NewsRetryState>;
+  onRetry?: (item: NewsBoardItem) => void;
+}) {
   return <section className="news-source-panel">
     <header>
       <div><p className="eyebrow">NEWS SOURCE</p><h3>{group.source}</h3></div>
@@ -999,6 +1013,7 @@ export function NewsSourcePanel({ group }: { group: NewsBoardSource }) {
     <div className="news-source-items">
       {group.items.map((item) => {
         const eventType = item.events[0]?.event_type;
+        const retryState = retryStates[item.id];
         return <article className={`news-board-item ${item.status}`} key={item.id}>
           <div className="news-board-item-heading">
             <span className="news-event-type">{eventType ? (eventTypeLabels[eventType] ?? eventType) : "待归类"}</span>
@@ -1009,9 +1024,16 @@ export function NewsSourcePanel({ group }: { group: NewsBoardSource }) {
             <time dateTime={item.published_at}>{new Date(item.published_at).toLocaleString("zh-CN")}</time>
             <span>{sourceQualityLabels[item.source_quality] ?? item.source_quality}</span>
           </div>
+          {item.status_detail && <small className="news-processing-detail">{item.status_detail}</small>}
           {!!item.assets.length && <div className="news-board-assets" aria-label="关联标的">
             {item.assets.slice(0, 5).map((asset) => <span key={asset.asset_id} title={`${asset.name} · ${asset.market}`}>{asset.symbol}</span>)}
             {item.assets.length > 5 && <small>+{item.assets.length - 5}</small>}
+          </div>}
+          {item.retryable && onRetry && <div className="news-retry-action">
+            <button type="button" disabled={retryState?.status === "pending" || retryState?.status === "queued"} onClick={() => onRetry(item)}>
+              {retryState?.status === "pending" ? "重新入队中…" : retryState?.status === "queued" ? "已重新入队" : "重新处理"}
+            </button>
+            {retryState?.status === "error" && <small>{retryState.error}</small>}
           </div>}
         </article>;
       })}
@@ -1023,6 +1045,7 @@ export function NewsPage({ apiBase }: { apiBase: string }) {
   const [board, setBoard] = useState<NewsBoardResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [retryStates, setRetryStates] = useState<Record<string, NewsRetryState>>({});
 
   const load = useCallback(async (signal?: AbortSignal, showLoading = false) => {
     if (showLoading) setLoading(true);
@@ -1049,6 +1072,20 @@ export function NewsPage({ apiBase }: { apiBase: string }) {
     };
   }, [load]);
 
+  async function retry(item: NewsBoardItem) {
+    if (["pending", "queued"].includes(retryStates[item.id]?.status || "")) return;
+    setRetryStates((current) => ({ ...current, [item.id]: { status: "pending" } }));
+    try {
+      const response = await fetch(`${apiBase}/api/v1/news/${encodeURIComponent(item.id)}/retry`, { method: "POST" });
+      const payload = await response.json() as { detail?: unknown };
+      if (!response.ok) throw new Error(typeof payload.detail === "string" ? payload.detail : "新闻重新入队失败");
+      setRetryStates((current) => ({ ...current, [item.id]: { status: "queued" } }));
+      await load();
+    } catch (reason) {
+      setRetryStates((current) => ({ ...current, [item.id]: { status: "error", error: reason instanceof Error ? reason.message : "新闻重新入队失败" } }));
+    }
+  }
+
   return <section className="app-page news-page">
     <PageHeading eyebrow="LIVE NEWS PIPELINE" title="新闻" copy="按来源查看最新 50 条新闻及其抽取、股票映射、研究和修订状态；页面每 5 秒自动更新。" />
     <div className="news-board-toolbar">
@@ -1058,7 +1095,7 @@ export function NewsPage({ apiBase }: { apiBase: string }) {
     {error && <div className="page-error">{error}</div>}
     {!board && loading && <div className="page-message">正在读取新闻状态…</div>}
     {board && !board.sources.length && <div className="page-empty">当前没有已入库新闻。</div>}
-    {board && <div className="news-source-grid" data-columns={newsSourceDesktopColumns}>{board.sources.map((group) => <NewsSourcePanel group={group} key={group.source} />)}</div>}
+    {board && <div className="news-source-grid" data-columns={newsSourceDesktopColumns}>{board.sources.map((group) => <NewsSourcePanel group={group} retryStates={retryStates} onRetry={(item) => void retry(item)} key={group.source} />)}</div>}
   </section>;
 }
 
