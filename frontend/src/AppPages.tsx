@@ -1302,6 +1302,8 @@ export type ResearchConclusionItem = {
   report: {
     confidence: number;
     news_confidence: number;
+    direction_score: number | null;
+    rating: string | null;
     impact_count: number;
     affected_markets: string[];
     affected_sectors: string[];
@@ -1549,7 +1551,7 @@ const modelRatingLabels: Record<string, string> = {
 export function ConclusionScore({
   score, rating, confidence, evidenceComplete, directionalEvidenceComplete, signalStatus,
   factConfidence, horizonDays, horizonUnit, scoringVersion, directionScore,
-  newsConfidence, ratingConfidence, scoreSource,
+  newsConfidence, ratingConfidence, scoreSource, compact = false,
 }: {
   score: number | null;
   directionScore?: number | null;
@@ -1565,6 +1567,7 @@ export function ConclusionScore({
   horizonUnit?: string;
   scoringVersion?: string;
   scoreSource?: "llm" | "rule_fallback";
+  compact?: boolean;
 }) {
   const isV3 = scoringVersion === "llm-direction-v3";
   const publishedScore = directionScore ?? score ?? 0;
@@ -1579,11 +1582,13 @@ export function ConclusionScore({
   const scoreTone = scoreBlocked ? "neutral" : publishedScore <= -positiveThreshold ? "negative" : publishedScore >= positiveThreshold ? "positive" : "neutral";
   return <div className={`conclusion-score ${scoreTone}`}>
     <strong>{scoreBlocked ? "暂不评分" : `${isV3 ? "方向分" : shortTerm ? "影响分" : "发布分"}：${publishedScore > 0 ? "+" : ""}${publishedScore}`}</strong>
-    <span>{signalStatusLabels[resolvedStatus] || resolvedStatus} · {isV3 ? "五级评级" : shortTerm ? "五档评级" : "评级"}：{recommendationRatingLabel(rating)}{isV3 && scoreSource === "rule_fallback" ? " · 规则回退" : ""}</span>
+    <span>{!compact && `${signalStatusLabels[resolvedStatus] || resolvedStatus} · `}{isV3 ? "五级评级" : shortTerm ? "五档评级" : "评级"}：{recommendationRatingLabel(rating)}{isV3 && scoreSource === "rule_fallback" ? " · 规则回退" : ""}</span>
     {isV3
       ? <small>新闻可信度 {Math.round((newsConfidence ?? factConfidence ?? 0) * 100)}% · 评级置信度 {Math.round((ratingConfidence ?? confidence) * 100)}% · 未来 {horizonDays ?? 90} 个自然日</small>
       : shortTerm && !scoreBlocked
       ? <small>新闻事实置信度 {Math.round((factConfidence ?? confidence) * 100)}% · 评级置信度 {Math.round(confidence * 100)}% · 未来 1–{horizonDays ?? 3} 个交易日</small>
+      : compact
+      ? <small>{scoreBlocked ? "参考置信度" : "发布置信度"} {Math.round(confidence * 100)}%</small>
       : <small>
         {scoreBlocked ? "门禁后参考置信度" : "发布置信度"} {Math.round(confidence * 100)}% · 资料覆盖{evidenceComplete ? "完整" : "不足"}
         {directionalEvidenceComplete !== undefined && ` · 方向证据${directionalEvidenceComplete ? "通过" : "未通过"}`}
@@ -1896,6 +1901,7 @@ export function ConclusionCard({
         horizonUnit={item.horizon_unit}
         scoringVersion={item.scoring_version}
         scoreSource={item.score_source}
+        compact
       />
     </button>
     <ResearchAgainButton state={researchState} onResearch={onResearch} />
@@ -1915,6 +1921,9 @@ export function EventConclusionCard({
   onOpen: () => void;
 }) {
   const report = item.report;
+  const score = report?.direction_score;
+  const rating = report?.rating;
+  const scoreTone = score === null || score === undefined ? "neutral" : score < 0 ? "negative" : score > 0 ? "positive" : "neutral";
   return <article className="conclusion-card event-conclusion-card">
     <button type="button" className="conclusion-card-details" onClick={onOpen} aria-label={`查看 ${item.title} 事件研报`}>
       <div className="conclusion-card-copy">
@@ -1922,10 +1931,12 @@ export function EventConclusionCard({
         <strong>{item.title}</strong>
         <p>{item.summary}</p>
       </div>
-      <div className={`event-conclusion-summary ${item.status}`}>
-        <strong>{eventConclusionStatusLabels[item.status] ?? item.status}</strong>
+      <div className={`event-conclusion-summary ${scoreTone}`}>
+        <strong>{score === null || score === undefined
+          ? "— · 暂无评级"
+          : `${score > 0 ? "+" : ""}${score} · ${rating ? recommendationRatingLabel(rating) : "暂无评级"}`}</strong>
         <span>影响目标 {report?.impact_count ?? 0} 个</span>
-        <small>新闻可信度 {Math.round((report?.news_confidence ?? 0) * 100)}% · 资料覆盖{item.evidence_complete ? "完整" : "不足"}</small>
+        <small>新闻可信度 {Math.round((report?.news_confidence ?? 0) * 100)}% · 研报置信度 {Math.round((report?.confidence ?? 0) * 100)}%</small>
       </div>
     </button>
   </article>;
@@ -2276,7 +2287,7 @@ export function ChangedTargetsPage({ apiBase }: { apiBase: string }) {
 }
 
 export function ConclusionsPage({ apiBase }: { apiBase: string }) {
-  const [filters, setFilters] = useState({ kind: "all", q: "", market: "", rating: "", evidence_status: "" });
+  const [filters, setFilters] = useState({ kind: "all", q: "", market: "", rating: "" });
   const [items, setItems] = useState<ResearchConclusionItem[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
   const [selectedAsset, setSelectedAsset] = useState<ConclusionDetail | null>(null);
@@ -2408,7 +2419,6 @@ export function ConclusionsPage({ apiBase }: { apiBase: string }) {
         <input aria-label="搜索结论" placeholder="事件、标的、代码或核心观点" value={filters.q} onChange={(e) => setFilters({ ...filters, q: e.target.value })} />
         <select aria-label="市场" value={filters.market} onChange={(e) => setFilters({ ...filters, market: e.target.value })}><option value="">全部市场</option><option value="US">美股</option><option value="CN">A股</option><option value="HK">港股</option><option value="CRYPTO">加密</option></select>
         <select aria-label="评级" value={filters.rating} onChange={(e) => setFilters({ ...filters, rating: e.target.value })}><option value="">全部评级</option>{Object.entries(ratingLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>
-        <select aria-label="证据状态" value={filters.evidence_status} onChange={(e) => setFilters({ ...filters, evidence_status: e.target.value })}><option value="">全部资料覆盖</option><option value="complete">资料覆盖完整</option><option value="incomplete">资料覆盖不足</option></select>
         <button disabled={loading}>{loading ? "筛选中…" : "筛选"}</button>
       </form>
       <div className="conclusions-split" data-layout="65-35">

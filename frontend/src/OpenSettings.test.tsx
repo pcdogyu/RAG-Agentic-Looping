@@ -381,6 +381,31 @@ describe("open source and search settings", () => {
     expect(markup.indexOf("影响分：-27")).toBeLessThan(markup.indexOf("已进入队列"));
   });
 
+  it("hides evidence status and coverage in compact asset cards", () => {
+    const markup = renderToStaticMarkup(createElement(ConclusionCard, {
+      item: {
+        ...shortTermRecommendation,
+        score: null,
+        direction_score: null,
+        rating: "watch",
+        confidence: 0,
+        evidence_complete: false,
+        directional_evidence_complete: false,
+        signal_status: "insufficient_evidence",
+        scoring_version: "legacy-v1",
+        horizon_unit: "calendar_days",
+      },
+      onOpen: () => undefined,
+      onResearch: () => undefined,
+    }));
+
+    expect(markup).toContain("暂不评分");
+    expect(markup).toContain("评级：中性");
+    expect(markup).toContain("参考置信度 0%");
+    expect(markup).not.toContain("方向证据不足");
+    expect(markup).not.toContain("资料覆盖不足");
+  });
+
   it("shows one blocking gate reason before the complete reason list", () => {
     const markup = renderToStaticMarkup(createElement(GateReasons, {
       primaryReason: "claim-level evidence strength is below the publication threshold",
@@ -447,6 +472,8 @@ describe("open source and search settings", () => {
     expect(markup).toContain("重新执行会创建新任务");
     expect(markup).toContain("正在加载历史失败研究…");
     expect(markup).toContain("正在加载研究结论…");
+    expect(markup).not.toContain("全部资料覆盖");
+    expect(markup).not.toContain('aria-label="证据状态"');
     expect(markup).not.toContain("当前筛选范围内没有最终标的建议。");
     expect(markup).toContain("全部重试");
     expect(markup.indexOf(">成功研究<")).toBeLessThan(markup.indexOf(">历史失败研究<"));

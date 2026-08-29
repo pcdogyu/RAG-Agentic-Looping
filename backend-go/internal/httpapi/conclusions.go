@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -153,6 +154,7 @@ func conclusionItem(row conclusionRow) (map[string]any, error) {
 		headline = stringValue(report["summary"])
 	}
 	impacts, _ := report["impacts"].([]any)
+	directionScore, rating := representativeImpact(impacts)
 	return map[string]any{
 		"kind": "event", "id": row.ID, "occurred_at": iso(row.OccurredAt), "status": payload["status"],
 		"evidence_complete": boolValue(report["evidence_complete"]), "title": headline, "summary": report["summary"],
@@ -160,9 +162,44 @@ func conclusionItem(row conclusionRow) (map[string]any, error) {
 		"event":          map[string]any{"id": payload["event_id"], "headline": headline, "event_type": defaultAny(event["event_type"], "other")},
 		"recommendation": nil,
 		"report": map[string]any{"confidence": report["confidence"], "news_confidence": report["news_confidence"],
+			"direction_score": directionScore, "rating": rating,
 			"impact_count": len(impacts), "affected_markets": defaultAny(report["affected_markets"], []any{}),
 			"affected_sectors": defaultAny(report["affected_sectors"], []any{}), "scoring_version": report["scoring_version"]},
 	}, nil
+}
+
+func representativeImpact(impacts []any) (any, any) {
+	var representative map[string]any
+	var representativeScore any
+	strongest := -1.0
+	for _, raw := range impacts {
+		impact, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		score, strength, ok := normalizedImpactScore(impact)
+		if !ok || strength <= strongest {
+			continue
+		}
+		representative = impact
+		representativeScore = score
+		strongest = strength
+	}
+	if representative == nil {
+		return nil, nil
+	}
+	return representativeScore, representative["rating"]
+}
+
+func normalizedImpactScore(impact map[string]any) (any, float64, bool) {
+	if score, ok := impact["direction_score"].(float64); ok {
+		return score, math.Abs(score), true
+	}
+	if score, ok := impact["score"].(float64); ok {
+		points := math.Round(score * 100)
+		return points, math.Abs(points), true
+	}
+	return nil, 0, false
 }
 
 func publicRecommendation(payload map[string]any) {

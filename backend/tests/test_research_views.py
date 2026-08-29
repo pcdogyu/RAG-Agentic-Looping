@@ -155,7 +155,32 @@ def test_research_conclusions_unify_visible_terminal_results_and_detail(db):
                 target_type=TargetType.SECTOR,
                 rating=Rating.BULLISH,
                 score=40,
-            )
+            ),
+            impact(
+                "Energy costs",
+                target_type=TargetType.COMMODITY_PRICE,
+                rating=Rating.STRONGLY_BEARISH,
+                score=-75,
+            ),
+        ],
+    )
+    tied = event_run(
+        db,
+        "tied macro",
+        status=RunStatus.COMPLETED,
+        impacts=[
+            impact(
+                "First tied target",
+                target_type=TargetType.SECTOR,
+                rating=Rating.STRONGLY_BULLISH,
+                score=70,
+            ),
+            impact(
+                "Second tied target",
+                target_type=TargetType.COMMODITY_PRICE,
+                rating=Rating.STRONGLY_BEARISH,
+                score=-70,
+            ),
         ],
     )
     insufficient = event_run(
@@ -189,12 +214,22 @@ def test_research_conclusions_unify_visible_terminal_results_and_detail(db):
     visible_ids = {item["id"] for item in response.json()["items"]}
     assert str(asset_item.id) in visible_ids
     assert str(completed.id) in visible_ids
+    assert str(tied.id) in visible_ids
     assert str(insufficient.id) in visible_ids
     assert {item["kind"] for item in event_only.json()["items"]} == {"event"}
     assert {item["kind"] for item in market_only.json()["items"]} == {"asset"}
     assert detail.status_code == 200
     assert detail.json()["event"]["headline"] == "completed macro"
     assert detail.json()["report"]["impacts"][0]["target_name"] == "Energy sector"
+    events_by_title = {
+        item["title"]: item for item in response.json()["items"] if item["kind"] == "event"
+    }
+    assert events_by_title["completed macro"]["report"]["direction_score"] == -75
+    assert events_by_title["completed macro"]["report"]["rating"] == "strongly_bearish"
+    assert events_by_title["tied macro"]["report"]["direction_score"] == 70
+    assert events_by_title["tied macro"]["report"]["rating"] == "strongly_bullish"
+    assert events_by_title["insufficient macro"]["report"]["direction_score"] is None
+    assert events_by_title["insufficient macro"]["report"]["rating"] is None
     assert first.json()["items"][0]["id"] != second.json()["items"][0]["id"]
 
 

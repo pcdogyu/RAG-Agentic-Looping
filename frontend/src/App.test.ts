@@ -647,12 +647,22 @@ describe("changed targets page", () => {
       asset: null,
       event: { id: "event-1", headline: "能源政策调整", event_type: "regulation" },
       recommendation: null,
-      report: { confidence: 0.6, news_confidence: 0.82, impact_count: 1, affected_markets: ["COMMODITY"], affected_sectors: ["能源"], scoring_version: "event-report-v1" },
+      report: { confidence: 0.6, news_confidence: 0.82, direction_score: -45, rating: "bearish", impact_count: 1, affected_markets: ["COMMODITY"], affected_sectors: ["能源"], scoring_version: "event-report-v1" },
     } as ResearchConclusionItem;
     const card = renderToStaticMarkup(createElement(EventConclusionCard, { item, onOpen: () => undefined }));
-    expect(card).toContain("证据不足");
+    expect(card).toContain("-45 · 看空");
     expect(card).toContain("新闻可信度 82%");
+    expect(card).toContain("研报置信度 60%");
     expect(card).toContain("影响目标 1 个");
+    expect(card).not.toContain("证据不足");
+    expect(card).not.toContain("资料覆盖不足");
+
+    const emptyCard = renderToStaticMarkup(createElement(EventConclusionCard, {
+      item: { ...item, report: { ...item.report!, direction_score: null, rating: null, impact_count: 0 } },
+      onOpen: () => undefined,
+    }));
+    expect(emptyCard).toContain("— · 暂无评级");
+    expect(emptyCard).toContain("影响目标 0 个");
 
     const detail = {
       run: { id: "event-run-1", status: "insufficient_evidence", updated_at: "2026-08-29T08:00:00Z" },

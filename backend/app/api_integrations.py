@@ -28,6 +28,7 @@ from backend.app.db import (
 )
 from backend.app.domain import (
     AssetClass,
+    EventReport,
     EventResearchRun,
     NewsItem,
     Recommendation,
@@ -865,6 +866,14 @@ def _matches_evidence_status(complete: bool, evidence_status: str) -> bool:
     return True
 
 
+def _representative_event_impact(report: EventReport) -> TargetImpact | None:
+    return max(
+        report.impacts,
+        key=lambda impact: abs(impact.direction_score or 0),
+        default=None,
+    )
+
+
 @router.get("/api/v1/research-conclusions")
 def list_research_conclusions(
     db: Db,
@@ -946,6 +955,7 @@ def list_research_conclusions(
             report = run.report
             if report is None:
                 continue
+            representative_impact = _representative_event_impact(report)
             if not _matches_evidence_status(report.evidence_complete, evidence_status):
                 continue
             event = events_by_id.get(run.event_id)
@@ -981,6 +991,16 @@ def list_research_conclusions(
                     "report": {
                         "confidence": report.confidence,
                         "news_confidence": report.news_confidence,
+                        "direction_score": (
+                            representative_impact.direction_score
+                            if representative_impact
+                            else None
+                        ),
+                        "rating": (
+                            representative_impact.rating.value
+                            if representative_impact
+                            else None
+                        ),
                         "impact_count": len(report.impacts),
                         "affected_markets": report.affected_markets,
                         "affected_sectors": report.affected_sectors,
