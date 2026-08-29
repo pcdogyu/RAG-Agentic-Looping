@@ -157,16 +157,16 @@ def reconcile_stale_research_runs(
                 )
             )
             continue
-        run.status = RunStatus.FAILED
-        run.completed_at = current
-        run.retryable_reason = "stale_worker_lease"
-        run.error = "Research worker lease expired"
+        run.status = RunStatus.QUEUED
+        run.completed_at = None
+        run.retryable_reason = None
+        run.error = None
         run.analysis_steps.append(
             AnalysisStep(
-                phase="research_lease",
-                status="failed",
+                phase="research_lease_recovery",
+                status="queued",
                 executor="research-lifecycle",
-                summary="研究 Worker 租约已失效，任务已转入可重新执行状态。",
+                summary="研究 Worker 租约已失效，任务将自动重新派发。",
             )
         )
         save_run(db, run)
@@ -176,15 +176,15 @@ def reconcile_stale_research_runs(
             continue
         if str(run.id) in live_ids or as_utc(run.updated_at) > cutoff:
             continue
-        run.status = RunStatus.FAILED
-        run.retryable_reason = "stale_worker_lease"
-        run.error = "Research worker lease expired"
+        run.status = RunStatus.QUEUED
+        run.retryable_reason = None
+        run.error = None
         run.analysis_steps.append(
             AnalysisStep(
-                phase="research_lease",
-                status="failed",
+                phase="research_lease_recovery",
+                status="queued",
                 executor="research-lifecycle",
-                summary="事件研究 Worker 租约已失效，任务已转入可重新执行状态。",
+                summary="事件研究 Worker 租约已失效，任务将自动重新派发。",
             )
         )
         save_event_research_run(db, run)

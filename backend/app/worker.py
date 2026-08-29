@@ -463,7 +463,15 @@ def recover_orphaned_queued_research_runs(
         scanned += 1
         run_id = str(run.id)
         dispatched_task_id = _research_dispatch_task_id(run_id, redis_client)
-        if dispatched_task_id is not None and dispatched_task_id == run.celery_task_id:
+        recovering_stale_lease = bool(
+            run.analysis_steps
+            and run.analysis_steps[-1].phase == "research_lease_recovery"
+        )
+        if (
+            dispatched_task_id is not None
+            and dispatched_task_id == run.celery_task_id
+            and not recovering_stale_lease
+        ):
             continue
 
         task_id = str(uuid4())

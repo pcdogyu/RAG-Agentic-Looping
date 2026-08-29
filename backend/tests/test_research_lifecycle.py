@@ -84,7 +84,7 @@ def test_compacts_only_queued_runs_inside_rolling_window(db):
     assert successor.status is RunStatus.QUEUED
 
 
-def test_reconciles_stale_active_run_into_manual_retry_state(db):
+def test_reconciles_stale_active_run_into_automatic_recovery_queue(db):
     run = ResearchRun(asset=SEED_ASSETS[0], status=RunStatus.RUNNING)
     save_run(db, run)
     settings = Settings(_env_file=None, research_lease_seconds=120)
@@ -98,8 +98,12 @@ def test_reconciles_stale_active_run_into_manual_retry_state(db):
 
     stored = get_run(db, run.id)
     assert repaired == 1
-    assert stored.status is RunStatus.FAILED
-    assert stored.retryable_reason == "stale_worker_lease"
+    assert stored.status is RunStatus.QUEUED
+    assert stored.completed_at is None
+    assert stored.retryable_reason is None
+    assert stored.error is None
+    assert stored.analysis_steps[-1].phase == "research_lease_recovery"
+    assert stored.analysis_steps[-1].status == "queued"
 
 
 def test_reconciles_hard_timed_out_asset_into_retryable_timeout(db):
@@ -233,6 +237,74 @@ def test_recovers_queued_runs_when_redis_dispatch_markers_are_missing(
         "recovery_failed": 0,
     }
     assert len(published) == 2
+
+
+def test_republishes_stale_event_lease_even_with_old_dispatch_marker(db, monkeypatch):
+    now = utc_now()
+    run = EventResearchRun(
+        event_id=uuid4(),
+        status=RunStatus.RUNNING,
+        celery_task_id="abandoned-event-task",
+        model_instance_id="research-0",
+        created_at=now - timedelta(minutes=5),
+        updated_at=now - timedelta(minutes=5),
+    )
+    save_event_research_run(db, run)
+    redis = MemoryRedis()
+    redis.set(worker._research_dispatch_key(str(run.id)), run.celery_task_id)
+    settings = Settings(_env_file=None, research_lease_seconds=120)
+
+    recovery_time = now + timedelta(minutes=3)
+    repaired = reconcile_stale_research_runs(db, redis, settings, now=recovery_time)
+
+    queued = get_event_research_run(db, run.id)
+    assert repaired == 1
+    assert queued.status is RunStatus.QUEUED
+    assert queued.error is None
+    assert queued.retryable_reason is None
+    assert queued.analysis_steps[-1].phase == "research_lease_recovery"
+
+    published = []
+    monkeypatch.setattr(
+        worker,
+        "select_model_instance",
+        lambda *_args, **_kwargs: SimpleNamespace(id="research-0"),
+    )
+    monkeypatch.setattr(
+        worker.research_event,
+        "apply_async",
+        lambda **kwargs: published.append(kwargs),
+    )
+
+    result = worker.recover_orphaned_queued_research_runs(
+        db,
+        redis,
+        settings,
+        now=recovery_time,
+    )
+
+    recovered = get_event_research_run(db, run.id)
+    assert result == {
+        "queued_scanned": 1,
+        "queued_recovered": 1,
+        "recovery_failed": 0,
+    }
+    assert recovered.celery_task_id != "abandoned-event-task"
+    assert recovered.analysis_steps[-1].phase == "research_dispatch_recovery"
+    assert published[0]["task_id"] == recovered.celery_task_id
+
+    repeated = worker.recover_orphaned_queued_research_runs(
+        db,
+        redis,
+        settings,
+        now=recovery_time,
+    )
+    assert repeated == {
+        "queued_scanned": 1,
+        "queued_recovered": 0,
+        "recovery_failed": 0,
+    }
+    assert len(published) == 1
 
 
 def test_asset_research_ignores_a_superseded_celery_delivery(db):
