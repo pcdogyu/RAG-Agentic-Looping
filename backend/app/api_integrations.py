@@ -581,7 +581,9 @@ def _conclusion_detail(db: Session, recommendation: Recommendation) -> dict[str,
     }
 
 
-def _latest_changed_targets(db: Session) -> list[tuple[Recommendation, Recommendation]]:
+def _latest_changed_targets(
+    db: Session,
+) -> list[tuple[Recommendation, Recommendation, Recommendation]]:
     rows = db.scalars(
         select(RecommendationRow).order_by(
             RecommendationRow.asset_id,
@@ -590,6 +592,7 @@ def _latest_changed_targets(db: Session) -> list[tuple[Recommendation, Recommend
         )
     ).all()
     previous_by_asset: dict[str, Recommendation] = {}
+    latest_by_asset: dict[str, Recommendation] = {}
     latest_change_by_asset: dict[str, tuple[Recommendation, Recommendation]] = {}
     for row in rows:
         current = Recommendation.model_validate(row.payload)
@@ -597,9 +600,13 @@ def _latest_changed_targets(db: Session) -> list[tuple[Recommendation, Recommend
         if previous and previous.rating != current.rating:
             latest_change_by_asset[row.asset_id] = (previous, current)
         previous_by_asset[row.asset_id] = current
+        latest_by_asset[row.asset_id] = current
     return sorted(
-        latest_change_by_asset.values(),
-        key=lambda pair: (pair[1].as_of, pair[1].id.int),
+        [
+            (previous, changed, latest_by_asset[asset_id])
+            for asset_id, (previous, changed) in latest_change_by_asset.items()
+        ],
+        key=lambda item: (item[1].as_of, item[1].id.int),
         reverse=True,
     )
 
@@ -614,19 +621,21 @@ def list_changed_targets(
     if cursor:
         cursor_time, cursor_id = _decode_cursor(cursor)
         changes = [
-            pair
-            for pair in changes
-            if pair[1].as_of < cursor_time
-            or (pair[1].as_of == cursor_time and pair[1].id.int < cursor_id.int)
+            item
+            for item in changes
+            if item[1].as_of < cursor_time
+            or (item[1].as_of == cursor_time and item[1].id.int < cursor_id.int)
         ]
     has_more = len(changes) > limit
     visible = changes[:limit]
     items = []
-    for previous, current in visible:
+    for previous, current, latest in visible:
         items.append(
             {
                 "asset": current.asset.model_dump(mode="json"),
                 "recommendation_id": current.id,
+                "latest_recommendation_id": latest.id,
+                "latest_researched_at": latest.as_of,
                 "changed_at": current.as_of,
                 "previous": {
                     "signal_status": previous.signal_status.value,

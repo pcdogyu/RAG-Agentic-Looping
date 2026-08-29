@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -988,7 +988,7 @@ def test_changed_targets_include_only_latest_rating_change_per_asset(db):
         rating="strongly_bearish",
         signal_status="neutral",
     )
-    _save_target_history_item(
+    both_latest_research = _save_target_history_item(
         db,
         assets["BOTH"],
         as_of=now,
@@ -1016,9 +1016,12 @@ def test_changed_targets_include_only_latest_rating_change_per_asset(db):
     items = {item["asset"]["symbol"]: item for item in body["items"]}
     assert "STATUS" not in items
     assert items["RATING"]["recommendation_id"] == str(rating_latest.id)
+    assert items["RATING"]["latest_recommendation_id"] == str(rating_latest.id)
     assert items["RATING"]["status_changed"] is False
     assert items["RATING"]["rating_changed"] is True
     assert items["BOTH"]["recommendation_id"] == str(both_latest.id)
+    assert items["BOTH"]["latest_recommendation_id"] == str(both_latest_research.id)
+    assert datetime.fromisoformat(items["BOTH"]["latest_researched_at"]) == both_latest_research.as_of
     assert items["BOTH"]["previous"] == {
         "signal_status": "directional",
         "rating": "bullish",
@@ -1026,6 +1029,14 @@ def test_changed_targets_include_only_latest_rating_change_per_asset(db):
     assert items["BOTH"]["status_changed"] is True
     assert items["BOTH"]["rating_changed"] is True
     assert all(item["rating_changed"] is True for item in body["items"])
+
+    with TestClient(app) as client:
+        detail = client.get(
+            f"/api/v1/conclusions/{items['BOTH']['latest_recommendation_id']}"
+        )
+
+    assert detail.status_code == 200
+    assert detail.json()["recommendation"]["id"] == str(both_latest_research.id)
 
 
 def test_changed_targets_cursor_paginates_unique_assets(db):

@@ -1141,6 +1141,8 @@ export type ChangedTarget = {
     market: string;
   };
   recommendation_id: string;
+  latest_recommendation_id?: string;
+  latest_researched_at?: string;
   changed_at: string;
   previous: { signal_status: string; rating: string };
   current: { signal_status: string; rating: string };
@@ -1148,12 +1150,16 @@ export type ChangedTarget = {
   rating_changed: boolean;
 };
 
-type ConclusionDetail = {
+export type ConclusionDetail = {
   recommendation: Recommendation;
   event: { headline: string } | null;
   news: Array<{ id: string; title: string; url: string; source: string }>;
   evidence: Array<{ id: string; claim: string; source_name: string; source_url: string; excerpt: string }>;
 };
+
+export function changedTargetLatestRecommendationId(item: ChangedTarget) {
+  return item.latest_recommendation_id || item.recommendation_id;
+}
 
 type ConclusionReference = { label: string; url: string; source: string };
 
@@ -1648,20 +1654,33 @@ export function ChangedTargetGrid({
   items,
   researchStates = {},
   onResearch = () => undefined,
+  onOpen = () => undefined,
+  detailLoadingId = "",
 }: {
   items: ChangedTarget[];
   researchStates?: Record<string, ConclusionResearchState>;
   onResearch?: (item: ChangedTarget) => void;
+  onOpen?: (item: ChangedTarget) => void;
+  detailLoadingId?: string;
 }) {
   return <div className="target-change-grid" data-columns={changedTargetDesktopColumns}>
     {items.map((item) => <article className="target-change-card" key={item.asset.asset_id}>
       <header>
         <span>{item.asset.market} · {new Date(item.changed_at).toLocaleString("zh-CN")}</span>
         <div className="target-change-symbol-row">
-          <strong>{item.asset.symbol}</strong>
+          <button
+            type="button"
+            className="target-change-identity"
+            aria-label={`查看 ${item.asset.symbol} 最近一次调研`}
+            aria-busy={detailLoadingId === item.asset.asset_id}
+            disabled={detailLoadingId === item.asset.asset_id}
+            onClick={() => onOpen(item)}
+          >
+            <strong>{item.asset.symbol}</strong>
+            <small>{detailLoadingId === item.asset.asset_id ? "正在加载最近调研…" : item.asset.name}</small>
+          </button>
           <ResearchAgainButton state={researchStates[item.asset.asset_id]} onResearch={() => onResearch(item)} />
         </div>
-        <small>{item.asset.name}</small>
       </header>
       <div className="target-change-field changed">
         <span>评级</span>
@@ -1673,6 +1692,7 @@ export function ChangedTargetGrid({
 
 export function ChangedTargetsContent({
   items, loading, error, onRetry, researchStates = {}, onResearch = () => undefined,
+  onOpen = () => undefined, detailLoadingId = "",
 }: {
   items: ChangedTarget[];
   loading: boolean;
@@ -1680,14 +1700,64 @@ export function ChangedTargetsContent({
   onRetry: () => void;
   researchStates?: Record<string, ConclusionResearchState>;
   onResearch?: (item: ChangedTarget) => void;
+  onOpen?: (item: ChangedTarget) => void;
+  detailLoadingId?: string;
 }) {
   return <>
     {error && <div className="page-error target-change-error"><span>{error}</span><button type="button" onClick={onRetry}>重试</button></div>}
     {!items.length && !error && (loading
       ? <div className="page-message">正在加载标的评级变化…</div>
       : <div className="page-empty">当前没有评级发生变化的标的。</div>)}
-    {!!items.length && <ChangedTargetGrid items={items} researchStates={researchStates} onResearch={onResearch} />}
+    {!!items.length && <ChangedTargetGrid items={items} researchStates={researchStates} onResearch={onResearch} onOpen={onOpen} detailLoadingId={detailLoadingId} />}
   </>;
+}
+
+export function ConclusionDetailModal({ detail, onClose }: { detail: ConclusionDetail; onClose: () => void }) {
+  const isShortTerm = detail.recommendation.scoring_version === "short-term-impact-v1"
+    || detail.recommendation.horizon_unit === "trading_sessions";
+  return <div className="modal-backdrop" onClick={onClose}>
+    <article className="modal conclusion-modal" onClick={(event) => event.stopPropagation()}>
+      <button type="button" className="close" aria-label="关闭调研详情" onClick={onClose}>×</button>
+      <p className="eyebrow">{detail.recommendation.asset.market} · {detail.recommendation.asset.symbol} · {new Date(detail.recommendation.as_of).toLocaleString("zh-CN")}</p>
+      <h2>{detail.recommendation.asset.name}</h2>
+      <ConclusionScore
+        score={detail.recommendation.score}
+        rating={detail.recommendation.rating}
+        confidence={detail.recommendation.confidence}
+        evidenceComplete={detail.recommendation.evidence_complete}
+        directionalEvidenceComplete={detail.recommendation.directional_evidence_complete}
+        signalStatus={detail.recommendation.signal_status}
+        factConfidence={detail.recommendation.fact_confidence}
+        horizonDays={detail.recommendation.horizon_days}
+        horizonUnit={detail.recommendation.horizon_unit}
+        scoringVersion={detail.recommendation.scoring_version}
+      />
+      <p className="score-explanation">{isShortTerm
+        ? "影响分按 D × (45M + 25T + 15I + 15C) 计算；证据质量核验只降低置信度，不改变方向或隐藏评分。"
+        : "该历史结论沿用原评分与证据门禁规则；证据不足记录继续暂不评分，供追溯和重新调研。"}</p>
+      <ModelOpinion direction={detail.recommendation.model_direction} rating={detail.recommendation.model_rating} confidence={detail.recommendation.model_confidence} />
+      {isShortTerm
+        ? <ShortTermScoreDetails recommendation={detail.recommendation} />
+        : <>
+          <div className="probability-grid"><span>看多 <strong>{Math.round(detail.recommendation.bull_probability * 100)}%</strong></span><span>基准 <strong>{Math.round(detail.recommendation.base_probability * 100)}%</strong></span><span>看空 <strong>{Math.round(detail.recommendation.bear_probability * 100)}%</strong></span></div>
+          <div className="research-gate-grid">
+            <span>程序原始分<strong>{detail.recommendation.score_available === false || ["technical_failure", "insufficient_evidence"].includes(detail.recommendation.signal_status || "") ? "—" : <>{(detail.recommendation.raw_score ?? detail.recommendation.score ?? 0) > 0 ? "+" : ""}{detail.recommendation.raw_score ?? detail.recommendation.score ?? 0}</>}</strong></span>
+            <span>证据强度<strong>{Math.round((detail.recommendation.evidence_strength ?? (detail.recommendation.evidence_complete ? 1 : 0)) * 100)}%</strong></span>
+            <span>映射可信度<strong>{Math.round((detail.recommendation.mapping_confidence ?? 1) * 100)}%</strong></span>
+            <span>研究期限<strong>{detail.recommendation.horizon_days ?? 90} 天</strong></span>
+          </div>
+          <GateReasons primaryReason={detail.recommendation.primary_gate_reason} allReasons={detail.recommendation.gate_reasons} />
+        </>}
+      <h3>核心观点</h3><p>{detail.recommendation.thesis.summary}</p>
+      {detail.recommendation.thesis.historical_context && <><h3>历史背景</h3><p>{detail.recommendation.thesis.historical_context}</p></>}
+      <h3>催化剂</h3><ul>{detail.recommendation.thesis.catalysts.map((item) => <li key={item}>{item}</li>)}</ul>
+      <h3>风险</h3><ul>{detail.recommendation.thesis.risks.map((item) => <li key={item}>{item}</li>)}</ul>
+      <h3>失效条件</h3><ul>{detail.recommendation.thesis.invalidation_conditions.map((item) => <li key={item}>{item}</li>)}</ul>
+      {!!detail.recommendation.claim_assessments?.length && <><h3>{isShortTerm ? "逐观点证据核验" : "逐观点证据门禁"}</h3><div className="claim-assessments">{detail.recommendation.claim_assessments.map((item, index) => <article key={`${item.claim_kind}-${index}`}><span>{item.claim_kind} · {item.verdict}</span><strong>{item.claim}</strong><small>复核置信度 {Math.round(item.confidence * 100)}%{item.reason ? ` · ${item.reason}` : ""}</small></article>)}</div></>}
+      {detail.event && <><h3>关联事件</h3><p>{detail.event.headline}</p></>}
+      <h3>新闻与证据</h3><div className="evidence-links">{conclusionReferences(detail).map((item) => <a key={`${item.url}-${item.label}`} href={item.url} target="_blank" rel="noreferrer"><strong>{item.label}</strong><span>{item.source}</span></a>)}</div>
+    </article>
+  </div>;
 }
 
 export function ChangedTargetsPage({ apiBase }: { apiBase: string }) {
@@ -1696,6 +1766,10 @@ export function ChangedTargetsPage({ apiBase }: { apiBase: string }) {
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState("");
+  const [detailError, setDetailError] = useState("");
+  const [detailRetryItem, setDetailRetryItem] = useState<ChangedTarget | null>(null);
+  const [detailLoadingId, setDetailLoadingId] = useState("");
+  const [selected, setSelected] = useState<ConclusionDetail | null>(null);
   const [researchStates, setResearchStates] = useState<Record<string, ConclusionResearchState>>({});
   const researchInFlight = useRef(new Set<string>());
 
@@ -1726,6 +1800,25 @@ export function ChangedTargetsPage({ apiBase }: { apiBase: string }) {
     setItems([]);
     setCursor(null);
     setError("");
+    setDetailError("");
+    setDetailRetryItem(null);
+  }
+
+  async function openLatestResearch(item: ChangedTarget) {
+    if (detailLoadingId) return;
+    setDetailLoadingId(item.asset.asset_id);
+    setDetailError("");
+    setDetailRetryItem(null);
+    try {
+      const response = await fetch(`${apiBase}/api/v1/conclusions/${changedTargetLatestRecommendationId(item)}`);
+      if (!response.ok) throw new Error("最近一次调研加载失败");
+      setSelected(await response.json() as ConclusionDetail);
+    } catch (reason) {
+      setDetailError(reason instanceof Error ? reason.message : "最近一次调研加载失败");
+      setDetailRetryItem(item);
+    } finally {
+      setDetailLoadingId("");
+    }
   }
 
   async function researchAgain(item: ChangedTarget) {
@@ -1734,7 +1827,7 @@ export function ChangedTargetsPage({ apiBase }: { apiBase: string }) {
     researchInFlight.current.add(assetId);
     setResearchStates((current) => ({ ...current, [assetId]: { status: "pending" } }));
     try {
-      await researchConclusion(apiBase, item.recommendation_id);
+      await researchConclusion(apiBase, changedTargetLatestRecommendationId(item));
       setResearchStates((current) => ({ ...current, [assetId]: { status: "queued" } }));
     } catch (reason) {
       setResearchStates((current) => ({
@@ -1752,6 +1845,7 @@ export function ChangedTargetsPage({ apiBase }: { apiBase: string }) {
       <button type="button" disabled={loading || !items.length} onClick={clearCurrentPage}>清除</button>
       <button type="button" disabled={loading} onClick={() => load()}>{loading ? "刷新中…" : "刷新"}</button>
     </div>
+    {detailError && <div className="page-error target-detail-error"><span>{detailError}</span><button type="button" onClick={() => detailRetryItem && void openLatestResearch(detailRetryItem)}>重试</button></div>}
     <ChangedTargetsContent
       items={items}
       loading={loading}
@@ -1759,8 +1853,11 @@ export function ChangedTargetsPage({ apiBase }: { apiBase: string }) {
       onRetry={() => load()}
       researchStates={researchStates}
       onResearch={(item) => void researchAgain(item)}
+      onOpen={(item) => void openLatestResearch(item)}
+      detailLoadingId={detailLoadingId}
     />
     {cursor && <button className="load-more" type="button" disabled={loadingMore} onClick={() => load(true)}>{loadingMore ? "正在加载…" : "加载更多"}</button>}
+    {selected && <ConclusionDetailModal detail={selected} onClose={() => setSelected(null)} />}
   </section>;
 }
 
@@ -1873,10 +1970,6 @@ export function ConclusionsPage({ apiBase }: { apiBase: string }) {
       researchInFlight.current.delete(assetId);
     }
   }
-  const selectedIsShortTerm = !!selected && (
-    selected.recommendation.scoring_version === "short-term-impact-v1"
-    || selected.recommendation.horizon_unit === "trading_sessions"
-  );
   return (
     <section className="app-page conclusions-page">
       <PageHeading eyebrow="RESEARCH OUTCOMES" title="研究结论" copy="新研究按未来 1–3 个交易日评估；证据质量只降低置信度，不再隐藏、归零或强制改成观望。" />
@@ -1930,46 +2023,7 @@ export function ConclusionsPage({ apiBase }: { apiBase: string }) {
           : <div className="page-empty">当前筛选范围内没有最终标的建议。</div>)}
       </div>
       {cursor && <button className="load-more" type="button" disabled={loadingMore} onClick={() => load(true)}>{loadingMore ? "正在加载…" : "加载更多"}</button>}
-      {selected && <div className="modal-backdrop" onClick={() => setSelected(null)}><article className="modal conclusion-modal" onClick={(e) => e.stopPropagation()}>
-        <button className="close" onClick={() => setSelected(null)}>×</button>
-        <p className="eyebrow">{selected.recommendation.asset.market} · {selected.recommendation.asset.symbol}</p><h2>{selected.recommendation.asset.name}</h2>
-        <ConclusionScore
-          score={selected.recommendation.score}
-          rating={selected.recommendation.rating}
-          confidence={selected.recommendation.confidence}
-          evidenceComplete={selected.recommendation.evidence_complete}
-          directionalEvidenceComplete={selected.recommendation.directional_evidence_complete}
-          signalStatus={selected.recommendation.signal_status}
-          factConfidence={selected.recommendation.fact_confidence}
-          horizonDays={selected.recommendation.horizon_days}
-          horizonUnit={selected.recommendation.horizon_unit}
-          scoringVersion={selected.recommendation.scoring_version}
-        />
-        <p className="score-explanation">{selectedIsShortTerm
-          ? "影响分按 D × (45M + 25T + 15I + 15C) 计算；证据质量核验只降低置信度，不改变方向或隐藏评分。"
-          : "该历史结论沿用原评分与证据门禁规则；证据不足记录继续暂不评分，供追溯和重新调研。"}</p>
-        <ModelOpinion direction={selected.recommendation.model_direction} rating={selected.recommendation.model_rating} confidence={selected.recommendation.model_confidence} />
-        {selectedIsShortTerm
-          ? <ShortTermScoreDetails recommendation={selected.recommendation} />
-          : <>
-            <div className="probability-grid"><span>看多 <strong>{Math.round(selected.recommendation.bull_probability * 100)}%</strong></span><span>基准 <strong>{Math.round(selected.recommendation.base_probability * 100)}%</strong></span><span>看空 <strong>{Math.round(selected.recommendation.bear_probability * 100)}%</strong></span></div>
-            <div className="research-gate-grid">
-              <span>程序原始分<strong>{selected.recommendation.score_available === false || ["technical_failure", "insufficient_evidence"].includes(selected.recommendation.signal_status || "") ? "—" : <>{(selected.recommendation.raw_score ?? selected.recommendation.score ?? 0) > 0 ? "+" : ""}{selected.recommendation.raw_score ?? selected.recommendation.score ?? 0}</>}</strong></span>
-              <span>证据强度<strong>{Math.round((selected.recommendation.evidence_strength ?? (selected.recommendation.evidence_complete ? 1 : 0)) * 100)}%</strong></span>
-              <span>映射可信度<strong>{Math.round((selected.recommendation.mapping_confidence ?? 1) * 100)}%</strong></span>
-              <span>研究期限<strong>{selected.recommendation.horizon_days ?? 90} 天</strong></span>
-            </div>
-            <GateReasons primaryReason={selected.recommendation.primary_gate_reason} allReasons={selected.recommendation.gate_reasons} />
-          </>}
-        <h3>核心观点</h3><p>{selected.recommendation.thesis.summary}</p>
-        {selected.recommendation.thesis.historical_context && <><h3>历史背景</h3><p>{selected.recommendation.thesis.historical_context}</p></>}
-        <h3>催化剂</h3><ul>{selected.recommendation.thesis.catalysts.map((item) => <li key={item}>{item}</li>)}</ul>
-        <h3>风险</h3><ul>{selected.recommendation.thesis.risks.map((item) => <li key={item}>{item}</li>)}</ul>
-        <h3>失效条件</h3><ul>{selected.recommendation.thesis.invalidation_conditions.map((item) => <li key={item}>{item}</li>)}</ul>
-        {!!selected.recommendation.claim_assessments?.length && <><h3>{selectedIsShortTerm ? "逐观点证据核验" : "逐观点证据门禁"}</h3><div className="claim-assessments">{selected.recommendation.claim_assessments.map((item, index) => <article key={`${item.claim_kind}-${index}`}><span>{item.claim_kind} · {item.verdict}</span><strong>{item.claim}</strong><small>复核置信度 {Math.round(item.confidence * 100)}%{item.reason ? ` · ${item.reason}` : ""}</small></article>)}</div></>}
-        {selected.event && <><h3>关联事件</h3><p>{selected.event.headline}</p></>}
-        <h3>新闻与证据</h3><div className="evidence-links">{conclusionReferences(selected).map((item) => <a key={`${item.url}-${item.label}`} href={item.url} target="_blank" rel="noreferrer"><strong>{item.label}</strong><span>{item.source}</span></a>)}</div>
-      </article></div>}
+      {selected && <ConclusionDetailModal detail={selected} onClose={() => setSelected(null)} />}
     </section>
   );
 }

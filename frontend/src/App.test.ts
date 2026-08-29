@@ -18,9 +18,12 @@ import BuildFooter, { buildInfo } from "./BuildFooter";
 import {
   applyCancelledTaskTombstone,
   changedTargetDesktopColumns,
+  changedTargetLatestRecommendationId,
   ChangedTargetGrid,
   ChangedTargetsContent,
   ChangedTargetsPage,
+  ConclusionDetailModal,
+  type ConclusionDetail,
   factSourceGroupDefinitions,
   formatQueueDuration,
   ModelInferenceQueuePanel,
@@ -492,6 +495,8 @@ describe("changed targets page", () => {
         market: "US",
       },
       recommendation_id: `recommendation-${index}`,
+      latest_recommendation_id: `latest-recommendation-${index}`,
+      latest_researched_at: `2026-08-28T0${index}:00:00Z`,
       changed_at: `2026-08-27T0${index}:00:00Z`,
       previous: {
         signal_status: index === 0 ? "insufficient_evidence" : "directional",
@@ -526,6 +531,73 @@ describe("changed targets page", () => {
     expect((markup.match(/class="research-again"/g) || []).length).toBe(5);
     expect(markup).toContain("已进入队列");
     expect(markup.indexOf("TARGET0")).toBeLessThan(markup.indexOf("已进入队列"));
+    expect(markup).toContain('class="target-change-identity"');
+    expect(markup).toContain('aria-label="查看 TARGET0 最近一次调研"');
+    expect(markup).toMatch(/target-change-identity[\s\S]*TARGET0[\s\S]*Target 0 Corp[\s\S]*<\/button>[\s\S]*conclusion-research-action/);
+  });
+
+  it("uses the latest research id and falls back for old API responses", () => {
+    const base = {
+      asset: { asset_id: "equity:XNAS:MRNA", symbol: "MRNA", name: "Moderna", market: "US" },
+      recommendation_id: "rating-change-id",
+      changed_at: "2026-08-27T00:00:00Z",
+      previous: { signal_status: "neutral", rating: "watch" },
+      current: { signal_status: "directional", rating: "bullish" },
+      status_changed: true,
+      rating_changed: true,
+    };
+
+    expect(changedTargetLatestRecommendationId(base)).toBe("rating-change-id");
+    expect(changedTargetLatestRecommendationId({ ...base, latest_recommendation_id: "latest-id" })).toBe("latest-id");
+
+    const loadingMarkup = renderToStaticMarkup(createElement(ChangedTargetGrid, {
+      items: [base],
+      detailLoadingId: base.asset.asset_id,
+    }));
+    expect(loadingMarkup).toContain("正在加载最近调研");
+    expect(loadingMarkup).toContain('aria-busy="true"');
+  });
+
+  it("renders the shared latest research modal with thesis, risk, and evidence", () => {
+    const detail = {
+      recommendation: {
+        id: "latest-id",
+        run_id: "run-1",
+        asset: { asset_id: "equity:XNAS:MRNA", symbol: "MRNA", name: "Moderna, Inc.", market: "US" },
+        rating: "bullish",
+        score: 36,
+        confidence: 0.72,
+        evidence_complete: true,
+        scoring_version: "short-term-impact-v1",
+        horizon_unit: "trading_sessions",
+        horizon_days: 3,
+        as_of: "2026-08-28T20:57:28Z",
+        bull_probability: 0.6,
+        base_probability: 0.3,
+        bear_probability: 0.1,
+        thesis: {
+          summary: "最近调研核心观点",
+          historical_context: "历史背景",
+          financials_and_growth: "财务",
+          products_or_protocol: "产品",
+          competition: "竞争",
+          valuation_or_tokenomics: "估值",
+          catalysts: ["近期催化剂"],
+          risks: ["关键下行风险"],
+          invalidation_conditions: ["观点失效条件"],
+        },
+      },
+      event: { headline: "关联事件标题" },
+      news: [{ id: "news-1", title: "支持新闻", url: "https://example.com/news", source: "Example" }],
+      evidence: [{ id: "evidence-1", claim: "支持证据", source_name: "Evidence", source_url: "https://example.com/evidence", excerpt: "摘要" }],
+    } as ConclusionDetail;
+
+    const markup = renderToStaticMarkup(createElement(ConclusionDetailModal, { detail, onClose: () => undefined }));
+    expect(markup).toContain("最近调研核心观点");
+    expect(markup).toContain("关键下行风险");
+    expect(markup).toContain("支持新闻");
+    expect(markup).toContain("关联事件标题");
+    expect(markup).toContain('aria-label="关闭调研详情"');
   });
 
   it("distinguishes loading, empty, and failed states", () => {
