@@ -2142,6 +2142,7 @@ export function TargetChangeGrid({
             <button
               type="button"
               className="target-change-identity"
+              title={item.label}
               aria-label={`查看 ${item.symbol || item.label} 最新研究`}
               aria-busy={detailLoadingId === item.key}
               disabled={detailLoadingId === item.key}
@@ -2150,13 +2151,13 @@ export function TargetChangeGrid({
               <strong>{item.symbol || item.label}</strong>
               {item.symbol && <small>{item.label}</small>}
             </button>
-            {onResearch && <ResearchAgainButton state={researchStates[targetChangeResearchKey(item)]} onResearch={() => onResearch(item)} />}
           </div>
         </header>
         <div className="target-change-field changed"><span>评级变化</span><strong>{recommendationRatingLabel(item.previous.rating)} → {recommendationRatingLabel(item.current.rating)}</strong></div>
-        <div className="target-change-latest">
+        <div className={`target-change-latest${onResearch ? " with-research" : ""}`}>
           <span>最新方向分<strong>{score === null ? "—" : `${score > 0 ? "+" : ""}${score}`}</strong></span>
           <span>评级置信度<strong>{confidence === null ? "—" : `${Math.round(confidence * 100)}%`}</strong></span>
+          {onResearch && <ResearchAgainButton state={researchStates[targetChangeResearchKey(item)]} onResearch={() => onResearch(item)} />}
         </div>
       </article>;
     })}

@@ -631,8 +631,10 @@ describe("changed targets page", () => {
     expect(markup).toContain("评级变化");
     expect(markup).toContain("最新方向分");
     expect(markup).toContain("评级置信度");
+    expect(markup).toContain('title="Target 0 Corp"');
     expect(markup).toContain('aria-label="查看 能源行业 0 最新研究"');
     expect(markup).toContain('aria-label="查看 TARGET0 最新研究"');
+    expect(markup.indexOf("评级置信度")).toBeLessThan(markup.indexOf('class="conclusion-research-action"'));
   });
 
   it("renders event conclusion cards and their macro impact detail", () => {
