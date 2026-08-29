@@ -7,6 +7,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from backend.app.domain import (
+    EventReport,
     EventResearchRun,
     EventType,
     NewsEvent,
@@ -620,6 +621,88 @@ def test_conclusion_force_research_reports_active_run_and_missing_event(
     assert active.status_code == 409
     assert active.json()["detail"]["code"] == "research_already_active"
     assert active.json()["detail"]["active_run_id"] == str(active_id)
+
+
+def test_event_conclusion_force_research_accepts_published_reports(db, monkeypatch):
+    captured = []
+
+    def fake_enqueue(_db, queued_event, queued_run):
+        captured.append((queued_event, queued_run))
+        queued_run.status = RunStatus.QUEUED
+        return "event-refresh-task", queued_run
+
+    monkeypatch.setattr(
+        "backend.app.main.enqueue_event_research_refresh", fake_enqueue
+    )
+    run_ids = []
+    for status in (RunStatus.COMPLETED, RunStatus.INSUFFICIENT_EVIDENCE):
+        now = utc_now()
+        event = NewsEvent(
+            news_item_ids=[],
+            headline=f"Refresh {status.value}",
+            event_type=EventType.MACRO,
+            direct_impact="Refresh the complete event report",
+            source_quality=SourceQuality.PROFESSIONAL,
+            published_at=now,
+            observed_at=now,
+            as_of=now,
+        )
+        save_event(db, event)
+        run = EventResearchRun(
+            event_id=event.id,
+            status=status,
+            report=EventReport(
+                summary="Published event report",
+                confidence=0.7,
+                evidence_complete=status is RunStatus.COMPLETED,
+            ),
+        )
+        save_event_research_run(db, run)
+        run_ids.append(run.id)
+
+    with TestClient(app) as client:
+        responses = [
+            client.post(f"/api/v1/event-conclusions/{run_id}/research")
+            for run_id in run_ids
+        ]
+
+    assert [response.status_code for response in responses] == [202, 202]
+    assert [response.json()["source_run_id"] for response in responses] == [
+        str(run_id) for run_id in run_ids
+    ]
+    assert all(response.json()["status"] == "queued" for response in responses)
+    assert [item[1].report.summary for item in captured] == [
+        "Published event report",
+        "Published event report",
+    ]
+
+
+def test_event_conclusion_force_research_rejects_invalid_or_active_runs(db):
+    now = utc_now()
+    event = NewsEvent(
+        news_item_ids=[],
+        headline="Active event research",
+        event_type=EventType.OTHER,
+        direct_impact="Already active",
+        source_quality=SourceQuality.PROFESSIONAL,
+        published_at=now,
+        observed_at=now,
+        as_of=now,
+    )
+    save_event(db, event)
+    active = EventResearchRun(event_id=event.id, status=RunStatus.RUNNING)
+    save_event_research_run(db, active)
+
+    with TestClient(app) as client:
+        missing = client.post(f"/api/v1/event-conclusions/{uuid4()}/research")
+        conflict = client.post(
+            f"/api/v1/event-conclusions/{active.id}/research"
+        )
+
+    assert missing.status_code == 404
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"]["code"] == "event_research_already_active"
+    assert conflict.json()["detail"]["active_run_id"] == str(active.id)
 
 
 def test_synchronous_research_failure_closes_reserved_run(db, monkeypatch):

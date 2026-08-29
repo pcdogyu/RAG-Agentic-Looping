@@ -97,6 +97,7 @@ from backend.app.worker import (
     celery_app,
     clear_news_extraction_queue,
     enqueue_asset_mapping,
+    enqueue_event_research_refresh,
     enqueue_event_research_retry,
     enqueue_news_extraction_retry,
     enqueue_research,
@@ -1394,6 +1395,47 @@ def research_conclusion_again(
         "source_recommendation_id": str(recommendation.id),
         "status": "queued",
     }
+
+
+@app.post("/api/v1/event-conclusions/{run_id}/research", status_code=202)
+def research_event_conclusion_again(
+    run_id: UUID,
+    db: Session = Depends(get_db),
+):
+    with _failed_research_retry_lock:
+        run = get_event_research_run(db, run_id)
+        if run is None:
+            raise HTTPException(404, "event conclusion not found")
+        if run.status in {
+            RunStatus.QUEUED,
+            RunStatus.RUNNING,
+            RunStatus.VERIFYING,
+        }:
+            raise HTTPException(
+                409,
+                {
+                    "code": "event_research_already_active",
+                    "message": "该事件已有排队中或执行中的研究任务。",
+                    "active_run_id": str(run.id),
+                },
+            )
+        if run.status not in {
+            RunStatus.COMPLETED,
+            RunStatus.INSUFFICIENT_EVIDENCE,
+        }:
+            raise HTTPException(409, "event conclusion is not refreshable")
+        if run.report is None:
+            raise HTTPException(409, "event conclusion has no report")
+        event = get_event(db, run.event_id)
+        if event is None:
+            raise HTTPException(409, "source event no longer exists")
+        task_id, refreshed = enqueue_event_research_refresh(db, event, run)
+        return {
+            "task_id": task_id,
+            "run_id": str(refreshed.id),
+            "source_run_id": str(run_id),
+            "status": "queued",
+        }
 
 
 @app.post("/api/v1/research-runs/{run_id}/retry", status_code=202)

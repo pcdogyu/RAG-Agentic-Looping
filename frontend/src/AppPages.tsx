@@ -1298,6 +1298,13 @@ export type ConclusionResearchResponse = {
   status: "queued";
 };
 
+export type EventConclusionResearchResponse = {
+  task_id: string;
+  run_id: string;
+  source_run_id: string;
+  status: "queued";
+};
+
 export const conclusionResearchPath = (recommendationId: string) =>
   `/api/v1/conclusions/${encodeURIComponent(recommendationId)}/research`;
 
@@ -1322,6 +1329,32 @@ export async function researchConclusion(
     throw new Error(detail);
   }
   return payload as ConclusionResearchResponse;
+}
+
+export const eventConclusionResearchPath = (runId: string) =>
+  `/api/v1/event-conclusions/${encodeURIComponent(runId)}/research`;
+
+export async function researchEventConclusion(
+  apiBase: string,
+  runId: string,
+  request: typeof fetch = fetch,
+): Promise<EventConclusionResearchResponse> {
+  const response = await request(`${apiBase}${eventConclusionResearchPath(runId)}`, { method: "POST" });
+  const payload = await response.json() as Partial<EventConclusionResearchResponse> & { detail?: unknown };
+  if (!response.ok) {
+    const structured = payload.detail && typeof payload.detail === "object"
+      ? payload.detail as { message?: unknown; active_run_id?: unknown }
+      : null;
+    const message = structured && typeof structured.message === "string" ? structured.message : null;
+    const activeRun = structured && typeof structured.active_run_id === "string" ? structured.active_run_id : null;
+    const detail = typeof payload.detail === "string"
+      ? payload.detail
+      : message
+        ? `${message}${activeRun ? `（活动任务 ${activeRun}）` : ""}`
+        : "事件重新调研失败";
+    throw new Error(detail);
+  }
+  return payload as EventConclusionResearchResponse;
 }
 
 export function failedResearchRetryPath(
@@ -2038,7 +2071,7 @@ export function TargetChangeGrid({
               <strong>{item.symbol || item.label}</strong>
               {item.symbol && <small>{item.label}</small>}
             </button>
-            {item.kind === "asset" && onResearch && <ResearchAgainButton state={researchStates[item.key]} onResearch={() => onResearch(item)} />}
+            {onResearch && <ResearchAgainButton state={researchStates[targetChangeResearchKey(item)]} onResearch={() => onResearch(item)} />}
           </div>
         </header>
         <div className="target-change-field changed"><span>评级变化</span><strong>{recommendationRatingLabel(item.previous.rating)} → {recommendationRatingLabel(item.current.rating)}</strong></div>
@@ -2049,6 +2082,12 @@ export function TargetChangeGrid({
       </article>;
     })}
   </div>;
+}
+
+export function targetChangeResearchKey(item: TargetChange) {
+  return item.kind === "macro"
+    ? `event:${item.latest_detail.id}`
+    : `asset:${item.key}`;
 }
 
 function TargetChangeSection({
@@ -2139,16 +2178,18 @@ export function ChangedTargetsPage({ apiBase }: { apiBase: string }) {
   }
 
   async function researchAgain(item: TargetChange) {
-    if (item.kind !== "asset" || researchInFlight.current.has(item.key) || researchStates[item.key]?.status === "queued") return;
-    researchInFlight.current.add(item.key);
-    setResearchStates((current) => ({ ...current, [item.key]: { status: "pending" } }));
+    const stateKey = targetChangeResearchKey(item);
+    if (researchInFlight.current.has(stateKey) || researchStates[stateKey]?.status === "queued") return;
+    researchInFlight.current.add(stateKey);
+    setResearchStates((current) => ({ ...current, [stateKey]: { status: "pending" } }));
     try {
-      await researchConclusion(apiBase, item.latest_detail.id);
-      setResearchStates((current) => ({ ...current, [item.key]: { status: "queued" } }));
+      if (item.kind === "macro") await researchEventConclusion(apiBase, item.latest_detail.id);
+      else await researchConclusion(apiBase, item.latest_detail.id);
+      setResearchStates((current) => ({ ...current, [stateKey]: { status: "queued" } }));
     } catch (reason) {
-      setResearchStates((current) => ({ ...current, [item.key]: { status: "error", error: reason instanceof Error ? reason.message : "重新调研失败" } }));
+      setResearchStates((current) => ({ ...current, [stateKey]: { status: "error", error: reason instanceof Error ? reason.message : "重新调研失败" } }));
     } finally {
-      researchInFlight.current.delete(item.key);
+      researchInFlight.current.delete(stateKey);
     }
   }
 
@@ -2156,7 +2197,7 @@ export function ChangedTargetsPage({ apiBase }: { apiBase: string }) {
     <PageHeading eyebrow="RATING CHANGES" title="标的评级变化" copy="左侧追踪宏观经济、行业及跨资产目标，右侧追踪具体证券；仅展示最近一次五级评级变化。" />
     {detailError && <div className="page-error target-detail-error"><span>{detailError}</span></div>}
     <div className="target-change-split">
-      <TargetChangeSection apiBase={apiBase} kind="macro" title="宏观经济与行业变化" copy="经济、行业、商品、汇率、利率、供给、航运与风险资产。" onOpen={(item) => void openLatestResearch(item)} detailLoadingId={detailLoadingId} researchStates={researchStates} />
+      <TargetChangeSection apiBase={apiBase} kind="macro" title="宏观经济与行业变化" copy="经济、行业、商品、汇率、利率、供给、航运与风险资产。" onOpen={(item) => void openLatestResearch(item)} detailLoadingId={detailLoadingId} researchStates={researchStates} onResearch={(item) => void researchAgain(item)} />
       <TargetChangeSection apiBase={apiBase} kind="asset" title="具体标的变化" copy="股票与加密资产的最新五级评级变化及研究结论。" onOpen={(item) => void openLatestResearch(item)} detailLoadingId={detailLoadingId} researchStates={researchStates} onResearch={(item) => void researchAgain(item)} />
     </div>
     {selectedAsset && <ConclusionDetailModal detail={selectedAsset} onClose={() => setSelectedAsset(null)} />}

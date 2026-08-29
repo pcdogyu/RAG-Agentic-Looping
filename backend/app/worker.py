@@ -2015,6 +2015,82 @@ def enqueue_event_research_retry(
     return str(task.id), run
 
 
+def enqueue_event_research_refresh(
+    db,
+    event: NewsEvent,
+    run: EventResearchRun,
+    *,
+    model_instance_id: str | None = None,
+) -> tuple[str, EventResearchRun]:
+    """Queue a fresh event report while keeping the published report visible."""
+
+    previous_status = run.status
+    previous_task_id = run.celery_task_id
+    if run.report is not None and (
+        not run.report_history or run.report_history[-1] != run.report
+    ):
+        run.report_history.append(run.report.model_copy(deep=True))
+    run.status = RunStatus.QUEUED
+    run.as_of = utc_now()
+    run.verification_round = 0
+    run.missing_requirements = []
+    run.contradictions = []
+    run.error = None
+    run.retryable_reason = None
+    task_id = str(uuid4())
+    instance = select_model_instance(
+        "research",
+        task_id=task_id,
+        preferred=model_instance_id,
+        settings=settings,
+        probe_health=True,
+    )
+    run.celery_task_id = task_id
+    run.model_instance_id = instance.id
+    run.analysis_steps.append(
+        AnalysisStep(
+            phase="forced_event_research_queue",
+            status="queued",
+            executor="celery",
+            model=settings.ollama_research_model,
+            summary="已保留当前事件研报，并创建完整事件重新调研任务。",
+            metrics={
+                "instance_id": instance.id,
+                "priority": EVENT_RESEARCH_PRIORITY,
+                "previous_status": previous_status.value,
+                "archived_report_count": len(run.report_history),
+            },
+        )
+    )
+    save_event_research_run(db, run)
+    dispatch_recorded = _record_research_dispatch(str(run.id), task_id)
+    try:
+        task = research_event.apply_async(
+            args=[str(event.id), str(run.id)],
+            kwargs={"model_instance_id": instance.id},
+            queue=broker_queue_name("research", instance.id),
+            task_id=task_id,
+            priority=EVENT_RESEARCH_PRIORITY,
+        )
+    except Exception as exc:
+        if dispatch_recorded:
+            _clear_research_dispatch(str(run.id), task_id)
+        run.status = previous_status
+        run.celery_task_id = previous_task_id
+        run.error = f"{type(exc).__name__}: event research refresh queue failed"
+        run.analysis_steps.append(
+            AnalysisStep(
+                phase="forced_event_research_queue",
+                status="failed",
+                executor="celery",
+                summary=f"事件重新调研入队失败（{type(exc).__name__}），已保留原研报。",
+            )
+        )
+        save_event_research_run(db, run)
+        raise
+    return str(task.id), run
+
+
 @celery_app.task(name="market_loop.ensure_scan_loop")
 def ensure_scan_loop() -> dict:
     """Start immediately when uninitialized, then ten minutes after completion."""

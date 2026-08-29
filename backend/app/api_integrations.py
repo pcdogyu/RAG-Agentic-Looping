@@ -1073,7 +1073,6 @@ def _macro_target_changes(db: Session) -> list[dict[str, Any]]:
     rows = list(
         db.scalars(
             select(EventResearchRunRow)
-            .where(EventResearchRunRow.status.in_(_VISIBLE_EVENT_STATUSES))
             .order_by(EventResearchRunRow.updated_at, EventResearchRunRow.id)
         ).all()
     )
@@ -1082,7 +1081,9 @@ def _macro_target_changes(db: Session) -> list[dict[str, Any]]:
     aliases: dict[tuple[str, str], str] = {}
     for row in rows:
         run = EventResearchRun.model_validate(row.payload)
-        if run.report is None:
+        if run.report is None or (
+            row.status not in _VISIBLE_EVENT_STATUSES and not run.report_history
+        ):
             continue
         parsed.append((row, run))
         for impact in run.report.impacts:

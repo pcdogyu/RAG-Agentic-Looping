@@ -25,6 +25,8 @@ import {
   parseFilterKeywords,
   retryAllFailedResearch,
   researchConclusion,
+  researchEventConclusion,
+  eventConclusionResearchPath,
   ResearchAgainButton,
   ShortTermScoreDetails,
   searchSourceLabel,
@@ -303,6 +305,41 @@ describe("open source and search settings", () => {
 
     await expect(researchConclusion("", "recommendation-1", request)).rejects.toThrow(
       "该标的已有活动研究（活动任务 active-run-1）",
+    );
+  });
+
+  it("posts a full event report refresh request and surfaces active conflicts", async () => {
+    const calls: Array<{ input: string; init?: RequestInit }> = [];
+    const request = (async (input: string | URL | Request, init?: RequestInit) => {
+      calls.push({ input: String(input), init });
+      return new Response(JSON.stringify({
+        task_id: "event-task-1",
+        run_id: "event/run-1",
+        source_run_id: "event/run-1",
+        status: "queued",
+      }), { status: 202, headers: { "Content-Type": "application/json" } });
+    }) as typeof fetch;
+
+    const payload = await researchEventConclusion("http://api.example", "event/run-1", request);
+
+    expect(eventConclusionResearchPath("event/run-1")).toBe(
+      "/api/v1/event-conclusions/event%2Frun-1/research",
+    );
+    expect(calls).toEqual([{
+      input: "http://api.example/api/v1/event-conclusions/event%2Frun-1/research",
+      init: { method: "POST" },
+    }]);
+    expect(payload.status).toBe("queued");
+
+    const conflict = (async () => new Response(JSON.stringify({
+      detail: {
+        code: "event_research_already_active",
+        message: "该事件已有活动研究",
+        active_run_id: "event-run-active",
+      },
+    }), { status: 409, headers: { "Content-Type": "application/json" } })) as typeof fetch;
+    await expect(researchEventConclusion("", "event-run-active", conflict)).rejects.toThrow(
+      "该事件已有活动研究（活动任务 event-run-active）",
     );
   });
 

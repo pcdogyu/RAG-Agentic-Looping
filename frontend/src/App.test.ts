@@ -48,6 +48,7 @@ import {
   type ResearchConclusionItem,
   routeFromHash,
   TargetChangeGrid,
+  targetChangeResearchKey,
   type TargetChange,
   TopNavigation,
   UnifiedModelQueuePanel,
@@ -604,14 +605,29 @@ describe("changed targets page", () => {
       latest_detail: { kind: kind === "macro" ? "event" : "asset", id: `${kind}-detail-${index}`, researched_at: `2026-08-29T0${index}:00:00Z` },
       change_detail_id: `${kind}-change-${index}`,
     })) as TargetChange[];
+    const macroItems = buildItems("macro");
+    const assetItems = buildItems("asset");
     const markup = renderToStaticMarkup(createElement("div", { className: "target-change-split" },
-      createElement(TargetChangeGrid, { items: buildItems("macro"), onOpen: () => undefined }),
-      createElement(TargetChangeGrid, { items: buildItems("asset"), onOpen: () => undefined }),
+      createElement(TargetChangeGrid, {
+        items: macroItems,
+        onOpen: () => undefined,
+        onResearch: () => undefined,
+        researchStates: { "event:macro-detail-0": { status: "queued" } },
+      }),
+      createElement(TargetChangeGrid, {
+        items: assetItems,
+        onOpen: () => undefined,
+        onResearch: () => undefined,
+      }),
     ));
 
     expect(changedTargetDesktopColumns).toBe(4);
     expect((markup.match(/data-columns="4"/g) || []).length).toBe(2);
     expect((markup.match(/target-change-card (?:macro|asset)/g) || []).length).toBe(8);
+    expect((markup.match(/class="research-again"/g) || []).length).toBe(8);
+    expect(markup).toContain("已进入队列");
+    expect(targetChangeResearchKey(macroItems[0])).toBe("event:macro-detail-0");
+    expect(targetChangeResearchKey(assetItems[0])).toBe("asset:asset-0");
     expect(markup).toContain("评级变化");
     expect(markup).toContain("最新方向分");
     expect(markup).toContain("评级置信度");

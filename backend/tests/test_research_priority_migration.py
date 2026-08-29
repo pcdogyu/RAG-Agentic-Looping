@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from backend.app import worker
 from backend.app.domain import (
     AnalysisStep,
+    EventReport,
     EventResearchRun,
     EventType,
     NewsEvent,
@@ -162,3 +163,44 @@ def test_event_retry_cannot_be_demoted_by_caller_priority(db, monkeypatch):
     assert published[0]["priority"] == worker.EVENT_RESEARCH_PRIORITY == 1
     stored = get_event_research_run(db, run.id)
     assert stored.analysis_steps[-1].metrics["priority"] == 1
+
+
+def test_event_refresh_archives_and_keeps_published_report(db, monkeypatch):
+    event = _event("已发布事件")
+    save_event(db, event)
+    report = EventReport(
+        summary="继续显示的旧研报",
+        confidence=0.74,
+        evidence_complete=True,
+    )
+    run = EventResearchRun(
+        event_id=event.id,
+        status=RunStatus.COMPLETED,
+        report=report,
+    )
+    save_event_research_run(db, run)
+    published = []
+    monkeypatch.setattr(
+        worker,
+        "select_model_instance",
+        lambda *_args, **_kwargs: SimpleNamespace(id="research-0"),
+    )
+    monkeypatch.setattr(worker, "_record_research_dispatch", lambda *_args: True)
+    monkeypatch.setattr(
+        worker.research_event,
+        "apply_async",
+        lambda **kwargs: published.append(kwargs) or SimpleNamespace(id=kwargs["task_id"]),
+    )
+
+    task_id, queued = worker.enqueue_event_research_refresh(db, event, run)
+
+    assert queued.status is RunStatus.QUEUED
+    assert queued.report == report
+    assert queued.report_history == [report]
+    assert queued.analysis_steps[-1].phase == "forced_event_research_queue"
+    assert published[0]["args"] == [str(event.id), str(run.id)]
+    assert published[0]["task_id"] == task_id
+    assert published[0]["priority"] == worker.EVENT_RESEARCH_PRIORITY
+    stored = get_event_research_run(db, run.id)
+    assert stored.report.summary == "继续显示的旧研报"
+    assert stored.report_history[-1].summary == "继续显示的旧研报"

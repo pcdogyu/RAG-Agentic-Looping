@@ -479,9 +479,9 @@ h1 span { color: var(--mint); font-weight: 400; }
 .target-change-identity:hover > strong { color: var(--mint); }
 .target-change-identity:focus-visible { outline: 2px solid var(--mint); outline-offset: 3px; border-radius: 3px; }
 .target-change-identity:disabled { opacity: .65; cursor: wait; }
-.target-change-card .conclusion-research-action { flex: 0 0 auto; }
-.target-change-card .research-again { padding: 7px 9px; font-size: 10px; }
-.target-change-card .conclusion-research-action small { max-width: 120px; }
+.target-change-card .conclusion-research-action { flex: 0 0 92px; min-width: 0; margin-left: auto; justify-items: end; }
+.target-change-card .research-again { width: 92px; padding: 7px 8px; font-size: 10px; }
+.target-change-card .conclusion-research-action small { max-width: 92px; text-align: right; }
 .target-change-field { display: grid; gap: 5px; min-width: 0; padding: 9px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--soft-hover); }
 .target-change-field span { color: var(--muted); font-size: 9px; }
 .target-change-field strong { color: var(--secondary); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }

@@ -290,10 +290,51 @@ def test_target_changes_split_macro_and_assets_and_link_latest_research(db):
     assert macro_items[0]["change_detail_id"] == str(changed_macro.id)
     assert macro_items[0]["latest_detail"]["id"] == str(latest_macro.id)
     assert all("SECURITY" not in item["label"] for item in macro_items)
-
     assert assets.status_code == 200
     asset_items = assets.json()["items"]
     assert len(asset_items) == 1
     assert asset_items[0]["current"]["rating"] == "bullish"
     assert asset_items[0]["latest"]["direction_score"] == 55
     assert asset_items[0]["latest_detail"]["id"] == str(latest_asset.id)
+
+
+def test_macro_change_keeps_published_report_visible_during_refresh(db):
+    event_run(
+        db,
+        "macro refresh baseline",
+        status=RunStatus.COMPLETED,
+        impacts=[
+            impact(
+                "能源行业",
+                target_type=TargetType.SECTOR,
+                rating=Rating.WATCH,
+                score=0,
+            )
+        ],
+    )
+    refreshing = event_run(
+        db,
+        "macro refresh published",
+        status=RunStatus.COMPLETED,
+        impacts=[
+            impact(
+                "能源行业",
+                target_type=TargetType.SECTOR,
+                rating=Rating.BEARISH,
+                score=-48,
+            )
+        ],
+    )
+    refreshing.report_history.append(refreshing.report.model_copy(deep=True))
+    refreshing.status = RunStatus.RUNNING
+    save_event_research_run(db, refreshing)
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/target-changes?kind=macro&limit=50")
+
+    assert response.status_code == 200
+    items = response.json()["items"]
+    assert len(items) == 1
+    assert items[0]["label"] == "能源行业"
+    assert items[0]["current"]["rating"] == "bearish"
+    assert items[0]["latest_detail"]["id"] == str(refreshing.id)
