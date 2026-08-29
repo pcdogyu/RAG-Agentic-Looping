@@ -568,6 +568,7 @@ h1 span { color: var(--mint); font-weight: 400; }
 .source-card small { margin-left: 8px; padding: 2px 5px; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); }
 .health-dot { display: inline-block; width: 7px; height: 7px; margin-right: 3px; border-radius: 50%; background: var(--muted); }
 .health-dot.healthy { background: var(--mint); box-shadow: 0 0 8px var(--mint); }
+.health-dot.discovered { background: var(--amber); box-shadow: 0 0 8px var(--amber); }
 .health-dot.failed { background: var(--red); }
 .card-actions { margin: 14px 0 0; }
 .card-actions .danger { color: var(--red); }

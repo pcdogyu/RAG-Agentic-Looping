@@ -57,7 +57,12 @@ OTHER_GROUP = {
     "tone": "neutral",
 }
 FACT_SOURCE_GROUP_IDS = {item["id"] for item in FACT_SOURCE_GROUPS} | {"other"}
-BUILTIN_SOURCE_GROUPS = {"FMP": "fmp", "SearXNG": "search", "DuckDuckGo": "search"}
+BUILTIN_SOURCE_GROUPS = {
+    "FMP": "fmp",
+    "SearXNG": "search",
+    "DuckDuckGo": "search",
+    "金十数据": "cn_news",
+}
 
 
 class StrictConfig(BaseModel):

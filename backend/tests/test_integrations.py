@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from backend.app.config import Settings
 from backend.app.db import IntegrationSettingRow, McpSourceRow
@@ -30,6 +31,8 @@ from backend.app.services.fact_sources import (
     save_native_group_config,
 )
 from backend.app.services.mcp_registry import (
+    JIN10_MCP_URL,
+    JIN10_TOOL_MAPPINGS,
     SearchRequest,
     fetch_enabled_news_feeds,
     flash_headline,
@@ -37,6 +40,7 @@ from backend.app.services.mcp_registry import (
     normalize_search_results,
     require_admin_token,
     search_enabled_sources,
+    seed_integrations,
     validate_mappings,
 )
 from backend.app.services.secret_store import decrypt_secret, encrypt_secret
@@ -104,10 +108,11 @@ def test_managed_sources_seed_and_cannot_be_deleted():
     with TestClient(app) as client:
         items = client.get("/api/v1/admin/mcp-sources").json()
         names = {item["name"] for item in items}
-        assert {"SearXNG", "DuckDuckGo", "FMP"} <= names
+        assert {"SearXNG", "DuckDuckGo", "FMP", "金十数据"} <= names
         searxng = next(item for item in items if item["name"] == "SearXNG")
         duckduckgo = next(item for item in items if item["name"] == "DuckDuckGo")
         fmp = next(item for item in items if item["name"] == "FMP")
+        jin10 = next(item for item in items if item["name"] == "金十数据")
         assert "web_search" in searxng["tool_mappings"]
         assert searxng["group_id"] == "search"
         assert duckduckgo["url"] == "http://duckduckgo-mcp:8080/mcp"
@@ -118,6 +123,14 @@ def test_managed_sources_seed_and_cannot_be_deleted():
         assert fmp["url"] == "http://fmp-mcp:8080/mcp"
         assert fmp["group_id"] == "fmp"
         assert set(fmp["tool_mappings"]) == {"quote", "fundamentals", "filings"}
+        assert jin10["url"] == JIN10_MCP_URL
+        assert jin10["priority"] == 80
+        assert jin10["enabled"] is False
+        assert jin10["managed"] is True
+        assert jin10["auth_type"] == "bearer"
+        assert jin10["secret_configured"] is False
+        assert jin10["group_id"] == "cn_news"
+        assert jin10["tool_mappings"] == JIN10_TOOL_MAPPINGS
         changed_group = client.put(
             f"/api/v1/admin/mcp-sources/{fmp['id']}",
             json={
@@ -143,10 +156,34 @@ def test_fact_source_groups_nest_managed_sources_and_hide_other_when_empty():
     payload = groups.json()
     assert [item["id"] for item in payload] == ["fmp", "sec", "cn_news", "crypto", "search"]
     fmp = next(item for item in payload if item["id"] == "fmp")
+    cn_news = next(item for item in payload if item["id"] == "cn_news")
     search = next(item for item in payload if item["id"] == "search")
     assert [item["name"] for item in fmp["mcp_sources"]] == ["FMP"]
+    assert [item["name"] for item in cn_news["mcp_sources"]] == ["金十数据"]
     assert [item["name"] for item in search["mcp_sources"]] == ["SearXNG", "DuckDuckGo"]
     assert "access_token" not in fmp["config"]
+
+
+def test_jin10_seed_is_idempotent_and_preserves_existing_configuration(db):
+    seed_integrations(db)
+    source = db.scalar(select(McpSourceRow).where(McpSourceRow.name == "金十数据"))
+    source.url = "https://custom.example.test/mcp"
+    source.description = "customized"
+    source.priority = 321
+    source.enabled = True
+    source.encrypted_secret = encrypt_secret("preserved-secret")
+    source.tool_mappings = {"news_search": JIN10_TOOL_MAPPINGS["news_search"]}
+    db.commit()
+
+    seed_integrations(db)
+    db.refresh(source)
+
+    assert source.url == "https://custom.example.test/mcp"
+    assert source.description == "customized"
+    assert source.priority == 321
+    assert source.enabled is True
+    assert decrypt_secret(source.encrypted_secret) == "preserved-secret"
+    assert source.tool_mappings == {"news_search": JIN10_TOOL_MAPPINGS["news_search"]}
 
 
 def test_custom_mcp_group_is_persisted_and_other_is_a_safe_fallback(db):
@@ -280,7 +317,15 @@ def test_discover_records_tools_and_validates_mapping(monkeypatch):
             {
                 "name": "web_search",
                 "description": "search",
-                "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}},
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "limit": {"type": "integer"},
+                        "language": {"type": "string"},
+                        "time_range": {"type": "string"},
+                    },
+                },
                 "output_schema": {"type": "object"},
             }
         ]
@@ -291,8 +336,117 @@ def test_discover_records_tools_and_validates_mapping(monkeypatch):
         source = next(item for item in items if item["name"] == "SearXNG")
         discovered = client.post(f"/api/v1/admin/mcp-sources/{source['id']}/discover")
     assert discovered.status_code == 200
-    assert discovered.json()["source"]["last_status"] == "healthy"
+    assert discovered.json()["source"]["last_status"] == "discovered"
     assert discovered.json()["tools"][0]["name"] == "web_search"
+
+
+def test_jin10_requires_credentials_discovery_and_test_before_enable(monkeypatch):
+    calls: list[tuple[str, str]] = []
+
+    async def fake_discover(_row):
+        return [
+            {
+                "name": "list_flash",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"cursor": {"type": "string"}},
+                },
+            },
+            {
+                "name": "search_flash",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"keyword": {"type": "string"}},
+                },
+            },
+        ]
+
+    async def fake_call(row, purpose, _arguments):
+        calls.append((row.name, purpose))
+        return {
+            "data": {
+                "items": [
+                    {
+                        "content": "ETF市场快讯。",
+                        "url": "https://jin10.example/flash/etf",
+                    }
+                ]
+            }
+        }
+
+    monkeypatch.setattr("backend.app.api_integrations.discover_source", fake_discover)
+    monkeypatch.setattr("backend.app.api_integrations.call_source_tool", fake_call)
+    with TestClient(app) as client:
+        source = next(
+            item
+            for item in client.get("/api/v1/admin/mcp-sources").json()
+            if item["name"] == "金十数据"
+        )
+        source_id = source["id"]
+        missing_secret = client.patch(
+            f"/api/v1/admin/mcp-sources/{source_id}/enabled",
+            json={"enabled": True},
+        )
+        source["secret"] = "rotated-token-for-test"
+        source["clear_secret"] = False
+        configured = client.put(f"/api/v1/admin/mcp-sources/{source_id}", json=source)
+        discovered = client.post(f"/api/v1/admin/mcp-sources/{source_id}/discover")
+        missing_test = client.patch(
+            f"/api/v1/admin/mcp-sources/{source_id}/enabled",
+            json={"enabled": True},
+        )
+        tested = client.post(f"/api/v1/admin/mcp-sources/{source_id}/test")
+        enabled = client.patch(
+            f"/api/v1/admin/mcp-sources/{source_id}/enabled",
+            json={"enabled": True},
+        )
+
+    assert missing_secret.status_code == 409
+    assert missing_secret.json()["detail"] == "请先配置 MCP 凭据"
+    assert configured.status_code == 200
+    assert configured.json()["enabled"] is False
+    assert configured.json()["secret_configured"] is True
+    assert "rotated-token-for-test" not in configured.text
+    assert discovered.json()["source"]["last_status"] == "discovered"
+    assert missing_test.status_code == 409
+    assert missing_test.json()["detail"] == "请先完成 MCP 连接测试"
+    assert tested.json()["source"]["last_status"] == "healthy"
+    assert calls == [("金十数据", "news_search")]
+    assert enabled.status_code == 200
+    assert enabled.json()["enabled"] is True
+
+
+def test_jin10_discovery_fails_closed_when_required_tool_is_missing(monkeypatch, db):
+    seed_integrations(db)
+    source = db.scalar(select(McpSourceRow).where(McpSourceRow.name == "金十数据"))
+    source.encrypted_secret = encrypt_secret("rotated-token-for-test")
+    db.commit()
+
+    async def incomplete_discover(_row):
+        return [
+            {
+                "name": "search_flash",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"keyword": {"type": "string"}},
+                },
+            }
+        ]
+
+    monkeypatch.setattr("backend.app.api_integrations.discover_source", incomplete_discover)
+    with TestClient(app) as client:
+        discovered = client.post(f"/api/v1/admin/mcp-sources/{source.id}/discover")
+        enabled = client.patch(
+            f"/api/v1/admin/mcp-sources/{source.id}/enabled",
+            json={"enabled": True},
+        )
+
+    assert discovered.status_code == 200
+    assert discovered.json()["source"]["last_status"] == "failed"
+    assert discovered.json()["source"]["discovered_tools"] == []
+    assert "mapped tool was not discovered: list_flash" in discovered.json()["source"]["last_error"]
+    assert enabled.status_code == 409
+    assert enabled.json()["detail"] == "请先完成 MCP 工具发现"
 
 
 def test_search_result_normalization_dedicated_shape():
@@ -592,7 +746,20 @@ def test_search_source_connection_test_calls_upstream(monkeypatch):
     calls: list[tuple[str, dict[str, object]]] = []
 
     async def fake_discover(_row):
-        return [{"name": "web_search", "input_schema": {"type": "object"}}]
+        return [
+            {
+                "name": "web_search",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {},
+                        "limit": {},
+                        "language": {},
+                        "time_range": {},
+                    },
+                },
+            }
+        ]
 
     async def fake_call(row, purpose, arguments):
         calls.append((row.name, {"purpose": purpose, **arguments}))
@@ -641,7 +808,15 @@ def test_jin10_connection_test_uses_financial_news_query_and_adapter(monkeypatch
     db.commit()
 
     async def fake_discover(_row):
-        return [{"name": "search_flash", "input_schema": {"type": "object"}}]
+        return [
+            {
+                "name": "search_flash",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"keyword": {}},
+                },
+            }
+        ]
 
     async def fake_call(row, purpose, arguments):
         calls.append((row.name, {"purpose": purpose, **arguments}))
@@ -679,7 +854,20 @@ def test_jin10_connection_test_uses_financial_news_query_and_adapter(monkeypatch
 
 def test_search_source_connection_test_rejects_empty_upstream(monkeypatch):
     async def fake_discover(_row):
-        return [{"name": "web_search", "input_schema": {"type": "object"}}]
+        return [
+            {
+                "name": "web_search",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {},
+                        "limit": {},
+                        "language": {},
+                        "time_range": {},
+                    },
+                },
+            }
+        ]
 
     async def empty_search(_row, _purpose, _arguments):
         return {"results": []}

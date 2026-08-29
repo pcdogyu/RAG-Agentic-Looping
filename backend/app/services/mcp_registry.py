@@ -46,6 +46,22 @@ OUTPUT_ADAPTERS = {
 }
 
 MCP_NEWS_FEED_MAX_PAGES = 3
+JIN10_MCP_NAME = "金十数据"
+JIN10_MCP_URL = "https://mcp.jin10.com/mcp"
+JIN10_TOOL_MAPPINGS = {
+    "news_feed": {
+        "tool_name": "list_flash",
+        "input_bindings": {"cursor": "cursor"},
+        "defaults": {},
+        "output_adapter": "jin10_flash_v1",
+    },
+    "news_search": {
+        "tool_name": "search_flash",
+        "input_bindings": {"query": "keyword"},
+        "defaults": {},
+        "output_adapter": "jin10_flash_v1",
+    },
+}
 
 
 class SourceInput(BaseModel):
@@ -244,12 +260,28 @@ def seed_integrations(db: Session, settings: Settings | None = None) -> None:
             fmp_source.updated_at = datetime.now().astimezone()
         if not fmp_source.tool_mappings:
             fmp_source.tool_mappings = fmp_mappings
+    jin10_source = db.scalar(
+        select(McpSourceRow).where(McpSourceRow.name == JIN10_MCP_NAME)
+    )
+    if not jin10_source:
+        jin10_source = McpSourceRow(
+            name=JIN10_MCP_NAME,
+            url=JIN10_MCP_URL,
+            description="金十数据专业财经快讯、市场动态与新闻检索",
+            priority=80,
+            enabled=False,
+            managed=True,
+            auth_type="bearer",
+            tool_mappings=JIN10_TOOL_MAPPINGS,
+        )
+        db.add(jin10_source)
     if not db.get(IntegrationSettingRow, "weknora"):
         db.add(IntegrationSettingRow(key="weknora", payload={"url": cfg.weknora_default_url}))
     db.flush()
     ensure_builtin_source_group(db, searxng_source.id, searxng_source.name)
     ensure_builtin_source_group(db, duckduckgo_source.id, duckduckgo_source.name)
     ensure_builtin_source_group(db, fmp_source.id, fmp_source.name)
+    ensure_builtin_source_group(db, jin10_source.id, jin10_source.name)
     db.commit()
 
 

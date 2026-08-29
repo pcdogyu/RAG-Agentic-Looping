@@ -210,6 +210,17 @@ def rescan_source_filter_log(log_id: UUID, db: Db) -> dict[str, Any]:
 
 
 def _apply_source(row: McpSourceRow, payload: SourceInput, *, creating: bool = False) -> None:
+    was_enabled = bool(row.enabled)
+    connection_changed = creating or any(
+        (
+            row.url != str(payload.url),
+            row.auth_type != payload.auth_type,
+            row.auth_header_name != payload.auth_header_name,
+            bool(payload.secret),
+            payload.clear_secret,
+        )
+    )
+    mappings_changed = (row.tool_mappings or {}) != payload.tool_mappings
     row.name = payload.name.strip()
     row.url = str(payload.url)
     row.description = payload.description.strip()
@@ -225,6 +236,19 @@ def _apply_source(row: McpSourceRow, payload: SourceInput, *, creating: bool = F
         row.encrypted_secret = encrypt_secret(payload.secret)
     elif creating and payload.auth_type != "none":
         raise ValueError("credential is required for the selected auth type")
+    if connection_changed:
+        row.discovered_tools = []
+        row.last_status = "unchecked"
+        row.last_error = None
+        row.last_checked_at = None
+    elif mappings_changed:
+        row.last_status = "discovered" if row.discovered_tools else "unchecked"
+        row.last_error = None
+        row.last_checked_at = None
+    if row.auth_type != "none" and (
+        connection_changed or mappings_changed or (payload.enabled and not was_enabled)
+    ):
+        row.enabled = False
     row.updated_at = utc_now()
 
 
@@ -301,6 +325,17 @@ def set_mcp_source_enabled(source_id: UUID, payload: EnabledInput, db: Db) -> di
     row = db.get(McpSourceRow, source_id)
     if not row:
         raise HTTPException(status_code=404, detail="MCP source not found")
+    if payload.enabled and row.auth_type != "none":
+        if not row.encrypted_secret:
+            raise HTTPException(status_code=409, detail="请先配置 MCP 凭据")
+        if not row.discovered_tools:
+            raise HTTPException(status_code=409, detail="请先完成 MCP 工具发现")
+        try:
+            validate_mappings(row.tool_mappings or {}, row.discovered_tools)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if row.last_status != "healthy":
+            raise HTTPException(status_code=409, detail="请先完成 MCP 连接测试")
     row.enabled = payload.enabled
     row.updated_at = utc_now()
     db.commit()
@@ -311,8 +346,12 @@ def set_mcp_source_enabled(source_id: UUID, payload: EnabledInput, db: Db) -> di
 async def _probe(row: McpSourceRow, db: Session, *, discover: bool) -> dict[str, Any]:
     try:
         tools = await discover_source(row)
+        if not tools:
+            raise RuntimeError("MCP tool discovery returned no tools")
+        validate_mappings(row.tool_mappings or {}, tools)
         if discover:
             row.discovered_tools = tools
+            row.last_status = "discovered"
         elif {"web_search", "news_search"} & set(row.tool_mappings or {}):
             purpose = "web_search" if "web_search" in (row.tool_mappings or {}) else "news_search"
             probe_query = "latest market news" if purpose == "web_search" else "ETF"
@@ -332,9 +371,13 @@ async def _probe(row: McpSourceRow, db: Session, *, discover: bool) -> dict[str,
             )
             if not normalize_search_results(result, row.name, adapter):
                 raise RuntimeError("search upstream returned no results")
-        row.last_status = "healthy"
+            row.discovered_tools = tools
+        if not discover:
+            row.last_status = "healthy"
         row.last_error = None
     except Exception as exc:
+        if discover:
+            row.discovered_tools = []
         row.last_status = "failed"
         leaf = exc
         while isinstance(leaf, BaseExceptionGroup) and leaf.exceptions:

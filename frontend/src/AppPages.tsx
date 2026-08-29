@@ -2291,7 +2291,7 @@ export function SourceFilterPage({ apiBase }: { apiBase: string }) {
   </section>;
 }
 
-type McpSource = {
+export type McpSource = {
   id: string; name: string; url: string; description: string; priority: number; enabled: boolean;
   managed: boolean; auth_type: string; auth_header_name: string | null; secret_configured: boolean;
   discovered_tools: Array<{ name: string; description: string; input_schema: unknown; output_schema: unknown }>;
@@ -2373,6 +2373,45 @@ function sourceDraft(source?: McpSource): SourceDraft {
     auth_header_name: source.auth_header_name || "X-API-Key", secret: "", clear_secret: false,
     tool_mappings: JSON.stringify(source.tool_mappings, null, 2), group_id: source.group_id,
   } : { ...blankSource };
+}
+
+export function mcpSourceCredentialLabel(source: Pick<McpSource, "auth_type" | "secret_configured">): string {
+  if (source.auth_type === "none") return "无需凭据";
+  return source.secret_configured ? "凭据已配置" : "待录入凭据";
+}
+
+export function mcpSourceSetupLabel(source: Pick<McpSource, "auth_type" | "secret_configured" | "discovered_tools" | "last_status">): string {
+  if (source.auth_type !== "none" && !source.secret_configured) return "配置凭据后发现工具";
+  if (source.discovered_tools.length === 0) return "待工具发现";
+  if (source.last_status === "healthy") return "连接已验证";
+  if (source.last_status === "failed") return "连接异常";
+  return "工具已发现，待连接测试";
+}
+
+export function canProbeMcpSource(source: Pick<McpSource, "auth_type" | "secret_configured">): boolean {
+  return source.auth_type === "none" || source.secret_configured;
+}
+
+export function canEnableMcpSource(source: Pick<McpSource, "enabled" | "auth_type" | "secret_configured" | "discovered_tools" | "last_status">): boolean {
+  if (source.enabled || source.auth_type === "none") return true;
+  return source.secret_configured && source.discovered_tools.length > 0 && source.last_status === "healthy";
+}
+
+export function McpSourceCard({ item, onToggle, onAction, onEdit, onRemove }: {
+  item: McpSource;
+  onToggle: (source: McpSource) => void;
+  onAction: (id: string, kind: "test" | "discover") => void;
+  onEdit: (source: McpSource) => void;
+  onRemove: (source: McpSource) => void;
+}) {
+  const canProbe = canProbeMcpSource(item);
+  const canEnable = canEnableMcpSource(item);
+  return <article className="source-card">
+    <div className="source-card-main"><div><span className={`health-dot ${item.last_status}`} /> <strong>{item.name}</strong>{item.managed && <small>内置</small>}<p>{item.description || item.url}</p><code>{item.url}</code></div><div><span>优先级 {item.priority}</span><span>{item.discovered_tools.length} 个工具</span><span>{mcpSourceCredentialLabel(item)}</span><span>{mcpSourceSetupLabel(item)}</span></div></div>
+    {item.last_error && <p className="page-error">{item.last_error}</p>}
+    <div className="card-actions"><button type="button" disabled={!canEnable} onClick={() => onToggle(item)}>{item.enabled ? "关闭" : "启用"}</button><button type="button" disabled={!canProbe} onClick={() => onAction(item.id, "test")}>连接测试</button><button type="button" disabled={!canProbe} onClick={() => onAction(item.id, "discover")}>工具发现</button><button type="button" onClick={() => onEdit(item)}>编辑</button>{!item.managed && <button type="button" className="danger" onClick={() => onRemove(item)}>删除</button>}</div>
+    {item.discovered_tools.length > 0 && <details><summary>已发现工具与 Schema</summary>{item.discovered_tools.map((tool) => <pre key={tool.name}>{tool.name}\n{tool.description}\n{JSON.stringify(tool.input_schema, null, 2)}</pre>)}</details>}
+  </article>;
 }
 
 function splitUrls(value: string | number | boolean | undefined) {
@@ -2467,12 +2506,14 @@ export function SourcesPage({ apiBase }: { apiBase: string }) {
     if (owner) setGroupMessage(owner.id, "正在连接 MCP 来源…");
     const response = await fetch(`${apiBase}/api/v1/admin/mcp-sources/${id}/${kind}`, { method: "POST", headers });
     const body = await response.json();
-    if (owner) setGroupMessage(owner.id, response.ok ? `${kind === "test" ? "连接测试" : "工具发现"}完成。` : body.detail || "操作失败");
+    const succeeded = response.ok && body.source?.last_status !== "failed";
+    if (owner) setGroupMessage(owner.id, succeeded ? `${kind === "test" ? "连接测试" : "工具发现"}完成。` : body.source?.last_error || body.detail || "操作失败");
     await load();
   }
   async function toggle(item: McpSource) {
     const response = await fetch(`${apiBase}/api/v1/admin/mcp-sources/${item.id}/enabled`, { method: "PATCH", headers, body: JSON.stringify({ enabled: !item.enabled }) });
-    setGroupMessage(item.group_id, response.ok ? `来源已${item.enabled ? "关闭" : "启用"}。` : "更新来源状态失败。");
+    const body = await response.json();
+    setGroupMessage(item.group_id, response.ok ? `来源已${item.enabled ? "关闭" : "启用"}。` : body.detail || "更新来源状态失败。");
     if (response.ok) await load();
   }
   async function save(event: FormEvent) {
@@ -2533,7 +2574,7 @@ export function SourcesPage({ apiBase }: { apiBase: string }) {
           <i className="group-chevron">{open ? "−" : "+"}</i>
         </button>
         {open && <div className="fact-group-detail">
-          {groupMessages[group.id] && <div className={groupMessages[group.id].includes("失败") || groupMessages[group.id].includes("异常") ? "page-error" : "page-message"}>{groupMessages[group.id]}</div>}
+          {groupMessages[group.id] && <div className={["失败", "异常", "请先", "Error"].some((token) => groupMessages[group.id].includes(token)) ? "page-error" : "page-message"}>{groupMessages[group.id]}</div>}
           <section className="native-config-panel">
             <div className="group-section-heading"><div><span>NATIVE CONFIG</span><h4>内置配置</h4></div><small>{group.config_source === "database" ? "数据库覆盖" : "环境配置"}</small></div>
             <NativeConfigEditor group={group} draft={groupDraftValue} onDraft={(value) => setDrafts((current) => ({ ...current, [group.id]: value }))} />
@@ -2541,12 +2582,7 @@ export function SourcesPage({ apiBase }: { apiBase: string }) {
           </section>
           <section className="group-mcp-panel">
             <div className="group-section-heading"><div><span>STREAMABLE HTTP</span><h4>MCP 来源</h4></div><small>{group.mcp_count} 个来源</small></div>
-            <div className="source-list">{group.mcp_sources.map((item) => <article className="source-card" key={item.id}>
-              <div className="source-card-main"><div><span className={`health-dot ${item.last_status}`} /> <strong>{item.name}</strong>{item.managed && <small>内置</small>}<p>{item.description || item.url}</p><code>{item.url}</code></div><div><span>优先级 {item.priority}</span><span>{item.discovered_tools.length} 个工具</span><span>{item.secret_configured ? "凭据已配置" : "无凭据"}</span></div></div>
-              {item.last_error && <p className="page-error">{item.last_error}</p>}
-              <div className="card-actions"><button type="button" onClick={() => toggle(item)}>{item.enabled ? "关闭" : "启用"}</button><button type="button" onClick={() => action(item.id, "test")}>连接测试</button><button type="button" onClick={() => action(item.id, "discover")}>工具发现</button><button type="button" onClick={() => { setEditing(item.id); setDraft(sourceDraft(item)); }}>编辑</button>{!item.managed && <button type="button" className="danger" onClick={() => remove(item)}>删除</button>}</div>
-              {item.discovered_tools.length > 0 && <details><summary>已发现工具与 Schema</summary>{item.discovered_tools.map((tool) => <pre key={tool.name}>{tool.name}\n{tool.description}\n{JSON.stringify(tool.input_schema, null, 2)}</pre>)}</details>}
-            </article>)}{group.mcp_sources.length === 0 && <div className="group-empty">此组尚无 MCP 来源，可使用“新增 MCP 来源”添加。</div>}</div>
+            <div className="source-list">{group.mcp_sources.map((item) => <McpSourceCard key={item.id} item={item} onToggle={toggle} onAction={action} onEdit={(source) => { setEditing(source.id); setDraft(sourceDraft(source)); }} onRemove={remove} />)}{group.mcp_sources.length === 0 && <div className="group-empty">此组尚无 MCP 来源，可使用“新增 MCP 来源”添加。</div>}</div>
           </section>
         </div>}
       </article>;

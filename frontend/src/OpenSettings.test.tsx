@@ -18,6 +18,8 @@ import {
   GateReasons,
   explainGateReason,
   isSearchSource,
+  McpSourceCard,
+  mcpSourceSetupLabel,
   ModelOpinion,
   NativeConfigEditor,
   parseFilterKeywords,
@@ -31,6 +33,7 @@ import {
   SourceFilterAuditRow,
   sourceFilterRescanPath,
   SourcesPage,
+  type McpSource,
   type Recommendation,
   V3ConfidenceDetails,
 } from "./AppPages";
@@ -525,6 +528,54 @@ describe("open source and search settings", () => {
     expect(factSourceGroupOptions.map((group) => group.id)).toEqual([
       "fmp", "sec", "cn_news", "crypto", "search", "other",
     ]);
+  });
+
+  it("renders Jin10 as a managed source waiting for encrypted credentials", () => {
+    const source: McpSource = {
+      id: "jin10-source",
+      name: "金十数据",
+      url: "https://mcp.jin10.com/mcp",
+      description: "金十数据专业财经快讯、市场动态与新闻检索",
+      priority: 80,
+      enabled: false,
+      managed: true,
+      auth_type: "bearer",
+      auth_header_name: null,
+      secret_configured: false,
+      discovered_tools: [],
+      tool_mappings: {
+        news_feed: { tool_name: "list_flash" },
+        news_search: { tool_name: "search_flash" },
+      },
+      last_status: "unchecked",
+      last_error: null,
+      group_id: "cn_news",
+    };
+    const noop = () => undefined;
+    const markup = renderToStaticMarkup(createElement(McpSourceCard, {
+      item: source,
+      onToggle: noop,
+      onAction: noop,
+      onEdit: noop,
+      onRemove: noop,
+    }));
+
+    expect(markup).toContain("金十数据");
+    expect(markup).toContain("内置");
+    expect(markup).toContain("待录入凭据");
+    expect(markup).toContain("配置凭据后发现工具");
+    expect(markup.match(/disabled/g)).toHaveLength(3);
+  });
+
+  it("requires discovery and a successful connection test before Jin10 can be enabled", () => {
+    const base = {
+      auth_type: "bearer",
+      secret_configured: true,
+      discovered_tools: [{ name: "list_flash", description: "", input_schema: {}, output_schema: {} }],
+    };
+
+    expect(mcpSourceSetupLabel({ ...base, last_status: "discovered" })).toBe("工具已发现，待连接测试");
+    expect(mcpSourceSetupLabel({ ...base, last_status: "healthy" })).toBe("连接已验证");
   });
 
   it("shows the search form without an administrator unlock", () => {
