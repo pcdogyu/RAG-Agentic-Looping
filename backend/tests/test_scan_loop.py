@@ -593,7 +593,7 @@ def test_background_extraction_queue_only_receives_hard_gate_matches(db, monkeyp
     assert get_news(db, items[2].id) is None
 
 
-def test_single_news_extraction_updates_registry_and_returns_event(db, monkeypatch):
+def test_single_news_extraction_dispatches_downstream_immediately(db, monkeypatch):
     redis = FakeRedis()
     monkeypatch.setattr(worker, "_redis_client", lambda: redis)
     now = datetime(2026, 8, 26, 8, 0, tzinfo=UTC)
@@ -625,6 +625,14 @@ def test_single_news_extraction_updates_registry_and_returns_event(db, monkeypat
             return [event]
 
     monkeypatch.setattr(worker, "EventService", EventServiceStub)
+    monkeypatch.setattr(worker.settings, "auto_research", True)
+    dispatched = []
+    monkeypatch.setattr(
+        worker,
+        "enqueue_asset_mapping",
+        lambda _db, queued_event, **_kwargs: dispatched.append(queued_event.id)
+        or "mapping-task",
+    )
     redis.set(worker.SCAN_GATE_KEY, "scan-1")
     worker._initialize_news_extraction_queue(
         redis,
@@ -650,9 +658,48 @@ def test_single_news_extraction_updates_registry_and_returns_event(db, monkeypat
 
     assert result["status"] == "completed"
     assert result["event_ids"] == [str(event.id)]
+    assert result["research_queued"] == 0
+    assert result["asset_mapping_queued"] == 1
+    assert result["downstream_dispatched"] is True
+    assert dispatched == [event.id]
     payload = worker._read_news_extraction_queue(redis)
     assert payload["items"][0]["status"] == "completed"
     assert payload["items"][0]["attempt"] == 1
+
+
+def test_realtime_dispatch_routes_mapped_event_to_research(monkeypatch):
+    monkeypatch.setattr(worker.settings, "auto_research", True)
+    now = datetime(2026, 8, 26, 8, 0, tzinfo=UTC)
+    event = NewsEvent(
+        news_item_ids=[],
+        headline="已映射事件实时进入研究",
+        event_type="other",
+        direct_impact="测试",
+        source_quality=SourceQuality.PROFESSIONAL,
+        published_at=now,
+        observed_at=now,
+        as_of=now,
+        candidates=[
+            CandidateAsset(
+                asset=SEED_ASSETS[0],
+                relationship="direct",
+                relevance=1,
+                rationale="test",
+            )
+        ],
+    )
+    dispatched = []
+    monkeypatch.setattr(
+        worker,
+        "enqueue_event_report",
+        lambda _db, queued_event: dispatched.append(queued_event.id)
+        or ("research-task", object()),
+    )
+
+    result = worker._dispatch_extracted_events(object(), [event], tolerate_errors=True)
+
+    assert result == (1, 0, True)
+    assert dispatched == [event.id]
 
 
 def test_terminal_news_extraction_failure_returns_structured_result(monkeypatch):
@@ -747,7 +794,13 @@ def test_failed_extraction_does_not_block_batch_finalization(db, monkeypatch):
 
     result = worker.finalize_news_extraction.run(
         [
-            {"status": "completed", "event_ids": [str(event.id)]},
+            {
+                "status": "completed",
+                "event_ids": [str(event.id)],
+                "research_queued": 1,
+                "asset_mapping_queued": 0,
+                "downstream_dispatched": True,
+            },
             {"status": "failed", "event_ids": [], "error": "RuntimeError"},
         ],
         "scan-1",
@@ -757,6 +810,69 @@ def test_failed_extraction_does_not_block_batch_finalization(db, monkeypatch):
     assert result["extraction_completed"] == 1
     assert result["extraction_failed"] == 1
     assert result["research_queued"] == 1
+    assert queued == []
+    assert redis.get(worker.SCAN_GATE_KEY) is None
+
+
+def test_batch_finalizer_backfills_legacy_extraction_results(db, monkeypatch):
+    redis = FakeRedis()
+    monkeypatch.setattr(worker, "_redis_client", lambda: redis)
+    monkeypatch.setattr(worker.notifier, "send", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(worker.settings, "auto_research", True)
+    now = datetime(2026, 8, 26, 8, 0, tzinfo=UTC)
+    event = NewsEvent(
+        news_item_ids=[],
+        headline="滚动升级前抽取的事件",
+        event_type="other",
+        direct_impact="测试",
+        source_quality=SourceQuality.PROFESSIONAL,
+        published_at=now,
+        observed_at=now,
+        as_of=now,
+        candidates=[
+            CandidateAsset(
+                asset=SEED_ASSETS[0],
+                relationship="direct",
+                relevance=1,
+                rationale="test",
+            )
+        ],
+    )
+    save_event(db, event)
+    redis.set(worker.SCAN_GATE_KEY, "scan-legacy")
+    worker._initialize_news_extraction_queue(
+        redis,
+        "scan-legacy",
+        [
+            {
+                "task_id": "extract-legacy",
+                "news_id": "00000000-0000-0000-0000-000000000001",
+                "title": "legacy",
+                "source": "test",
+                "published_at": now.isoformat(),
+                "status": "completed",
+                "attempt": 1,
+                "queued_at": now.isoformat(),
+                "updated_at": now.isoformat(),
+                "error": None,
+            }
+        ],
+        {"discovered": 1, "accepted": 1, "filtered": 0},
+    )
+    queued = []
+    monkeypatch.setattr(
+        worker,
+        "enqueue_event_report",
+        lambda _db, queued_event: queued.append(queued_event.id) or ("task", object()),
+    )
+
+    result = worker.finalize_news_extraction.run(
+        [{"status": "completed", "event_ids": [str(event.id)]}],
+        "scan-legacy",
+    )
+
+    assert result["research_queued"] == 1
+    assert result["asset_mapping_queued"] == 0
     assert queued == [event.id]
     assert redis.get(worker.SCAN_GATE_KEY) is None
 

@@ -1893,6 +1893,44 @@ def enqueue_event_report(
     return str(task.id), run
 
 
+def _dispatch_extracted_events(
+    db,
+    events: list[NewsEvent],
+    *,
+    force_asset_mapping: bool = False,
+    tolerate_errors: bool = False,
+) -> tuple[int, int, bool]:
+    """Immediately route extracted events while preserving idempotent queue guards."""
+
+    research_queued = 0
+    mapping_queued = 0
+    dispatched = True
+    if not (settings.auto_research or force_asset_mapping):
+        return research_queued, mapping_queued, dispatched
+    for event in events:
+        try:
+            if force_asset_mapping or not event.candidates:
+                mapping_queued += int(
+                    enqueue_asset_mapping(
+                        db,
+                        event,
+                        force=force_asset_mapping,
+                    )
+                    is not None
+                )
+            else:
+                report_task_id, _ = enqueue_event_report(db, event)
+                research_queued += int(report_task_id is not None)
+        except Exception as exc:
+            dispatched = False
+            if not tolerate_errors:
+                raise
+            notifier.send(
+                f"下游研究任务入队失败：{event.headline}\n错误：{type(exc).__name__}"
+            )
+    return research_queued, mapping_queued, dispatched
+
+
 def enqueue_event_research_retry(
     db,
     event: NewsEvent,
@@ -2244,6 +2282,13 @@ def extract_news_item(
             registry = ProviderRegistry(assets=list_assets(db))
             events = EventService(registry).ingest(db, [news])
             provider_errors = list(registry.last_errors)
+            research_queued, mapping_queued, downstream_dispatched = (
+                _dispatch_extracted_events(
+                    db,
+                    events,
+                    tolerate_errors=True,
+                )
+            )
         updated = _update_news_extraction_item(
             client,
             scan_task_id,
@@ -2264,6 +2309,9 @@ def extract_news_item(
             "news_id": news_id,
             "event_ids": [str(event.id) for event in events],
             "provider_errors": provider_errors,
+            "research_queued": research_queued,
+            "asset_mapping_queued": mapping_queued,
+            "downstream_dispatched": downstream_dispatched,
         }
     except ScanLeaseLost:
         return {"status": "superseded", "news_id": news_id, "event_ids": []}
@@ -2328,22 +2376,11 @@ def retry_news_item(
             )
             registry = ProviderRegistry(assets=list_assets(db))
             events = EventService(registry).ingest(db, [news])
-            research_queued = 0
-            mapping_queued = 0
-            if settings.auto_research or force_asset_mapping:
-                for event in events:
-                    if force_asset_mapping or not event.candidates:
-                        mapping_queued += int(
-                            enqueue_asset_mapping(
-                                db,
-                                event,
-                                force=force_asset_mapping,
-                            )
-                            is not None
-                        )
-                    else:
-                        report_task_id, _ = enqueue_event_report(db, event)
-                        research_queued += int(report_task_id is not None)
+            research_queued, mapping_queued, _ = _dispatch_extracted_events(
+                db,
+                events,
+                force_asset_mapping=force_asset_mapping,
+            )
         update_model_task(
             "extract",
             task_id,
@@ -2390,7 +2427,7 @@ def finalize_news_extraction(
     extraction_results: list[dict[str, Any]],
     scan_task_id: str,
 ) -> dict[str, Any]:
-    """Join one scan batch and enqueue downstream research exactly once."""
+    """Join one scan batch and backfill only work not dispatched during extraction."""
 
     client = _redis_client()
     try:
@@ -2406,6 +2443,12 @@ def finalize_news_extraction(
                 for event_id in result.get("event_ids", [])
             )
         )
+        backfill_event_ids = {
+            event_id
+            for result in extraction_results
+            if isinstance(result, dict) and result.get("downstream_dispatched") is not True
+            for event_id in result.get("event_ids", [])
+        }
         provider_errors = list(
             dict.fromkeys(
                 error
@@ -2419,12 +2462,20 @@ def finalize_news_extraction(
         _update_scan_status(
             client,
             state="running",
-            phase="queuing",
+            phase="finalizing",
             current=0,
             total=len(event_ids),
         )
-        queued = 0
-        mapping_queued = 0
+        queued = sum(
+            int(result.get("research_queued") or 0)
+            for result in extraction_results
+            if isinstance(result, dict)
+        )
+        mapping_queued = sum(
+            int(result.get("asset_mapping_queued") or 0)
+            for result in extraction_results
+            if isinstance(result, dict)
+        )
         with SessionLocal() as db:
             events = [
                 event
@@ -2435,7 +2486,7 @@ def finalize_news_extraction(
                 _wait_if_scan_paused(
                     client,
                     scan_task_id,
-                    phase="queuing",
+                    phase="finalizing",
                     current=event_index,
                     total=len(events),
                 )
@@ -2444,18 +2495,15 @@ def finalize_news_extraction(
                         f"高优先级事件：{event.headline}\n类型：{event.event_type.value}\n"
                         f"候选标的：{', '.join(item.asset.symbol for item in event.candidates[:5]) or '待解析'}"
                     )
-                if not settings.auto_research:
+                if str(event.id) not in backfill_event_ids:
                     continue
-                try:
-                    if not event.candidates:
-                        mapping_queued += int(enqueue_asset_mapping(db, event) is not None)
-                    else:
-                        report_task_id, _ = enqueue_event_report(db, event)
-                        queued += int(report_task_id is not None)
-                except Exception as exc:
-                    notifier.send(
-                        f"下游研究任务入队失败：{event.headline}\n错误：{type(exc).__name__}"
-                    )
+                added_research, added_mapping, _ = _dispatch_extracted_events(
+                    db,
+                    [event],
+                    tolerate_errors=True,
+                )
+                queued += added_research
+                mapping_queued += added_mapping
         counts = _news_extraction_counts(payload)
         metadata = payload.get("metadata") or {}
         result = {
