@@ -3197,7 +3197,7 @@ export function AssetUniversePage({ apiBase }: { apiBase: string }) {
           return <article className={`universe-status ${status?.status || "pending"}`} key={key}>
             <span>{label}</span>
             <strong>{(activeCounts[key] || status?.asset_count || 0).toLocaleString()}</strong>
-            <small>行业 {(status?.classified_count || 0).toLocaleString()} / {(activeCounts[key] || status?.asset_count || 0).toLocaleString()} · {Math.round((status?.classification_rate || 0) * 100)}%</small>
+            <small>行业 {(status?.classified_count || 0).toLocaleString()} / {(activeCounts[key] || status?.asset_count || 0).toLocaleString()} · {((status?.classification_rate || 0) * 100).toLocaleString("zh-CN", { maximumFractionDigits: 1 })}%</small>
             <small>{status?.status === "failed" ? `失败：${status.last_error}` : universeTime(status?.completed_at || null)}</small>
           </article>;
         })}
