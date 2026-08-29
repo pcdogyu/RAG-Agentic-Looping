@@ -151,8 +151,8 @@ class AkShareProvider:
         return symbol_matches or (len(name) >= 2 and name in normalized_query)
 
     def _listed_assets(self) -> list[AssetRef]:
-        a_share_key = cache.key("akshare-a-share-security-master", {"version": 3})
-        hk_share_key = cache.key("akshare-hk-share-security-master", {"version": 3})
+        a_share_key = cache.key("akshare-a-share-security-master", {"version": 4})
+        hk_share_key = cache.key("akshare-hk-share-security-master", {"version": 4})
         a_share_payload = cache.get(a_share_key)
         hk_share_payload = cache.get(hk_share_key)
         if a_share_payload and hk_share_payload:

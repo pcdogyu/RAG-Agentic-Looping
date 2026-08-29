@@ -130,7 +130,7 @@ def test_akshare_does_not_cache_an_empty_security_master(monkeypatch):
 
     assets = provider._listed_assets()
     assert [(item.symbol, item.name) for item in assets] == [("600499", "科达制造")]
-    assert fake_cache.set_calls == [("akshare-a-share-security-master:3", 24 * 60 * 60)]
+    assert fake_cache.set_calls == [("akshare-a-share-security-master:4", 24 * 60 * 60)]
 
 
 def test_akshare_does_not_cache_an_incomplete_industry_directory(monkeypatch):
