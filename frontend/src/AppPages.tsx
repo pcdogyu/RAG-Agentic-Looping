@@ -93,6 +93,34 @@ export const queueDesktopColumns = 5;
 export const newsBoardRefreshIntervalMs = 5000;
 export const researchViewsRefreshIntervalMs = 5000;
 export const newsSourceDesktopColumns = 3;
+export const liveSnapshotEventName = "market-loop:snapshot";
+
+export function subscribeLiveRefresh(refresh: () => void, fallbackMs: number) {
+  let lastLiveUpdate = Date.now();
+  const refreshWhenVisible = () => {
+    if (document.visibilityState !== "hidden") refresh();
+  };
+  const onSnapshot = () => {
+    lastLiveUpdate = Date.now();
+    refreshWhenVisible();
+  };
+  const onVisibility = () => {
+    if (document.visibilityState === "visible") {
+      lastLiveUpdate = Date.now();
+      refresh();
+    }
+  };
+  window.addEventListener(liveSnapshotEventName, onSnapshot);
+  document.addEventListener("visibilitychange", onVisibility);
+  const timer = window.setInterval(() => {
+    if (Date.now() - lastLiveUpdate >= fallbackMs) refreshWhenVisible();
+  }, fallbackMs);
+  return () => {
+    window.removeEventListener(liveSnapshotEventName, onSnapshot);
+    document.removeEventListener("visibilitychange", onVisibility);
+    window.clearInterval(timer);
+  };
+}
 
 export function formatQueueDuration(value: number | null | undefined) {
   if (value == null) return "—";
@@ -863,18 +891,18 @@ export function QueuePage({ apiBase }: { apiBase: string }) {
   useEffect(() => {
     const controller = new AbortController();
     void loadQueues(controller.signal, true);
-    const timer = window.setInterval(
+    const unsubscribe = subscribeLiveRefresh(
       () => void loadQueues(controller.signal),
       queueRefreshIntervalMs,
     );
     return () => {
       controller.abort();
-      window.clearInterval(timer);
+      unsubscribe();
     };
   }, [loadQueues]);
 
   return <section className="app-page queue-page">
-    <PageHeading eyebrow="ACTIVE MODEL PIPELINES" title="队列" copy="分别查看四条业务队列及其独立推理通道；页面每 5 秒自动更新。" />
+    <PageHeading eyebrow="ACTIVE MODEL PIPELINES" title="队列" copy="分别查看四条业务队列及其独立推理通道；实时事件触发更新，连接中断时每 5 秒回退刷新。" />
     <div className="queue-toolbar">
       <span>四条业务队列独立加载；任一服务异常不会遮挡其他队列。</span>
       <button
@@ -1065,10 +1093,13 @@ export function NewsPage({ apiBase }: { apiBase: string }) {
   useEffect(() => {
     const controller = new AbortController();
     void load(controller.signal, true);
-    const timer = window.setInterval(() => void load(controller.signal), newsBoardRefreshIntervalMs);
+    const unsubscribe = subscribeLiveRefresh(
+      () => void load(controller.signal),
+      newsBoardRefreshIntervalMs,
+    );
     return () => {
       controller.abort();
-      window.clearInterval(timer);
+      unsubscribe();
     };
   }, [load]);
 
@@ -1087,7 +1118,7 @@ export function NewsPage({ apiBase }: { apiBase: string }) {
   }
 
   return <section className="app-page news-page">
-    <PageHeading eyebrow="LIVE NEWS PIPELINE" title="新闻" copy="按来源查看最新 50 条新闻及其抽取、股票映射、研究和修订状态；页面每 5 秒自动更新。" />
+    <PageHeading eyebrow="LIVE NEWS PIPELINE" title="新闻" copy="按来源查看最新 50 条新闻及其抽取、股票映射、研究和修订状态；实时事件触发更新，断线时自动回退轮询。" />
     <div className="news-board-toolbar">
       <span>{board ? `${board.total_sources} 个来源 · 每来源最新 ${board.per_source} 条` : "正在读取新闻来源…"}</span>
       <button type="button" disabled={loading} onClick={() => void load(undefined, true)}>{loading ? "刷新中…" : "立即刷新"}</button>
@@ -2174,8 +2205,10 @@ function TargetChangeSection({
 
   useEffect(() => {
     void load();
-    const timer = window.setInterval(() => void load(false, true), researchViewsRefreshIntervalMs);
-    return () => window.clearInterval(timer);
+    return subscribeLiveRefresh(
+      () => void load(false, true),
+      researchViewsRefreshIntervalMs,
+    );
   }, [load]);
 
   return <section className={`target-change-section ${kind}`}>
@@ -2305,8 +2338,10 @@ export function ConclusionsPage({ apiBase }: { apiBase: string }) {
   useEffect(() => {
     void load();
     void loadFailures();
-    const timer = window.setInterval(() => void load(false, true), researchViewsRefreshIntervalMs);
-    return () => window.clearInterval(timer);
+    return subscribeLiveRefresh(
+      () => void load(false, true),
+      researchViewsRefreshIntervalMs,
+    );
   }, [load]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function retry(item: FailedResearch, instanceId?: string) {

@@ -153,6 +153,88 @@ services:
       duckduckgo-mcp:
         condition: service_started
 
+  go-api:
+    profiles: ["go-shadow"]
+    build:
+      context: .
+      dockerfile: backend-go/Dockerfile
+    entrypoint: ["/usr/local/bin/api"]
+    env_file: .env
+    environment:
+      APP_ENV: development
+      GO_API_ADDRESS: ":8081"
+      GO_ALLOW_LEGACY_PROXY: "true"
+      LEGACY_API_URL: http://api:8000
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      MARKET_ADAPTER_URL: http://market-adapter:8091
+      ML_ADAPTER_URL: http://ml-adapter:8092
+    ports:
+      - "8081:8081"
+    depends_on:
+      api:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  go-worker:
+    profiles: ["go-shadow"]
+    build:
+      context: .
+      dockerfile: backend-go/Dockerfile
+    entrypoint: ["/usr/local/bin/worker"]
+    env_file: .env
+    environment:
+      APP_ENV: development
+      GO_WORKER_QUEUES: io,extract,assist,research,code
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      MARKET_ADAPTER_URL: http://market-adapter:8091
+      ML_ADAPTER_URL: http://ml-adapter:8092
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  go-scheduler:
+    profiles: ["go-shadow"]
+    build:
+      context: .
+      dockerfile: backend-go/Dockerfile
+    entrypoint: ["/usr/local/bin/scheduler"]
+    env_file: .env
+    environment:
+      APP_ENV: development
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  market-adapter:
+    profiles: ["go-shadow"]
+    build: ./infra/market-adapter
+    expose:
+      - "8091"
+    environment:
+      ADAPTER_PORT: "8091"
+    restart: unless-stopped
+
+  ml-adapter:
+    profiles: ["go-shadow"]
+    build: ./infra/ml-adapter
+    expose:
+      - "8092"
+    environment:
+      ADAPTER_PORT: "8092"
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-intfloat/multilingual-e5-small}
+    restart: unless-stopped
+
   io-worker:
     <<: *backend
     command: celery -A backend.app.worker:celery_app worker -Q io,default --concurrency=4 --loglevel=INFO

@@ -308,6 +308,7 @@ export default function App() {
         recommendations: incoming.recommendations,
         analysis_logs: incoming.analysis_logs || current.analysis_logs,
       }));
+      window.dispatchEvent(new Event("market-loop:snapshot"));
     });
     const portfolioTimer = window.setInterval(() => {
       fetch(`${API}/api/v1/portfolio`).then((r) => r.json()).then(setPortfolio).catch(() => undefined);
