@@ -24,6 +24,9 @@ import {
   ChangedTargetsPage,
   ConclusionDetailModal,
   type ConclusionDetail,
+  EventConclusionCard,
+  EventConclusionDetailModal,
+  type EventConclusionDetail,
   factSourceGroupDefinitions,
   formatQueueDuration,
   ModelInferenceQueuePanel,
@@ -41,7 +44,11 @@ import {
   QueueGrid,
   NewsExtractionList,
   queueRefreshIntervalMs,
+  researchViewsRefreshIntervalMs,
+  type ResearchConclusionItem,
   routeFromHash,
+  TargetChangeGrid,
+  type TargetChange,
   TopNavigation,
   UnifiedModelQueuePanel,
   removeTasksFromQueueOverview,
@@ -526,11 +533,13 @@ describe("changed targets page", () => {
     const markup = renderToStaticMarkup(createElement(ChangedTargetsPage, { apiBase: "" }));
 
     expect(markup).toContain("标的评级变化");
-    expect(markup).toContain("五档评级发生变化");
-    expect(markup).toContain("正在加载标的评级变化");
+    expect(markup).toContain("宏观经济与行业变化");
+    expect(markup).toContain("具体标的变化");
+    expect(markup).toContain("正在加载宏观经济与行业变化");
+    expect(markup).toContain("正在加载具体标的变化");
   });
 
-  it("renders five target cards with rating changes only", () => {
+  it("keeps legacy target cards compatible with the new four-column grid", () => {
     const items = Array.from({ length: 5 }, (_, index) => ({
       asset: {
         asset_id: `equity:XNAS:TARGET${index}`,
@@ -561,8 +570,8 @@ describe("changed targets page", () => {
       },
     }));
 
-    expect(changedTargetDesktopColumns).toBe(5);
-    expect(markup).toContain('class="target-change-grid" data-columns="5"');
+    expect(changedTargetDesktopColumns).toBe(4);
+    expect(markup).toContain('class="target-change-grid" data-columns="4"');
     expect((markup.match(/class="target-change-card"/g) || []).length).toBe(5);
     expect(markup).not.toContain("结论状态");
     expect(markup).not.toContain("方向证据不足");
@@ -578,6 +587,80 @@ describe("changed targets page", () => {
     expect(markup).toContain('class="target-change-identity"');
     expect(markup).toContain('aria-label="查看 TARGET0 最近一次调研"');
     expect(markup).toMatch(/target-change-identity[\s\S]*TARGET0[\s\S]*Target 0 Corp[\s\S]*<\/button>[\s\S]*conclusion-research-action/);
+  });
+
+  it("renders four macro and four asset changes across the two target columns", () => {
+    const buildItems = (kind: "macro" | "asset") => Array.from({ length: 4 }, (_, index) => ({
+      kind,
+      key: `${kind}-${index}`,
+      label: kind === "macro" ? `能源行业 ${index}` : `Target ${index} Corp`,
+      symbol: kind === "macro" ? null : `TARGET${index}`,
+      market: kind === "macro" ? null : "US",
+      target_type: kind === "macro" ? "sector" : "tradable_asset",
+      changed_at: `2026-08-28T0${index}:00:00Z`,
+      previous: { rating: "watch", direction_score: 0, rating_confidence: 0.5 },
+      current: { rating: "bullish", direction_score: 45, rating_confidence: 0.7 },
+      latest: { rating: "bullish", direction_score: 58, rating_confidence: 0.81 },
+      latest_detail: { kind: kind === "macro" ? "event" : "asset", id: `${kind}-detail-${index}`, researched_at: `2026-08-29T0${index}:00:00Z` },
+      change_detail_id: `${kind}-change-${index}`,
+    })) as TargetChange[];
+    const markup = renderToStaticMarkup(createElement("div", { className: "target-change-split" },
+      createElement(TargetChangeGrid, { items: buildItems("macro"), onOpen: () => undefined }),
+      createElement(TargetChangeGrid, { items: buildItems("asset"), onOpen: () => undefined }),
+    ));
+
+    expect(changedTargetDesktopColumns).toBe(4);
+    expect((markup.match(/data-columns="4"/g) || []).length).toBe(2);
+    expect((markup.match(/target-change-card (?:macro|asset)/g) || []).length).toBe(8);
+    expect(markup).toContain("评级变化");
+    expect(markup).toContain("最新方向分");
+    expect(markup).toContain("评级置信度");
+    expect(markup).toContain('aria-label="查看 能源行业 0 最新研究"');
+    expect(markup).toContain('aria-label="查看 TARGET0 最新研究"');
+  });
+
+  it("renders event conclusion cards and their macro impact detail", () => {
+    const item = {
+      kind: "event",
+      id: "event-run-1",
+      occurred_at: "2026-08-29T08:00:00Z",
+      status: "insufficient_evidence",
+      evidence_complete: false,
+      title: "能源政策调整",
+      summary: "能源行业利润和原油价格可能发生变化。",
+      asset: null,
+      event: { id: "event-1", headline: "能源政策调整", event_type: "regulation" },
+      recommendation: null,
+      report: { confidence: 0.6, news_confidence: 0.82, impact_count: 1, affected_markets: ["COMMODITY"], affected_sectors: ["能源"], scoring_version: "event-report-v1" },
+    } as ResearchConclusionItem;
+    const card = renderToStaticMarkup(createElement(EventConclusionCard, { item, onOpen: () => undefined }));
+    expect(card).toContain("证据不足");
+    expect(card).toContain("新闻可信度 82%");
+    expect(card).toContain("影响目标 1 个");
+
+    const detail = {
+      run: { id: "event-run-1", status: "insufficient_evidence", updated_at: "2026-08-29T08:00:00Z" },
+      event: { id: "event-1", headline: "能源政策调整", event_type: "regulation" },
+      report: {
+        summary: "事件结论摘要",
+        affected_markets: ["COMMODITY"], affected_sectors: ["能源"], scenarios: ["基准情景"], catalysts: ["政策生效"], risks: ["需求下降"], unresolved_questions: ["执行日期"],
+        confidence: 0.6, evidence_complete: false, news_confidence: 0.82,
+        impacts: [{ target_type: "commodity_price", target_name: "WTI 原油", asset: null, direction_score: 45, rating: "bullish", rating_confidence: 0.71, horizon_days: 90, horizon_unit: "calendar_days", transmission_path: ["供给减少", "价格上升"], rationale: "供应风险溢价上升", missing_information: ["实际减产量"] }],
+        macro_factors: [{ id: "factor-1", name: "原油供给", description: "供给收缩", strength: 0.7 }], missing_information: ["政策细则"],
+      },
+      news: [{ id: "news-1", title: "政策新闻", url: "https://example.com/news", source: "Example" }],
+      evidence: [{ id: "evidence-1", claim: "政策已宣布", source_name: "Official", source_url: "https://example.com/evidence", excerpt: "摘要" }],
+    } as EventConclusionDetail;
+    const modal = renderToStaticMarkup(createElement(EventConclusionDetailModal, { detail, onClose: () => undefined }));
+    expect(modal).toContain("事件结论摘要");
+    expect(modal).toContain("WTI 原油");
+    expect(modal).toContain("供给减少");
+    expect(modal).toContain("资料覆盖不足");
+    expect(modal).toContain("政策新闻");
+  });
+
+  it("refreshes conclusion and target views every five seconds", () => {
+    expect(researchViewsRefreshIntervalMs).toBe(5000);
   });
 
   it("uses the latest research id and falls back for old API responses", () => {

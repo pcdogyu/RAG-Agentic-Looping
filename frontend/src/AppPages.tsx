@@ -91,6 +91,7 @@ function PageHeading({ eyebrow, title, copy }: { eyebrow: string; title: string;
 export const queueRefreshIntervalMs = 5000;
 export const queueDesktopColumns = 5;
 export const newsBoardRefreshIntervalMs = 5000;
+export const researchViewsRefreshIntervalMs = 5000;
 export const newsSourceDesktopColumns = 3;
 
 export function formatQueueDuration(value: number | null | undefined) {
@@ -1183,6 +1184,78 @@ export type ConclusionDetail = {
   evidence: Array<{ id: string; claim: string; source_name: string; source_url: string; excerpt: string }>;
 };
 
+export type EventTargetImpact = {
+  target_type: string;
+  target_name: string;
+  asset: { asset_id: string; symbol: string; name: string; market: string } | null;
+  direction_score: number;
+  rating: string;
+  rating_confidence: number;
+  horizon_days: number;
+  horizon_unit: string;
+  transmission_path: string[];
+  rationale: string;
+  missing_information: string[];
+};
+
+export type EventConclusionDetail = {
+  run: { id: string; status: string; updated_at: string };
+  event: { id: string; headline: string; event_type: string } | null;
+  report: {
+    summary: string;
+    affected_markets: string[];
+    affected_sectors: string[];
+    scenarios: string[];
+    catalysts: string[];
+    risks: string[];
+    unresolved_questions: string[];
+    confidence: number;
+    evidence_complete: boolean;
+    news_confidence: number;
+    impacts: EventTargetImpact[];
+    macro_factors: Array<{ id: string; name: string; description: string; strength: number }>;
+    missing_information: string[];
+  };
+  news: Array<{ id: string; title: string; url: string; source: string }>;
+  evidence: Array<{ id: string; claim: string; source_name: string; source_url: string; excerpt: string }>;
+};
+
+export type ResearchConclusionItem = {
+  kind: "asset" | "event";
+  id: string;
+  occurred_at: string;
+  status: string;
+  evidence_complete: boolean;
+  title: string;
+  summary: string;
+  asset: Recommendation["asset"] | null;
+  event: { id: string; headline: string; event_type: string } | null;
+  recommendation: Recommendation | null;
+  report: {
+    confidence: number;
+    news_confidence: number;
+    impact_count: number;
+    affected_markets: string[];
+    affected_sectors: string[];
+    scoring_version: string;
+  } | null;
+};
+
+export type TargetChange = {
+  kind: "macro" | "asset";
+  key: string;
+  label: string;
+  symbol: string | null;
+  market: string | null;
+  target_type: string;
+  changed_at: string;
+  previous: { rating: string; direction_score: number | null; rating_confidence: number | null };
+  current: { rating: string; direction_score: number | null; rating_confidence: number | null };
+  latest: { rating: string; direction_score: number | null; rating_confidence: number | null };
+  latest_detail: { kind: "event" | "asset"; id: string; researched_at: string };
+  change_detail_id: string;
+};
+
 export function changedTargetLatestRecommendationId(item: ChangedTarget) {
   return item.latest_recommendation_id || item.recommendation_id;
 }
@@ -1728,7 +1801,36 @@ export function ConclusionCard({
   </article>;
 }
 
-export const changedTargetDesktopColumns = 5;
+const eventConclusionStatusLabels: Record<string, string> = {
+  completed: "已完成",
+  insufficient_evidence: "证据不足",
+};
+
+export function EventConclusionCard({
+  item,
+  onOpen,
+}: {
+  item: ResearchConclusionItem;
+  onOpen: () => void;
+}) {
+  const report = item.report;
+  return <article className="conclusion-card event-conclusion-card">
+    <button type="button" className="conclusion-card-details" onClick={onOpen} aria-label={`查看 ${item.title} 事件研报`}>
+      <div className="conclusion-card-copy">
+        <span>{item.event?.event_type ?? "other"} · {new Date(item.occurred_at).toLocaleString("zh-CN")}</span>
+        <strong>{item.title}</strong>
+        <p>{item.summary}</p>
+      </div>
+      <div className={`event-conclusion-summary ${item.status}`}>
+        <strong>{eventConclusionStatusLabels[item.status] ?? item.status}</strong>
+        <span>影响目标 {report?.impact_count ?? 0} 个</span>
+        <small>新闻可信度 {Math.round((report?.news_confidence ?? 0) * 100)}% · 资料覆盖{item.evidence_complete ? "完整" : "不足"}</small>
+      </div>
+    </button>
+  </article>;
+}
+
+export const changedTargetDesktopColumns = 4;
 
 export function ChangedTargetGrid({
   items,
@@ -1852,112 +1954,222 @@ export function ConclusionDetailModal({ detail, onClose }: { detail: ConclusionD
   </div>;
 }
 
-export function ChangedTargetsPage({ apiBase }: { apiBase: string }) {
-  const [items, setItems] = useState<ChangedTarget[]>([]);
+const targetTypeLabels: Record<string, string> = {
+  economy: "宏观经济",
+  supply_volume: "供给量",
+  commodity_price: "商品价格",
+  fx_rate: "汇率",
+  interest_rate: "利率",
+  sector: "行业",
+  tradable_asset: "具体标的",
+  risk_asset: "风险资产",
+  shipping: "航运",
+  other: "其他",
+};
+
+export function EventConclusionDetailModal({ detail, onClose }: { detail: EventConclusionDetail; onClose: () => void }) {
+  const report = detail.report;
+  return <div className="modal-backdrop" onClick={onClose}>
+    <article className="modal conclusion-modal event-conclusion-modal" onClick={(event) => event.stopPropagation()}>
+      <button type="button" className="close" aria-label="关闭事件研报详情" onClick={onClose}>×</button>
+      <p className="eyebrow">{detail.event?.event_type ?? "other"} · {new Date(detail.run.updated_at).toLocaleString("zh-CN")}</p>
+      <h2>{detail.event?.headline ?? "事件研报"}</h2>
+      <div className="event-report-metrics">
+        <span>研究状态<strong>{eventConclusionStatusLabels[detail.run.status] ?? detail.run.status}</strong></span>
+        <span>新闻可信度<strong>{Math.round(report.news_confidence * 100)}%</strong></span>
+        <span>研报置信度<strong>{Math.round(report.confidence * 100)}%</strong></span>
+        <span>影响目标<strong>{report.impacts.length}</strong></span>
+      </div>
+      {!report.evidence_complete && <div className="page-message">该报告可追溯，但资料覆盖不足，不应视为可直接交易的确定性结论。</div>}
+      <h3>事件结论</h3><p>{report.summary}</p>
+      {(report.affected_markets.length > 0 || report.affected_sectors.length > 0) && <div className="event-report-scope">
+        <span>市场：{report.affected_markets.join("、") || "未明确"}</span>
+        <span>行业：{report.affected_sectors.join("、") || "未明确"}</span>
+      </div>}
+      {!!report.impacts.length && <><h3>目标影响</h3><div className="event-impact-grid">{report.impacts.map((impact, index) => <article key={`${impact.target_type}-${impact.target_name}-${index}`}>
+        <span>{targetTypeLabels[impact.target_type] ?? impact.target_type}{impact.asset?.symbol ? ` · ${impact.asset.symbol}` : ""}</span>
+        <strong>{impact.target_name}</strong>
+        <div><b>{recommendationRatingLabel(impact.rating)}</b><b>{impact.direction_score > 0 ? "+" : ""}{impact.direction_score}</b><b>置信度 {Math.round(impact.rating_confidence * 100)}%</b></div>
+        <small>未来 {impact.horizon_days} 个自然日</small>
+        {impact.rationale && <p>{impact.rationale}</p>}
+        {!!impact.transmission_path.length && <ol>{impact.transmission_path.map((step, stepIndex) => <li key={`${step}-${stepIndex}`}>{step}</li>)}</ol>}
+        {!!impact.missing_information.length && <small>缺失：{impact.missing_information.join("、")}</small>}
+      </article>)}</div></>}
+      {!!report.macro_factors.length && <><h3>宏观因子</h3><div className="macro-factor-list">{report.macro_factors.map((factor) => <article key={factor.id}><strong>{factor.name}</strong><span>{Math.round(factor.strength * 100)}%</span><p>{factor.description}</p></article>)}</div></>}
+      {!!report.scenarios.length && <><h3>情景</h3><ul>{report.scenarios.map((item) => <li key={item}>{item}</li>)}</ul></>}
+      {!!report.catalysts.length && <><h3>催化剂</h3><ul>{report.catalysts.map((item) => <li key={item}>{item}</li>)}</ul></>}
+      {!!report.risks.length && <><h3>风险</h3><ul>{report.risks.map((item) => <li key={item}>{item}</li>)}</ul></>}
+      {!!report.unresolved_questions.length && <><h3>待确认问题</h3><ul>{report.unresolved_questions.map((item) => <li key={item}>{item}</li>)}</ul></>}
+      {!!report.missing_information.length && <><h3>缺失信息</h3><ul>{report.missing_information.map((item) => <li key={item}>{item}</li>)}</ul></>}
+      <h3>新闻与证据</h3><div className="evidence-links">{conclusionReferences(detail).map((item) => <a key={`${item.url}-${item.label}`} href={item.url} target="_blank" rel="noreferrer"><strong>{item.label}</strong><span>{item.source}</span></a>)}</div>
+    </article>
+  </div>;
+}
+
+export function TargetChangeGrid({
+  items,
+  onOpen,
+  detailLoadingId = "",
+  researchStates = {},
+  onResearch,
+}: {
+  items: TargetChange[];
+  onOpen: (item: TargetChange) => void;
+  detailLoadingId?: string;
+  researchStates?: Record<string, ConclusionResearchState>;
+  onResearch?: (item: TargetChange) => void;
+}) {
+  return <div className="target-change-grid unified-target-change-grid" data-columns={changedTargetDesktopColumns}>
+    {items.map((item) => {
+      const score = item.latest.direction_score;
+      const confidence = item.latest.rating_confidence;
+      return <article className={`target-change-card ${item.kind}`} key={item.key}>
+        <header>
+          <span>{item.kind === "macro" ? (targetTypeLabels[item.target_type] ?? item.target_type) : item.market} · {new Date(item.changed_at).toLocaleString("zh-CN")}</span>
+          <div className="target-change-symbol-row">
+            <button
+              type="button"
+              className="target-change-identity"
+              aria-label={`查看 ${item.symbol || item.label} 最新研究`}
+              aria-busy={detailLoadingId === item.key}
+              disabled={detailLoadingId === item.key}
+              onClick={() => onOpen(item)}
+            >
+              <strong>{item.symbol || item.label}</strong>
+              {item.symbol && <small>{item.label}</small>}
+            </button>
+            {item.kind === "asset" && onResearch && <ResearchAgainButton state={researchStates[item.key]} onResearch={() => onResearch(item)} />}
+          </div>
+        </header>
+        <div className="target-change-field changed"><span>评级变化</span><strong>{recommendationRatingLabel(item.previous.rating)} → {recommendationRatingLabel(item.current.rating)}</strong></div>
+        <div className="target-change-latest">
+          <span>最新方向分<strong>{score === null ? "—" : `${score > 0 ? "+" : ""}${score}`}</strong></span>
+          <span>评级置信度<strong>{confidence === null ? "—" : `${Math.round(confidence * 100)}%`}</strong></span>
+        </div>
+      </article>;
+    })}
+  </div>;
+}
+
+function TargetChangeSection({
+  apiBase,
+  kind,
+  title,
+  copy,
+  onOpen,
+  detailLoadingId,
+  researchStates,
+  onResearch,
+}: {
+  apiBase: string;
+  kind: "macro" | "asset";
+  title: string;
+  copy: string;
+  onOpen: (item: TargetChange) => void;
+  detailLoadingId: string;
+  researchStates: Record<string, ConclusionResearchState>;
+  onResearch?: (item: TargetChange) => void;
+}) {
+  const [items, setItems] = useState<TargetChange[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState("");
-  const [detailError, setDetailError] = useState("");
-  const [detailRetryItem, setDetailRetryItem] = useState<ChangedTarget | null>(null);
+  const cursorRef = useRef<string | null>(null);
+
+  const load = useCallback(async (append = false, silent = false) => {
+    const params = new URLSearchParams({ kind, limit: "50" });
+    if (append && cursorRef.current) params.set("cursor", cursorRef.current);
+    if (append) setLoadingMore(true); else if (!silent) setLoading(true);
+    try {
+      const response = await fetch(`${apiBase}/api/v1/target-changes?${params}`);
+      if (!response.ok) throw new Error(`${title}请求失败`);
+      const payload = await response.json() as { items: TargetChange[]; next_cursor: string | null };
+      setItems((current) => append ? [...current, ...payload.items] : payload.items);
+      cursorRef.current = payload.next_cursor;
+      setCursor(payload.next_cursor);
+      setError("");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : `${title}请求失败`);
+    } finally {
+      if (append) setLoadingMore(false); else if (!silent) setLoading(false);
+    }
+  }, [apiBase, kind, title]);
+
+  useEffect(() => {
+    void load();
+    const timer = window.setInterval(() => void load(false, true), researchViewsRefreshIntervalMs);
+    return () => window.clearInterval(timer);
+  }, [load]);
+
+  return <section className={`target-change-section ${kind}`}>
+    <header><div><p className="eyebrow">{kind === "macro" ? "MACRO / SECTOR" : "SECURITY TARGETS"}</p><h2>{title}</h2><p>{copy}</p></div><button type="button" disabled={loading} onClick={() => void load()}>{loading ? "刷新中…" : "刷新"}</button></header>
+    {error && <div className="page-error target-change-error"><span>{error}</span><button type="button" onClick={() => void load()}>重试</button></div>}
+    {!items.length && !error && (loading ? <div className="page-message">正在加载{title}…</div> : <div className="page-empty">当前没有最近评级变化。</div>)}
+    {!!items.length && <TargetChangeGrid items={items} onOpen={onOpen} detailLoadingId={detailLoadingId} researchStates={researchStates} onResearch={onResearch} />}
+    {cursor && <button className="load-more" type="button" disabled={loadingMore} onClick={() => void load(true)}>{loadingMore ? "正在加载…" : "加载更多"}</button>}
+  </section>;
+}
+
+export function ChangedTargetsPage({ apiBase }: { apiBase: string }) {
   const [detailLoadingId, setDetailLoadingId] = useState("");
-  const [selected, setSelected] = useState<ConclusionDetail | null>(null);
+  const [detailError, setDetailError] = useState("");
+  const [selectedAsset, setSelectedAsset] = useState<ConclusionDetail | null>(null);
+  const [selectedEvent, setSelectedEvent] = useState<EventConclusionDetail | null>(null);
   const [researchStates, setResearchStates] = useState<Record<string, ConclusionResearchState>>({});
   const researchInFlight = useRef(new Set<string>());
 
-  async function load(append = false) {
-    const params = new URLSearchParams({ limit: "50" });
-    if (append && cursor) params.set("cursor", cursor);
-    if (append) setLoadingMore(true); else setLoading(true);
-    setError("");
-    try {
-      const response = await fetch(`${apiBase}/api/v1/changed-targets?${params}`);
-      if (!response.ok) throw new Error("标的评级变化请求失败");
-      const payload = await response.json() as {
-        items: ChangedTarget[];
-        next_cursor: string | null;
-      };
-      setItems((current) => append ? [...current, ...payload.items] : payload.items);
-      setCursor(payload.next_cursor);
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "标的评级变化请求失败");
-    } finally {
-      if (append) setLoadingMore(false); else setLoading(false);
-    }
-  }
-
-  useEffect(() => { void load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  function clearCurrentPage() {
-    setItems([]);
-    setCursor(null);
-    setError("");
-    setDetailError("");
-    setDetailRetryItem(null);
-  }
-
-  async function openLatestResearch(item: ChangedTarget) {
+  async function openLatestResearch(item: TargetChange) {
     if (detailLoadingId) return;
-    setDetailLoadingId(item.asset.asset_id);
+    setDetailLoadingId(item.key);
     setDetailError("");
-    setDetailRetryItem(null);
     try {
-      const response = await fetch(`${apiBase}/api/v1/conclusions/${changedTargetLatestRecommendationId(item)}`);
+      const path = item.latest_detail.kind === "event"
+        ? `/api/v1/event-conclusions/${item.latest_detail.id}`
+        : `/api/v1/conclusions/${item.latest_detail.id}`;
+      const response = await fetch(`${apiBase}${path}`);
       if (!response.ok) throw new Error("最近一次调研加载失败");
-      setSelected(await response.json() as ConclusionDetail);
+      if (item.latest_detail.kind === "event") setSelectedEvent(await response.json() as EventConclusionDetail);
+      else setSelectedAsset(await response.json() as ConclusionDetail);
     } catch (reason) {
       setDetailError(reason instanceof Error ? reason.message : "最近一次调研加载失败");
-      setDetailRetryItem(item);
     } finally {
       setDetailLoadingId("");
     }
   }
 
-  async function researchAgain(item: ChangedTarget) {
-    const assetId = item.asset.asset_id;
-    if (researchInFlight.current.has(assetId) || researchStates[assetId]?.status === "queued") return;
-    researchInFlight.current.add(assetId);
-    setResearchStates((current) => ({ ...current, [assetId]: { status: "pending" } }));
+  async function researchAgain(item: TargetChange) {
+    if (item.kind !== "asset" || researchInFlight.current.has(item.key) || researchStates[item.key]?.status === "queued") return;
+    researchInFlight.current.add(item.key);
+    setResearchStates((current) => ({ ...current, [item.key]: { status: "pending" } }));
     try {
-      await researchConclusion(apiBase, changedTargetLatestRecommendationId(item));
-      setResearchStates((current) => ({ ...current, [assetId]: { status: "queued" } }));
+      await researchConclusion(apiBase, item.latest_detail.id);
+      setResearchStates((current) => ({ ...current, [item.key]: { status: "queued" } }));
     } catch (reason) {
-      setResearchStates((current) => ({
-        ...current,
-        [assetId]: { status: "error", error: reason instanceof Error ? reason.message : "重新调研失败" },
-      }));
+      setResearchStates((current) => ({ ...current, [item.key]: { status: "error", error: reason instanceof Error ? reason.message : "重新调研失败" } }));
     } finally {
-      researchInFlight.current.delete(assetId);
+      researchInFlight.current.delete(item.key);
     }
   }
 
   return <section className="app-page targets-page">
-    <PageHeading eyebrow="RATING CHANGES" title="标的评级变化" copy="汇总历史结论中五档评级发生变化的标的；每个标的只展示最新一次评级变化。" />
-    <div className="page-toolbar target-change-toolbar">
-      <button type="button" disabled={loading || !items.length} onClick={clearCurrentPage}>清除</button>
-      <button type="button" disabled={loading} onClick={() => load()}>{loading ? "刷新中…" : "刷新"}</button>
+    <PageHeading eyebrow="RATING CHANGES" title="标的评级变化" copy="左侧追踪宏观经济、行业及跨资产目标，右侧追踪具体证券；仅展示最近一次五级评级变化。" />
+    {detailError && <div className="page-error target-detail-error"><span>{detailError}</span></div>}
+    <div className="target-change-split">
+      <TargetChangeSection apiBase={apiBase} kind="macro" title="宏观经济与行业变化" copy="经济、行业、商品、汇率、利率、供给、航运与风险资产。" onOpen={(item) => void openLatestResearch(item)} detailLoadingId={detailLoadingId} researchStates={researchStates} />
+      <TargetChangeSection apiBase={apiBase} kind="asset" title="具体标的变化" copy="股票与加密资产的最新五级评级变化及研究结论。" onOpen={(item) => void openLatestResearch(item)} detailLoadingId={detailLoadingId} researchStates={researchStates} onResearch={(item) => void researchAgain(item)} />
     </div>
-    {detailError && <div className="page-error target-detail-error"><span>{detailError}</span><button type="button" onClick={() => detailRetryItem && void openLatestResearch(detailRetryItem)}>重试</button></div>}
-    <ChangedTargetsContent
-      items={items}
-      loading={loading}
-      error={error}
-      onRetry={() => load()}
-      researchStates={researchStates}
-      onResearch={(item) => void researchAgain(item)}
-      onOpen={(item) => void openLatestResearch(item)}
-      detailLoadingId={detailLoadingId}
-    />
-    {cursor && <button className="load-more" type="button" disabled={loadingMore} onClick={() => load(true)}>{loadingMore ? "正在加载…" : "加载更多"}</button>}
-    {selected && <ConclusionDetailModal detail={selected} onClose={() => setSelected(null)} />}
+    {selectedAsset && <ConclusionDetailModal detail={selectedAsset} onClose={() => setSelectedAsset(null)} />}
+    {selectedEvent && <EventConclusionDetailModal detail={selectedEvent} onClose={() => setSelectedEvent(null)} />}
   </section>;
 }
 
 export function ConclusionsPage({ apiBase }: { apiBase: string }) {
-  const [filters, setFilters] = useState({ q: "", market: "", rating: "", evidence_status: "" });
-  const [items, setItems] = useState<Recommendation[]>([]);
+  const [filters, setFilters] = useState({ kind: "all", q: "", market: "", rating: "", evidence_status: "" });
+  const [items, setItems] = useState<ResearchConclusionItem[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
-  const [selected, setSelected] = useState<ConclusionDetail | null>(null);
+  const [selectedAsset, setSelectedAsset] = useState<ConclusionDetail | null>(null);
+  const [selectedEvent, setSelectedEvent] = useState<EventConclusionDetail | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -1970,23 +2182,26 @@ export function ConclusionsPage({ apiBase }: { apiBase: string }) {
   const [retryMessageError, setRetryMessageError] = useState(false);
   const [researchStates, setResearchStates] = useState<Record<string, ConclusionResearchState>>({});
   const researchInFlight = useRef(new Set<string>());
+  const filtersRef = useRef(filters);
+  const cursorRef = useRef<string | null>(null);
 
-  async function load(append = false) {
-    const params = new URLSearchParams({ ...filters, limit: "20" });
-    if (append && cursor) params.set("cursor", cursor);
-    if (append) setLoadingMore(true); else setLoading(true);
+  const load = useCallback(async (append = false, silent = false) => {
+    const params = new URLSearchParams({ ...filtersRef.current, limit: "20" });
+    if (append && cursorRef.current) params.set("cursor", cursorRef.current);
+    if (append) setLoadingMore(true); else if (!silent) setLoading(true);
     try {
-      const response = await fetch(`${apiBase}/api/v1/conclusions?${params}`);
+      const response = await fetch(`${apiBase}/api/v1/research-conclusions?${params}`);
       if (!response.ok) throw new Error("结论请求失败");
-      const payload = await response.json() as { items: Recommendation[]; next_cursor: string | null };
+      const payload = await response.json() as { items: ResearchConclusionItem[]; next_cursor: string | null };
       setItems((current) => append ? [...current, ...payload.items] : payload.items);
+      cursorRef.current = payload.next_cursor;
       setCursor(payload.next_cursor); setError("");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "结论请求失败");
     } finally {
-      if (append) setLoadingMore(false); else setLoading(false);
+      if (append) setLoadingMore(false); else if (!silent) setLoading(false);
     }
-  }
+  }, [apiBase]);
   async function loadFailures() {
     setFailuresLoading(true);
     try {
@@ -2009,7 +2224,12 @@ export function ConclusionsPage({ apiBase }: { apiBase: string }) {
       setFailuresLoading(false);
     }
   }
-  useEffect(() => { load(); loadFailures(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    void load();
+    void loadFailures();
+    const timer = window.setInterval(() => void load(false, true), researchViewsRefreshIntervalMs);
+    return () => window.clearInterval(timer);
+  }, [load]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function retry(item: FailedResearch, instanceId?: string) {
     setRetryingId(item.id); setRetryMessage(""); setRetryMessageError(false);
@@ -2040,9 +2260,14 @@ export function ConclusionsPage({ apiBase }: { apiBase: string }) {
     } finally { setRetryingAll(false); }
   }
 
-  async function open(item: Recommendation) {
-    const response = await fetch(`${apiBase}/api/v1/conclusions/${item.id}`);
-    if (response.ok) setSelected(await response.json() as ConclusionDetail);
+  async function open(item: ResearchConclusionItem) {
+    const path = item.kind === "event"
+      ? `/api/v1/event-conclusions/${item.id}`
+      : `/api/v1/conclusions/${item.id}`;
+    const response = await fetch(`${apiBase}${path}`);
+    if (!response.ok) return;
+    if (item.kind === "event") setSelectedEvent(await response.json() as EventConclusionDetail);
+    else setSelectedAsset(await response.json() as ConclusionDetail);
   }
 
   async function researchAgain(item: Recommendation) {
@@ -2065,8 +2290,9 @@ export function ConclusionsPage({ apiBase }: { apiBase: string }) {
   return (
     <section className="app-page conclusions-page">
       <PageHeading eyebrow="RESEARCH OUTCOMES" title="研究结论" copy="新研究按事件类型使用 30、90 或 180 个自然日评级周期；新闻可信度与评级置信度独立计算。" />
-      <form className="page-filters" onSubmit={(e) => { e.preventDefault(); load(); }}>
-        <input aria-label="搜索结论" placeholder="标的、代码或核心观点" value={filters.q} onChange={(e) => setFilters({ ...filters, q: e.target.value })} />
+      <form className="page-filters" onSubmit={(e) => { e.preventDefault(); filtersRef.current = filters; cursorRef.current = null; setCursor(null); void load(); }}>
+        <select aria-label="结论类型" value={filters.kind} onChange={(e) => setFilters({ ...filters, kind: e.target.value })}><option value="all">全部结论</option><option value="event">事件研报</option><option value="asset">具体标的</option></select>
+        <input aria-label="搜索结论" placeholder="事件、标的、代码或核心观点" value={filters.q} onChange={(e) => setFilters({ ...filters, q: e.target.value })} />
         <select aria-label="市场" value={filters.market} onChange={(e) => setFilters({ ...filters, market: e.target.value })}><option value="">全部市场</option><option value="US">美股</option><option value="CN">A股</option><option value="HK">港股</option><option value="CRYPTO">加密</option></select>
         <select aria-label="评级" value={filters.rating} onChange={(e) => setFilters({ ...filters, rating: e.target.value })}><option value="">全部评级</option>{Object.entries(ratingLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>
         <select aria-label="证据状态" value={filters.evidence_status} onChange={(e) => setFilters({ ...filters, evidence_status: e.target.value })}><option value="">全部资料覆盖</option><option value="complete">资料覆盖完整</option><option value="incomplete">资料覆盖不足</option></select>
@@ -2103,19 +2329,22 @@ export function ConclusionsPage({ apiBase }: { apiBase: string }) {
         </div>
       </section>
       <div className="conclusion-list">
-        {items.map((item) => <ConclusionCard
-          key={item.id}
-          item={item}
-          researchState={researchStates[recommendationAssetKey(item)]}
-          onOpen={() => void open(item)}
-          onResearch={() => void researchAgain(item)}
-        />)}
+        {items.map((item) => item.kind === "asset" && item.recommendation
+          ? <ConclusionCard
+            key={`${item.kind}-${item.id}`}
+            item={item.recommendation}
+            researchState={researchStates[recommendationAssetKey(item.recommendation)]}
+            onOpen={() => void open(item)}
+            onResearch={() => void researchAgain(item.recommendation as Recommendation)}
+          />
+          : <EventConclusionCard key={`${item.kind}-${item.id}`} item={item} onOpen={() => void open(item)} />)}
         {!items.length && !error && (loading
           ? <div className="page-message">正在加载研究结论…</div>
-          : <div className="page-empty">当前筛选范围内没有最终标的建议。</div>)}
+          : <div className="page-empty">当前筛选范围内没有事件或标的结论。</div>)}
       </div>
-      {cursor && <button className="load-more" type="button" disabled={loadingMore} onClick={() => load(true)}>{loadingMore ? "正在加载…" : "加载更多"}</button>}
-      {selected && <ConclusionDetailModal detail={selected} onClose={() => setSelected(null)} />}
+      {cursor && <button className="load-more" type="button" disabled={loadingMore} onClick={() => void load(true)}>{loadingMore ? "正在加载…" : "加载更多"}</button>}
+      {selectedAsset && <ConclusionDetailModal detail={selectedAsset} onClose={() => setSelectedAsset(null)} />}
+      {selectedEvent && <EventConclusionDetailModal detail={selectedEvent} onClose={() => setSelectedEvent(null)} />}
     </section>
   );
 }

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import base64
+import re
+import unicodedata
 from datetime import datetime
 from hashlib import sha256
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 import httpx
@@ -15,6 +17,8 @@ from sqlalchemy.orm import Session
 
 from backend.app.config import get_settings
 from backend.app.db import (
+    EventResearchRunRow,
+    EventRow,
     IntegrationSettingRow,
     McpSourceRow,
     NewsFilterLogRow,
@@ -23,11 +27,17 @@ from backend.app.db import (
     get_db,
 )
 from backend.app.domain import (
+    AssetClass,
+    EventResearchRun,
     NewsItem,
     Recommendation,
     ResearchRun,
+    RunStatus,
     SignalStatus,
     SourceQuality,
+    TargetImpact,
+    TargetType,
+    as_utc,
     utc_now,
 )
 from backend.app.services.fact_sources import (
@@ -780,3 +790,431 @@ def get_conclusion(recommendation_id: UUID, db: Db) -> dict[str, Any]:
     if not row:
         raise HTTPException(status_code=404, detail="conclusion not found")
     return _conclusion_detail(db, Recommendation.model_validate(row.payload))
+
+
+_CONCLUSION_KIND_ORDER = {"event": 0, "asset": 1}
+_VISIBLE_EVENT_STATUSES = {
+    RunStatus.COMPLETED.value,
+    RunStatus.INSUFFICIENT_EVIDENCE.value,
+}
+_MACRO_TARGET_TYPES = {
+    TargetType.ECONOMY,
+    TargetType.SUPPLY_VOLUME,
+    TargetType.COMMODITY_PRICE,
+    TargetType.FX_RATE,
+    TargetType.INTEREST_RATE,
+    TargetType.SECTOR,
+    TargetType.RISK_ASSET,
+    TargetType.SHIPPING,
+    TargetType.OTHER,
+}
+
+
+def _encode_union_cursor(stamp: datetime, kind: str, item_id: UUID) -> str:
+    raw = f"{as_utc(stamp).isoformat()}|{kind}|{item_id}"
+    return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
+
+
+def _decode_union_cursor(cursor: str) -> tuple[datetime, str, UUID]:
+    try:
+        padded = cursor + "=" * (-len(cursor) % 4)
+        stamp, kind, item_id = base64.urlsafe_b64decode(padded).decode().split("|", 2)
+        if kind not in _CONCLUSION_KIND_ORDER:
+            raise ValueError("invalid conclusion kind")
+        return as_utc(datetime.fromisoformat(stamp)), kind, UUID(item_id)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail="invalid cursor") from exc
+
+
+def _conclusion_sort_key(item: dict[str, Any]) -> tuple[datetime, int, int]:
+    return (
+        as_utc(datetime.fromisoformat(str(item["occurred_at"]))),
+        _CONCLUSION_KIND_ORDER[str(item["kind"])],
+        UUID(str(item["id"])).int,
+    )
+
+
+def _matches_evidence_status(complete: bool, evidence_status: str) -> bool:
+    if evidence_status == "complete":
+        return complete
+    if evidence_status == "incomplete":
+        return not complete
+    return True
+
+
+@router.get("/api/v1/research-conclusions")
+def list_research_conclusions(
+    db: Db,
+    kind: Literal["all", "event", "asset"] = "all",
+    q: str = "",
+    market: str = "",
+    rating: str = "",
+    evidence_status: Literal["", "complete", "incomplete"] = "",
+    cursor: str | None = None,
+    limit: int = Query(default=20, ge=1, le=100),
+) -> dict[str, Any]:
+    query_text = q.strip().casefold()
+    feed: list[dict[str, Any]] = []
+
+    if kind in {"all", "asset"}:
+        recommendation_rows = list(db.scalars(select(RecommendationRow)).all())
+        recommendations = [
+            Recommendation.model_validate(row.payload) for row in recommendation_rows
+        ]
+        run_ids = {item.run_id for item in recommendations}
+        run_rows = (
+            db.scalars(select(ResearchRunRow).where(ResearchRunRow.id.in_(run_ids))).all()
+            if run_ids
+            else []
+        )
+        runs_by_id = {
+            row.id: ResearchRun.model_validate(row.payload) for row in run_rows
+        }
+        for recommendation in recommendations:
+            asset = recommendation.asset
+            if market and asset.market.value.casefold() != market.casefold():
+                continue
+            if rating and recommendation.rating.value != rating:
+                continue
+            if not _matches_evidence_status(
+                recommendation.evidence_complete, evidence_status
+            ):
+                continue
+            searchable = (
+                f"{asset.symbol} {asset.name} {recommendation.thesis.summary}"
+            ).casefold()
+            if query_text and query_text not in searchable:
+                continue
+            feed.append(
+                {
+                    "kind": "asset",
+                    "id": recommendation.id,
+                    "occurred_at": as_utc(recommendation.as_of).isoformat(),
+                    "status": recommendation.signal_status.value,
+                    "evidence_complete": recommendation.evidence_complete,
+                    "title": f"{asset.symbol} · {asset.name}",
+                    "summary": recommendation.thesis.summary,
+                    "asset": asset.model_dump(mode="json"),
+                    "event": None,
+                    "recommendation": _public_recommendation(
+                        recommendation, runs_by_id.get(recommendation.run_id)
+                    ),
+                    "report": None,
+                }
+            )
+
+    if kind in {"all", "event"} and not market and not rating:
+        event_rows = list(
+            db.scalars(
+                select(EventResearchRunRow).where(
+                    EventResearchRunRow.status.in_(_VISIBLE_EVENT_STATUSES)
+                )
+            ).all()
+        )
+        event_ids = {row.event_id for row in event_rows}
+        stored_events = (
+            db.scalars(select(EventRow).where(EventRow.id.in_(event_ids))).all()
+            if event_ids
+            else []
+        )
+        events_by_id = {row.id: row.payload for row in stored_events}
+        for row in event_rows:
+            run = EventResearchRun.model_validate(row.payload)
+            report = run.report
+            if report is None:
+                continue
+            if not _matches_evidence_status(report.evidence_complete, evidence_status):
+                continue
+            event = events_by_id.get(run.event_id)
+            headline = str((event or {}).get("headline") or report.summary)
+            searchable = " ".join(
+                [
+                    headline,
+                    report.summary,
+                    *report.affected_markets,
+                    *report.affected_sectors,
+                ]
+            ).casefold()
+            if query_text and query_text not in searchable:
+                continue
+            feed.append(
+                {
+                    "kind": "event",
+                    "id": run.id,
+                    "occurred_at": as_utc(row.updated_at).isoformat(),
+                    "status": run.status.value,
+                    "evidence_complete": report.evidence_complete,
+                    "title": headline,
+                    "summary": report.summary,
+                    "asset": None,
+                    "event": (
+                        {
+                            "id": str(run.event_id),
+                            "headline": headline,
+                            "event_type": (event or {}).get("event_type", "other"),
+                        }
+                    ),
+                    "recommendation": None,
+                    "report": {
+                        "confidence": report.confidence,
+                        "news_confidence": report.news_confidence,
+                        "impact_count": len(report.impacts),
+                        "affected_markets": report.affected_markets,
+                        "affected_sectors": report.affected_sectors,
+                        "scoring_version": report.scoring_version,
+                    },
+                }
+            )
+
+    feed.sort(key=_conclusion_sort_key, reverse=True)
+    if cursor:
+        cursor_time, cursor_kind, cursor_id = _decode_union_cursor(cursor)
+        cursor_key = (
+            cursor_time,
+            _CONCLUSION_KIND_ORDER[cursor_kind],
+            cursor_id.int,
+        )
+        feed = [item for item in feed if _conclusion_sort_key(item) < cursor_key]
+    has_more = len(feed) > limit
+    visible = feed[:limit]
+    next_cursor = None
+    if has_more and visible:
+        last = visible[-1]
+        next_cursor = _encode_union_cursor(
+            datetime.fromisoformat(str(last["occurred_at"])),
+            str(last["kind"]),
+            UUID(str(last["id"])),
+        )
+    return {"items": visible, "next_cursor": next_cursor}
+
+
+@router.get("/api/v1/event-conclusions/{run_id}")
+def get_event_conclusion(run_id: UUID, db: Db) -> dict[str, Any]:
+    row = db.get(EventResearchRunRow, run_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="event conclusion not found")
+    run = EventResearchRun.model_validate(row.payload)
+    if run.report is None:
+        raise HTTPException(status_code=404, detail="event conclusion has no report")
+    event = get_event(db, run.event_id)
+    news = [get_news(db, news_id) for news_id in (event.news_item_ids if event else [])]
+    return {
+        "run": run.model_dump(mode="json"),
+        "event": event.model_dump(mode="json") if event else None,
+        "report": run.report.model_dump(mode="json"),
+        "news": [item.model_dump(mode="json") for item in news if item],
+        "evidence": [item.model_dump(mode="json") for item in run.evidence],
+    }
+
+
+def _normalized_target_text(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", value).casefold()
+    return re.sub(r"[^a-z0-9\u3400-\u9fff]+", "", normalized)
+
+
+def _macro_target_base(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", value).casefold()
+    normalized = re.sub(r"\([^)]*(?:[a-z]{1,8}|\d{4,8})[^)]*\)", " ", normalized)
+    for phrase in (
+        "continuous benchmark",
+        "continuous contract",
+        "continuous futures",
+        "连续基准",
+        "连续合约",
+    ):
+        normalized = normalized.replace(phrase, " ")
+    return _normalized_target_text(normalized)
+
+
+def _security_aliases(db: Session) -> tuple[set[str], set[str]]:
+    names: set[str] = set()
+    symbols: set[str] = set()
+    for payload in db.scalars(select(RecommendationRow.payload)).all():
+        try:
+            asset = Recommendation.model_validate(payload).asset
+        except (TypeError, ValueError):
+            continue
+        if asset.asset_class not in {AssetClass.EQUITY, AssetClass.CRYPTO}:
+            continue
+        names.add(_normalized_target_text(asset.name))
+        symbols.add(asset.symbol.casefold())
+    return names, symbols
+
+
+def _resembles_security_target(
+    impact: TargetImpact,
+    security_names: set[str],
+    security_symbols: set[str],
+) -> bool:
+    if impact.target_type is TargetType.TRADABLE_ASSET:
+        return True
+    if impact.asset and impact.asset.asset_class in {AssetClass.EQUITY, AssetClass.CRYPTO}:
+        return True
+    compact = _normalized_target_text(impact.target_name)
+    if compact in security_names:
+        return True
+    tokens = {
+        token.casefold()
+        for token in re.findall(r"[A-Za-z0-9.\-]+", impact.target_name)
+        if len(token) >= 2
+    }
+    return bool(tokens & security_symbols)
+
+
+def _impact_state(impact: TargetImpact) -> dict[str, Any]:
+    return {
+        "rating": impact.rating.value,
+        "direction_score": impact.direction_score,
+        "rating_confidence": impact.rating_confidence,
+    }
+
+
+def _macro_target_changes(db: Session) -> list[dict[str, Any]]:
+    rows = list(
+        db.scalars(
+            select(EventResearchRunRow)
+            .where(EventResearchRunRow.status.in_(_VISIBLE_EVENT_STATUSES))
+            .order_by(EventResearchRunRow.updated_at, EventResearchRunRow.id)
+        ).all()
+    )
+    security_names, security_symbols = _security_aliases(db)
+    parsed: list[tuple[EventResearchRunRow, EventResearchRun]] = []
+    aliases: dict[tuple[str, str], str] = {}
+    for row in rows:
+        run = EventResearchRun.model_validate(row.payload)
+        if run.report is None:
+            continue
+        parsed.append((row, run))
+        for impact in run.report.impacts:
+            if (
+                impact.target_type in _MACRO_TARGET_TYPES
+                and impact.asset
+                and impact.asset.asset_class not in {AssetClass.EQUITY, AssetClass.CRYPTO}
+            ):
+                aliases[(impact.target_type.value, _macro_target_base(impact.target_name))] = (
+                    impact.asset.asset_id
+                )
+
+    previous_by_key: dict[str, tuple[TargetImpact, EventResearchRun, datetime]] = {}
+    latest_by_key: dict[str, tuple[TargetImpact, EventResearchRun, datetime]] = {}
+    changes: dict[
+        str,
+        tuple[TargetImpact, TargetImpact, EventResearchRun, datetime],
+    ] = {}
+    for row, run in parsed:
+        report_impacts: dict[str, TargetImpact] = {}
+        for impact in run.report.impacts if run.report else []:
+            if impact.target_type not in _MACRO_TARGET_TYPES or _resembles_security_target(
+                impact, security_names, security_symbols
+            ):
+                continue
+            alias_key = (impact.target_type.value, _macro_target_base(impact.target_name))
+            stable_id = (
+                impact.asset.asset_id
+                if impact.asset
+                and impact.asset.asset_class not in {AssetClass.EQUITY, AssetClass.CRYPTO}
+                else aliases.get(alias_key)
+            )
+            key = stable_id or f"{impact.target_type.value}:{alias_key[1]}"
+            report_impacts[key] = impact
+        stamp = as_utc(row.updated_at)
+        for key, impact in report_impacts.items():
+            previous = previous_by_key.get(key)
+            if previous and previous[0].rating != impact.rating:
+                changes[key] = (previous[0], impact, run, stamp)
+            previous_by_key[key] = (impact, run, stamp)
+            latest_by_key[key] = (impact, run, stamp)
+
+    output: list[dict[str, Any]] = []
+    for key, (previous, current, change_run, changed_at) in changes.items():
+        latest, latest_run, latest_at = latest_by_key[key]
+        output.append(
+            {
+                "kind": "macro",
+                "key": key,
+                "label": latest.target_name,
+                "symbol": latest.asset.symbol if latest.asset else None,
+                "market": latest.asset.market.value if latest.asset else None,
+                "target_type": latest.target_type.value,
+                "changed_at": changed_at,
+                "previous": _impact_state(previous),
+                "current": _impact_state(current),
+                "latest": _impact_state(latest),
+                "latest_detail": {
+                    "kind": "event",
+                    "id": latest_run.id,
+                    "researched_at": latest_at,
+                },
+                "change_detail_id": change_run.id,
+            }
+        )
+    return sorted(
+        output,
+        key=lambda item: (as_utc(item["changed_at"]), UUID(str(item["change_detail_id"])).int),
+        reverse=True,
+    )
+
+
+def _asset_target_changes(db: Session) -> list[dict[str, Any]]:
+    return [
+        {
+            "kind": "asset",
+            "key": current.asset.asset_id,
+            "label": current.asset.name,
+            "symbol": current.asset.symbol,
+            "market": current.asset.market.value,
+            "target_type": TargetType.TRADABLE_ASSET.value,
+            "changed_at": current.as_of,
+            "previous": {
+                "rating": previous.rating.value,
+                "direction_score": previous.direction_score,
+                "rating_confidence": previous.rating_confidence,
+            },
+            "current": {
+                "rating": current.rating.value,
+                "direction_score": current.direction_score,
+                "rating_confidence": current.rating_confidence,
+            },
+            "latest": {
+                "rating": latest.rating.value,
+                "direction_score": latest.direction_score,
+                "rating_confidence": latest.rating_confidence,
+            },
+            "latest_detail": {
+                "kind": "asset",
+                "id": latest.id,
+                "researched_at": latest.as_of,
+            },
+            "change_detail_id": current.id,
+        }
+        for previous, current, latest in _latest_changed_targets(db)
+    ]
+
+
+@router.get("/api/v1/target-changes")
+def list_target_changes(
+    db: Db,
+    kind: Literal["macro", "asset"],
+    cursor: str | None = None,
+    limit: int = Query(default=50, ge=1, le=100),
+) -> dict[str, Any]:
+    changes = _macro_target_changes(db) if kind == "macro" else _asset_target_changes(db)
+    if cursor:
+        cursor_time, cursor_id = _decode_cursor(cursor)
+        changes = [
+            item
+            for item in changes
+            if as_utc(item["changed_at"]) < as_utc(cursor_time)
+            or (
+                as_utc(item["changed_at"]) == as_utc(cursor_time)
+                and UUID(str(item["change_detail_id"])).int < cursor_id.int
+            )
+        ]
+    has_more = len(changes) > limit
+    visible = changes[:limit]
+    next_cursor = None
+    if has_more and visible:
+        next_cursor = _encode_cursor(
+            visible[-1]["changed_at"], UUID(str(visible[-1]["change_detail_id"]))
+        )
+    return {"items": visible, "next_cursor": next_cursor}
