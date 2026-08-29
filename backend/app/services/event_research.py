@@ -19,6 +19,7 @@ from backend.app.domain import (
     utc_now,
 )
 from backend.app.llm import LlmGateway, gateway
+from backend.app.providers.registry import query_mentions_asset
 from backend.app.services.confidence_v3 import (
     NEWS_CONFIDENCE_VERSION,
     RATING_CONFIDENCE_VERSION,
@@ -332,11 +333,15 @@ class EventResearchService:
 
     def _asset_map(self, event: NewsEvent) -> dict[str, AssetRef]:
         direct_ids = {item.asset.asset_id for item in event.candidates[:3]}
+        source_text = "\n".join([event.headline, *event.entities])
         assets = {
             item.asset_id: item
             for item in list_assets(self.db)
             if item.asset_id in direct_ids
-            or item.asset_class in {AssetClass.COMMODITY, AssetClass.FX}
+            or (
+                item.asset_class in {AssetClass.COMMODITY, AssetClass.FX}
+                and query_mentions_asset(source_text, item)
+            )
         }
         assets.update(
             {item.asset.asset_id: item.asset for item in event.candidates[:3]}
@@ -381,7 +386,7 @@ class EventResearchService:
             }
             for asset in self._asset_map(event).values()
             if asset.asset_id in {item.asset.asset_id for item in event.candidates[:3]}
-            or asset.symbol in {"CLUSD", "BZUSD", "ZGUSD"}
+            or asset.asset_class in {AssetClass.COMMODITY, AssetClass.FX}
         ]
         prompt = (
             f"事实框架：{event.model_dump_json(exclude={'analysis_steps'})}\n"

@@ -187,11 +187,31 @@ class AssetRef(BaseModel):
     aliases: list[str] = Field(default_factory=list)
     products: list[str] = Field(default_factory=list)
     competitors: list[str] = Field(default_factory=list)
+    sector_id: str = ""
+    industry_id: str = ""
+    raw_sector: str = ""
+    raw_industry: str = ""
+    instrument_type: str = ""
+    market_cap: float | None = Field(default=None, ge=0)
+    market_cap_rank: int | None = Field(default=None, ge=1)
+    last_synced_at: datetime | None = None
     # Multiple listings/ADRs may point at the same issuer without being treated
     # as interchangeable instruments.  Existing asset payloads remain valid.
     issuer_id: str | None = None
     primary_listing_asset_id: str | None = None
     lot_size: int = Field(default=1, ge=1)
+    active: bool = True
+
+
+class IndustryRef(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    industry_id: str
+    parent_id: str | None = None
+    level: int = Field(ge=1, le=2)
+    name_zh: str
+    name_en: str
+    aliases: list[str] = Field(default_factory=list)
     active: bool = True
 
 
@@ -353,6 +373,7 @@ class NewsEvent(BaseModel):
     observed_at: datetime = Field(default_factory=utc_now)
     as_of: datetime = Field(default_factory=utc_now)
     candidates: list[CandidateAsset] = Field(default_factory=list)
+    industry_ids: list[str] = Field(default_factory=list)
     novelty: float = Field(default=0.5, ge=0, le=1)
     priority: float = Field(default=0.5, ge=0, le=1)
     analysis_steps: list[AnalysisStep] = Field(default_factory=list)

@@ -27,6 +27,7 @@ from backend.app.providers.registry import (
 
 
 class AssetMappingHint(BaseModel):
+    asset_id: str = ""
     source_mention: str = Field(min_length=1)
     name: str = Field(min_length=1)
     symbol: str = ""
@@ -40,6 +41,7 @@ class AssetMappingHint(BaseModel):
 
 class AssetMappingOutput(BaseModel):
     candidates: list[AssetMappingHint] = Field(default_factory=list, max_length=10)
+    industry_ids: list[str] = Field(default_factory=list, max_length=5)
     no_asset_reason: str = ""
 
     @model_validator(mode="after")
@@ -56,6 +58,7 @@ class AssetMappingResult(BaseModel):
     rejected_count: int = 0
     no_asset_reason: str = ""
     technical_warning: str = ""
+    industry_ids: list[str] = Field(default_factory=list)
 
 
 def normalize_security_text(value: str) -> str:
@@ -120,6 +123,22 @@ class AssetMappingService:
             max_chars=max(2, evidence_chars - len(event_json) - len("事件：\n新闻：")),
         )
         master_candidates = self._verified_product_candidates(source_text)
+        shortlist_resolver = getattr(self.registry, "shortlist_assets", None)
+        shortlist = shortlist_resolver(source_text, limit=30) if callable(shortlist_resolver) else []
+        allowed_asset_ids = {item.asset_id for item in shortlist}
+        industry_catalog = (
+            self.registry.all_industries()
+            if callable(getattr(self.registry, "all_industries", None))
+            else []
+        )
+        allowed_industry_ids = {
+            item.industry_id for item in industry_catalog if item.level == 2
+        }
+        mentioned_industries = (
+            self.registry.industries_for_text(source_text)
+            if callable(getattr(self.registry, "industries_for_text", None))
+            else []
+        )
         verified_products = [
             {
                 "source_mention": candidate.identity_basis[-1],
@@ -138,9 +157,15 @@ class AssetMappingService:
             "提供 symbol 时必须与主数据中的具体上市代码完全一致，不得改选同发行人的其他上市代码。"
             "机器人等同时是行业通用词的简称，原文没有明确代码或完整发行人身份时不得映射。"
             "不知道代码时保留空字符串。没有候选时必须填写非空 no_asset_reason。\n"
+            "优先从候选主数据中选择并原样返回 asset_id；有候选主数据时不得填写列表外代码。"
+            "新闻只描述行业时填写 industry_ids，并由系统关联代表股，不得自行创造行业成分股。\n"
             f"事件：{event_json}\n"
             "已验证产品归属："
             f"{json.dumps(verified_products, ensure_ascii=False, separators=(',', ':'))}\n"
+            "候选证券主数据："
+            f"{json.dumps([{'asset_id': item.asset_id, 'symbol': item.symbol, 'name': item.name, 'aliases': item.aliases[:5], 'market': item.market.value, 'industry_id': item.industry_id} for item in shortlist], ensure_ascii=False, separators=(',', ':'))}\n"
+            "允许行业："
+            f"{json.dumps([{'industry_id': item.industry_id, 'name_zh': item.name_zh, 'name_en': item.name_en} for item in industry_catalog if item.level == 2], ensure_ascii=False, separators=(',', ':'))}\n"
             f"新闻：{news_payload}"
         )
         try:
@@ -175,7 +200,12 @@ class AssetMappingService:
         candidates: dict[str, CandidateAsset] = dict(master_candidates)
         rejected = 0
         for hint in output.candidates:
-            validated = self._validate_hint(hint, source_text, source_symbols)
+            validated = self._validate_hint(
+                hint,
+                source_text,
+                source_symbols,
+                allowed_asset_ids=allowed_asset_ids,
+            )
             if not validated:
                 rejected += 1
                 continue
@@ -183,6 +213,35 @@ class AssetMappingService:
                 previous = candidates.get(candidate.asset.asset_id)
                 if not previous or candidate.relevance > previous.relevance:
                     candidates[candidate.asset.asset_id] = candidate
+        industry_ids = list(
+            dict.fromkeys(
+                [
+                    *mentioned_industries,
+                    *[
+                        item
+                        for item in output.industry_ids
+                        if item in allowed_industry_ids
+                    ],
+                ]
+            )
+        )
+        representative_resolver = getattr(self.registry, "industry_representatives", None)
+        if callable(representative_resolver) and industry_ids:
+            for asset in representative_resolver(
+                industry_ids,
+                limit=max(0, 8 - len(candidates)),
+            ):
+                candidates.setdefault(
+                    asset.asset_id,
+                    CandidateAsset(
+                        asset=asset,
+                        relationship="industry_peer",
+                        relevance=0.40,
+                        rationale="新闻涉及该标的所属行业；公司未被新闻直接点名。",
+                        mapping_confidence=0.55,
+                        identity_basis=["industry_taxonomy", asset.industry_id],
+                    ),
+                )
         ranked = sorted(candidates.values(), key=lambda item: item.relevance, reverse=True)
         return AssetMappingResult(
             candidates=ranked,
@@ -191,6 +250,7 @@ class AssetMappingService:
             rejected_count=rejected,
             no_asset_reason="" if ranked else output.no_asset_reason,
             technical_warning=technical_warning,
+            industry_ids=industry_ids,
         )
 
     def _verified_product_candidates(
@@ -212,7 +272,12 @@ class AssetMappingService:
         return candidates
 
     def _validate_hint(
-        self, hint: AssetMappingHint, source_text: str, source_symbols: list[str]
+        self,
+        hint: AssetMappingHint,
+        source_text: str,
+        source_symbols: list[str],
+        *,
+        allowed_asset_ids: set[str] | None = None,
     ) -> list[CandidateAsset]:
         mention = normalize_security_text(hint.source_mention)
         if (
@@ -245,11 +310,21 @@ class AssetMappingService:
                 if (not hint.asset_class or asset.asset_class is hint.asset_class)
             ]
 
+        allowed_asset_ids = allowed_asset_ids or set()
         queries = [hint.symbol, hint.name, hint.source_mention, *hint.search_queries]
         resolved: dict[str, AssetRef] = {}
+        if hint.asset_id:
+            if allowed_asset_ids and hint.asset_id not in allowed_asset_ids:
+                return []
+            getter = getattr(self.registry, "get_asset", None)
+            asset = getter(hint.asset_id) if callable(getter) else None
+            if asset is not None:
+                resolved[asset.asset_id] = asset
         for query in queries:
             if query.strip():
                 for asset in self.registry.resolve_assets(query):
+                    if allowed_asset_ids and asset.asset_id not in allowed_asset_ids:
+                        continue
                     resolved[asset.asset_id] = asset
 
         hinted_symbol = normalize_listing_symbol(hint.symbol)

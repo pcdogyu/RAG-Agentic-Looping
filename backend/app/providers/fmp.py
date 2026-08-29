@@ -24,6 +24,7 @@ from backend.app.domain import (
 )
 from backend.app.providers.base import ProviderError
 from backend.app.providers.cache import cache
+from backend.app.services.industry_taxonomy import normalize_industry
 
 
 class MinuteRateLimiter:
@@ -292,6 +293,72 @@ class FmpProvider:
                 )
             )
         return output
+
+    def list_equity_universe(self) -> list[AssetRef]:
+        """Load active US operating companies and issuer-verified OTC ADRs."""
+
+        output: dict[str, AssetRef] = {}
+        for exchange in ("NASDAQ", "NYSE", "AMEX", "OTC"):
+            payload = self._rest(
+                "company-screener",
+                {
+                    "exchange": exchange,
+                    "isEtf": "false",
+                    "isFund": "false",
+                    "isActivelyTrading": "true",
+                    "limit": 10_000,
+                },
+                ttl=24 * 60 * 60,
+            )
+            if isinstance(payload, dict):
+                payload = payload.get("data", payload.get("results", []))
+            for item in payload if isinstance(payload, list) else []:
+                symbol = str(item.get("symbol") or "").strip().upper()
+                name = str(item.get("companyName") or item.get("name") or symbol).strip()
+                if not symbol or not name:
+                    continue
+                lowered = name.casefold()
+                is_adr = " adr" in f" {lowered}" or "depositary" in lowered
+                if exchange == "OTC" and not is_adr:
+                    continue
+                raw_sector = str(item.get("sector") or "").strip()
+                raw_industry = str(item.get("industry") or "").strip()
+                sector_id, industry_id = normalize_industry(raw_sector, raw_industry)
+                market_cap = item.get("marketCap")
+                try:
+                    market_cap = float(market_cap) if market_cap is not None else None
+                except (TypeError, ValueError):
+                    market_cap = None
+                asset_id = f"equity:{exchange}:{symbol}"
+                output[asset_id] = AssetRef(
+                    asset_id=asset_id,
+                    asset_class=AssetClass.EQUITY,
+                    market=Market.US,
+                    symbol=symbol,
+                    name=name,
+                    exchange_or_provider=exchange,
+                    currency=str(item.get("currency") or "USD").strip().upper(),
+                    aliases=[
+                        value
+                        for value in {
+                            str(item.get("companyName") or "").strip(),
+                            str(item.get("shortName") or "").strip(),
+                            self._underlying_issuer_name(name),
+                        }
+                        if value and value not in {name, symbol}
+                    ],
+                    issuer_id=self._explicit_issuer_id(item),
+                    primary_listing_asset_id=self._explicit_primary_listing_id(
+                        item, symbol=symbol, exchange=exchange
+                    ),
+                    sector_id=sector_id,
+                    industry_id=industry_id,
+                    raw_sector=raw_sector,
+                    raw_industry=raw_industry,
+                    instrument_type="adr" if is_adr else "common_stock",
+                    market_cap=market_cap,
+                )
+        return list(output.values())
 
     def list_macro_assets(self) -> list[AssetRef]:
         """Load FMP continuous commodity benchmarks and spot FX master data."""

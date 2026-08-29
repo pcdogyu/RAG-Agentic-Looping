@@ -7,6 +7,7 @@ from backend.app.config import Settings
 from backend.app.domain import (
     ActionStage,
     AssetClass,
+    AssetRef,
     CandidateAsset,
     EventAction,
     EventReport,
@@ -27,6 +28,8 @@ from backend.app.services.directional_scoring import (
 )
 from backend.app.services.macro_impacts import (
     TARGET_SCORING_VERSION,
+    EventImpactDraft,
+    TargetImpactDraft,
     finalize_impacts,
     rule_based_event_draft,
 )
@@ -342,6 +345,68 @@ def test_mapping_technical_failure_keeps_all_targets_untradeable():
 
     assert all(item.trade_status is TradeStatus.UNTRADEABLE for item in impacts)
     assert all(item.technical_failure for item in impacts)
+
+
+def test_industry_peer_association_cannot_become_an_execution_signal():
+    stock = AssetRef(
+        asset_id="equity:XNAS:NVDA",
+        asset_class=AssetClass.EQUITY,
+        market=Market.US,
+        symbol="NVDA",
+        name="NVIDIA",
+        exchange_or_provider="XNAS",
+        sector_id="sector:information_technology",
+        industry_id="industry:semiconductors",
+        instrument_type="common_stock",
+    )
+    headline = "半导体行业先进制程需求升温"
+    event = _event(
+        headline,
+        EventAction(
+            actor="行业机构",
+            action_type="industry_update",
+            action_stage=ActionStage.REALIZED,
+            action="确认行业需求上升",
+            object="半导体行业",
+            strength=0.85,
+        ),
+    )
+    event.candidates = [
+        CandidateAsset(
+            asset=stock,
+            relationship="industry_peer",
+            relevance=0.40,
+            mapping_confidence=0.55,
+            rationale="新闻只提到行业，公司未被点名。",
+        )
+    ]
+    evidence = [_evidence(headline)]
+    draft = EventImpactDraft(
+        summary=headline,
+        evidence_ids=[str(evidence[0].id)],
+        impacts=[
+            TargetImpactDraft(
+                target_type="tradable_asset",
+                target_name=stock.name,
+                asset_id=stock.asset_id,
+                direction_score=90,
+                transmission_path=["行业需求", "芯片订单", "公司收入"],
+                rationale="行业需求可能向公司订单传导。",
+                evidence_ids=[str(evidence[0].id)],
+            )
+        ],
+    )
+
+    _, impacts, _, _ = finalize_impacts(
+        draft,
+        event=event,
+        evidence=evidence,
+        assets={stock.asset_id: stock},
+    )
+
+    assert impacts[0].trade_status is TradeStatus.UNTRADEABLE
+    assert impacts[0].execution_supported is False
+    assert "industry_only_mapping" in impacts[0].missing_information
 
 
 def test_fmp_parses_commodity_and_fx_master_lists(monkeypatch):

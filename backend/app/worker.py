@@ -21,6 +21,7 @@ from backend.app.domain import (
     AssetRef,
     EventReport,
     EventResearchRun,
+    Market,
     NewsEvent,
     NewsItem,
     Rating,
@@ -33,6 +34,7 @@ from backend.app.domain import (
 from backend.app.model_audit import cleanup_model_audits
 from backend.app.providers.registry import ProviderRegistry
 from backend.app.services.asset_mapping import AssetMappingService
+from backend.app.services.asset_universe import AssetUniverseService
 from backend.app.services.event_research import EventResearchService
 from backend.app.services.events import EventService
 from backend.app.services.evolution import EvolutionService
@@ -181,6 +183,11 @@ celery_app.conf.update(
         "refresh-crypto-universe": {
             "task": "market_loop.refresh_crypto_universe",
             "schedule": 6 * 60 * 60,
+            "options": {"queue": "io"},
+        },
+        "refresh-equity-universe": {
+            "task": "market_loop.refresh_asset_universe",
+            "schedule": 24 * 60 * 60,
             "options": {"queue": "io"},
         },
         "refresh-macro-universe": {
@@ -1508,7 +1515,10 @@ def enqueue_event_researches(db, event: NewsEvent, limit: int) -> list[tuple[str
     """Queue distinct event-assets in relevance order, up to the requested limit."""
 
     queued: list[tuple[str, ResearchRun]] = []
-    for candidate in event.candidates[:limit]:
+    direct_candidates = [
+        item for item in event.candidates if item.relationship != "industry_peer"
+    ]
+    for candidate in direct_candidates[:limit]:
         existing = get_run_for_event_asset(db, event.id, candidate.asset.asset_id)
         if existing:
             event_urls = {
@@ -1596,6 +1606,7 @@ def enqueue_asset_mapping(
     force: bool = False,
     priority: int | None = None,
     model_instance_id: str | None = None,
+    refresh_event_report: bool = False,
 ) -> str | None:
     """Queue one visible 7B mapping attempt for an unmapped event."""
 
@@ -1645,6 +1656,7 @@ def enqueue_asset_mapping(
             kwargs={
                 "model_instance_id": instance.id,
                 **({"force_mapping": True} if force else {}),
+                **({"refresh_event_report": True} if refresh_event_report else {}),
             },
             queue=broker_queue_name("assist", instance.id),
             task_id=task_id,
@@ -2962,6 +2974,7 @@ def resolve_event_assets(
     event_id: str,
     model_instance_id: str | None = None,
     force_mapping: bool = False,
+    refresh_event_report: bool = False,
 ) -> dict:
     task_id = str(self.request.id or f"event:{event_id}")
     if model_task_is_cancelled("assist", task_id):
@@ -3018,6 +3031,7 @@ def resolve_event_assets(
                 ]
                 mapping_result = AssetMappingService(registry).map_event(event, news_items)
                 event.candidates = mapping_result.candidates
+                event.industry_ids = mapping_result.industry_ids
                 for candidate in event.candidates:
                     upsert_asset(db, candidate.asset)
                 _replace_event_step(
@@ -3046,6 +3060,11 @@ def resolve_event_assets(
                             "provider_errors": registry.mapping_errors,
                             "no_asset_reason": mapping_result.no_asset_reason,
                             "technical_warning": mapping_result.technical_warning,
+                            "industry_ids": mapping_result.industry_ids,
+                            "industry_peer_count": sum(
+                                item.relationship == "industry_peer"
+                                for item in event.candidates
+                            ),
                         },
                     ),
                 )
@@ -3061,7 +3080,15 @@ def resolve_event_assets(
                 )
                 save_event(db, event)
 
-            task_id, run = enqueue_event_report(db, event)
+            existing_report = get_event_research_for_event(db, event.id)
+            if refresh_event_report and existing_report is not None:
+                task_id, run = enqueue_event_research_refresh(
+                    db,
+                    event,
+                    existing_report,
+                )
+            else:
+                task_id, run = enqueue_event_report(db, event)
             update_model_task(
                 "assist",
                 str(self.request.id or f"event:{event_id}"),
@@ -3350,12 +3377,51 @@ def research_asset(
 @celery_app.task(name="market_loop.refresh_crypto_universe")
 def refresh_crypto_universe() -> dict:
     init_db()
-    registry = ProviderRegistry()
-    assets = registry.refresh_crypto_universe()
     with SessionLocal() as db:
-        for asset in assets:
-            upsert_asset(db, asset)
-    return {"assets": len(assets)}
+        return AssetUniverseService(db).sync([Market.CRYPTO])
+
+
+@celery_app.task(name="market_loop.refresh_asset_universe")
+def refresh_asset_universe() -> dict:
+    """Refresh complete A-share, Hong Kong, US and crypto identities."""
+
+    init_db()
+    with SessionLocal() as db:
+        return AssetUniverseService(db).sync()
+
+
+@celery_app.task(name="market_loop.backfill_asset_mappings")
+def backfill_asset_mappings(days: int = 7, limit: int = 500) -> dict[str, int]:
+    """Re-map recent empty or low-confidence events and refresh their reports."""
+
+    init_db()
+    cutoff = utc_now() - timedelta(days=max(1, min(days, 30)))
+    queued = skipped = failed = 0
+    with SessionLocal() as db:
+        events = [
+            event
+            for event in list_events(db, limit=5000)
+            if event.observed_at >= cutoff
+        ]
+        for event in events[: max(1, min(limit, 2000))]:
+            low_confidence = not event.candidates or all(
+                min(item.relevance, item.mapping_confidence) < 0.65
+                for item in event.candidates
+            )
+            if not low_confidence or _asset_mapping_is_active(event):
+                skipped += 1
+                continue
+            try:
+                task_id = enqueue_asset_mapping(
+                    db,
+                    event,
+                    force=True,
+                    refresh_event_report=True,
+                )
+                queued += int(task_id is not None)
+            except Exception:
+                failed += 1
+    return {"queued": queued, "skipped": skipped, "failed": failed}
 
 
 @celery_app.task(name="market_loop.refresh_macro_universe")

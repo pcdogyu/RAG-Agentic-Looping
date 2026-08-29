@@ -4,7 +4,10 @@ from hashlib import sha256
 
 from backend.app.config import Settings
 from backend.app.domain import (
+    AssetClass,
+    AssetRef,
     EventResearchRun,
+    Market,
     NewsEvent,
     NewsItem,
     RunStatus,
@@ -20,6 +23,7 @@ from backend.app.storage import (
     list_recommendations,
     save_event,
     save_news,
+    upsert_asset,
 )
 
 
@@ -332,3 +336,42 @@ def test_historical_event_replay_never_calls_live_search(monkeypatch, db, tmp_pa
 
     assert result.status is not RunStatus.COMPLETED
     assert len(result.evidence) == 1
+
+
+def test_event_research_does_not_attach_unmentioned_default_commodities(db, tmp_path):
+    for symbol, name in (
+        ("CLUSD", "WTI Crude Oil Continuous Benchmark"),
+        ("BZUSD", "Brent Crude Oil Continuous Benchmark"),
+        ("ZGUSD", "Gold Continuous Benchmark"),
+    ):
+        upsert_asset(
+            db,
+            AssetRef(
+                asset_id=f"commodity:fmp:{symbol}",
+                asset_class=AssetClass.COMMODITY,
+                market=Market.COMMODITY,
+                symbol=symbol,
+                name=name,
+                exchange_or_provider="fmp",
+            ),
+        )
+    observed = datetime(2026, 8, 29, 12, 0, tzinfo=UTC)
+    event = NewsEvent(
+        news_item_ids=[],
+        headline="空客探索出售美国航天业务，转向欧洲制造卫星",
+        event_type="other",
+        entities=["空客", "欧洲卫星制造"],
+        direct_impact="公司业务组合可能调整。",
+        source_quality=SourceQuality.PROFESSIONAL,
+        published_at=observed,
+        observed_at=observed,
+        as_of=observed,
+    )
+
+    service = EventResearchService(
+        db,
+        Settings(fmp_access_token="", fmp_mcp_url="", reports_dir=tmp_path),
+        EventResearchLlm(),
+    )
+
+    assert service._asset_map(event) == {}

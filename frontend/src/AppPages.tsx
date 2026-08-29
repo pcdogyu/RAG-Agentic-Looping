@@ -3,13 +3,14 @@ import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import AnalysisPage, { type AnalysisLog } from "./AnalysisPage";
 import ModelLogsPage from "./ModelLogs";
 
-export type AppRoute = "home" | "source-filter" | "sources" | "news" | "queue" | "analysis" | "conclusions" | "targets" | "model-logs" | "search" | "weknora";
+export type AppRoute = "home" | "source-filter" | "sources" | "asset-universe" | "news" | "queue" | "analysis" | "conclusions" | "targets" | "model-logs" | "search" | "weknora";
 
 export const navigationGroups: Record<"left" | "right", Array<{ route: AppRoute; label: string }>> = {
   left: [
     { route: "home", label: "首页" },
     { route: "source-filter", label: "数据源过滤" },
     { route: "sources", label: "数据源" },
+    { route: "asset-universe", label: "资产主数据" },
     { route: "news", label: "新闻" },
     { route: "queue", label: "队列" },
     { route: "analysis", label: "分析链路" },
@@ -2965,6 +2966,230 @@ export function isSearchSource(item: Pick<McpSource, "enabled" | "tool_mappings"
   return item.enabled && ("web_search" in item.tool_mappings || "news_search" in item.tool_mappings);
 }
 
+type UniverseAsset = {
+  asset_id: string;
+  market: string;
+  symbol: string;
+  name: string;
+  aliases: string[];
+  sector_id: string;
+  industry_id: string;
+  instrument_type: string;
+  market_cap: number | null;
+  market_cap_rank: number | null;
+  active: boolean;
+  last_synced_at: string | null;
+};
+
+type IndustryItem = {
+  industry_id: string;
+  parent_id: string | null;
+  level: number;
+  name_zh: string;
+  name_en: string;
+  asset_count: number;
+};
+
+type UniverseMarketStatus = {
+  market: string;
+  status: string;
+  asset_count: number;
+  industry_count: number;
+  last_error: string | null;
+  completed_at: string | null;
+};
+
+const universeMarketLabels: Record<string, string> = {
+  CN: "A 股",
+  HK: "港股",
+  US: "美股",
+  CRYPTO: "加密资产",
+};
+
+function universeTime(value: string | null) {
+  return value ? new Date(value).toLocaleString("zh-CN") : "尚未同步";
+}
+
+export function AssetUniversePage({ apiBase }: { apiBase: string }) {
+  const [token, setToken] = useState(readToken);
+  const [assets, setAssets] = useState<UniverseAsset[]>([]);
+  const [industries, setIndustries] = useState<IndustryItem[]>([]);
+  const [statuses, setStatuses] = useState<UniverseMarketStatus[]>([]);
+  const [activeCounts, setActiveCounts] = useState<Record<string, number>>({});
+  const [query, setQuery] = useState("");
+  const [market, setMarket] = useState("");
+  const [industryId, setIndustryId] = useState("");
+  const [offset, setOffset] = useState(0);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+  const [editing, setEditing] = useState<UniverseAsset | null>(null);
+  const [aliasDraft, setAliasDraft] = useState("");
+  const [industryDraft, setIndustryDraft] = useState("");
+  const [activeDraft, setActiveDraft] = useState(true);
+  const limit = 100;
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    const params = new URLSearchParams({ offset: String(offset), limit: String(limit) });
+    if (query.trim()) params.set("q", query.trim());
+    if (market) params.set("market", market);
+    if (industryId) params.set("industry_id", industryId);
+    try {
+      const [assetResponse, industryResponse, statusResponse] = await Promise.all([
+        fetch(`${apiBase}/api/v1/asset-universe?${params}`),
+        fetch(`${apiBase}/api/v1/industries`),
+        fetch(`${apiBase}/api/v1/asset-universe/status`),
+      ]);
+      if (!assetResponse.ok || !industryResponse.ok || !statusResponse.ok) {
+        throw new Error("资产主数据读取失败");
+      }
+      const assetPayload = await assetResponse.json() as { items: UniverseAsset[]; total: number };
+      const statusPayload = await statusResponse.json() as {
+        markets: UniverseMarketStatus[];
+        active_counts: Record<string, number>;
+      };
+      setAssets(assetPayload.items);
+      setTotal(assetPayload.total);
+      setIndustries(await industryResponse.json() as IndustryItem[]);
+      setStatuses(statusPayload.markets);
+      setActiveCounts(statusPayload.active_counts || {});
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "资产主数据读取失败");
+    } finally {
+      setLoading(false);
+    }
+  }, [apiBase, industryId, market, offset, query]);
+
+  useEffect(() => { void load(); }, [load]);
+
+  async function queueAdminAction(path: "refresh" | "backfill") {
+    setError("");
+    setMessage("");
+    try {
+      const response = await fetch(`${apiBase}/api/v1/admin/asset-universe/${path}`, {
+        method: "POST",
+        headers: { "X-Admin-Token": token },
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.detail || "任务入队失败");
+      setMessage(path === "refresh"
+        ? `全市场同步已进入队列（${payload.task_id}）。`
+        : `最近 ${payload.days} 天的低置信度映射已进入回补队列。`);
+      window.setTimeout(() => { void load(); }, 1000);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "任务入队失败");
+    }
+  }
+
+  function beginEdit(asset: UniverseAsset) {
+    setEditing(asset);
+    setAliasDraft(asset.aliases.join("\n"));
+    setIndustryDraft(asset.industry_id || "");
+    setActiveDraft(asset.active);
+  }
+
+  async function saveEdit(event: FormEvent) {
+    event.preventDefault();
+    if (!editing) return;
+    setError("");
+    const response = await fetch(`${apiBase}/api/v1/admin/assets/${encodeURIComponent(editing.asset_id)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", "X-Admin-Token": token },
+      body: JSON.stringify({
+        aliases: aliasDraft.split("\n").map((item) => item.trim()).filter(Boolean),
+        industry_id: industryDraft,
+        active: activeDraft,
+      }),
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      setError(payload.detail || "保存资产修订失败");
+      return;
+    }
+    setEditing(null);
+    setMessage(`${payload.symbol} 的主数据修订已保存。`);
+    await load();
+  }
+
+  const statusByMarket = new Map(statuses.map((item) => [item.market, item]));
+  const levelTwoIndustries = industries.filter((item) => item.level === 2);
+  return (
+    <section className="app-page asset-universe-page">
+      <PageHeading
+        eyebrow="SECURITY & INDUSTRY MASTER"
+        title="资产与行业主数据"
+        copy="维护 A 股、港股、美股公司证券及 CoinGecko 全量加密资产目录；映射时只向 7B 提供与新闻命中的短名单。"
+      />
+      <div className="universe-status-grid">
+        {Object.entries(universeMarketLabels).map(([key, label]) => {
+          const status = statusByMarket.get(key);
+          return <article className={`universe-status ${status?.status || "pending"}`} key={key}>
+            <span>{label}</span>
+            <strong>{(activeCounts[key] || status?.asset_count || 0).toLocaleString()}</strong>
+            <small>{status?.status === "failed" ? `失败：${status.last_error}` : universeTime(status?.completed_at || null)}</small>
+          </article>;
+        })}
+      </div>
+      <AdminUnlock token={token} onToken={setToken} />
+      <div className="universe-actions">
+        <button type="button" disabled={!token} onClick={() => void queueAdminAction("refresh")}>同步全部市场</button>
+        <button type="button" disabled={!token} onClick={() => void queueAdminAction("backfill")}>回补最近 7 天映射</button>
+        <span>行业新闻自动关联每市场市值靠前代表股，关系标记为 industry_peer，最多 8 只。</span>
+      </div>
+      {message && <div className="page-message">{message}</div>}
+      {error && <div className="page-error">{error}</div>}
+      <form className="universe-filters" onSubmit={(event) => { event.preventDefault(); setOffset(0); void load(); }}>
+        <input aria-label="搜索资产" placeholder="代码或公司/资产名称" value={query} onChange={(event) => { setQuery(event.target.value); setOffset(0); }} />
+        <select aria-label="市场" value={market} onChange={(event) => { setMarket(event.target.value); setOffset(0); }}>
+          <option value="">全部市场</option>
+          {Object.entries(universeMarketLabels).map(([key, label]) => <option key={key} value={key}>{label}</option>)}
+        </select>
+        <select aria-label="行业" value={industryId} onChange={(event) => { setIndustryId(event.target.value); setOffset(0); }}>
+          <option value="">全部行业</option>
+          {levelTwoIndustries.map((item) => <option key={item.industry_id} value={item.industry_id}>{item.name_zh}（{item.asset_count}）</option>)}
+        </select>
+        <button type="submit">查询</button>
+        <button type="button" onClick={() => void load()}>刷新状态</button>
+      </form>
+      <div className="universe-table-wrap">
+        <table className="universe-table">
+          <thead><tr><th>市场 / 代码</th><th>名称与别名</th><th>行业</th><th>类型</th><th>同步时间</th><th>操作</th></tr></thead>
+          <tbody>
+            {assets.map((asset) => <tr key={asset.asset_id} className={asset.active ? "" : "inactive"}>
+              <td><small>{universeMarketLabels[asset.market] || asset.market}</small><strong>{asset.symbol}</strong></td>
+              <td><strong>{asset.name}</strong><small>{asset.aliases.slice(0, 3).join(" · ") || "无别名"}</small></td>
+              <td>{levelTwoIndustries.find((item) => item.industry_id === asset.industry_id)?.name_zh || "待归类"}</td>
+              <td>{asset.instrument_type || "—"}</td>
+              <td>{universeTime(asset.last_synced_at)}</td>
+              <td><button type="button" disabled={!token} onClick={() => beginEdit(asset)}>编辑</button></td>
+            </tr>)}
+          </tbody>
+        </table>
+        {!loading && !assets.length && <div className="page-empty">没有符合条件的资产。</div>}
+        {loading && <div className="page-empty">正在读取资产主数据…</div>}
+      </div>
+      <div className="universe-pagination">
+        <span>共 {total.toLocaleString()} 条，当前 {offset + 1}–{Math.min(offset + limit, total)}</span>
+        <button type="button" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - limit))}>上一页</button>
+        <button type="button" disabled={offset + limit >= total} onClick={() => setOffset(offset + limit)}>下一页</button>
+      </div>
+      {editing && <div className="modal-backdrop" role="presentation" onMouseDown={() => setEditing(null)}>
+        <form className="universe-editor" onSubmit={saveEdit} onMouseDown={(event) => event.stopPropagation()}>
+          <div><span>主数据修订</span><button type="button" onClick={() => setEditing(null)}>关闭</button></div>
+          <h3>{editing.symbol} · {editing.name}</h3>
+          <label>别名（每行一个）<textarea value={aliasDraft} onChange={(event) => setAliasDraft(event.target.value)} /></label>
+          <label>统一行业<select value={industryDraft} onChange={(event) => setIndustryDraft(event.target.value)}><option value="">待归类</option>{levelTwoIndustries.map((item) => <option key={item.industry_id} value={item.industry_id}>{item.name_zh} / {item.name_en}</option>)}</select></label>
+          <label className="inline-check"><input type="checkbox" checked={activeDraft} onChange={(event) => setActiveDraft(event.target.checked)} />参与映射</label>
+          <button type="submit">保存修订</button>
+        </form>
+      </div>}
+    </section>
+  );
+}
+
 export function SearchPage({ apiBase }: { apiBase: string }) {
   const [sources, setSources] = useState<McpSource[]>([]);
   const [query, setQuery] = useState(""); const [sourceId, setSourceId] = useState("");
@@ -2995,6 +3220,7 @@ export function RoutedPage({
   if (route === "conclusions") return <ConclusionsPage apiBase={apiBase} />;
   if (route === "targets") return <ChangedTargetsPage apiBase={apiBase} />;
   if (route === "sources") return <SourcesPage apiBase={apiBase} />;
+  if (route === "asset-universe") return <AssetUniversePage apiBase={apiBase} />;
   if (route === "news") return <NewsPage apiBase={apiBase} />;
   if (route === "queue") return <QueuePage apiBase={apiBase} />;
   if (route === "analysis") return <AnalysisPage logs={analysisLogs} />;

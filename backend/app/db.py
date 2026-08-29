@@ -56,12 +56,53 @@ class AssetRow(Base):
     aliases: Mapped[list[str]] = mapped_column(JSON, default=list)
     products: Mapped[list[str]] = mapped_column(JSON, default=list)
     competitors: Mapped[list[str]] = mapped_column(JSON, default=list)
+    sector_id: Mapped[str] = mapped_column(String(120), default="", index=True)
+    industry_id: Mapped[str] = mapped_column(String(160), default="", index=True)
+    raw_sector: Mapped[str] = mapped_column(String(160), default="")
+    raw_industry: Mapped[str] = mapped_column(String(200), default="")
+    instrument_type: Mapped[str] = mapped_column(String(40), default="", index=True)
+    market_cap: Mapped[float | None] = mapped_column(Float, nullable=True, index=True)
+    market_cap_rank: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    last_synced_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    manual_industry_id: Mapped[str | None] = mapped_column(
+        String(160), nullable=True, index=True
+    )
+    manual_active: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     issuer_id: Mapped[str | None] = mapped_column(String(240), nullable=True)
     primary_listing_asset_id: Mapped[str | None] = mapped_column(
         String(160), nullable=True
     )
     lot_size: Mapped[int] = mapped_column(Integer, default=1)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class IndustryRow(Base):
+    __tablename__ = "industries"
+
+    id: Mapped[str] = mapped_column(String(160), primary_key=True)
+    parent_id: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    level: Mapped[int] = mapped_column(Integer, index=True)
+    name_zh: Mapped[str] = mapped_column(String(120), index=True)
+    name_en: Mapped[str] = mapped_column(String(160), index=True)
+    aliases: Mapped[list[str]] = mapped_column(JSON, default=list)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class AssetUniverseSyncRow(Base):
+    __tablename__ = "asset_universe_sync"
+
+    market: Mapped[str] = mapped_column(String(20), primary_key=True)
+    status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
+    asset_count: Mapped[int] = mapped_column(Integer, default=0)
+    industry_count: Mapped[int] = mapped_column(Integer, default=0)
+    added_count: Mapped[int] = mapped_column(Integer, default=0)
+    updated_count: Mapped[int] = mapped_column(Integer, default=0)
+    deactivated_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class NewsRow(Base):
@@ -350,6 +391,16 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False
 _ASSET_IDENTITY_COLUMNS = {
     "issuer_id": "VARCHAR(240)",
     "primary_listing_asset_id": "VARCHAR(160)",
+    "sector_id": "VARCHAR(120) DEFAULT ''",
+    "industry_id": "VARCHAR(160) DEFAULT ''",
+    "raw_sector": "VARCHAR(160) DEFAULT ''",
+    "raw_industry": "VARCHAR(200) DEFAULT ''",
+    "instrument_type": "VARCHAR(40) DEFAULT ''",
+    "market_cap": "DOUBLE PRECISION",
+    "market_cap_rank": "INTEGER",
+    "last_synced_at": "TIMESTAMP WITH TIME ZONE",
+    "manual_industry_id": "VARCHAR(160)",
+    "manual_active": "BOOLEAN",
 }
 
 

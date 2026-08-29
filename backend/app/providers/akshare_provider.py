@@ -15,6 +15,7 @@ from dateutil.parser import parse as parse_datetime
 
 from backend.app.domain import AssetClass, AssetRef, Market, NewsItem, SourceQuality
 from backend.app.providers.cache import cache
+from backend.app.services.industry_taxonomy import normalize_industry
 
 SHANGHAI_TIMEZONE = ZoneInfo("Asia/Shanghai")
 TIME_NORMALIZATION_MARKER = "Asia/Shanghai->UTC:v1"
@@ -133,6 +134,11 @@ class AkShareProvider:
             if self._matches(asset, normalized_query)
         ]
 
+    def list_equity_universe(self) -> list[AssetRef]:
+        """Return the cached full A-share and Hong Kong company master."""
+
+        return self._listed_assets()
+
     @staticmethod
     def _matches(asset: AssetRef, normalized_query: str) -> bool:
         symbol = _normalize_security_text(asset.symbol)
@@ -208,6 +214,13 @@ class AkShareProvider:
                 continue
             code = raw_code.zfill(6)
             exchange = "XSHG" if code.startswith("6") else "XBEI" if code[0] in "489" else "XSHE"
+            raw_industry = str(row.get("所属行业") or row.get("行业") or "").strip()
+            sector_id, industry_id = normalize_industry(raw_industry, raw_industry)
+            market_cap = row.get("总市值") or row.get("市值")
+            try:
+                market_cap = float(market_cap) if market_cap is not None else None
+            except (TypeError, ValueError):
+                market_cap = None
             output.append(
                 AssetRef(
                     asset_id=f"equity:{exchange}:{code}",
@@ -218,6 +231,12 @@ class AkShareProvider:
                     exchange_or_provider=exchange,
                     currency="CNY",
                     lot_size=100,
+                    sector_id=sector_id,
+                    industry_id=industry_id,
+                    raw_sector=raw_industry,
+                    raw_industry=raw_industry,
+                    instrument_type="common_stock",
+                    market_cap=market_cap,
                 ).model_dump(mode="json")
             )
         return output
@@ -231,6 +250,13 @@ class AkShareProvider:
             if not raw_code or not name or not raw_code.isdigit():
                 continue
             code = raw_code.zfill(5)
+            raw_industry = str(row.get("所属行业") or row.get("行业") or "").strip()
+            sector_id, industry_id = normalize_industry(raw_industry, raw_industry)
+            market_cap = row.get("总市值") or row.get("市值")
+            try:
+                market_cap = float(market_cap) if market_cap is not None else None
+            except (TypeError, ValueError):
+                market_cap = None
             output.append(
                 AssetRef(
                     asset_id=f"equity:XHKG:{code}",
@@ -241,6 +267,12 @@ class AkShareProvider:
                     exchange_or_provider="XHKG",
                     currency="HKD",
                     lot_size=100,
+                    sector_id=sector_id,
+                    industry_id=industry_id,
+                    raw_sector=raw_industry,
+                    raw_industry=raw_industry,
+                    instrument_type="common_stock",
+                    market_cap=market_cap,
                 ).model_dump(mode="json")
             )
         return output

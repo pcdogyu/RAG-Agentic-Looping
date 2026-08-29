@@ -37,7 +37,7 @@ from backend.app.domain import (
 from backend.app.services.source_lineage import enrich_news_lineage
 
 
-def upsert_asset(db: Session, asset: AssetRef) -> AssetRef:
+def upsert_asset(db: Session, asset: AssetRef, *, commit: bool = True) -> AssetRef:
     row = db.get(AssetRow, asset.asset_id) or AssetRow(id=asset.asset_id)
     payload = asset.model_dump(mode="json")
     row.asset_class = payload["asset_class"]
@@ -49,12 +49,21 @@ def upsert_asset(db: Session, asset: AssetRef) -> AssetRef:
     row.aliases = asset.aliases
     row.products = asset.products
     row.competitors = asset.competitors
+    row.sector_id = asset.sector_id
+    row.industry_id = asset.industry_id
+    row.raw_sector = asset.raw_sector
+    row.raw_industry = asset.raw_industry
+    row.instrument_type = asset.instrument_type
+    row.market_cap = asset.market_cap
+    row.market_cap_rank = asset.market_cap_rank
+    row.last_synced_at = asset.last_synced_at
     row.issuer_id = asset.issuer_id
     row.primary_listing_asset_id = asset.primary_listing_asset_id
     row.lot_size = asset.lot_size
     row.active = asset.active
     db.add(row)
-    db.commit()
+    if commit:
+        db.commit()
     return asset
 
 
@@ -70,6 +79,14 @@ def asset_from_row(row: AssetRow) -> AssetRef:
         aliases=row.aliases or [],
         products=row.products or [],
         competitors=row.competitors or [],
+        sector_id=row.sector_id or "",
+        industry_id=row.industry_id or "",
+        raw_sector=row.raw_sector or "",
+        raw_industry=row.raw_industry or "",
+        instrument_type=row.instrument_type or "",
+        market_cap=row.market_cap,
+        market_cap_rank=row.market_cap_rank,
+        last_synced_at=row.last_synced_at,
         issuer_id=row.issuer_id,
         primary_listing_asset_id=row.primary_listing_asset_id,
         lot_size=row.lot_size or 1,

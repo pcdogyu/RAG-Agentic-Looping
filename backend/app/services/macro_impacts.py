@@ -303,6 +303,11 @@ def finalize_impacts(
             ),
             None,
         )
+        industry_only_mapping = bool(
+            candidate and candidate.relationship == "industry_peer"
+        )
+        if industry_only_mapping:
+            missing = _dedupe_strings([*missing, "industry_only_mapping"])
         confidence_score = rating_confidence_score(
             direction_score=score_points,
             event=event,
@@ -352,6 +357,7 @@ def finalize_impacts(
                 execution_supported=bool(
                     asset
                     and asset.asset_class in {AssetClass.EQUITY, AssetClass.CRYPTO}
+                    and not industry_only_mapping
                 ),
                 technical_failure=technical_failure,
             )

@@ -17,6 +17,7 @@ import AnalysisPage, {
 import BuildFooter, { buildInfo } from "./BuildFooter";
 import {
   applyCancelledTaskTombstone,
+  AssetUniversePage,
   changedTargetDesktopColumns,
   changedTargetLatestRecommendationId,
   ChangedTargetGrid,
@@ -482,12 +483,13 @@ describe("model log navigation and filters", () => {
 });
 
 describe("shared hash navigation", () => {
-  it("recognizes all eleven routes and falls back to home", () => {
+  it("recognizes all twelve routes and falls back to home", () => {
     expect(routeFromHash("#/home")).toBe("home");
     expect(routeFromHash("#/source-filter")).toBe("source-filter");
     expect(routeFromHash("#/conclusions")).toBe("conclusions");
     expect(routeFromHash("#/targets")).toBe("targets");
     expect(routeFromHash("#/sources")).toBe("sources");
+    expect(routeFromHash("#/asset-universe")).toBe("asset-universe");
     expect(routeFromHash("#/news")).toBe("news");
     expect(routeFromHash("#/queue")).toBe("queue");
     expect(routeFromHash("#/analysis")).toBe("analysis");
@@ -500,7 +502,7 @@ describe("shared hash navigation", () => {
 
   it("renders grouped menu links in order and exposes the current page accessibly", () => {
     expect(navigationGroups.left.map((item) => item.route)).toEqual([
-      "home", "source-filter", "sources", "news", "queue", "analysis", "conclusions", "targets",
+      "home", "source-filter", "sources", "asset-universe", "news", "queue", "analysis", "conclusions", "targets",
     ]);
     expect(navigationGroups.right.map((item) => item.route)).toEqual([
       "model-logs", "search", "weknora",
@@ -510,14 +512,15 @@ describe("shared hash navigation", () => {
     const queueMarkup = renderToStaticMarkup(createElement(TopNavigation, { current: "queue" }));
     const analysisMarkup = renderToStaticMarkup(createElement(TopNavigation, { current: "analysis" }));
     const targetsMarkup = renderToStaticMarkup(createElement(TopNavigation, { current: "targets" }));
-    expect((markup.match(/<a /g) || []).length).toBe(11);
+    expect((markup.match(/<a /g) || []).length).toBe(12);
     expect(markup).toContain('href="#/source-filter" aria-current="page"');
     expect(newsMarkup).toContain('href="#/news" aria-current="page"');
     expect(queueMarkup).toContain('href="#/queue" aria-current="page"');
     expect(analysisMarkup).toContain('href="#/analysis" aria-current="page"');
     expect(targetsMarkup).toContain('href="#/targets" aria-current="page"');
     expect(markup.indexOf("数据源过滤")).toBeLessThan(markup.indexOf(">数据源<"));
-    expect(markup.indexOf(">数据源<")).toBeLessThan(markup.indexOf(">新闻<"));
+    expect(markup.indexOf(">数据源<")).toBeLessThan(markup.indexOf("资产主数据"));
+    expect(markup.indexOf("资产主数据")).toBeLessThan(markup.indexOf(">新闻<"));
     expect(markup.indexOf(">新闻<")).toBeLessThan(markup.indexOf(">队列<"));
     expect(markup.indexOf(">队列<")).toBeLessThan(markup.indexOf("分析链路"));
     expect(markup.indexOf("分析链路")).toBeLessThan(markup.indexOf("结论"));
@@ -526,6 +529,19 @@ describe("shared hash navigation", () => {
     expect(markup.indexOf("结论")).toBeLessThan(markup.indexOf("模型日志"));
     expect(markup).toContain("搜索引擎");
     expect(markup).toContain("WeKnora");
+  });
+});
+
+describe("asset universe page", () => {
+  it("explains full crypto coverage and industry peer safeguards", () => {
+    const markup = renderToStaticMarkup(createElement(AssetUniversePage, { apiBase: "" }));
+
+    expect(markup).toContain("资产与行业主数据");
+    expect(markup).toContain("CoinGecko 全量加密资产目录");
+    expect(markup).toContain("同步全部市场");
+    expect(markup).toContain("回补最近 7 天映射");
+    expect(markup).toContain("industry_peer");
+    expect(markup).toContain("加密资产");
   });
 });
 

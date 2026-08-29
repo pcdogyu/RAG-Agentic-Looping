@@ -9,6 +9,7 @@ import httpx
 from backend.app.config import Settings, get_settings
 from backend.app.domain import AssetClass, AssetRef, Market, NewsItem
 from backend.app.providers.cache import cache
+from backend.app.services.industry_taxonomy import normalize_industry
 
 
 class CryptoProvider:
@@ -57,11 +58,52 @@ class CryptoProvider:
                     exchange_or_provider="coingecko",
                     currency="USD",
                     aliases=[item["id"]],
+                    sector_id="sector:digital_assets",
+                    industry_id="industry:cryptocurrency",
+                    raw_sector="Digital Assets",
+                    raw_industry="Cryptocurrency",
+                    instrument_type="crypto",
+                    market_cap=item.get("market_cap"),
+                    market_cap_rank=item.get("market_cap_rank"),
                 )
             )
             if len(assets) >= limit:
                 break
         return assets
+
+    def all_assets(self) -> list[AssetRef]:
+        """Return CoinGecko's complete active coin identity directory."""
+
+        key = cache.key("coingecko-all-coins", {"version": 1})
+
+        def loader() -> list[dict[str, Any]]:
+            response = self.client.get(
+                f"{self.settings.coingecko_base_url}/coins/list",
+                params={"include_platform": "false"},
+            )
+            response.raise_for_status()
+            return response.json()
+
+        payload = cache.remember(key, 24 * 60 * 60, loader)
+        sector_id, industry_id = normalize_industry("Digital Assets", "Cryptocurrency")
+        return [
+            AssetRef(
+                asset_id=f"crypto:coingecko:{item['id']}",
+                asset_class=AssetClass.CRYPTO,
+                market=Market.CRYPTO,
+                symbol=str(item.get("symbol") or "").upper(),
+                name=str(item.get("name") or item.get("id") or ""),
+                exchange_or_provider="coingecko",
+                aliases=[str(item["id"])],
+                sector_id=sector_id,
+                industry_id=industry_id,
+                raw_sector="Digital Assets",
+                raw_industry="Cryptocurrency",
+                instrument_type="crypto",
+            )
+            for item in payload
+            if item.get("id") and item.get("symbol") and item.get("name")
+        ]
 
     def resolve_assets(self, query: str) -> list[AssetRef]:
         lowered = query.lower()

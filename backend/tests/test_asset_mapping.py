@@ -170,6 +170,71 @@ def test_mapping_news_prompt_caps_each_summary_and_total_body() -> None:
     assert set(payload[0]) == {"title", "symbols", "summary"}
 
 
+class IndustryOnlyLlm:
+    def generate_json(self, **kwargs):
+        return AssetMappingOutput(
+            industry_ids=["industry:semiconductors"],
+            no_asset_reason="新闻只描述半导体行业，没有点名公司。",
+        ).model_dump(mode="json")
+
+
+def test_industry_only_news_adds_low_confidence_cross_market_representatives():
+    observed = datetime(2026, 8, 29, 12, 0, tzinfo=UTC)
+    assets = [
+        AssetRef(
+            asset_id=f"equity:{exchange}:{symbol}",
+            asset_class=AssetClass.EQUITY,
+            market=market,
+            symbol=symbol,
+            name=name,
+            exchange_or_provider=exchange,
+            sector_id="sector:information_technology",
+            industry_id="industry:semiconductors",
+            instrument_type="common_stock",
+            market_cap=market_cap,
+        )
+        for exchange, symbol, name, market, market_cap in (
+            ("XSHG", "688981", "中芯国际", Market.CN, 420_000_000_000),
+            ("XHKG", "00981", "中芯国际港股", Market.HK, 250_000_000_000),
+            ("XNAS", "NVDA", "NVIDIA", Market.US, 4_000_000_000_000),
+            ("XNAS", "AMD", "AMD", Market.US, 300_000_000_000),
+        )
+    ]
+    news = NewsItem(
+        source="Example",
+        title="半导体行业先进制程需求升温",
+        summary="报道只讨论行业订单和产能变化，没有点名公司。",
+        url="https://example.com/semiconductors",
+        published_at=observed,
+        observed_at=observed,
+        as_of=observed,
+        content_hash=sha256(b"industry-only").hexdigest(),
+    )
+    event = NewsEvent(
+        news_item_ids=[news.id],
+        headline=news.title,
+        event_type="supply_chain",
+        entities=["半导体行业"],
+        direct_impact=news.summary,
+        source_quality=news.source_quality,
+        published_at=observed,
+        observed_at=observed,
+        as_of=observed,
+    )
+    registry = ProviderRegistry(
+        Settings(fmp_access_token="", fmp_mcp_url=""),
+        assets=assets,
+    )
+
+    result = AssetMappingService(registry, llm=IndustryOnlyLlm()).map_event(event, [news])
+
+    assert result.industry_ids == ["industry:semiconductors"]
+    assert [item.asset.symbol for item in result.candidates] == ["688981", "00981", "NVDA", "AMD"]
+    assert all(item.relationship == "industry_peer" for item in result.candidates)
+    assert all(item.mapping_confidence == 0.55 for item in result.candidates)
+    assert all(item.relevance == 0.40 for item in result.candidates)
+
+
 def test_empty_mapping_output_requires_a_reason_for_gateway_retry() -> None:
     with pytest.raises(ValidationError, match="no_asset_reason"):
         AssetMappingOutput.model_validate({})

@@ -72,6 +72,35 @@ def test_health_and_asset_endpoints():
     assert event_runs.json() == []
 
 
+def test_asset_universe_api_lists_industries_and_protects_manual_edits():
+    with TestClient(app) as client:
+        assets = client.get("/api/v1/asset-universe", params={"market": "US"})
+        industries = client.get("/api/v1/industries")
+        unauthorized = client.patch(
+            "/api/v1/admin/assets/equity:XNAS:AAPL",
+            json={"aliases": ["Apple", "苹果"]},
+        )
+        updated = client.patch(
+            "/api/v1/admin/assets/equity:XNAS:AAPL",
+            headers={"X-Admin-Token": "test-admin-token"},
+            json={
+                "aliases": ["Apple", "苹果"],
+                "industry_id": "industry:hardware",
+                "active": True,
+            },
+        )
+
+    assert assets.status_code == 200
+    assert assets.json()["total"] >= 1
+    assert any(item["symbol"] == "AAPL" for item in assets.json()["items"])
+    assert industries.status_code == 200
+    assert any(item["industry_id"] == "industry:semiconductors" for item in industries.json())
+    assert unauthorized.status_code == 401
+    assert updated.status_code == 200
+    assert updated.json()["industry_id"] == "industry:hardware"
+    assert updated.json()["aliases"] == ["Apple", "苹果"]
+
+
 def test_health_lists_dedicated_assist_and_research_instances(monkeypatch):
     class Response:
         def __init__(self, payload):

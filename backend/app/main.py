@@ -20,6 +20,7 @@ from redis import Redis
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
+from backend.app.api_assets import router as assets_router
 from backend.app.api_integrations import router as integrations_router
 from backend.app.config import get_settings
 from backend.app.db import ModelCallAuditRow, NewsRow, SessionLocal, engine, get_db, init_db
@@ -35,6 +36,7 @@ from backend.app.domain import (
 from backend.app.llm import gateway
 from backend.app.model_audit import audit_detail, list_model_audits, model_usage
 from backend.app.providers.registry import ProviderRegistry
+from backend.app.services.asset_universe import AssetUniverseService
 from backend.app.services.events import EventService
 from backend.app.services.evolution import EvolutionError, EvolutionService
 from backend.app.services.fact_sources import get_effective_settings
@@ -274,8 +276,10 @@ async def lifespan(app: FastAPI):
         normalize_legacy_akshare_timestamps(db)
         seed_integrations(db, settings)
         startup_registry = _provider_registry(db)
+        AssetUniverseService(db, startup_registry).seed_industries()
         for asset in startup_registry.all_assets():
-            upsert_asset(db, asset)
+            upsert_asset(db, asset, commit=False)
+        db.commit()
     if not settings.database_url.startswith("sqlite"):
         _load_persisted_model_queue_snapshot()
         _start_model_queue_snapshot_refresh()
@@ -299,6 +303,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(integrations_router)
+app.include_router(assets_router)
 
 
 class ResearchRequest(BaseModel):

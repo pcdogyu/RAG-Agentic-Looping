@@ -17,6 +17,7 @@ from backend.app.providers.fmp import FmpProvider
 from backend.app.providers.rss import RssProvider
 from backend.app.providers.sec import SecProvider
 from backend.app.services.fact_sources import get_effective_settings
+from backend.app.services.industry_taxonomy import all_industries, industries_mentioned
 from backend.app.services.mcp_registry import (
     call_enabled_purpose_sync,
     fetch_enabled_news_feeds_sync,
@@ -33,6 +34,11 @@ SEED_ASSETS = [
         aliases=["Apple", "苹果公司"],
         products=["iPhone", "Mac", "Services"],
         competitors=["MSFT", "GOOGL", "SAMSUNG"],
+        sector_id="sector:information_technology",
+        industry_id="industry:hardware",
+        raw_sector="Information Technology",
+        raw_industry="Technology Hardware",
+        instrument_type="common_stock",
     ),
     AssetRef(
         asset_id="equity:XSHG:600519",
@@ -44,6 +50,11 @@ SEED_ASSETS = [
         currency="CNY",
         aliases=["茅台", "Kweichow Moutai"],
         lot_size=100,
+        sector_id="sector:consumer_staples",
+        industry_id="industry:food_beverage",
+        raw_sector="必选消费",
+        raw_industry="食品饮料",
+        instrument_type="common_stock",
     ),
     AssetRef(
         asset_id="equity:XHKG:00700",
@@ -57,6 +68,11 @@ SEED_ASSETS = [
         products=["微信", "游戏", "云服务"],
         competitors=["9988", "NTES"],
         lot_size=100,
+        sector_id="sector:communication_services",
+        industry_id="industry:internet",
+        raw_sector="Communication Services",
+        raw_industry="Internet Services",
+        instrument_type="common_stock",
     ),
     AssetRef(
         asset_id="crypto:coingecko:bitcoin",
@@ -66,6 +82,9 @@ SEED_ASSETS = [
         name="Bitcoin",
         exchange_or_provider="coingecko",
         aliases=["bitcoin", "比特币"],
+        sector_id="sector:digital_assets",
+        industry_id="industry:cryptocurrency",
+        instrument_type="crypto",
     ),
     AssetRef(
         asset_id="crypto:coingecko:ethereum",
@@ -75,6 +94,9 @@ SEED_ASSETS = [
         name="Ethereum",
         exchange_or_provider="coingecko",
         aliases=["ethereum", "以太坊"],
+        sector_id="sector:digital_assets",
+        industry_id="industry:cryptocurrency",
+        instrument_type="crypto",
     ),
     AssetRef(
         asset_id="equity:XHKG:09988",
@@ -88,6 +110,11 @@ SEED_ASSETS = [
         products=["阿里云", "Alibaba Cloud"],
         issuer_id="curated:alibaba-group",
         lot_size=100,
+        sector_id="sector:communication_services",
+        industry_id="industry:internet",
+        raw_sector="Communication Services",
+        raw_industry="Internet Services",
+        instrument_type="common_stock",
     ),
     AssetRef(
         asset_id="equity:NYSE:BABA",
@@ -99,6 +126,11 @@ SEED_ASSETS = [
         aliases=["阿里巴巴", "阿里巴巴集团", "Alibaba", "Alibaba Group"],
         products=["阿里云", "Alibaba Cloud"],
         issuer_id="curated:alibaba-group",
+        sector_id="sector:communication_services",
+        industry_id="industry:internet",
+        raw_sector="Communication Services",
+        raw_industry="Internet Services",
+        instrument_type="adr",
     ),
     AssetRef(
         asset_id="commodity:fmp:CLUSD",
@@ -153,6 +185,22 @@ SEED_ASSETS = [
         name="USD/CNH Spot FX",
         exchange_or_provider="fmp",
         aliases=["USD/CNH", "美元兑离岸人民币"],
+    ),
+    AssetRef(
+        asset_id="equity:OTC:EADSY",
+        asset_class=AssetClass.EQUITY,
+        market=Market.US,
+        symbol="EADSY",
+        name="Airbus SE Sponsored ADR",
+        exchange_or_provider="OTC",
+        aliases=["Airbus", "Airbus SE", "空客", "空中客车"],
+        issuer_id="curated:airbus-se",
+        primary_listing_asset_id="equity:XPAR:AIR.PA",
+        sector_id="sector:industrials",
+        industry_id="industry:aerospace_defense",
+        raw_sector="Industrials",
+        raw_industry="Aerospace & Defense",
+        instrument_type="adr",
     ),
 ]
 
@@ -530,6 +578,13 @@ class ProviderRegistry:
                     "competitors": list(
                         dict.fromkeys([*existing.competitors, *asset.competitors])
                     ),
+                    "sector_id": asset.sector_id or existing.sector_id,
+                    "industry_id": asset.industry_id or existing.industry_id,
+                    "raw_sector": asset.raw_sector or existing.raw_sector,
+                    "raw_industry": asset.raw_industry or existing.raw_industry,
+                    "instrument_type": asset.instrument_type or existing.instrument_type,
+                    "market_cap": asset.market_cap or existing.market_cap,
+                    "market_cap_rank": asset.market_cap_rank or existing.market_cap_rank,
                     "issuer_id": existing.issuer_id or asset.issuer_id,
                     "primary_listing_asset_id": (
                         existing.primary_listing_asset_id
@@ -550,6 +605,75 @@ class ProviderRegistry:
 
     def all_assets(self) -> list[AssetRef]:
         return list(self._assets.values())
+
+    @staticmethod
+    def all_industries():
+        return all_industries()
+
+    def shortlist_assets(self, text: str, limit: int = 30) -> list[AssetRef]:
+        """Retrieve a compact identity shortlist without expanding industry peers."""
+
+        normalized = compact_security_text(text)
+        if not normalized:
+            return []
+        scored: list[tuple[int, float, str, AssetRef]] = []
+        for asset in self._assets.values():
+            if not asset.active or asset.asset_class not in {AssetClass.EQUITY, AssetClass.CRYPTO}:
+                continue
+            score = 0
+            if explicit_symbol_present(text, asset.symbol):
+                score = 100
+            terms = [asset.name, *asset.aliases]
+            if any(
+                (term_key := compact_security_text(term))
+                and len(term_key) >= 2
+                and term_key in normalized
+                for term in terms
+            ):
+                score = max(score, 90)
+            if any(
+                (product_key := compact_security_text(product))
+                and len(product_key) >= 3
+                and product_key in normalized
+                for product in asset.products
+            ):
+                score = max(score, 95)
+            if score:
+                scored.append((score, asset.market_cap or 0, asset.asset_id, asset))
+        scored.sort(key=lambda item: (-item[0], -item[1], item[2]))
+        return [item[-1] for item in scored[: max(1, limit)]]
+
+    @staticmethod
+    def industries_for_text(text: str) -> list[str]:
+        return industries_mentioned(text)
+
+    def industry_representatives(
+        self, industry_ids: Iterable[str], limit: int = 8
+    ) -> list[AssetRef]:
+        selected: list[AssetRef] = []
+        for industry_id in dict.fromkeys(industry_ids):
+            by_market: dict[Market, list[AssetRef]] = {
+                Market.CN: [],
+                Market.HK: [],
+                Market.US: [],
+            }
+            for asset in self._assets.values():
+                if (
+                    asset.active
+                    and asset.asset_class is AssetClass.EQUITY
+                    and asset.industry_id == industry_id
+                    and asset.market in by_market
+                ):
+                    by_market[asset.market].append(asset)
+            for values in by_market.values():
+                values.sort(key=lambda item: (-(item.market_cap or 0), item.asset_id))
+            for index in range(3):
+                for market in (Market.CN, Market.HK, Market.US):
+                    if index < len(by_market[market]) and len(selected) < limit:
+                        selected.append(by_market[market][index])
+            if len(selected) >= limit:
+                break
+        return selected
 
     def get_asset(self, asset_id: str) -> AssetRef | None:
         return self._assets.get(asset_id)
