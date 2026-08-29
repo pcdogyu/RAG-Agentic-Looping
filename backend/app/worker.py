@@ -112,6 +112,7 @@ from backend.app.storage import (
     list_assets,
     list_event_research_runs,
     list_events,
+    list_events_without_downstream,
     list_evolutions,
     list_outcomes,
     list_queued_runs,
@@ -1938,6 +1939,72 @@ def enqueue_durable_news_retry(
     return result["queued"][0]
 
 
+def _asset_mapping_is_active(event: NewsEvent) -> bool:
+    queue_step = next(
+        (step for step in reversed(event.analysis_steps) if step.phase == "asset_mapping_queue"),
+        None,
+    )
+    if queue_step is None or queue_step.status != "queued":
+        return False
+    mapping_step = next(
+        (step for step in reversed(event.analysis_steps) if step.phase == "asset_mapping"),
+        None,
+    )
+    return bool(
+        mapping_step is None
+        or mapping_step.occurred_at <= queue_step.occurred_at
+        or mapping_step.status in {"running", "retrying"}
+    )
+
+
+def recover_stranded_event_followups(
+    db,
+    *,
+    limit: int = 100,
+    retention_days: int = 7,
+    now: datetime | None = None,
+) -> dict[str, int]:
+    """Dispatch recent extracted events that never received downstream work."""
+
+    current = as_utc(now or utc_now())
+    events = list_events_without_downstream(
+        db,
+        observed_after=current - timedelta(days=max(1, retention_days)),
+        limit=limit,
+    )
+    research_queued = 0
+    mapping_queued = 0
+    active_mapping = 0
+    failed = 0
+    for event in events:
+        if _asset_mapping_is_active(event):
+            active_mapping += 1
+            continue
+        try:
+            if event.candidates or _asset_mapping_is_terminal(event):
+                task_id, _ = enqueue_event_report(db, event)
+                research_queued += int(task_id is not None)
+                continue
+            had_mapping_attempt = any(
+                step.phase == "asset_mapping_queue" for step in event.analysis_steps
+            )
+            mapping_queued += int(
+                enqueue_asset_mapping(db, event, force=had_mapping_attempt) is not None
+            )
+        except Exception as exc:
+            failed += 1
+            notifier.send(
+                f"遗漏下游任务恢复失败：{event.headline}\n错误：{type(exc).__name__}"
+            )
+    return {
+        "stranded_events": len(events),
+        "event_research_queued": research_queued,
+        "asset_mapping_queued": mapping_queued,
+        "active_mapping": active_mapping,
+        "followup_failed": failed,
+    }
+
+
 @celery_app.task(name="market_loop.recover_orphaned_news")
 def recover_orphaned_news() -> dict[str, Any]:
     """Recover news rows stranded outside the provider lookback window."""
@@ -1949,8 +2016,19 @@ def recover_orphaned_news() -> dict[str, Any]:
             limit=100,
             stale_seconds=SCAN_HEARTBEAT_STALE_SECONDS,
         )
+        followups = (
+            recover_stranded_event_followups(db)
+            if settings.auto_research
+            else {
+                "stranded_events": 0,
+                "event_research_queued": 0,
+                "asset_mapping_queued": 0,
+                "active_mapping": 0,
+                "followup_failed": 0,
+            }
+        )
     dispatch = dispatch_news_processing_outbox(limit=50)
-    return {**recovery, **dispatch}
+    return {**recovery, **followups, **dispatch}
 
 
 def enqueue_event_report(

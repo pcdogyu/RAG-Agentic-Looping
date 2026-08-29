@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import desc, select
+from sqlalchemy import desc, exists, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -195,6 +195,33 @@ def list_events(db: Session, limit: int = 100, as_of: datetime | None = None) ->
         statement = statement.where(EventRow.observed_at <= as_of, EventRow.published_at <= as_of)
     rows = db.scalars(
         statement.order_by(desc(EventRow.published_at), desc(EventRow.priority)).limit(limit)
+    ).all()
+    return [NewsEvent.model_validate(row.payload) for row in rows]
+
+
+def list_events_without_downstream(
+    db: Session,
+    *,
+    observed_after: datetime,
+    limit: int = 100,
+) -> list[NewsEvent]:
+    """Return recent events that never reached mapping/research follow-up."""
+
+    rows = db.scalars(
+        select(EventRow)
+        .where(
+            EventRow.observed_at >= observed_after,
+            ~exists(
+                select(EventResearchRunRow.id).where(
+                    EventResearchRunRow.event_id == EventRow.id
+                )
+            ),
+            ~exists(
+                select(ResearchRunRow.id).where(ResearchRunRow.event_id == EventRow.id)
+            ),
+        )
+        .order_by(EventRow.observed_at, EventRow.id)
+        .limit(limit)
     ).all()
     return [NewsEvent.model_validate(row.payload) for row in rows]
 

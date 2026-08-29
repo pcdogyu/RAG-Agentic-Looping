@@ -6,7 +6,15 @@ from sqlalchemy import func, select
 
 from backend.app import worker
 from backend.app.db import NewsProcessingOutboxRow, NewsProcessingRow
-from backend.app.domain import EventType, NewsEvent, NewsItem, SourceQuality
+from backend.app.domain import (
+    AnalysisStep,
+    EventResearchRun,
+    EventType,
+    NewsEvent,
+    NewsItem,
+    RunStatus,
+    SourceQuality,
+)
 from backend.app.main import app
 from backend.app.services.news_processing import (
     DISPATCH_FAILED,
@@ -20,7 +28,7 @@ from backend.app.services.news_processing import (
     request_news_retry,
     stage_news_for_extraction,
 )
-from backend.app.storage import save_event, save_news
+from backend.app.storage import save_event, save_event_research_run, save_news
 
 BASE_TIME = datetime(2026, 8, 29, 7, 0, tzinfo=UTC)
 
@@ -148,6 +156,80 @@ def test_manual_retry_rejects_an_already_active_news_item(db):
         assert str(exc) == "news extraction is already active"
     else:
         raise AssertionError("active news retry should be rejected")
+
+
+def test_recovery_dispatches_stranded_event_followups_without_duplicates(
+    db, monkeypatch
+):
+    def event_with_step(title: str, phase: str | None, status: str = "completed"):
+        event = NewsEvent(
+            news_item_ids=[],
+            headline=title,
+            event_type=EventType.OTHER,
+            direct_impact=f"{title} impact",
+            source_quality=SourceQuality.PROFESSIONAL,
+            published_at=BASE_TIME,
+            observed_at=BASE_TIME,
+            as_of=BASE_TIME,
+        )
+        if phase:
+            event.analysis_steps.append(
+                AnalysisStep(
+                    phase=phase,
+                    status=status,
+                    executor="test",
+                    summary=f"{title} {phase}",
+                    occurred_at=BASE_TIME,
+                )
+            )
+        save_event(db, event)
+        return event
+
+    mapping_needed = event_with_step("needs mapping", None)
+    research_needed = event_with_step(
+        "mapping complete", "asset_mapping_queue", "completed"
+    )
+    event_with_step("mapping active", "asset_mapping_queue", "queued")
+    already_dispatched = event_with_step("already dispatched", None)
+    save_event_research_run(
+        db,
+        EventResearchRun(
+            event_id=already_dispatched.id,
+            status=RunStatus.QUEUED,
+        ),
+    )
+
+    mapped: list[str] = []
+    researched: list[str] = []
+    monkeypatch.setattr(
+        worker,
+        "enqueue_asset_mapping",
+        lambda _db, event, **_kwargs: mapped.append(event.headline) or "mapping-task",
+    )
+    monkeypatch.setattr(
+        worker,
+        "enqueue_event_report",
+        lambda _db, event: (
+            researched.append(event.headline) or "research-task",
+            EventResearchRun(event_id=event.id),
+        ),
+    )
+
+    result = worker.recover_stranded_event_followups(
+        db,
+        now=BASE_TIME + timedelta(hours=1),
+    )
+
+    assert result == {
+        "stranded_events": 3,
+        "event_research_queued": 1,
+        "asset_mapping_queued": 1,
+        "active_mapping": 1,
+        "followup_failed": 0,
+    }
+    assert mapped == [mapping_needed.headline]
+    assert researched == [research_needed.headline]
+    assert already_dispatched.headline not in mapped + researched
 
 
 def test_news_retry_api_dispatches_by_stable_news_id(db, monkeypatch):
