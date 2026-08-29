@@ -22,15 +22,9 @@ def asset(
         name=name,
         exchange_or_provider="test",
         sector_id=(
-            "sector:digital_assets"
-            if market is Market.CRYPTO
-            else "sector:information_technology"
+            "sector:digital_assets" if market is Market.CRYPTO else "sector:information_technology"
         ),
-        industry_id=(
-            "industry:cryptocurrency"
-            if market is Market.CRYPTO
-            else industry_id
-        ),
+        industry_id=("industry:cryptocurrency" if market is Market.CRYPTO else industry_id),
         instrument_type="crypto" if market is Market.CRYPTO else "common_stock",
     )
 
@@ -117,6 +111,31 @@ def test_universe_sync_deactivates_missing_provider_assets(db):
     assert bitcoin.active is False
     assert bitcoin.industry_id == "industry:software"
     assert db.get(AssetRow, "crypto:coingecko:small-coin").active is False
+
+
+def test_universe_sync_preserves_prior_industry_when_provider_temporarily_omits_it(db):
+    service = AssetUniverseService(db, Registry())
+    service.sync([Market.US])
+    row = db.get(AssetRow, "equity:XNAS:NVDA")
+    assert row.industry_id == "industry:semiconductors"
+    service.registry.fmp.values = [
+        asset(
+            "equity:XNAS:NVDA",
+            Market.US,
+            "NVDA",
+            "NVIDIA",
+            industry_id="",
+        )
+    ]
+
+    service.sync([Market.US])
+
+    row = db.get(AssetRow, "equity:XNAS:NVDA")
+    assert row.industry_id == "industry:semiconductors"
+    status = universe_status(db)["markets"][0]
+    assert status["classified_count"] == 1
+    assert status["unclassified_count"] == 0
+    assert status["classification_rate"] == 1.0
 
 
 def test_crypto_provider_uses_complete_coingecko_identity_directory(monkeypatch):

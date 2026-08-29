@@ -63,7 +63,12 @@ class AssetUniverseService:
                     "error": status.last_error,
                     "assets": status.asset_count,
                 }
-        return {"markets": results, "status": "completed_with_errors" if any(item["status"] == "failed" for item in results.values()) else "completed"}
+        return {
+            "markets": results,
+            "status": "completed_with_errors"
+            if any(item["status"] == "failed" for item in results.values())
+            else "completed",
+        }
 
     def _start_status(self, market: Market) -> AssetUniverseSyncRow:
         row = self.db.get(AssetUniverseSyncRow, market.value) or AssetUniverseSyncRow(
@@ -110,9 +115,7 @@ class AssetUniverseService:
             row.currency = asset.currency
             row.aliases = merged_aliases
             row.products = list(dict.fromkeys([*(row.products or []), *asset.products]))
-            row.competitors = list(
-                dict.fromkeys([*(row.competitors or []), *asset.competitors])
-            )
+            row.competitors = list(dict.fromkeys([*(row.competitors or []), *asset.competitors]))
             if row.manual_industry_id is not None:
                 row.industry_id = row.manual_industry_id
                 manual_industry = (
@@ -133,9 +136,7 @@ class AssetUniverseService:
             row.instrument_type = asset.instrument_type or row.instrument_type or ""
             row.market_cap = asset.market_cap if asset.market_cap is not None else row.market_cap
             row.market_cap_rank = (
-                asset.market_cap_rank
-                if asset.market_cap_rank is not None
-                else row.market_cap_rank
+                asset.market_cap_rank if asset.market_cap_rank is not None else row.market_cap_rank
             )
             row.issuer_id = asset.issuer_id or row.issuer_id
             row.primary_listing_asset_id = (
@@ -173,14 +174,19 @@ class AssetUniverseService:
 
 def universe_status(db: Session) -> dict[str, object]:
     rows = db.scalars(select(AssetUniverseSyncRow).order_by(AssetUniverseSyncRow.market)).all()
-    counts = {
-        market: count
-        for market, count in db.execute(
-            select(AssetRow.market, func.count(AssetRow.id))
+    classification_counts = {
+        market: (int(count), int(classified))
+        for market, count, classified in db.execute(
+            select(
+                AssetRow.market,
+                func.count(AssetRow.id),
+                func.count(func.nullif(AssetRow.industry_id, "")),
+            )
             .where(AssetRow.active.is_(True))
             .group_by(AssetRow.market)
         )
     }
+    counts = {market: count for market, (count, _classified) in classification_counts.items()}
     return {
         "markets": [
             {
@@ -191,6 +197,18 @@ def universe_status(db: Session) -> dict[str, object]:
                 "added_count": row.added_count,
                 "updated_count": row.updated_count,
                 "deactivated_count": row.deactivated_count,
+                "classified_count": classification_counts.get(row.market, (0, 0))[1],
+                "unclassified_count": (
+                    classification_counts.get(row.market, (0, 0))[0]
+                    - classification_counts.get(row.market, (0, 0))[1]
+                ),
+                "classification_rate": round(
+                    classification_counts.get(row.market, (0, 0))[1]
+                    / classification_counts.get(row.market, (1, 0))[0],
+                    4,
+                )
+                if classification_counts.get(row.market, (0, 0))[0]
+                else 0.0,
                 "last_error": row.last_error,
                 "started_at": row.started_at,
                 "completed_at": row.completed_at,

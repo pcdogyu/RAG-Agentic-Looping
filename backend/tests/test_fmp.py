@@ -99,3 +99,29 @@ def test_symbol_search_preserves_otc_adr_underlying_issuer(monkeypatch):
     assert "Monadelphous Group Limited" in asset.aliases
     assert asset.issuer_id == "fmp:monadelphous-group"
     assert asset.primary_listing_asset_id == "equity:ASX:MND.AX"
+
+
+def test_equity_universe_classifies_shell_companies_as_non_peer_special_purpose(
+    monkeypatch,
+):
+    provider = FmpProvider(Settings(fmp_access_token="", fmp_mcp_url=""))
+
+    def screener(_endpoint, params, **_kwargs):
+        if params["exchange"] != "NASDAQ":
+            return []
+        return [
+            {
+                "symbol": "SHELL",
+                "companyName": "Example Acquisition Corp",
+                "sector": "Financial Services",
+                "industry": "Shell Companies",
+                "currency": "USD",
+            }
+        ]
+
+    monkeypatch.setattr(provider, "_rest", screener)
+
+    asset = provider.list_equity_universe()[0]
+
+    assert asset.industry_id == "industry:special_purpose"
+    assert asset.instrument_type == "shell_company"

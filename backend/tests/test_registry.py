@@ -63,6 +63,24 @@ def _cn_asset() -> AssetRef:
     )
 
 
+def test_special_purpose_companies_are_not_industry_representatives():
+    shell = AssetRef(
+        asset_id="equity:XNAS:SHELL",
+        asset_class=AssetClass.EQUITY,
+        market=Market.US,
+        symbol="SHELL",
+        name="Example Acquisition Corp",
+        exchange_or_provider="NASDAQ",
+        sector_id="sector:financials",
+        industry_id="industry:special_purpose",
+        instrument_type="shell_company",
+        market_cap=1_000_000_000,
+    )
+    registry = ProviderRegistry(Settings(fmp_access_token="", fmp_mcp_url=""), assets=[shell])
+
+    assert registry.industry_representatives(["industry:special_purpose"]) == []
+
+
 def test_research_data_includes_normalized_market_and_benchmark_prices(monkeypatch):
     registry = ProviderRegistry(Settings(fmp_access_token="", fmp_mcp_url=""))
     provider = PriceProvider()
@@ -207,6 +225,4 @@ def test_cross_listing_uses_traded_listing_for_prices_and_primary_for_issuer_fac
     assert fundamental_symbols == ["MND.AX"]
     assert filing_symbols == ["MND.AX"]
     assert payload["issuer_research_asset"]["asset_id"] == "equity:ASX:MND.AX"
-    assert payload["factor_sources"]["fundamentals"]["name"].endswith(
-        "MND.AX 财务报表"
-    )
+    assert payload["factor_sources"]["fundamentals"]["name"].endswith("MND.AX 财务报表")

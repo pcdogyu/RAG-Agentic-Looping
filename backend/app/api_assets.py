@@ -77,20 +77,20 @@ def asset_universe(
 
 
 @router.get("/api/v1/industries")
-def industries(db: Db):
+def industries(db: Db, market: str = ""):
     rows = db.scalars(
-        select(IndustryRow).where(IndustryRow.active.is_(True)).order_by(
-            IndustryRow.level, IndustryRow.parent_id, IndustryRow.name_zh
-        )
+        select(IndustryRow)
+        .where(IndustryRow.active.is_(True))
+        .order_by(IndustryRow.level, IndustryRow.parent_id, IndustryRow.name_zh)
     ).all()
-    counts = {
-        industry_id: count
-        for industry_id, count in db.execute(
-            select(AssetRow.industry_id, func.count(AssetRow.id))
-            .where(AssetRow.active.is_(True), AssetRow.industry_id != "")
-            .group_by(AssetRow.industry_id)
-        )
-    }
+    count_statement = (
+        select(AssetRow.industry_id, func.count(AssetRow.id))
+        .where(AssetRow.active.is_(True), AssetRow.industry_id != "")
+        .group_by(AssetRow.industry_id)
+    )
+    if market:
+        count_statement = count_statement.where(AssetRow.market == market.upper())
+    counts = {industry_id: count for industry_id, count in db.execute(count_statement)}
     return [
         {
             "industry_id": row.id,
@@ -143,9 +143,7 @@ def edit_asset(asset_id: str, payload: AssetEditInput, db: Db):
     if row is None:
         raise HTTPException(404, "asset not found")
     if payload.aliases is not None:
-        row.aliases = list(
-            dict.fromkeys(item.strip() for item in payload.aliases if item.strip())
-        )
+        row.aliases = list(dict.fromkeys(item.strip() for item in payload.aliases if item.strip()))
     if payload.industry_id is not None:
         if payload.industry_id and db.get(IndustryRow, payload.industry_id) is None:
             raise HTTPException(422, "unknown industry_id")

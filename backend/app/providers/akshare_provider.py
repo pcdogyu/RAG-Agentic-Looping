@@ -7,10 +7,12 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
+from io import BytesIO
 from math import isfinite
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import requests
 from dateutil.parser import parse as parse_datetime
 
 from backend.app.domain import AssetClass, AssetRef, Market, NewsItem, SourceQuality
@@ -20,6 +22,7 @@ from backend.app.services.industry_taxonomy import normalize_industry
 SHANGHAI_TIMEZONE = ZoneInfo("Asia/Shanghai")
 TIME_NORMALIZATION_MARKER = "Asia/Shanghai->UTC:v1"
 _ADDRESS_FAMILY_LOCK = threading.Lock()
+_INDUSTRY_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60
 
 
 @contextmanager
@@ -83,6 +86,9 @@ class AkShareProvider:
 
         self.settings = settings or get_settings()
         self.last_errors: list[str] = []
+        self._szse_directory = None
+        self._sse_directory: list[dict[str, Any]] | None = None
+        self._bjse_directory = None
 
     def discover_news(self, *, since: datetime, limit: int = 100) -> list[NewsItem]:
         try:
@@ -128,11 +134,7 @@ class AkShareProvider:
         normalized_query = _normalize_security_text(query)
         if not normalized_query:
             return []
-        return [
-            asset
-            for asset in self._listed_assets()
-            if self._matches(asset, normalized_query)
-        ]
+        return [asset for asset in self._listed_assets() if self._matches(asset, normalized_query)]
 
     def list_equity_universe(self) -> list[AssetRef]:
         """Return the cached full A-share and Hong Kong company master."""
@@ -149,15 +151,12 @@ class AkShareProvider:
         return symbol_matches or (len(name) >= 2 and name in normalized_query)
 
     def _listed_assets(self) -> list[AssetRef]:
-        a_share_key = cache.key("akshare-a-share-security-master", {"version": 2})
-        hk_share_key = cache.key("akshare-hk-share-security-master", {"version": 2})
+        a_share_key = cache.key("akshare-a-share-security-master", {"version": 3})
+        hk_share_key = cache.key("akshare-hk-share-security-master", {"version": 3})
         a_share_payload = cache.get(a_share_key)
         hk_share_payload = cache.get(hk_share_key)
         if a_share_payload and hk_share_payload:
-            return [
-                AssetRef.model_validate(item)
-                for item in [*a_share_payload, *hk_share_payload]
-            ]
+            return [AssetRef.model_validate(item) for item in [*a_share_payload, *hk_share_payload]]
         try:
             import akshare as ak
         except Exception as exc:
@@ -166,6 +165,27 @@ class AkShareProvider:
                 AssetRef.model_validate(item)
                 for item in [*(a_share_payload or []), *(hk_share_payload or [])]
             ]
+
+        a_share_industries = (
+            self._cached_industry_map(
+                "akshare-a-share-industry-master",
+                "a-share-industries",
+                lambda: self._a_share_industry_map(ak),
+                minimum_size=4_500,
+            )
+            if not a_share_payload
+            else {}
+        )
+        hk_share_industries = (
+            self._cached_industry_map(
+                "akshare-hk-share-industry-master",
+                "hk-share-industries",
+                lambda: self._hk_share_industry_map(ak),
+                minimum_size=2_000,
+            )
+            if not hk_share_payload
+            else {}
+        )
 
         def market_master(
             key: str,
@@ -191,18 +211,309 @@ class AkShareProvider:
                 a_share_key,
                 a_share_payload,
                 "a-share-master",
-                ak.stock_info_a_code_name,
-                self._a_share_records,
+                lambda: self._a_share_security_frame(ak),
+                lambda frame: self._a_share_records(frame, a_share_industries),
             ),
             *market_master(
                 hk_share_key,
                 hk_share_payload,
                 "hk-share-master",
                 lambda: self._hk_security_frame(ak),
-                self._hk_share_records,
+                lambda frame: self._hk_share_records(frame, hk_share_industries),
             ),
         ]
         return [AssetRef.model_validate(item) for item in payload]
+
+    def _cached_industry_map(
+        self,
+        namespace: str,
+        error_label: str,
+        loader,
+        *,
+        minimum_size: int = 1,
+    ) -> dict[str, str]:
+        key = cache.key(namespace, {"version": 1})
+        cached = cache.get(key)
+        if cached:
+            return {str(code): str(industry) for code, industry in cached.items()}
+        try:
+            values = loader()
+        except Exception as exc:
+            self.last_errors.append(f"{error_label}: {type(exc).__name__}")
+            return {}
+        if len(values) >= minimum_size:
+            cache.set(key, values, _INDUSTRY_CACHE_TTL_SECONDS)
+        elif values:
+            self.last_errors.append(f"{error_label}: incomplete ({len(values)} < {minimum_size})")
+        return values
+
+    def _a_share_industry_map(self, ak: Any) -> dict[str, str]:
+        """Build a detailed board map, then fill gaps from official exchange lists."""
+
+        output: dict[str, str] = {}
+        if hasattr(ak, "stock_board_industry_name_em") and hasattr(
+            ak, "stock_board_industry_cons_em"
+        ):
+            try:
+                with _request_address_family(self.settings.akshare_ipv4_only):
+                    boards = ak.stock_board_industry_name_em()
+                for board in boards.to_dict(orient="records"):
+                    board_name = str(board.get("板块名称") or "").strip()
+                    board_code = str(board.get("板块代码") or board_name).strip()
+                    if not board_name or not board_code:
+                        continue
+                    try:
+                        with _request_address_family(self.settings.akshare_ipv4_only):
+                            constituents = ak.stock_board_industry_cons_em(symbol=board_code)
+                    except Exception as exc:
+                        self.last_errors.append(
+                            f"a-share-industry-{board_code}: {type(exc).__name__}"
+                        )
+                        continue
+                    for row in constituents.to_dict(orient="records"):
+                        code = str(row.get("代码") or row.get("code") or "").strip()
+                        if code.isdigit():
+                            output.setdefault(code.zfill(6), board_name)
+            except Exception as exc:
+                self.last_errors.append(f"a-share-industry-boards: {type(exc).__name__}")
+
+        if hasattr(ak, "stock_info_bj_name_code"):
+            try:
+                self._merge_exchange_industries(
+                    output,
+                    self._load_bjse_directory(ak),
+                    ("证券代码", "代码"),
+                )
+            except Exception as exc:
+                self.last_errors.append(f"stock_info_bj_name_code: {type(exc).__name__}")
+
+        if hasattr(ak, "stock_info_sz_name_code"):
+            try:
+                self._merge_szse_industries(output)
+            except Exception as exc:
+                self.last_errors.append(f"szse-industry-master: {type(exc).__name__}")
+        if hasattr(ak, "stock_info_sh_name_code"):
+            try:
+                self._merge_sse_industries(output)
+            except Exception as exc:
+                self.last_errors.append(f"sse-industry-master: {type(exc).__name__}")
+        return output
+
+    @staticmethod
+    def _merge_exchange_industries(
+        output: dict[str, str], frame: Any, code_fields: tuple[str, ...]
+    ) -> None:
+        for row in frame.to_dict(orient="records"):
+            code = next(
+                (str(row.get(field) or "").strip() for field in code_fields if row.get(field)),
+                "",
+            )
+            industry = str(
+                row.get("所属行业") or row.get("行业") or row.get("行业门类") or ""
+            ).strip()
+            if code.isdigit() and industry:
+                output.setdefault(code.zfill(6), industry)
+
+    def _merge_sse_industries(self, output: dict[str, str]) -> None:
+        for row in self._load_sse_directory():
+            code = str(row.get("A_STOCK_CODE") or "").strip()
+            industry = str(row.get("CSRC_CODE_DESC") or "").strip()
+            if code.isdigit() and industry:
+                output.setdefault(code.zfill(6), industry)
+
+    def _load_sse_directory(self) -> list[dict[str, Any]]:
+        if self._sse_directory is not None:
+            return self._sse_directory
+        url = "https://query.sse.com.cn/sseQuery/commonQuery.do"
+        headers = {
+            "Referer": "https://www.sse.com.cn/assortment/stock/list/share/",
+            "User-Agent": "Mozilla/5.0",
+        }
+        output: list[dict[str, Any]] = []
+        for stock_type in ("1", "8"):
+            params = {
+                "STOCK_TYPE": stock_type,
+                "REG_PROVINCE": "",
+                "CSRC_CODE": "",
+                "STOCK_CODE": "",
+                "sqlId": "COMMON_SSE_CP_GPJCTPZ_GPLB_GP_L",
+                "COMPANY_STATUS": "2,4,5,7,8",
+                "type": "inParams",
+                "isPagination": "true",
+                "pageHelp.cacheSize": "1",
+                "pageHelp.beginPage": "1",
+                "pageHelp.pageSize": "10000",
+                "pageHelp.pageNo": "1",
+                "pageHelp.endPage": "1",
+            }
+            with _request_address_family(self.settings.akshare_ipv4_only):
+                response = requests.get(url, params=params, headers=headers, timeout=20)
+            response.raise_for_status()
+            output.extend(response.json().get("result", []))
+        self._sse_directory = output
+        return output
+
+    def _merge_szse_industries(self, output: dict[str, str]) -> None:
+        self._merge_exchange_industries(
+            output,
+            self._load_szse_directory(),
+            ("A股代码", "证券代码"),
+        )
+
+    def _load_szse_directory(self):
+        if self._szse_directory is not None:
+            return self._szse_directory
+        import pandas as pd
+
+        url = "https://www.szse.cn/api/report/ShowReport"
+        params = {
+            "SHOWTYPE": "xlsx",
+            "CATALOGID": "1110",
+            "TABKEY": "tab1",
+        }
+        headers = {
+            "Referer": "https://www.szse.cn/market/product/stock/list/index.html",
+            "User-Agent": "Mozilla/5.0",
+        }
+        last_error: Exception | None = None
+        for _attempt in range(3):
+            try:
+                with _request_address_family(self.settings.akshare_ipv4_only):
+                    response = requests.get(
+                        url,
+                        params=params,
+                        headers=headers,
+                        timeout=60,
+                    )
+                response.raise_for_status()
+                frame = pd.read_excel(BytesIO(response.content))
+                self._szse_directory = frame
+                return frame
+            except Exception as exc:
+                last_error = exc
+        raise RuntimeError("Shenzhen industry directory unavailable") from last_error
+
+    def _load_bjse_directory(self, ak: Any):
+        if self._bjse_directory is not None:
+            return self._bjse_directory
+        loader = getattr(ak, "stock_info_bj_name_code", None)
+        if not callable(loader):
+            raise RuntimeError("Beijing security directory is unavailable")
+        with _request_address_family(self.settings.akshare_ipv4_only):
+            self._bjse_directory = loader()
+        return self._bjse_directory
+
+    def _a_share_security_frame(self, ak: Any):
+        """Build the A-share identity directory from official exchanges."""
+
+        import pandas as pd
+
+        records: list[dict[str, Any]] = []
+        official_capable = all(
+            hasattr(ak, loader)
+            for loader in (
+                "stock_info_sz_name_code",
+                "stock_info_sh_name_code",
+                "stock_info_bj_name_code",
+            )
+        )
+        if official_capable:
+            try:
+                for row in self._load_szse_directory().to_dict(orient="records"):
+                    records.append(
+                        {
+                            "code": row.get("A股代码") or row.get("证券代码"),
+                            "name": row.get("A股简称") or row.get("证券简称"),
+                            "所属行业": row.get("所属行业") or row.get("行业"),
+                        }
+                    )
+            except Exception as exc:
+                self.last_errors.append(f"a-share-master-szse: {type(exc).__name__}")
+            try:
+                for row in self._load_sse_directory():
+                    records.append(
+                        {
+                            "code": row.get("A_STOCK_CODE"),
+                            "name": row.get("SEC_NAME_CN") or row.get("COMPANY_ABBR"),
+                            "所属行业": row.get("CSRC_CODE_DESC"),
+                        }
+                    )
+            except Exception as exc:
+                self.last_errors.append(f"a-share-master-sse: {type(exc).__name__}")
+            try:
+                for row in self._load_bjse_directory(ak).to_dict(orient="records"):
+                    records.append(
+                        {
+                            "code": row.get("证券代码") or row.get("代码"),
+                            "name": row.get("证券简称") or row.get("名称"),
+                            "所属行业": row.get("所属行业") or row.get("行业"),
+                        }
+                    )
+            except Exception as exc:
+                self.last_errors.append(f"a-share-master-bjse: {type(exc).__name__}")
+        if len(records) >= 4_500:
+            return pd.DataFrame(records)
+        if records:
+            self.last_errors.append(f"a-share-master-official: incomplete ({len(records)} < 4500)")
+
+        # Eastmoney is retained as a full-directory fallback.  When the official
+        # loaders exist, never accept a partial fallback because the caller treats
+        # every omitted security as inactive.
+        with _request_address_family(self.settings.akshare_ipv4_only):
+            fallback = ak.stock_info_a_code_name()
+        if official_capable:
+            fallback_size = len(fallback.to_dict(orient="records"))
+            if fallback_size < 4_500:
+                raise RuntimeError(
+                    f"incomplete A-share security directory ({fallback_size} < 4500)"
+                )
+        return fallback
+
+    def _hk_share_industry_map(self, ak: Any) -> dict[str, str]:
+        """Page the Eastmoney HK company profile directory in bounded batches."""
+
+        if not hasattr(ak, "stock_hk_company_profile_em"):
+            return {}
+        url = "https://datacenter.eastmoney.com/securities/api/data/v1/get"
+        base_params = {
+            "reportName": "RPT_HKF10_INFO_ORGPROFILE",
+            "columns": "SECURITY_CODE,BELONG_INDUSTRY",
+            "quoteColumns": "",
+            "pageSize": "500",
+            "sortTypes": "",
+            "sortColumns": "",
+            "source": "F10",
+            "client": "PC",
+        }
+        output: dict[str, str] = {}
+        page_count = 1
+        for page in range(1, 101):
+            payload = None
+            for _attempt in range(3):
+                try:
+                    with _request_address_family(self.settings.akshare_ipv4_only):
+                        response = requests.get(
+                            url,
+                            params={**base_params, "pageNumber": str(page)},
+                            timeout=20,
+                        )
+                    response.raise_for_status()
+                    payload = response.json().get("result")
+                    if payload:
+                        break
+                except (requests.RequestException, ValueError):
+                    continue
+            if not payload:
+                raise RuntimeError(f"Hong Kong industry page {page} unavailable")
+            page_count = max(1, int(payload.get("pages") or 1))
+            for row in payload.get("data") or []:
+                code = str(row.get("SECURITY_CODE") or "").strip()
+                industry = str(row.get("BELONG_INDUSTRY") or "").strip()
+                if code.isdigit() and industry:
+                    output[code.zfill(5)] = industry
+            if page >= page_count:
+                break
+        return output
 
     @staticmethod
     def _hk_security_frame(ak: Any):
@@ -214,7 +525,9 @@ class AkShareProvider:
             return ak.stock_hk_spot()
 
     @staticmethod
-    def _a_share_records(frame: Any) -> list[dict[str, Any]]:
+    def _a_share_records(
+        frame: Any, industry_map: dict[str, str] | None = None
+    ) -> list[dict[str, Any]]:
         output: list[dict[str, Any]] = []
         for row in frame.to_dict(orient="records"):
             raw_code = str(row.get("code") or row.get("代码") or "").strip()
@@ -223,7 +536,9 @@ class AkShareProvider:
                 continue
             code = raw_code.zfill(6)
             exchange = "XSHG" if code.startswith("6") else "XBEI" if code[0] in "489" else "XSHE"
-            raw_industry = str(row.get("所属行业") or row.get("行业") or "").strip()
+            raw_industry = str(
+                (industry_map or {}).get(code) or row.get("所属行业") or row.get("行业") or ""
+            ).strip()
             sector_id, industry_id = normalize_industry(raw_industry, raw_industry)
             market_cap = row.get("总市值") or row.get("市值")
             try:
@@ -251,7 +566,9 @@ class AkShareProvider:
         return output
 
     @staticmethod
-    def _hk_share_records(frame: Any) -> list[dict[str, Any]]:
+    def _hk_share_records(
+        frame: Any, industry_map: dict[str, str] | None = None
+    ) -> list[dict[str, Any]]:
         output: list[dict[str, Any]] = []
         for row in frame.to_dict(orient="records"):
             raw_code = str(row.get("代码") or row.get("code") or "").strip()
@@ -265,7 +582,9 @@ class AkShareProvider:
             if not raw_code or not name or not raw_code.isdigit():
                 continue
             code = raw_code.zfill(5)
-            raw_industry = str(row.get("所属行业") or row.get("行业") or "").strip()
+            raw_industry = str(
+                (industry_map or {}).get(code) or row.get("所属行业") or row.get("行业") or ""
+            ).strip()
             sector_id, industry_id = normalize_industry(raw_industry, raw_industry)
             market_cap = row.get("总市值") or row.get("市值")
             try:
@@ -298,13 +617,9 @@ class AkShareProvider:
 
             with _request_address_family(self.settings.akshare_ipv4_only):
                 if asset.market.value == "CN":
-                    frame = ak.stock_zh_a_hist(
-                        symbol=asset.symbol, period="daily", adjust="qfq"
-                    )
+                    frame = ak.stock_zh_a_hist(symbol=asset.symbol, period="daily", adjust="qfq")
                 else:
-                    frame = ak.stock_hk_hist(
-                        symbol=asset.symbol, period="daily", adjust="qfq"
-                    )
+                    frame = ak.stock_hk_hist(symbol=asset.symbol, period="daily", adjust="qfq")
             return frame.to_dict(orient="records")
         except Exception:
             return []
@@ -381,9 +696,7 @@ class AkShareProvider:
             limit=30,
         )
         company_info = {
-            str(row.get("item")): row.get("value")
-            for row in company_info_rows
-            if row.get("item")
+            str(row.get("item")): row.get("value") for row in company_info_rows if row.get("item")
         }
         if business:
             datasets["business_profile"] = business[0]

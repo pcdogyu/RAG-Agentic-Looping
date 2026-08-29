@@ -3037,6 +3037,8 @@ type UniverseAsset = {
   aliases: string[];
   sector_id: string;
   industry_id: string;
+  raw_sector: string;
+  raw_industry: string;
   instrument_type: string;
   market_cap: number | null;
   market_cap_rank: number | null;
@@ -3058,6 +3060,9 @@ type UniverseMarketStatus = {
   status: string;
   asset_count: number;
   industry_count: number;
+  classified_count: number;
+  unclassified_count: number;
+  classification_rate: number;
   last_error: string | null;
   completed_at: string | null;
 };
@@ -3103,7 +3108,7 @@ export function AssetUniversePage({ apiBase }: { apiBase: string }) {
     try {
       const [assetResponse, industryResponse, statusResponse] = await Promise.all([
         fetch(`${apiBase}/api/v1/asset-universe?${params}`),
-        fetch(`${apiBase}/api/v1/industries`),
+        fetch(`${apiBase}/api/v1/industries${market ? `?market=${encodeURIComponent(market)}` : ""}`),
         fetch(`${apiBase}/api/v1/asset-universe/status`),
       ]);
       if (!assetResponse.ok || !industryResponse.ok || !statusResponse.ok) {
@@ -3184,7 +3189,7 @@ export function AssetUniversePage({ apiBase }: { apiBase: string }) {
       <PageHeading
         eyebrow="SECURITY & INDUSTRY MASTER"
         title="资产与行业主数据"
-        copy="维护 A 股、港股、美股公司证券及 CoinGecko 全量加密资产目录；映射时只向 7B 提供与新闻命中的短名单。"
+        copy="维护 A 股、港股、美股公司证券及 CoinGecko 全量加密资产目录；统一行业用于跨市场比较，并保留上游原始行业供追溯。"
       />
       <div className="universe-status-grid">
         {Object.entries(universeMarketLabels).map(([key, label]) => {
@@ -3192,6 +3197,7 @@ export function AssetUniversePage({ apiBase }: { apiBase: string }) {
           return <article className={`universe-status ${status?.status || "pending"}`} key={key}>
             <span>{label}</span>
             <strong>{(activeCounts[key] || status?.asset_count || 0).toLocaleString()}</strong>
+            <small>行业 {(status?.classified_count || 0).toLocaleString()} / {(activeCounts[key] || status?.asset_count || 0).toLocaleString()} · {Math.round((status?.classification_rate || 0) * 100)}%</small>
             <small>{status?.status === "failed" ? `失败：${status.last_error}` : universeTime(status?.completed_at || null)}</small>
           </article>;
         })}
@@ -3206,7 +3212,7 @@ export function AssetUniversePage({ apiBase }: { apiBase: string }) {
       {error && <div className="page-error">{error}</div>}
       <form className="universe-filters" onSubmit={(event) => { event.preventDefault(); setOffset(0); void load(); }}>
         <input aria-label="搜索资产" placeholder="代码或公司/资产名称" value={query} onChange={(event) => { setQuery(event.target.value); setOffset(0); }} />
-        <select aria-label="市场" value={market} onChange={(event) => { setMarket(event.target.value); setOffset(0); }}>
+        <select aria-label="市场" value={market} onChange={(event) => { setMarket(event.target.value); setIndustryId(""); setOffset(0); }}>
           <option value="">全部市场</option>
           {Object.entries(universeMarketLabels).map(([key, label]) => <option key={key} value={key}>{label}</option>)}
         </select>
@@ -3219,12 +3225,12 @@ export function AssetUniversePage({ apiBase }: { apiBase: string }) {
       </form>
       <div className="universe-table-wrap">
         <table className="universe-table">
-          <thead><tr><th>市场 / 代码</th><th>名称与别名</th><th>行业</th><th>类型</th><th>同步时间</th><th>操作</th></tr></thead>
+          <thead><tr><th>市场 / 代码</th><th>名称与别名</th><th>统一行业 / 原始行业</th><th>类型</th><th>同步时间</th><th>操作</th></tr></thead>
           <tbody>
             {assets.map((asset) => <tr key={asset.asset_id} className={asset.active ? "" : "inactive"}>
               <td><small>{universeMarketLabels[asset.market] || asset.market}</small><strong>{asset.symbol}</strong></td>
               <td><strong>{asset.name}</strong><small>{asset.aliases.slice(0, 3).join(" · ") || "无别名"}</small></td>
-              <td>{levelTwoIndustries.find((item) => item.industry_id === asset.industry_id)?.name_zh || "待归类"}</td>
+              <td><strong>{levelTwoIndustries.find((item) => item.industry_id === asset.industry_id)?.name_zh || "待归类"}</strong><small>{asset.raw_industry ? `原始：${asset.raw_industry}` : "未取得原始行业"}</small></td>
               <td>{asset.instrument_type || "—"}</td>
               <td>{universeTime(asset.last_synced_at)}</td>
               <td><button type="button" disabled={!token} onClick={() => beginEdit(asset)}>编辑</button></td>

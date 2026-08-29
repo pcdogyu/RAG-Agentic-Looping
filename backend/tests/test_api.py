@@ -78,6 +78,8 @@ def test_asset_universe_api_lists_industries_and_protects_manual_edits():
     with TestClient(app) as client:
         assets = client.get("/api/v1/asset-universe", params={"market": "US"})
         industries = client.get("/api/v1/industries")
+        us_industries = client.get("/api/v1/industries", params={"market": "US"})
+        universe_status = client.get("/api/v1/asset-universe/status")
         unauthorized = client.patch(
             "/api/v1/admin/assets/equity:XNAS:AAPL",
             json={"aliases": ["Apple", "苹果"]},
@@ -97,6 +99,13 @@ def test_asset_universe_api_lists_industries_and_protects_manual_edits():
     assert any(item["symbol"] == "AAPL" for item in assets.json()["items"])
     assert industries.status_code == 200
     assert any(item["industry_id"] == "industry:semiconductors" for item in industries.json())
+    assert us_industries.status_code == 200
+    assert sum(item["asset_count"] for item in us_industries.json()) >= 1
+    assert universe_status.status_code == 200
+    assert all(
+        {"classified_count", "unclassified_count", "classification_rate"} <= item.keys()
+        for item in universe_status.json()["markets"]
+    )
     assert unauthorized.status_code == 401
     assert updated.status_code == 200
     assert updated.json()["industry_id"] == "industry:hardware"
@@ -114,19 +123,12 @@ def test_health_lists_dedicated_assist_and_research_instances(monkeypatch):
         def json(self):
             return self.payload
 
-    monkeypatch.setattr(
-        "backend.app.main.settings.ollama_assist_base_url", "http://assist.invalid"
-    )
+    monkeypatch.setattr("backend.app.main.settings.ollama_assist_base_url", "http://assist.invalid")
     monkeypatch.setattr(
         "backend.app.main.settings.ollama_research_base_urls",
-        (
-            "http://research-0.invalid,http://research-1.invalid,"
-            "http://research-2.invalid"
-        ),
+        ("http://research-0.invalid,http://research-1.invalid,http://research-2.invalid"),
     )
-    monkeypatch.setattr(
-        "backend.app.main.settings.ollama_research_max_concurrency", 3
-    )
+    monkeypatch.setattr("backend.app.main.settings.ollama_research_max_concurrency", 3)
     monkeypatch.setattr(
         "backend.app.main.httpx.get",
         lambda url, **_kwargs: Response(
@@ -301,9 +303,7 @@ def test_failed_asset_research_can_target_a_healthy_instance(db, monkeypatch):
     monkeypatch.setattr("backend.app.main.enqueue_research", fake_enqueue)
 
     with TestClient(app) as client:
-        response = client.post(
-            f"/api/v1/research-runs/{original.id}/retry?instance_id=research-2"
-        )
+        response = client.post(f"/api/v1/research-runs/{original.id}/retry?instance_id=research-2")
 
     assert response.status_code == 202
     assert response.json()["instance_id"] == "research-2"
@@ -311,9 +311,7 @@ def test_failed_asset_research_can_target_a_healthy_instance(db, monkeypatch):
     assert captured["priority"] == 0
 
 
-def test_targeted_research_retry_rejects_unknown_or_unavailable_instance(
-    db, monkeypatch
-):
+def test_targeted_research_retry_rejects_unknown_or_unavailable_instance(db, monkeypatch):
     original = ResearchRun(asset=SEED_ASSETS[1], status=RunStatus.FAILED)
     save_run(db, original)
     monkeypatch.setattr(
@@ -326,9 +324,7 @@ def test_targeted_research_retry_rejects_unknown_or_unavailable_instance(
     )
 
     with TestClient(app) as client:
-        missing = client.post(
-            f"/api/v1/research-runs/{original.id}/retry?instance_id=research-9"
-        )
+        missing = client.post(f"/api/v1/research-runs/{original.id}/retry?instance_id=research-9")
         unavailable = client.post(
             f"/api/v1/research-runs/{original.id}/retry?instance_id=research-0"
         )
@@ -379,9 +375,7 @@ def test_failed_asset_research_is_hidden_while_retry_is_active(db):
     assert bulk.json()["requested"] == 0
 
 
-def test_bulk_failed_research_retry_includes_every_kind_beyond_page_limit(
-    db, monkeypatch
-):
+def test_bulk_failed_research_retry_includes_every_kind_beyond_page_limit(db, monkeypatch):
     originals = []
     for index in range(51):
         asset = SEED_ASSETS[0].model_copy(
@@ -442,9 +436,7 @@ def test_bulk_failed_research_retry_includes_every_kind_beyond_page_limit(
         raise AssertionError("bulk retry must reuse the shared lineage snapshot")
 
     monkeypatch.setattr("backend.app.main.enqueue_research", fake_enqueue_asset)
-    monkeypatch.setattr(
-        "backend.app.main.enqueue_event_research_retry", fake_enqueue_event
-    )
+    monkeypatch.setattr("backend.app.main.enqueue_event_research_retry", fake_enqueue_event)
     monkeypatch.setattr("backend.app.main.list_retries_for_run", fail_lineage_scan)
 
     with TestClient(app) as client:
@@ -612,9 +604,7 @@ def test_conclusion_force_research_without_event_uses_current_asset(db, monkeypa
     assert captured["event"] is None
 
 
-def test_conclusion_force_research_reports_active_run_and_missing_event(
-    db, monkeypatch
-):
+def test_conclusion_force_research_reports_active_run_and_missing_event(db, monkeypatch):
     now = utc_now()
     missing_event_id = uuid4()
     source_run = ResearchRun(
@@ -700,8 +690,7 @@ def test_event_conclusion_force_research_accepts_published_reports(db, monkeypat
 
     with TestClient(app) as client:
         responses = [
-            client.post(f"/api/v1/event-conclusions/{run_id}/research")
-            for run_id in run_ids
+            client.post(f"/api/v1/event-conclusions/{run_id}/research") for run_id in run_ids
         ]
 
     assert [response.status_code for response in responses] == [202, 202]
@@ -709,9 +698,7 @@ def test_event_conclusion_force_research_accepts_published_reports(db, monkeypat
         str(run_id) for run_id in run_ids
     ]
     assert all(response.json()["status"] == "queued" for response in responses)
-    assert all(
-        response.json()["stage"] == "event_extraction" for response in responses
-    )
+    assert all(response.json()["stage"] == "event_extraction" for response in responses)
     assert [item[1].report.summary for item in captured] == [
         "Published event report",
         "Published event report",
@@ -736,9 +723,7 @@ def test_event_conclusion_force_research_rejects_invalid_or_active_runs(db):
 
     with TestClient(app) as client:
         missing = client.post(f"/api/v1/event-conclusions/{uuid4()}/research")
-        conflict = client.post(
-            f"/api/v1/event-conclusions/{active.id}/research"
-        )
+        conflict = client.post(f"/api/v1/event-conclusions/{active.id}/research")
 
     assert missing.status_code == 404
     assert conflict.status_code == 409
@@ -931,9 +916,7 @@ def test_additional_model_inference_queues_are_public(monkeypatch):
         }
 
     monkeypatch.setattr("backend.app.main.gateway.gpu.queue_status", queue_status)
-    monkeypatch.setattr(
-        "backend.app.main.gateway.num_threads_for", lambda _model, **_kwargs: 8
-    )
+    monkeypatch.setattr("backend.app.main.gateway.num_threads_for", lambda _model, **_kwargs: 8)
 
     with TestClient(app) as client:
         response = client.get("/api/v1/model-inference-queues")
@@ -1157,9 +1140,7 @@ def test_failed_event_research_can_be_requeued(db, monkeypatch):
     monkeypatch.setattr("backend.app.main.enqueue_event_research_retry", fake_retry)
 
     with TestClient(app) as client:
-        response = client.post(
-            f"/api/v1/event-research-runs/{run.id}/retry?instance_id=research-1"
-        )
+        response = client.post(f"/api/v1/event-research-runs/{run.id}/retry?instance_id=research-1")
 
     assert response.status_code == 202
     assert response.json()["run_id"] == str(run.id)

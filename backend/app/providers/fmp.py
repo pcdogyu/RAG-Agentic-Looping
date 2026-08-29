@@ -259,9 +259,7 @@ class FmpProvider:
         output = []
         for item in payload if isinstance(payload, list) else []:
             symbol = str(item.get("symbol") or "").strip()
-            exchange = str(
-                item.get("exchangeShortName") or item.get("exchange") or "US"
-            ).strip()
+            exchange = str(item.get("exchangeShortName") or item.get("exchange") or "US").strip()
             if not symbol:
                 continue
             name = str(item.get("name") or item.get("companyName") or symbol).strip()
@@ -355,7 +353,13 @@ class FmpProvider:
                     industry_id=industry_id,
                     raw_sector=raw_sector,
                     raw_industry=raw_industry,
-                    instrument_type="adr" if is_adr else "common_stock",
+                    instrument_type=(
+                        "shell_company"
+                        if industry_id == "industry:special_purpose"
+                        else "adr"
+                        if is_adr
+                        else "common_stock"
+                    ),
                     market_cap=market_cap,
                 )
         return list(output.values())

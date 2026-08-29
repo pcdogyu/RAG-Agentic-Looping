@@ -543,6 +543,9 @@ describe("asset universe page", () => {
     expect(markup).toContain("回补最近 7 天映射");
     expect(markup).toContain("industry_peer");
     expect(markup).toContain("加密资产");
+    expect(markup).toContain("统一行业用于跨市场比较");
+    expect(markup).toContain("统一行业 / 原始行业");
+    expect(markup).toContain("行业 0 / 0 · 0%");
   });
 });
 

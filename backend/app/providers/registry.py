@@ -575,9 +575,7 @@ class ProviderRegistry:
                 update={
                     "aliases": list(dict.fromkeys([*existing.aliases, *asset.aliases])),
                     "products": list(dict.fromkeys([*existing.products, *asset.products])),
-                    "competitors": list(
-                        dict.fromkeys([*existing.competitors, *asset.competitors])
-                    ),
+                    "competitors": list(dict.fromkeys([*existing.competitors, *asset.competitors])),
                     "sector_id": asset.sector_id or existing.sector_id,
                     "industry_id": asset.industry_id or existing.industry_id,
                     "raw_sector": asset.raw_sector or existing.raw_sector,
@@ -587,8 +585,7 @@ class ProviderRegistry:
                     "market_cap_rank": asset.market_cap_rank or existing.market_cap_rank,
                     "issuer_id": existing.issuer_id or asset.issuer_id,
                     "primary_listing_asset_id": (
-                        existing.primary_listing_asset_id
-                        or asset.primary_listing_asset_id
+                        existing.primary_listing_asset_id or asset.primary_listing_asset_id
                     ),
                 }
             )
@@ -663,6 +660,8 @@ class ProviderRegistry:
                     and asset.asset_class is AssetClass.EQUITY
                     and asset.industry_id == industry_id
                     and asset.market in by_market
+                    and asset.instrument_type != "shell_company"
+                    and industry_id != "industry:special_purpose"
                 ):
                     by_market[asset.market].append(asset)
             for values in by_market.values():
@@ -705,8 +704,7 @@ class ProviderRegistry:
                     or asset.primary_listing_asset_id == owner.asset_id
                     or (
                         bool(owner.primary_listing_asset_id)
-                        and owner.primary_listing_asset_id
-                        == asset.primary_listing_asset_id
+                        and owner.primary_listing_asset_id == asset.primary_listing_asset_id
                     )
                 )
                 if explicitly_linked:
@@ -807,9 +805,7 @@ class ProviderRegistry:
         # derived issuer identity, but expose only assets explicitly mentioned
         # by this query to the event mapper.
         self._assets.update(discovered)
-        return [
-            asset for asset in discovered.values() if query_mentions_asset(query, asset)
-        ]
+        return [asset for asset in discovered.values() if query_mentions_asset(query, asset)]
 
     def provider_for(self, asset: AssetRef):
         if asset.asset_class is AssetClass.CRYPTO:
@@ -874,8 +870,7 @@ class ProviderRegistry:
             # until a true point-in-time crypto market index source is wired.
             return None
         if asset.exchange_or_provider.casefold() == "asx" or (
-            asset.primary_listing_asset_id
-            and ":asx:" in asset.primary_listing_asset_id.casefold()
+            asset.primary_listing_asset_id and ":asx:" in asset.primary_listing_asset_id.casefold()
         ):
             return AssetRef(
                 asset_id="equity:ASX:STW.AX",
@@ -1001,9 +996,7 @@ class ProviderRegistry:
         start: datetime,
         end: datetime,
     ) -> list[dict[str, Any]]:
-        if provider is self.fmp and not self._source_enabled(
-            "FMP", self.settings.fmp_enabled
-        ):
+        if provider is self.fmp and not self._source_enabled("FMP", self.settings.fmp_enabled):
             return []
         try:
             rows = normalize_price_records(
@@ -1088,8 +1081,7 @@ class ProviderRegistry:
                     candidate = payload.get("data", payload)
                     if isinstance(candidate, dict):
                         unattributed_fundamentals = (
-                            unattributed_fundamentals
-                            or self._has_material_fundamentals(candidate)
+                            unattributed_fundamentals or self._has_material_fundamentals(candidate)
                         )
                         for key, value in candidate.items():
                             if (
@@ -1156,13 +1148,8 @@ class ProviderRegistry:
                 filings.extend(issuer_provider.get_filings(issuer_asset))
             except Exception:
                 pass
-        if (
-            self._has_material_fundamentals(provider_fundamentals)
-            and not unattributed_fundamentals
-        ):
-            fundamentals_source = self._fundamentals_source(
-                issuer_provider, issuer_asset
-            )
+        if self._has_material_fundamentals(provider_fundamentals) and not unattributed_fundamentals:
+            fundamentals_source = self._fundamentals_source(issuer_provider, issuer_asset)
             if fundamentals_source:
                 factor_sources["fundamentals"] = fundamentals_source
         if self._sec_eligible(issuer_asset):
