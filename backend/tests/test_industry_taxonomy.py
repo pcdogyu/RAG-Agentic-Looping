@@ -1,8 +1,34 @@
+import pytest
+
 from backend.app.services.industry_taxonomy import (
     all_industries,
     industries_mentioned,
     normalize_industry,
 )
+
+
+@pytest.mark.parametrize(
+    ("raw_sector", "raw_industry", "expected"),
+    [
+        ("Basic Materials", "Aluminum", "industry:metals_mining"),
+        ("Energy", "Uranium", "industry:metals_mining"),
+        (
+            "Financial Services",
+            "Investment - Banking & Investment Services",
+            "industry:capital_markets",
+        ),
+        (
+            "Healthcare",
+            "REIT - Healthcare Facilities",
+            "industry:reits",
+        ),
+        ("Consumer Cyclical", "Department Stores", "industry:retail"),
+        ("Industrials", "Trucking", "industry:transportation"),
+        ("C 制造业", "电气机械和器材制造业", "industry:electrical_equipment"),
+    ],
+)
+def test_known_upstream_industries_use_specific_categories(raw_sector, raw_industry, expected):
+    assert normalize_industry(raw_sector, raw_industry)[1] == expected
 
 
 def test_industry_taxonomy_maps_specific_bilingual_source_values():
