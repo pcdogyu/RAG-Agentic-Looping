@@ -454,8 +454,10 @@ h1 span { color: var(--mint); font-weight: 400; }
 .conclusion-card span, .conclusion-card small { color: var(--muted); font-size: 10px; }
 .conclusion-card p { max-width: 900px; margin: 0; color: var(--secondary); line-height: 1.65; }
 .conclusion-card > .conclusion-research-action { align-self: center; padding: 20px 20px 20px 0; }
-.event-conclusion-card { grid-template-columns: 1fr; }
-.event-conclusion-summary { display: grid; align-content: center; justify-items: end; gap: 5px; min-width: 220px; text-align: right; }
+.event-conclusion-card { grid-template-columns: minmax(0, 1fr) auto; }
+.event-conclusion-card > .conclusion-card-details { grid-template-columns: minmax(0, 1fr); padding-right: 12px; }
+.event-conclusion-side { display: grid; align-content: center; justify-items: end; gap: 9px; min-width: 220px; padding: 20px 20px 20px 0; }
+.event-conclusion-summary { display: grid; align-content: center; justify-items: end; gap: 5px; min-width: 220px; padding: 0; border: 0; color: inherit; background: transparent; text-align: right; cursor: pointer; }
 .event-conclusion-summary > strong { color: var(--amber); font: 500 20px "DM Mono", monospace; }
 .event-conclusion-summary.positive > strong { color: var(--mint); }
 .event-conclusion-summary.negative > strong { color: var(--red); }
@@ -813,6 +815,7 @@ h1 span { color: var(--mint); font-weight: 400; }
   .universe-actions > button, .universe-filters > *, .universe-pagination > * { width: 100%; }
   .conclusion-score { text-align: left; }
   .event-conclusion-summary { justify-items: start; min-width: 0; text-align: left; }
+  .event-conclusion-side { justify-items: start; min-width: 0; padding: 0 20px 20px; }
   .event-report-metrics, .event-impact-grid, .macro-factor-list { grid-template-columns: 1fr; }
   .score-factor-grid { grid-template-columns: 1fr; }
   .research-gate-grid { grid-template-columns: repeat(2, 1fr); }

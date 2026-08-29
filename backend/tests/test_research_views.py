@@ -3,6 +3,7 @@ from datetime import timedelta
 from fastapi.testclient import TestClient
 
 from backend.app.domain import (
+    AnalysisStep,
     AssetClass,
     AssetRef,
     EventReport,
@@ -193,6 +194,22 @@ def test_research_conclusions_unify_visible_terminal_results_and_detail(db):
         status=RunStatus.INSUFFICIENT_EVIDENCE,
         impacts=[],
     )
+    refreshing = event_run(
+        db,
+        "refreshing macro",
+        status=RunStatus.QUEUED,
+        impacts=[],
+    )
+    refreshing.analysis_steps.append(
+        AnalysisStep(
+            phase="full_event_research",
+            status="running",
+            executor="celery",
+            summary="Mapping refreshed event",
+            metrics={"stage": "asset_mapping"},
+        )
+    )
+    save_event_research_run(db, refreshing)
     event_run(db, "failed macro", status=RunStatus.FAILED, impacts=[])
     event_run(db, "cancelled macro", status=RunStatus.CANCELLED, impacts=[])
     event_run(
@@ -220,6 +237,7 @@ def test_research_conclusions_unify_visible_terminal_results_and_detail(db):
     assert str(completed.id) in visible_ids
     assert str(tied.id) in visible_ids
     assert str(insufficient.id) in visible_ids
+    assert str(refreshing.id) in visible_ids
     assert {item["kind"] for item in event_only.json()["items"]} == {"event"}
     assert {item["kind"] for item in market_only.json()["items"]} == {"asset"}
     assert detail.status_code == 200
@@ -233,6 +251,11 @@ def test_research_conclusions_unify_visible_terminal_results_and_detail(db):
     assert events_by_title["tied macro"]["report"]["direction_score"] == 70
     assert events_by_title["tied macro"]["report"]["rating"] == "strongly_bullish"
     assert events_by_title["insufficient macro"]["report"]["direction_score"] is None
+    assert events_by_title["refreshing macro"]["refresh"] == {
+        "status": "running",
+        "stage": "asset_mapping",
+        "error": None,
+    }
     assert events_by_title["insufficient macro"]["report"]["rating"] is None
     assert first.json()["items"][0]["id"] != second.json()["items"][0]["id"]
 

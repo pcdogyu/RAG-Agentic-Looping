@@ -26,6 +26,7 @@ from backend.app.services.confidence_v3 import (
     event_horizon_days,
     news_confidence_score,
 )
+from backend.app.services.event_refresh import update_full_event_research
 from backend.app.services.macro_impacts import (
     TARGET_SCORING_VERSION,
     EventImpactDraft,
@@ -56,7 +57,13 @@ class EventResearchService:
         self.settings = settings or get_settings()
         self.llm = llm or gateway
 
-    def run(self, event: NewsEvent, queued_run: EventResearchRun) -> EventResearchRun:
+    def run(
+        self,
+        event: NewsEvent,
+        queued_run: EventResearchRun,
+        *,
+        force_web_search: bool = False,
+    ) -> EventResearchRun:
         run = queued_run
         event.horizon_days = event_horizon_days(event.event_type)
         run.status = RunStatus.RUNNING
@@ -122,8 +129,16 @@ class EventResearchService:
         )
         if (
             not run.historical_replay
-            and (source_gate in missing or needs_macro_context)
+            and (force_web_search or source_gate in missing or needs_macro_context)
         ):
+            if force_web_search:
+                update_full_event_research(
+                    run,
+                    status="running",
+                    stage="web_search",
+                    summary="事件深度研究正在重新执行联网搜索与证据核验。",
+                )
+                save_event_research_run(self.db, run)
             added, errors = self._supplement_web_evidence(event, run)
             run.analysis_steps.append(
                 AnalysisStep(

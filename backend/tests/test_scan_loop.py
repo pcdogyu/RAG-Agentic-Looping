@@ -25,12 +25,25 @@ from backend.app.domain import (
 from backend.app.main import _analysis_logs
 from backend.app.providers.registry import SEED_ASSETS
 from backend.app.services.asset_mapping import AssetMappingResult
+from backend.app.services.event_refresh import (
+    begin_full_event_research,
+    latest_full_event_research_step,
+)
 from backend.app.services.source_filter import (
     SourceFilterConfig,
     filter_news_items,
     save_source_filter,
 )
-from backend.app.storage import get_event, get_news, list_runs, save_event, save_news, save_run
+from backend.app.storage import (
+    get_event,
+    get_event_research_run,
+    get_news,
+    list_runs,
+    save_event,
+    save_event_research_run,
+    save_news,
+    save_run,
+)
 
 
 class FakeRedis:
@@ -81,6 +94,9 @@ def test_scan_visibility_and_gate_cover_long_running_tasks():
         "queue": "extract"
     }
     assert worker.celery_app.conf.task_routes["market_loop.retry_news_item"] == {"queue": "extract"}
+    assert worker.celery_app.conf.task_routes["market_loop.reextract_event"] == {
+        "queue": "extract"
+    }
     assert worker.celery_app.conf.task_routes["market_loop.research_asset"] == {"queue": "research"}
     assert worker.celery_app.conf.task_default_priority == 5
     assert worker.celery_app.conf.task_queue_max_priority == 9
@@ -1680,6 +1696,108 @@ def test_standalone_news_rescan_forces_downstream_7b_mapping(db, monkeypatch):
     assert captured == [(event.id, {"force": True})]
 
 
+def test_full_event_refresh_reextracts_all_news_then_forces_mapping(db, monkeypatch):
+    observed = datetime(2026, 8, 22, 12, 0, tzinfo=UTC)
+    news_items = [
+        NewsItem(
+            source="Example",
+            source_quality=SourceQuality.PROFESSIONAL,
+            title=f"Refresh source {index}",
+            summary=f"Updated fact {index}",
+            url=f"https://example.com/full-refresh-{index}",
+            published_at=observed + timedelta(minutes=index),
+            observed_at=observed + timedelta(minutes=index),
+            as_of=observed + timedelta(minutes=index),
+            content_hash=sha256(f"full-refresh-{index}".encode()).hexdigest(),
+        )
+        for index in range(2)
+    ]
+    for item in news_items:
+        save_news(db, item)
+    event = NewsEvent(
+        news_item_ids=[item.id for item in news_items],
+        headline="Old event",
+        event_type="other",
+        direct_impact="Old impact",
+        source_quality=SourceQuality.AGGREGATOR,
+        published_at=observed,
+        observed_at=observed,
+        as_of=observed,
+        candidates=[
+            CandidateAsset(
+                asset=SEED_ASSETS[0],
+                relationship="direct",
+                relevance=0.9,
+                rationale="stale mapping",
+            )
+        ],
+        industry_ids=["stale-industry"],
+    )
+    save_event(db, event)
+    run = EventResearchRun(
+        event_id=event.id,
+        status=RunStatus.COMPLETED,
+        report=EventReport(summary="Published report", confidence=0.7),
+    )
+    begin_full_event_research(run, task_id=f"event-refresh:{event.id}")
+    save_event_research_run(db, run)
+    mapped = []
+
+    def fake_extract(_service, item):
+        return NewsEvent(
+            news_item_ids=[item.id],
+            headline=item.title,
+            event_type="product",
+            entities=[f"Entity {item.title[-1]}"],
+            direct_impact=item.summary,
+            source_quality=item.source_quality,
+            published_at=item.published_at,
+            observed_at=item.observed_at,
+            as_of=item.as_of,
+        )
+
+    monkeypatch.setattr(worker, "init_db", lambda: None)
+    monkeypatch.setattr(worker, "model_task_is_cancelled", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(worker, "update_model_task", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(worker, "instance_health", lambda *_args, **_kwargs: (True, True))
+    monkeypatch.setattr(worker.EventService, "extract", fake_extract)
+    monkeypatch.setattr(
+        worker,
+        "enqueue_asset_mapping",
+        lambda _db, queued_event, **kwargs: (
+            mapped.append((queued_event.model_copy(deep=True), kwargs)) or "mapping-task"
+        ),
+    )
+
+    result = worker.reextract_event.run(
+        str(event.id),
+        str(run.id),
+        model_instance_id="extract-0",
+    )
+
+    refreshed_event = get_event(db, event.id)
+    refreshed_run = get_event_research_run(db, run.id)
+    assert result["status"] == "asset_mapping_queued"
+    assert refreshed_event is not None and refreshed_event.id == event.id
+    assert refreshed_event.news_item_ids == event.news_item_ids
+    assert refreshed_event.headline == news_items[0].title
+    assert refreshed_event.entities == ["Entity 0", "Entity 1"]
+    assert refreshed_event.candidates == []
+    assert refreshed_event.industry_ids == []
+    assert mapped[0][1] == {
+        "force": True,
+        "refresh_event_report": True,
+        "force_web_search": True,
+    }
+    assert refreshed_run is not None
+    refresh_step = latest_full_event_research_step(refreshed_run)
+    assert refresh_step is not None
+    assert refresh_step.status == "running"
+    assert refresh_step.metrics["stage"] == "asset_mapping"
+    assert refreshed_run.report is not None
+    assert refreshed_run.report.summary == "Published report"
+
+
 def test_forced_7b_mapping_replaces_candidates_then_queues_target_event_report(
     db, monkeypatch
 ):
@@ -1752,6 +1870,72 @@ def test_forced_7b_mapping_replaces_candidates_then_queues_target_event_report(
     assert persisted is not None
     assert len(persisted.candidates) == 4
     assert queued_reports == [event.id]
+
+
+def test_full_event_mapping_continues_to_forced_web_research(db, monkeypatch):
+    observed = datetime(2026, 8, 22, 12, 0, tzinfo=UTC)
+    news = NewsItem(
+        source="Example",
+        title="Full refresh mapping",
+        summary="Map this event again.",
+        url="https://example.com/full-refresh-mapping",
+        published_at=observed,
+        observed_at=observed,
+        as_of=observed,
+        content_hash=sha256(b"full-refresh-mapping").hexdigest(),
+    )
+    save_news(db, news)
+    event = NewsEvent(
+        news_item_ids=[news.id],
+        headline=news.title,
+        event_type="other",
+        direct_impact=news.summary,
+        source_quality=news.source_quality,
+        published_at=observed,
+        observed_at=observed,
+        as_of=observed,
+    )
+    save_event(db, event)
+    run = EventResearchRun(
+        event_id=event.id,
+        status=RunStatus.COMPLETED,
+        report=EventReport(summary="Published report", confidence=0.7),
+    )
+    begin_full_event_research(run, task_id="extract-task")
+    save_event_research_run(db, run)
+    monkeypatch.setattr(
+        worker.AssetMappingService,
+        "map_event",
+        lambda *_args, **_kwargs: AssetMappingResult(candidates=[]),
+    )
+    captured = []
+    monkeypatch.setattr(
+        worker,
+        "enqueue_event_research_refresh",
+        lambda _db, queued_event, queued_run, **kwargs: (
+            captured.append((queued_event.id, queued_run.id, kwargs))
+            or ("research-task", queued_run)
+        ),
+    )
+
+    result = worker.resolve_event_assets.run(
+        str(event.id),
+        force_mapping=True,
+        refresh_event_report=True,
+        force_web_search=True,
+    )
+
+    persisted_run = get_event_research_run(db, run.id)
+    assert result["task_id"] == "research-task"
+    assert captured == [
+        (event.id, run.id, {"force_web_search": True}),
+    ]
+    assert persisted_run is not None
+    refresh_step = latest_full_event_research_step(persisted_run)
+    assert refresh_step is not None
+    assert refresh_step.metrics["stage"] == "deep_research"
+    assert persisted_run.report is not None
+    assert persisted_run.report.summary == "Published report"
 
 
 def test_target_research_queues_only_impacts_that_pass_v2_gate(db, monkeypatch):

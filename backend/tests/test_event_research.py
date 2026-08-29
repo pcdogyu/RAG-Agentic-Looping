@@ -4,6 +4,7 @@ from hashlib import sha256
 
 from backend.app.config import Settings
 from backend.app.domain import (
+    AnalysisStep,
     AssetClass,
     AssetRef,
     EventResearchRun,
@@ -287,6 +288,67 @@ def test_event_research_uses_one_bounded_web_supplement(monkeypatch, db, tmp_pat
         )
     assert len(result.evidence) == 2
     assert [step.phase for step in result.analysis_steps].count("web_search_verification") == 1
+
+
+def test_full_event_refresh_forces_web_search_after_evidence_gate_passes(
+    monkeypatch, db, tmp_path
+):
+    observed = datetime(2026, 8, 22, 12, 0, tzinfo=UTC)
+    news = NewsItem(
+        source="Official Bulletin",
+        source_quality=SourceQuality.OFFICIAL,
+        title="官方确认产品发布",
+        summary="官方已经披露完整产品信息。",
+        url="https://official.example/product",
+        published_at=observed,
+        observed_at=observed,
+        as_of=observed,
+        content_hash=sha256(b"forced-event-web-search").hexdigest(),
+    )
+    event = NewsEvent(
+        news_item_ids=[news.id],
+        headline=news.title,
+        event_type="product",
+        entities=["产品"],
+        direct_impact=news.summary,
+        source_quality=news.source_quality,
+        published_at=observed,
+        observed_at=observed,
+        as_of=observed,
+    )
+    save_news(db, news)
+    save_event(db, event)
+    calls = []
+    monkeypatch.setattr(
+        "backend.app.services.event_research.search_enabled_sources_sync",
+        lambda request: (calls.append(request) or [], []),
+    )
+    run = EventResearchRun(
+        event_id=event.id,
+        as_of=observed,
+        analysis_steps=[
+            AnalysisStep(
+                phase="full_event_research",
+                status="running",
+                executor="celery",
+                summary="Full refresh",
+                metrics={"stage": "deep_research"},
+            )
+        ],
+    )
+
+    result = EventResearchService(
+        db,
+        Settings(fmp_access_token="", fmp_mcp_url="", reports_dir=tmp_path),
+        AllEvidenceEventResearchLlm(),
+    ).run(event, run, force_web_search=True)
+
+    assert 1 <= len(calls) <= 3
+    assert any(step.phase == "web_search_verification" for step in result.analysis_steps)
+    refresh_step = next(
+        step for step in result.analysis_steps if step.phase == "full_event_research"
+    )
+    assert refresh_step.metrics["stage"] == "web_search"
 
 
 def test_historical_event_replay_never_calls_live_search(monkeypatch, db, tmp_path):

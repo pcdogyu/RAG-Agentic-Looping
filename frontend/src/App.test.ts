@@ -27,6 +27,7 @@ import {
   type ConclusionDetail,
   EventConclusionCard,
   EventConclusionDetailModal,
+  eventRefreshResearchState,
   type EventConclusionDetail,
   factSourceGroupDefinitions,
   formatQueueDuration,
@@ -670,20 +671,33 @@ describe("changed targets page", () => {
       recommendation: null,
       report: { confidence: 0.6, news_confidence: 0.82, direction_score: -45, rating: "bearish", impact_count: 1, affected_markets: ["COMMODITY"], affected_sectors: ["能源"], scoring_version: "event-report-v1" },
     } as ResearchConclusionItem;
-    const card = renderToStaticMarkup(createElement(EventConclusionCard, { item, onOpen: () => undefined }));
+    const card = renderToStaticMarkup(createElement(EventConclusionCard, {
+      item,
+      researchState: undefined,
+      onOpen: () => undefined,
+      onResearch: () => undefined,
+    }));
     expect(card).toContain("-45 · 看空");
     expect(card).toContain("新闻可信度 82%");
     expect(card).toContain("研报置信度 60%");
     expect(card).toContain("影响目标 1 个");
+    expect(card).toContain("重新研究");
+    expect(card.indexOf("研报置信度 60%")).toBeLessThan(card.indexOf("重新研究"));
+    expect((card.match(/<button/g) || [])).toHaveLength(3);
     expect(card).not.toContain("证据不足");
     expect(card).not.toContain("资料覆盖不足");
 
     const emptyCard = renderToStaticMarkup(createElement(EventConclusionCard, {
       item: { ...item, report: { ...item.report!, direction_score: null, rating: null, impact_count: 0 } },
+      researchState: { status: "queued" },
       onOpen: () => undefined,
+      onResearch: () => undefined,
     }));
     expect(emptyCard).toContain("— · 暂无评级");
     expect(emptyCard).toContain("影响目标 0 个");
+    expect(emptyCard).toContain("已进入队列");
+    expect(eventRefreshResearchState({ status: "running", stage: "web_search", error: null })).toEqual({ status: "queued" });
+    expect(eventRefreshResearchState({ status: "failed", stage: "deep_research", error: "网络失败" })).toEqual({ status: "error", error: "网络失败" });
 
     const detail = {
       run: { id: "event-run-1", status: "insufficient_evidence", updated_at: "2026-08-29T08:00:00Z" },

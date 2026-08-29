@@ -35,6 +35,13 @@ from backend.app.model_audit import cleanup_model_audits
 from backend.app.providers.registry import ProviderRegistry
 from backend.app.services.asset_mapping import AssetMappingService
 from backend.app.services.asset_universe import AssetUniverseService
+from backend.app.services.event_refresh import (
+    begin_full_event_research,
+    full_event_research_is_active,
+    latest_full_event_research_step,
+    rebuild_event_from_extractions,
+    update_full_event_research,
+)
 from backend.app.services.event_research import EventResearchService
 from backend.app.services.events import EventService
 from backend.app.services.evolution import EvolutionService
@@ -160,6 +167,7 @@ celery_app.conf.update(
     worker_prefetch_multiplier=1,
     task_routes={
         "market_loop.extract_news_item": {"queue": "extract"},
+        "market_loop.reextract_event": {"queue": "extract"},
         "market_loop.retry_news_item": {"queue": "extract"},
         "market_loop.finalize_news_extraction": {"queue": "extract"},
         "market_loop.resolve_event_assets": {"queue": "mapping"},
@@ -1607,6 +1615,7 @@ def enqueue_asset_mapping(
     priority: int | None = None,
     model_instance_id: str | None = None,
     refresh_event_report: bool = False,
+    force_web_search: bool = False,
 ) -> str | None:
     """Queue one visible 7B mapping attempt for an unmapped event."""
 
@@ -1657,6 +1666,7 @@ def enqueue_asset_mapping(
                 "model_instance_id": instance.id,
                 **({"force_mapping": True} if force else {}),
                 **({"refresh_event_report": True} if refresh_event_report else {}),
+                **({"force_web_search": True} if force_web_search else {}),
             },
             queue=broker_queue_name("assist", instance.id),
             task_id=task_id,
@@ -2224,12 +2234,70 @@ def enqueue_event_research_retry(
     return str(task.id), run
 
 
+def enqueue_full_event_research(
+    db,
+    event: NewsEvent,
+    run: EventResearchRun,
+    *,
+    model_instance_id: str | None = None,
+) -> tuple[str, EventResearchRun]:
+    """Queue a durable refresh beginning with the event extraction stage."""
+
+    if full_event_research_is_active(run):
+        raise RuntimeError("full event research is already active")
+    task_id = str(uuid4())
+    instance = select_model_instance(
+        "extract",
+        task_id=task_id,
+        preferred=model_instance_id,
+        settings=settings,
+        probe_health=True,
+    )
+    begin_full_event_research(run, task_id=task_id)
+    save_event_research_run(db, run)
+    try:
+        record_model_task(
+            "extract",
+            task_id=task_id,
+            kind="event_reextraction",
+            entity_id=str(event.id),
+            title=event.headline,
+            subtitle="完整重新研究",
+            source="manual",
+            instance_id=instance.id,
+        )
+        task = reextract_event.apply_async(
+            args=[str(event.id), str(run.id)],
+            kwargs={"model_instance_id": instance.id},
+            queue=broker_queue_name("extract", instance.id),
+            task_id=task_id,
+        )
+    except Exception as exc:
+        update_model_task(
+            "extract",
+            task_id,
+            status="failed",
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        update_full_event_research(
+            run,
+            status="failed",
+            stage="event_extraction",
+            summary=f"完整重新研究入队失败（{type(exc).__name__}），已保留原研报。",
+            error=f"{type(exc).__name__}: event extraction queue failed",
+        )
+        save_event_research_run(db, run)
+        raise
+    return str(task.id), run
+
+
 def enqueue_event_research_refresh(
     db,
     event: NewsEvent,
     run: EventResearchRun,
     *,
     model_instance_id: str | None = None,
+    force_web_search: bool = False,
 ) -> tuple[str, EventResearchRun]:
     """Queue a fresh event report while keeping the published report visible."""
 
@@ -2276,7 +2344,10 @@ def enqueue_event_research_refresh(
     try:
         task = research_event.apply_async(
             args=[str(event.id), str(run.id)],
-            kwargs={"model_instance_id": instance.id},
+            kwargs={
+                "model_instance_id": instance.id,
+                **({"force_web_search": True} if force_web_search else {}),
+            },
             queue=broker_queue_name("research", instance.id),
             task_id=task_id,
             priority=EVENT_RESEARCH_PRIORITY,
@@ -2721,6 +2792,145 @@ def extract_news_item(
         }
 
 
+@celery_app.task(bind=True, name="market_loop.reextract_event", max_retries=2)
+@model_instance_task("extract")
+def reextract_event(
+    self,
+    event_id: str,
+    run_id: str,
+    model_instance_id: str | None = None,
+) -> dict[str, Any]:
+    """Rebuild one durable event, then force mapping and fresh web research."""
+
+    task_id = str(self.request.id or f"event-refresh:{event_id}")
+    init_db()
+    if model_task_is_cancelled("extract", task_id):
+        with SessionLocal() as db:
+            run = get_event_research_run(db, UUID(run_id))
+            if run is not None:
+                update_full_event_research(
+                    run,
+                    status="failed",
+                    stage="event_extraction",
+                    summary="完整重新研究已取消，原研报保持不变。",
+                    error="event refresh cancelled",
+                )
+                save_event_research_run(db, run)
+        return {"status": "cancelled", "event_id": event_id, "run_id": run_id}
+    update_model_task(
+        "extract",
+        task_id,
+        status="running",
+        attempt=self.request.retries + 1,
+        entity_id=event_id,
+    )
+    try:
+        with SessionLocal() as db:
+            event = get_event(db, UUID(event_id))
+            run = get_event_research_run(db, UUID(run_id))
+            if event is None or run is None or run.event_id != UUID(event_id):
+                raise ValueError(f"unknown event refresh: {event_id}/{run_id}")
+            active_step = latest_full_event_research_step(run)
+            if active_step and active_step.metrics.get("task_id") not in {None, task_id}:
+                return {
+                    "status": "superseded",
+                    "event_id": event_id,
+                    "run_id": run_id,
+                }
+            update_full_event_research(
+                run,
+                status="running",
+                stage="event_extraction",
+                summary="正在从全部可用关联新闻重新抽取事件事实。",
+                metrics={"attempt": self.request.retries + 1},
+            )
+            save_event_research_run(db, run)
+            news_items = [
+                item
+                for news_id in event.news_item_ids
+                if (item := get_news(db, news_id)) is not None
+            ]
+            missing_news_count = len(event.news_item_ids) - len(news_items)
+            if not news_items:
+                raise ValueError("event has no source news available for extraction")
+            registry = ProviderRegistry(assets=list_assets(db))
+            service = EventService(registry)
+            extracted_events = [service.extract(item) for item in news_items]
+            rebuild_event_from_extractions(
+                event,
+                extracted_events,
+                missing_news_count=missing_news_count,
+            )
+            save_event(db, event)
+            update_full_event_research(
+                run,
+                status="running",
+                stage="asset_mapping",
+                summary="事件事实已重新抽取，正在强制执行股票映射。",
+                metrics={
+                    "available_news_count": len(news_items),
+                    "missing_news_count": missing_news_count,
+                },
+            )
+            save_event_research_run(db, run)
+            mapping_task_id = enqueue_asset_mapping(
+                db,
+                event,
+                force=True,
+                refresh_event_report=True,
+                force_web_search=True,
+            )
+        update_model_task(
+            "extract",
+            task_id,
+            status="completed",
+            metrics={
+                "news_count": len(news_items),
+                "missing_news_count": missing_news_count,
+                "asset_mapping_task_id": mapping_task_id,
+            },
+        )
+        return {
+            "status": "asset_mapping_queued",
+            "event_id": event_id,
+            "run_id": run_id,
+            "task_id": mapping_task_id,
+            "news_count": len(news_items),
+            "missing_news_count": missing_news_count,
+        }
+    except Exception as exc:
+        retrying = self.request.retries < self.max_retries
+        with SessionLocal() as db:
+            run = get_event_research_run(db, UUID(run_id))
+            if run is not None:
+                update_full_event_research(
+                    run,
+                    status="retrying" if retrying else "failed",
+                    stage="event_extraction",
+                    summary=(
+                        "事件重新抽取暂时失败，等待重试。"
+                        if retrying
+                        else "事件重新抽取最终失败，已保留原研报。"
+                    ),
+                    error=f"{type(exc).__name__}: {exc}",
+                    metrics={"attempt": self.request.retries + 1},
+                )
+                save_event_research_run(db, run)
+        update_model_task(
+            "extract",
+            task_id,
+            status="retrying" if retrying else "failed",
+            attempt=self.request.retries + 1,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        if retrying:
+            raise self.retry(
+                exc=exc,
+                countdown=min(60, 2 ** (self.request.retries + 1)),
+            ) from exc
+        raise
+
+
 @celery_app.task(bind=True, name="market_loop.retry_news_item", max_retries=2)
 @model_instance_task("extract")
 def retry_news_item(
@@ -2975,6 +3185,7 @@ def resolve_event_assets(
     model_instance_id: str | None = None,
     force_mapping: bool = False,
     refresh_event_report: bool = False,
+    force_web_search: bool = False,
 ) -> dict:
     task_id = str(self.request.id or f"event:{event_id}")
     if model_task_is_cancelled("assist", task_id):
@@ -3006,6 +3217,19 @@ def resolve_event_assets(
             title=event.headline,
             subtitle=event.event_type.value,
         )
+        workflow_run = (
+            get_event_research_for_event(db, event.id)
+            if refresh_event_report
+            else None
+        )
+        if workflow_run is not None and force_web_search:
+            update_full_event_research(
+                workflow_run,
+                status="running",
+                stage="asset_mapping",
+                summary="正在使用当前股票主数据和映射模型重新识别影响标的。",
+            )
+            save_event_research_run(db, workflow_run)
         registry = ProviderRegistry(assets=list_assets(db))
         try:
             mapping_result = None
@@ -3082,10 +3306,19 @@ def resolve_event_assets(
 
             existing_report = get_event_research_for_event(db, event.id)
             if refresh_event_report and existing_report is not None:
+                if force_web_search:
+                    update_full_event_research(
+                        existing_report,
+                        status="running",
+                        stage="deep_research",
+                        summary="股票映射已完成，正在排队执行深度研究与联网搜索。",
+                    )
+                    save_event_research_run(db, existing_report)
                 task_id, run = enqueue_event_research_refresh(
                     db,
                     event,
                     existing_report,
+                    force_web_search=force_web_search,
                 )
             else:
                 task_id, run = enqueue_event_report(db, event)
@@ -3141,7 +3374,39 @@ def resolve_event_assets(
                     exc=exc,
                     countdown=min(60, 2 ** (self.request.retries + 1)),
                 ) from exc
-            report_task_id, report_run = enqueue_event_report(db, event)
+            existing_report = get_event_research_for_event(db, event.id)
+            if refresh_event_report and existing_report is not None:
+                if force_web_search:
+                    update_full_event_research(
+                        existing_report,
+                        status="running",
+                        stage="deep_research",
+                        summary=(
+                            "股票映射最终失败，已记录技术警告并继续执行深度研究与联网搜索。"
+                        ),
+                        metrics={"asset_mapping_error": type(exc).__name__},
+                    )
+                    save_event_research_run(db, existing_report)
+                try:
+                    report_task_id, report_run = enqueue_event_research_refresh(
+                        db,
+                        event,
+                        existing_report,
+                        force_web_search=force_web_search,
+                    )
+                except Exception as queue_exc:
+                    if force_web_search:
+                        update_full_event_research(
+                            existing_report,
+                            status="failed",
+                            stage="deep_research",
+                            summary="深度研究入队失败，已保留原研报。",
+                            error=f"{type(queue_exc).__name__}: {queue_exc}",
+                        )
+                        save_event_research_run(db, existing_report)
+                    raise
+            else:
+                report_task_id, report_run = enqueue_event_report(db, event)
             return {
                 "status": "event_research_queued_after_mapping_failure",
                 "event_id": event_id,
@@ -3159,6 +3424,7 @@ def research_event(
     event_id: str,
     run_id: str,
     model_instance_id: str | None = None,
+    force_web_search: bool = False,
 ) -> dict:
     init_db()
     try:
@@ -3192,10 +3458,22 @@ def research_event(
             settings=settings,
         ):
             try:
-                result = EventResearchService(db).run(event, run)
+                result = EventResearchService(db).run(
+                    event,
+                    run,
+                    force_web_search=force_web_search,
+                )
                 persisted = get_event_research_run(db, run.id)
                 if persisted and persisted.status is RunStatus.CANCELLED:
                     return persisted.model_dump(mode="json")
+                if force_web_search:
+                    update_full_event_research(
+                        result,
+                        status="completed",
+                        stage="completed",
+                        summary="事件抽取、股票映射、深度研究与联网搜索已全部完成。",
+                    )
+                    save_event_research_run(db, result)
                 notifier.send(
                     f"事件研究完成：{event.headline}\n"
                     f"证据{'完整' if result.report and result.report.evidence_complete else '不足'}"
@@ -3222,6 +3500,19 @@ def research_event(
                 retrying = self.request.retries < self.max_retries
                 run.status = RunStatus.QUEUED if retrying else RunStatus.FAILED
                 run.error = f"{type(exc).__name__}: {exc}"
+                if force_web_search:
+                    update_full_event_research(
+                        run,
+                        status="retrying" if retrying else "failed",
+                        stage="deep_research",
+                        summary=(
+                            "深度研究暂时失败，等待重试。"
+                            if retrying
+                            else "深度研究最终失败，已保留原研报。"
+                        ),
+                        error=f"{type(exc).__name__}: {exc}",
+                        metrics={"attempt": self.request.retries + 1},
+                    )
                 run.analysis_steps.append(
                     AnalysisStep(
                         phase="event_research_failed",

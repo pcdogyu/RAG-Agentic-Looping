@@ -41,6 +41,7 @@ from backend.app.domain import (
     as_utc,
     utc_now,
 )
+from backend.app.services.event_refresh import public_full_event_research
 from backend.app.services.fact_sources import (
     BUILTIN_SOURCE_GROUPS,
     FACT_SOURCE_GROUPS,
@@ -821,6 +822,13 @@ _VISIBLE_EVENT_STATUSES = {
     RunStatus.COMPLETED.value,
     RunStatus.INSUFFICIENT_EVIDENCE.value,
 }
+_EVENT_REFRESH_FEED_STATUSES = {
+    *_VISIBLE_EVENT_STATUSES,
+    RunStatus.QUEUED.value,
+    RunStatus.RUNNING.value,
+    RunStatus.VERIFYING.value,
+    RunStatus.FAILED.value,
+}
 _MACRO_TARGET_TYPES = {
     TargetType.ECONOMY,
     TargetType.SUPPLY_VOLUME,
@@ -939,7 +947,7 @@ def list_research_conclusions(
         event_rows = list(
             db.scalars(
                 select(EventResearchRunRow).where(
-                    EventResearchRunRow.status.in_(_VISIBLE_EVENT_STATUSES)
+                    EventResearchRunRow.status.in_(_EVENT_REFRESH_FEED_STATUSES)
                 )
             ).all()
         )
@@ -954,6 +962,9 @@ def list_research_conclusions(
             run = EventResearchRun.model_validate(row.payload)
             report = run.report
             if report is None:
+                continue
+            refresh = public_full_event_research(run)
+            if row.status not in _VISIBLE_EVENT_STATUSES and refresh is None:
                 continue
             representative_impact = _representative_event_impact(report)
             if not _matches_evidence_status(report.evidence_complete, evidence_status):
@@ -988,6 +999,7 @@ def list_research_conclusions(
                         }
                     ),
                     "recommendation": None,
+                    "refresh": refresh,
                     "report": {
                         "confidence": report.confidence,
                         "news_confidence": report.news_confidence,
@@ -1043,6 +1055,7 @@ def get_event_conclusion(run_id: UUID, db: Db) -> dict[str, Any]:
     news = [get_news(db, news_id) for news_id in (event.news_item_ids if event else [])]
     return {
         "run": run.model_dump(mode="json"),
+        "refresh": public_full_event_research(run),
         "event": event.model_dump(mode="json") if event else None,
         "report": run.report.model_dump(mode="json"),
         "news": [item.model_dump(mode="json") for item in news if item],

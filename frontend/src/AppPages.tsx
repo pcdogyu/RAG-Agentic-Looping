@@ -1269,6 +1269,7 @@ export type EventTargetImpact = {
 
 export type EventConclusionDetail = {
   run: { id: string; status: string; updated_at: string };
+  refresh?: EventResearchRefresh | null;
   event: { id: string; headline: string; event_type: string } | null;
   report: {
     summary: string;
@@ -1300,6 +1301,7 @@ export type ResearchConclusionItem = {
   asset: Recommendation["asset"] | null;
   event: { id: string; headline: string; event_type: string } | null;
   recommendation: Recommendation | null;
+  refresh?: EventResearchRefresh | null;
   report: {
     confidence: number;
     news_confidence: number;
@@ -1310,6 +1312,12 @@ export type ResearchConclusionItem = {
     affected_sectors: string[];
     scoring_version: string;
   } | null;
+};
+
+export type EventResearchRefresh = {
+  status: "queued" | "running" | "retrying" | "failed";
+  stage: "event_extraction" | "asset_mapping" | "deep_research" | "web_search";
+  error: string | null;
 };
 
 export type TargetChange = {
@@ -1374,6 +1382,7 @@ export type EventConclusionResearchResponse = {
   run_id: string;
   source_run_id: string;
   status: "queued";
+  stage: "event_extraction";
 };
 
 export const conclusionResearchPath = (recommendationId: string) =>
@@ -1623,12 +1632,24 @@ export type ConclusionResearchState = {
   error?: string;
 };
 
+export function eventRefreshResearchState(
+  refresh?: EventResearchRefresh | null,
+): ConclusionResearchState | undefined {
+  if (!refresh) return undefined;
+  if (refresh.status === "failed") {
+    return { status: "error", error: refresh.error || "完整重新研究失败" };
+  }
+  return { status: "queued" };
+}
+
 export function ResearchAgainButton({
   state,
   onResearch,
+  label = "重新调研",
 }: {
   state?: ConclusionResearchState;
   onResearch: () => void;
+  label?: string;
 }) {
   const pending = state?.status === "pending";
   const queued = state?.status === "queued";
@@ -1638,8 +1659,8 @@ export function ResearchAgainButton({
       className="research-again"
       disabled={pending || queued}
       onClick={onResearch}
-    >{pending ? "重新调研中…" : queued ? "已进入队列" : "重新调研"}</button>
-    {state?.status === "error" && <small role="alert">{state.error || "重新调研失败"}</small>}
+    >{pending ? `${label}中…` : queued ? "已进入队列" : label}</button>
+    {state?.status === "error" && <small role="alert">{state.error || `${label}失败`}</small>}
   </div>;
 }
 
@@ -1916,10 +1937,14 @@ const eventConclusionStatusLabels: Record<string, string> = {
 
 export function EventConclusionCard({
   item,
+  researchState,
   onOpen,
+  onResearch,
 }: {
   item: ResearchConclusionItem;
+  researchState?: ConclusionResearchState;
   onOpen: () => void;
+  onResearch: () => void;
 }) {
   const report = item.report;
   const score = report?.direction_score;
@@ -1932,14 +1957,17 @@ export function EventConclusionCard({
         <strong>{item.title}</strong>
         <p>{item.summary}</p>
       </div>
-      <div className={`event-conclusion-summary ${scoreTone}`}>
+    </button>
+    <div className="event-conclusion-side">
+      <button type="button" className={`event-conclusion-summary ${scoreTone}`} onClick={onOpen} aria-label={`查看 ${item.title} 事件研报评分`}>
         <strong>{score === null || score === undefined
           ? "— · 暂无评级"
           : `${score > 0 ? "+" : ""}${score} · ${rating ? recommendationRatingLabel(rating) : "暂无评级"}`}</strong>
         <span>影响目标 {report?.impact_count ?? 0} 个</span>
         <small>新闻可信度 {Math.round((report?.news_confidence ?? 0) * 100)}% · 研报置信度 {Math.round((report?.confidence ?? 0) * 100)}%</small>
-      </div>
-    </button>
+      </button>
+      <ResearchAgainButton state={researchState} onResearch={onResearch} label="重新研究" />
+    </div>
   </article>;
 }
 
@@ -2319,6 +2347,16 @@ export function ConclusionsPage({ apiBase }: { apiBase: string }) {
       if (!response.ok) throw new Error("结论请求失败");
       const payload = await response.json() as { items: ResearchConclusionItem[]; next_cursor: string | null };
       setItems((current) => append ? [...current, ...payload.items] : payload.items);
+      setResearchStates((current) => {
+        const next = { ...current };
+        for (const item of payload.items) {
+          if (item.kind !== "event") continue;
+          const state = eventRefreshResearchState(item.refresh);
+          if (state) next[item.id] = state;
+          else if (next[item.id]?.status === "queued") delete next[item.id];
+        }
+        return next;
+      });
       cursorRef.current = payload.next_cursor;
       setCursor(payload.next_cursor); setError("");
     } catch (reason) {
@@ -2414,6 +2452,25 @@ export function ConclusionsPage({ apiBase }: { apiBase: string }) {
       researchInFlight.current.delete(assetId);
     }
   }
+
+  async function researchEventAgain(item: ResearchConclusionItem) {
+    const runId = item.id;
+    if (researchInFlight.current.has(runId) || researchStates[runId]?.status === "queued") return;
+    researchInFlight.current.add(runId);
+    setResearchStates((current) => ({ ...current, [runId]: { status: "pending" } }));
+    try {
+      await researchEventConclusion(apiBase, runId);
+      setResearchStates((current) => ({ ...current, [runId]: { status: "queued" } }));
+      await load(false, true);
+    } catch (reason) {
+      setResearchStates((current) => ({
+        ...current,
+        [runId]: { status: "error", error: reason instanceof Error ? reason.message : "完整重新研究失败" },
+      }));
+    } finally {
+      researchInFlight.current.delete(runId);
+    }
+  }
   return (
     <section className="app-page conclusions-page">
       <PageHeading eyebrow="RESEARCH OUTCOMES" title="研究结论" copy="新研究按事件类型使用 30、90 或 180 个自然日评级周期；新闻可信度与评级置信度独立计算。" />
@@ -2438,7 +2495,13 @@ export function ConclusionsPage({ apiBase }: { apiBase: string }) {
                   onOpen={() => void open(item)}
                   onResearch={() => void researchAgain(item.recommendation as Recommendation)}
                 />
-                : <EventConclusionCard key={`${item.kind}-${item.id}`} item={item} onOpen={() => void open(item)} />)}
+                : <EventConclusionCard
+                  key={`${item.kind}-${item.id}`}
+                  item={item}
+                  researchState={researchStates[item.id] ?? eventRefreshResearchState(item.refresh)}
+                  onOpen={() => void open(item)}
+                  onResearch={() => void researchEventAgain(item)}
+                />)}
               {!items.length && !error && (loading
                 ? <div className="page-message">正在加载研究结论…</div>
                 : <div className="page-empty">当前筛选范围内没有事件或标的结论。</div>)}

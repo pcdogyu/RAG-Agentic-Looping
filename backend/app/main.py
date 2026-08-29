@@ -37,6 +37,7 @@ from backend.app.llm import gateway
 from backend.app.model_audit import audit_detail, list_model_audits, model_usage
 from backend.app.providers.registry import ProviderRegistry
 from backend.app.services.asset_universe import AssetUniverseService
+from backend.app.services.event_refresh import full_event_research_is_active
 from backend.app.services.events import EventService
 from backend.app.services.evolution import EvolutionError, EvolutionService
 from backend.app.services.fact_sources import get_effective_settings
@@ -99,8 +100,8 @@ from backend.app.worker import (
     celery_app,
     clear_news_extraction_queue,
     enqueue_asset_mapping,
-    enqueue_event_research_refresh,
     enqueue_event_research_retry,
+    enqueue_full_event_research,
     enqueue_news_extraction_retry,
     enqueue_research,
     enqueue_scan,
@@ -1411,6 +1412,15 @@ def research_event_conclusion_again(
         run = get_event_research_run(db, run_id)
         if run is None:
             raise HTTPException(404, "event conclusion not found")
+        if full_event_research_is_active(run):
+            raise HTTPException(
+                409,
+                {
+                    "code": "event_research_already_active",
+                    "message": "该事件已有完整重新研究任务正在执行。",
+                    "active_run_id": str(run.id),
+                },
+            )
         if run.status in {
             RunStatus.QUEUED,
             RunStatus.RUNNING,
@@ -1427,6 +1437,7 @@ def research_event_conclusion_again(
         if run.status not in {
             RunStatus.COMPLETED,
             RunStatus.INSUFFICIENT_EVIDENCE,
+            RunStatus.FAILED,
         }:
             raise HTTPException(409, "event conclusion is not refreshable")
         if run.report is None:
@@ -1434,12 +1445,21 @@ def research_event_conclusion_again(
         event = get_event(db, run.event_id)
         if event is None:
             raise HTTPException(409, "source event no longer exists")
-        task_id, refreshed = enqueue_event_research_refresh(db, event, run)
+        available_news = [
+            news_id for news_id in event.news_item_ids if get_news(db, news_id) is not None
+        ]
+        if not available_news:
+            raise HTTPException(
+                409,
+                "该事件没有可用的关联原始新闻，无法执行完整重新研究。",
+            )
+        task_id, refreshed = enqueue_full_event_research(db, event, run)
         return {
             "task_id": task_id,
             "run_id": str(refreshed.id),
             "source_run_id": str(run_id),
             "status": "queued",
+            "stage": "event_extraction",
         }
 
 
