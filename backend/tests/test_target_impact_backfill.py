@@ -12,14 +12,16 @@ from backend.app.domain import (
     RunStatus,
     SourceQuality,
 )
-from backend.app.services.macro_impacts import TARGET_SCORING_VERSION
 from backend.app.storage import (
     get_event_research_for_event,
     save_event,
     save_event_research_run,
     save_news,
 )
-from backend.app.target_impact_backfill import reprocess_target_impacts
+from backend.app.target_impact_backfill import (
+    BACKFILL_SCORING_VERSION,
+    reprocess_target_impacts,
+)
 
 
 def test_target_v2_backfill_is_previewable_point_in_time_and_idempotent(db, monkeypatch):
@@ -97,7 +99,7 @@ def test_target_v2_backfill_is_previewable_point_in_time_and_idempotent(db, monk
     queued.status = RunStatus.COMPLETED
     queued.report = EventReport(
         summary="v2 逐目标报告",
-        scoring_version=TARGET_SCORING_VERSION,
+        scoring_version=BACKFILL_SCORING_VERSION,
     )
     save_event_research_run(db, queued)
     complete = reprocess_target_impacts(apply=False, batch_size=10, max_active=10)

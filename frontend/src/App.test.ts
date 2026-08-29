@@ -313,6 +313,50 @@ describe("analysis mapping states", () => {
     expect(markup).not.toContain("程序原始分");
   });
 
+  it("renders v3 analysis with three core values and a dynamic natural-day horizon", () => {
+    const log = {
+      id: "v3-log",
+      event_id: "event-v3",
+      run_id: "run-v3",
+      event_research_run_id: null,
+      status: "completed",
+      updated_at: "2026-08-29T01:00:00Z",
+      news: [],
+      event: { headline: "并购正式宣布", event_type: "m_and_a", direct_impact: "整合预期", priority: 0.8 },
+      asset: { symbol: "ACME", name: "Acme", market: "US" },
+      models: ["qwen2.5:7b"],
+      steps: [],
+      result: {
+        kind: "asset_recommendation",
+        rating: "strongly_bullish",
+        score: 75,
+        direction_score: 75,
+        confidence: 0.78,
+        rating_confidence: 0.78,
+        news_confidence: 0.93,
+        score_source: "llm",
+        evidence_complete: true,
+        directional_evidence_complete: true,
+        signal_status: "directional",
+        scoring_version: "llm-direction-v3",
+        horizon_unit: "calendar_days",
+        horizon_days: 180,
+        summary: "并购传导路径明确。",
+      },
+    } satisfies AnalysisLog;
+
+    const markup = renderToStaticMarkup(createElement(AnalysisTraceList, { logs: [log] }));
+
+    expect(markup).toContain("方向分");
+    expect(markup).toContain("+75");
+    expect(markup).toContain("新闻可信度");
+    expect(markup).toContain("93%");
+    expect(markup).toContain("评级置信度");
+    expect(markup).toContain("78%");
+    expect(markup).toContain("未来 180 个自然日");
+    expect(markup).not.toContain("未来 1–3 个交易日");
+  });
+
   it("renders a completed target-impact report with neutral untradeable details", () => {
     const log = {
       id: "event-log",
@@ -524,7 +568,7 @@ describe("changed targets page", () => {
     expect(markup).not.toContain("方向证据不足");
     expect(markup).not.toContain("方向信号");
     expect(markup).not.toContain("未变");
-    expect(markup).toContain("观望");
+    expect(markup).toContain("中性");
     expect(markup).toContain("看空");
     expect(markup).toContain("看多");
     expect(markup).toContain("强烈看多");

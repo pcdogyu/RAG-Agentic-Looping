@@ -1530,9 +1530,24 @@ def _analysis_logs(db: Session, limit: int) -> list[dict]:
                     "kind": "asset_recommendation",
                     "rating": recommendation.rating.value,
                     "score": recommendation.score,
+                    "direction_score": recommendation.direction_score,
                     "raw_score": recommendation.raw_score,
                     "confidence": recommendation.confidence,
+                    "rating_confidence": recommendation.rating_confidence,
                     "fact_confidence": recommendation.fact_confidence,
+                    "news_confidence": recommendation.news_confidence,
+                    "news_confidence_factors": (
+                        recommendation.news_confidence_factors.model_dump(mode="json")
+                        if recommendation.news_confidence_factors
+                        else None
+                    ),
+                    "rating_confidence_factors": (
+                        recommendation.rating_confidence_factors.model_dump(mode="json")
+                        if recommendation.rating_confidence_factors
+                        else None
+                    ),
+                    "mapping_distance": recommendation.mapping_distance,
+                    "score_source": recommendation.score_source.value,
                     "scoring_version": recommendation.scoring_version,
                     "horizon_unit": recommendation.horizon_unit.value,
                     "horizon_days": recommendation.horizon_days,
@@ -1553,6 +1568,12 @@ def _analysis_logs(db: Session, limit: int) -> list[dict]:
                     {
                         "kind": "event_report",
                         "confidence": report.confidence,
+                        "news_confidence": report.news_confidence,
+                        "news_confidence_factors": (
+                            report.news_confidence_factors.model_dump(mode="json")
+                            if report.news_confidence_factors
+                            else None
+                        ),
                         "evidence_complete": report.evidence_complete,
                         "summary": report.summary,
                         "affected_markets": report.affected_markets,

@@ -621,6 +621,82 @@ def _market_factors(
                     "industry_return_pct": round(industry_return, 6),
                 },
             )
+
+    if horizon_days is not None and post:
+        target_day = event_day + timedelta(days=horizon_days)
+        horizon_points = [item for item in post if item.timestamp.date() <= target_day]
+        if not horizon_points:
+            missing.append(f"market_reaction:{horizon_days}cd_window_incomplete")
+            return points, baseline
+        endpoint = horizon_points[-1]
+        asset_return = _percent_change(baseline.close, endpoint.close)
+        horizon_inputs = {
+            "market_timezone": market_timezone,
+            "event_session_date": event_day.isoformat(),
+            "horizon_days": horizon_days,
+            "horizon_target_date": target_day.isoformat(),
+            "window_complete": as_of_local.date() >= target_day,
+            "start_close": baseline.close,
+            "end_close": endpoint.close,
+        }
+        _append_factor(
+            factors,
+            key=f"asset_return_horizon_{horizon_days}cd_pct",
+            category=FactorCategory.MARKET_REACTION,
+            label=f"事件后{horizon_days}个自然日周期内收益",
+            value=asset_return,
+            unit="percent",
+            confidence=0.9,
+            description="事件前收盘至对应评级周期内当前可观察终点的标的收益率",
+            source_keys=["market"],
+            window_start=baseline.timestamp,
+            window_end=endpoint.timestamp,
+            inputs=horizon_inputs,
+        )
+        benchmark_return = _return_between(
+            benchmark, baseline.timestamp.date(), endpoint.timestamp.date()
+        )
+        if asset_return is not None and benchmark_return is not None:
+            _append_factor(
+                factors,
+                key=f"excess_vs_benchmark_horizon_{horizon_days}cd_pct",
+                category=FactorCategory.RELATIVE_PERFORMANCE,
+                label=f"{horizon_days}自然日周期内相对基准收益",
+                value=asset_return - benchmark_return,
+                unit="percentage_points",
+                confidence=0.9,
+                description="标的在对应评级周期内的收益减去同窗口市场基准收益",
+                source_keys=["market", "benchmark"],
+                window_start=baseline.timestamp,
+                window_end=endpoint.timestamp,
+                inputs={
+                    **horizon_inputs,
+                    "asset_return_pct": round(asset_return, 6),
+                    "benchmark_return_pct": round(benchmark_return, 6),
+                },
+            )
+        industry_return = _return_between(
+            industry, baseline.timestamp.date(), endpoint.timestamp.date()
+        )
+        if asset_return is not None and industry_return is not None:
+            _append_factor(
+                factors,
+                key=f"excess_vs_industry_horizon_{horizon_days}cd_pct",
+                category=FactorCategory.RELATIVE_PERFORMANCE,
+                label=f"{horizon_days}自然日周期内相对行业收益",
+                value=asset_return - industry_return,
+                unit="percentage_points",
+                confidence=0.85,
+                description="标的在对应评级周期内的收益减去同窗口行业组合收益",
+                source_keys=["market", "industry"],
+                window_start=baseline.timestamp,
+                window_end=endpoint.timestamp,
+                inputs={
+                    **horizon_inputs,
+                    "asset_return_pct": round(asset_return, 6),
+                    "industry_return_pct": round(industry_return, 6),
+                },
+            )
     return points, baseline
 
 

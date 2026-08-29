@@ -10,11 +10,11 @@ from sqlalchemy import select
 from backend.app.db import EventResearchRunRow, EventRow, SessionLocal, init_db
 from backend.app.domain import AnalysisStep, EventResearchRun, RunStatus
 from backend.app.services.events import EventService
-from backend.app.services.macro_impacts import TARGET_SCORING_VERSION
 from backend.app.services.model_instances import broker_queue_name, select_model_instance
 from backend.app.storage import get_event, get_news, save_event, save_event_research_run
 
 BACKFILL_PHASE = "target_impact_v2_replay"
+BACKFILL_SCORING_VERSION = "target-transmission-v2"
 ACTIVE_STATUSES = {RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.VERIFYING}
 
 
@@ -22,7 +22,7 @@ def _is_v2(run: EventResearchRun | None) -> bool:
     return bool(
         run
         and run.report
-        and run.report.scoring_version == TARGET_SCORING_VERSION
+        and run.report.scoring_version == BACKFILL_SCORING_VERSION
     )
 
 
@@ -73,7 +73,7 @@ def reprocess_target_impacts(
         selected = available_rows[: min(batch_size, capacity)]
         summary: dict[str, Any] = {
             "dry_run": not apply,
-            "scoring_version": TARGET_SCORING_VERSION,
+            "scoring_version": BACKFILL_SCORING_VERSION,
             "pending": len(pending_rows),
             "failed": failures,
             "active": active,
@@ -146,7 +146,7 @@ def reprocess_target_impacts(
                     phase=BACKFILL_PHASE,
                     status="queued",
                     executor="target-impact-backfill",
-                    model=TARGET_SCORING_VERSION,
+                    model=BACKFILL_SCORING_VERSION,
                     summary="已按原 as_of 创建点时逐目标 v2 后继运行；实时搜索和当前基本面已禁用。",
                     metrics={
                         "historical_replay": True,

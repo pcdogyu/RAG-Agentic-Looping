@@ -25,6 +25,7 @@ from backend.app.providers.registry import (
     explicit_symbol_present,
     query_mentions_issuer,
 )
+from backend.app.services.confidence_v3 import event_horizon_days
 from backend.app.services.source_lineage import enrich_news_lineage, normalize_text, source_group
 from backend.app.storage import (
     event_news_item_ids,
@@ -384,7 +385,7 @@ class EventService:
             entities=extracted.entities,
             actions=extracted.actions,
             direct_impact=extracted.direct_impact,
-            horizon_days=extracted.horizon_days,
+            horizon_days=event_horizon_days(extracted.event_type),
             source_quality=item.source_quality,
             published_at=item.published_at,
             observed_at=item.observed_at,

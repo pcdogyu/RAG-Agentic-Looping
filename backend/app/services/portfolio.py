@@ -17,6 +17,7 @@ from backend.app.domain import (
     Position,
     Rating,
     Recommendation,
+    ScoreSource,
     utc_now,
 )
 from backend.app.providers.registry import ProviderRegistry
@@ -130,7 +131,17 @@ class PortfolioService:
     ) -> PaperOrder:
         if recommendation.asset.asset_class not in {AssetClass.EQUITY, AssetClass.CRYPTO}:
             raise PortfolioError("paper execution is not supported for commodity or FX assets")
-        if recommendation.scoring_version == "target-transmission-v2":
+        if recommendation.scoring_version == "llm-direction-v3":
+            if (
+                recommendation.score_source is not ScoreSource.LLM
+                or recommendation.impact is None
+                or not recommendation.impact.execution_supported
+                or recommendation.impact.trade_status.value != "tradeable"
+                or (recommendation.direction_score or recommendation.score) < 30
+                or not recommendation.evidence_complete
+            ):
+                raise PortfolioError("recommendation does not meet the v3 trading gate")
+        elif recommendation.scoring_version == "target-transmission-v2":
             if (
                 recommendation.impact is None
                 or not recommendation.impact.execution_supported

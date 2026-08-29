@@ -1495,7 +1495,7 @@ def enqueue_target_researches(
     historical_replay: bool = False,
     as_of: datetime | None = None,
 ) -> list[tuple[str, ResearchRun]]:
-    """Queue only verified tools whose target impact passed the v2 trade gate."""
+    """Queue only verified tools whose target impact passed the current trade gate."""
 
     queued: list[tuple[str, ResearchRun]] = []
     for impact in report.impacts:
@@ -1510,7 +1510,7 @@ def enqueue_target_researches(
             if (
                 previous
                 and previous.recommendation
-                and previous.recommendation.scoring_version == "target-transmission-v2"
+                and previous.recommendation.scoring_version == "llm-direction-v3"
             ):
                 continue
             queued.append(
@@ -1522,7 +1522,7 @@ def enqueue_target_researches(
                     historical_replay=historical_replay,
                     retry_of_run_id=(previous.id if historical_replay and previous else None),
                     force_research=historical_replay,
-                    queue_phase=("target_impact_v2_replay" if historical_replay else None),
+                    queue_phase=("direction_v3_replay" if historical_replay else None),
                 )
             )
         except ResearchAdmissionError:

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import Field
 from sqlalchemy.orm import Session
 
 from backend.app.config import Settings, get_settings
@@ -20,10 +19,18 @@ from backend.app.domain import (
     utc_now,
 )
 from backend.app.llm import LlmGateway, gateway
+from backend.app.services.confidence_v3 import (
+    NEWS_CONFIDENCE_VERSION,
+    RATING_CONFIDENCE_VERSION,
+    event_horizon_days,
+    news_confidence_score,
+)
 from backend.app.services.macro_impacts import (
     TARGET_SCORING_VERSION,
     EventImpactDraft,
+    ModelEventImpactDraft,
     finalize_impacts,
+    internal_event_draft,
     public_rule_catalog,
     rule_based_event_draft,
 )
@@ -34,7 +41,7 @@ from backend.app.storage import get_news, list_assets, save_event_research_run
 
 
 class EventReportDraft(EventImpactDraft):
-    confidence: float = Field(default=0.3, ge=0, le=1)
+    pass
 
 
 class EventResearchService:
@@ -50,6 +57,7 @@ class EventResearchService:
 
     def run(self, event: NewsEvent, queued_run: EventResearchRun) -> EventResearchRun:
         run = queued_run
+        event.horizon_days = event_horizon_days(event.event_type)
         run.status = RunStatus.RUNNING
         run.error = None
         run.evidence = self._build_evidence(run, event)
@@ -92,7 +100,7 @@ class EventResearchService:
                     + (f" 模型不可用（{draft_error}），当前为保守结果。" if draft_error else "")
                 ),
                 metrics={
-                    "confidence": draft.confidence,
+                    "direction_scores": [item.direction_score for item in draft.impacts],
                     "citation_count": len(draft.evidence_ids),
                 },
             )
@@ -157,7 +165,6 @@ class EventResearchService:
             except Exception as exc:
                 revision_error = type(exc).__name__
                 run.retryable_reason = f"model_{revision_error}"
-                draft.confidence = min(draft.confidence, 0.5)
             run.analysis_steps.append(
                 AnalysisStep(
                     phase="event_report_revision",
@@ -190,13 +197,19 @@ class EventResearchService:
             and step.status in {"failed", "fallback"}
             for step in event.analysis_steps
         )
-        macro_factors, impacts, fact_confidence, missing_information = finalize_impacts(
+        macro_factors, impacts, _, missing_information = finalize_impacts(
             draft,
             event=event,
             evidence=run.evidence,
             assets=self._asset_map(event),
             technical_failure=technical_failure,
         )
+        news_items = [
+            item
+            for news_id in event.news_item_ids
+            if (item := get_news(self.db, news_id)) is not None
+        ]
+        news_score = news_confidence_score(event, run.evidence, news_items)
         if not complete:
             impacts = [
                 item.model_copy(
@@ -221,10 +234,14 @@ class EventResearchService:
             risks=draft.risks,
             unresolved_questions=draft.unresolved_questions,
             evidence_ids=[valid_ids[item] for item in draft.evidence_ids if item in valid_ids],
-            confidence=draft.confidence if complete else min(draft.confidence, 0.54),
+            confidence=news_score.confidence,
             evidence_complete=complete,
             scoring_version=TARGET_SCORING_VERSION,
-            fact_confidence=fact_confidence,
+            fact_confidence=news_score.confidence,
+            news_confidence=news_score.confidence,
+            news_confidence_version=NEWS_CONFIDENCE_VERSION,
+            news_confidence_factors=news_score.factors,
+            rating_confidence_version=RATING_CONFIDENCE_VERSION,
             macro_factors=macro_factors,
             impacts=impacts,
             trade_status=(
@@ -266,7 +283,6 @@ class EventResearchService:
         return EventReportDraft.model_validate(
             {
                 **draft.model_dump(mode="json"),
-                "confidence": min(0.45, len(run.evidence) * 0.1),
             }
         )
 
@@ -376,7 +392,9 @@ class EventResearchService:
             "生成最多 6 个互不重复的目标影响；每个方向必须对应 target_name，禁止全局方向、"
             "全局 score 或全局 rating。直接证券候选最多 3 个并优先占用目标名额。"
             "summary 只总结证据支持的事件事实，不得包含资产方向、分数、评级或交易结论。"
-            "只输出传导六因子与置信四因子，最终分数、评级和可交易状态由程序计算。"
+            "每个目标只输出一个 direction_score（-100 到 100）作为最终数值判断；"
+            "不得输出评级、概率、新闻可信度、评级置信度或任何置信因子。"
+            "评级和两种置信度全部由程序计算。"
             "asset_id 只能从允许工具中选择；宏观目标没有真实工具时保持空。"
             "只能引用给定 evidence_ids 和 actions.id。未知制裁范围、生效日、支付结算、"
             "港口航运、实际供应或市场反应必须写入 missing_information。"
@@ -386,12 +404,13 @@ class EventResearchService:
             lane="research",
             system="你是证据优先的目标传导研究员；先判断对谁，再判断可交易资产路径。",
             prompt=prompt,
-            schema=EventReportDraft,
+            schema=ModelEventImpactDraft,
             operation="event_report_drafting",
             entity_type="event_research_run",
             entity_id=run.id,
         )
-        return EventReportDraft.model_validate(payload)
+        internal = internal_event_draft(ModelEventImpactDraft.model_validate(payload))
+        return EventReportDraft.model_validate(internal.model_dump(mode="json"))
 
     def _revise(
         self,
@@ -412,12 +431,13 @@ class EventResearchService:
             lane="research",
             system="你是逐目标事件研报修订器，只能使用给定证据。",
             prompt=prompt,
-            schema=EventReportDraft,
+            schema=ModelEventImpactDraft,
             operation="event_report_revision",
             entity_type="event_research_run",
             entity_id=run.id,
         )
-        return EventReportDraft.model_validate(payload)
+        internal = internal_event_draft(ModelEventImpactDraft.model_validate(payload))
+        return EventReportDraft.model_validate(internal.model_dump(mode="json"))
 
     @staticmethod
     def _verify(
@@ -505,7 +525,7 @@ class EventResearchService:
                 [
                     item.target_name,
                     item.rating.value,
-                    f"{item.score:+.2f}",
+                    f"{(item.direction_score or 0):+d}",
                     f"{item.confidence:.0%}",
                     " → ".join(item.transmission_path) or "—",
                     item.trade_status.value,
@@ -518,12 +538,12 @@ class EventResearchService:
         content = (
             f"# {event.headline}\n\n"
             f"- 类型：{event.event_type.value}\n"
-            f"- 置信度：{report.confidence:.0%}\n"
+            f"- 新闻可信度：{(report.news_confidence or 0):.0%}\n"
             f"- 证据完整：{'是' if report.evidence_complete else '否'}\n"
             f"- 截止时间：{run.as_of.isoformat()}\n\n"
             f"## 事件摘要\n\n{report.summary}\n\n"
             "## 逐目标影响\n\n"
-            "| 目标 | 评级 | 分数 | 方向置信度 | 传导路径 | 可交易状态 | 缺失信息 |\n"
+            "| 目标 | 评级 | 方向分 | 评级置信度 | 传导路径 | 可交易状态 | 缺失信息 |\n"
             "|---|---:|---:|---:|---|---|---|\n"
             f"{impact_rows}\n\n"
             "## 受影响市场与行业\n\n"

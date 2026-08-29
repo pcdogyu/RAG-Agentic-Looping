@@ -1067,13 +1067,22 @@ type ScoringFactor = {
   evidence_ids: string[];
 };
 
+type SystemConfidenceFactor = {
+  value: number;
+  reason: string;
+  evidence_ids: string[];
+};
+
 export type Recommendation = {
   id: string;
   run_id: string;
   asset: { asset_id: string; symbol: string; name: string; market: string };
   rating: string;
   score: number | null;
+  direction_score?: number | null;
   confidence: number;
+  rating_confidence?: number;
+  news_confidence?: number;
   evidence_complete: boolean;
   directional_evidence_complete?: boolean;
   direction_verified?: boolean;
@@ -1104,6 +1113,23 @@ export type Recommendation = {
     market_context_completeness: ScoringFactor;
   };
   fact_confidence?: number;
+  news_confidence_factors?: {
+    source_reliability: SystemConfidenceFactor;
+    originality: SystemConfidenceFactor;
+    cross_verification: SystemConfidenceFactor;
+    clarity: SystemConfidenceFactor;
+    timeliness_completeness: SystemConfidenceFactor;
+  };
+  rating_confidence_factors?: {
+    mapping_strength: SystemConfidenceFactor;
+    causality_certainty: SystemConfidenceFactor;
+    historical_pattern: SystemConfidenceFactor;
+    impact_scale: SystemConfidenceFactor;
+    timing_certainty: SystemConfidenceFactor;
+    market_consistency: SystemConfidenceFactor;
+  };
+  mapping_distance?: number;
+  score_source?: "llm" | "rule_fallback";
   evidence_warnings?: string[];
   scoring_version?: string;
   calibration_version?: string;
@@ -1317,7 +1343,7 @@ export function conclusionReferences(
 }
 
 const ratingLabels: Record<string, string> = {
-  strongly_bullish: "强烈看多", bullish: "看多", watch: "观望", bearish: "看空", strongly_bearish: "强烈看空",
+  strongly_bullish: "强烈看多", bullish: "看多", watch: "中性", bearish: "看空", strongly_bearish: "强烈看空",
 };
 
 export function recommendationRatingLabel(value: string) {
@@ -1341,18 +1367,22 @@ const modelDirectionLabels: Record<string, string> = {
 const modelRatingLabels: Record<string, string> = {
   strongly_bullish: "强烈看多 / Strongly bullish",
   bullish: "看多 / Bullish",
-  watch: "观望 / Watch",
+  watch: "中性 / Neutral",
   bearish: "看空 / Bearish",
   strongly_bearish: "强烈看空 / Strongly bearish",
 };
 
 export function ConclusionScore({
   score, rating, confidence, evidenceComplete, directionalEvidenceComplete, signalStatus,
-  factConfidence, horizonDays, horizonUnit, scoringVersion,
+  factConfidence, horizonDays, horizonUnit, scoringVersion, directionScore,
+  newsConfidence, ratingConfidence, scoreSource,
 }: {
   score: number | null;
+  directionScore?: number | null;
   rating: string;
   confidence: number;
+  newsConfidence?: number;
+  ratingConfidence?: number;
   evidenceComplete: boolean;
   directionalEvidenceComplete?: boolean;
   signalStatus?: string;
@@ -1360,18 +1390,25 @@ export function ConclusionScore({
   horizonDays?: number;
   horizonUnit?: string;
   scoringVersion?: string;
+  scoreSource?: "llm" | "rule_fallback";
 }) {
+  const isV3 = scoringVersion === "llm-direction-v3";
+  const publishedScore = directionScore ?? score ?? 0;
   const resolvedStatus = signalStatus || (
-    !evidenceComplete ? "insufficient_evidence" : (Math.abs(score ?? 0) < 20 ? "neutral" : "directional")
+    isV3
+      ? (Math.abs(publishedScore) < 30 ? "neutral" : "directional")
+      : (!evidenceComplete ? "insufficient_evidence" : (Math.abs(publishedScore) < 20 ? "neutral" : "directional"))
   );
   const shortTerm = scoringVersion === "short-term-impact-v1" || horizonUnit === "trading_sessions";
-  const publishedScore = score ?? 0;
-  const scoreBlocked = score === null || resolvedStatus === "insufficient_evidence" || resolvedStatus === "technical_failure";
-  const scoreTone = scoreBlocked ? "neutral" : publishedScore <= -15 ? "negative" : publishedScore >= 15 ? "positive" : "neutral";
+  const scoreBlocked = !isV3 && (score === null || resolvedStatus === "insufficient_evidence" || resolvedStatus === "technical_failure");
+  const positiveThreshold = isV3 ? 30 : 15;
+  const scoreTone = scoreBlocked ? "neutral" : publishedScore <= -positiveThreshold ? "negative" : publishedScore >= positiveThreshold ? "positive" : "neutral";
   return <div className={`conclusion-score ${scoreTone}`}>
-    <strong>{scoreBlocked ? "暂不评分" : `${shortTerm ? "影响分" : "发布分"}：${publishedScore > 0 ? "+" : ""}${publishedScore}`}</strong>
-    <span>{signalStatusLabels[resolvedStatus] || resolvedStatus} · {shortTerm ? "五档评级" : "评级"}：{recommendationRatingLabel(rating)}</span>
-    {shortTerm && !scoreBlocked
+    <strong>{scoreBlocked ? "暂不评分" : `${isV3 ? "方向分" : shortTerm ? "影响分" : "发布分"}：${publishedScore > 0 ? "+" : ""}${publishedScore}`}</strong>
+    <span>{signalStatusLabels[resolvedStatus] || resolvedStatus} · {isV3 ? "五级评级" : shortTerm ? "五档评级" : "评级"}：{recommendationRatingLabel(rating)}{isV3 && scoreSource === "rule_fallback" ? " · 规则回退" : ""}</span>
+    {isV3
+      ? <small>新闻可信度 {Math.round((newsConfidence ?? factConfidence ?? 0) * 100)}% · 评级置信度 {Math.round((ratingConfidence ?? confidence) * 100)}% · 未来 {horizonDays ?? 90} 个自然日</small>
+      : shortTerm && !scoreBlocked
       ? <small>新闻事实置信度 {Math.round((factConfidence ?? confidence) * 100)}% · 评级置信度 {Math.round(confidence * 100)}% · 未来 1–{horizonDays ?? 3} 个交易日</small>
       : <small>
         {scoreBlocked ? "门禁后参考置信度" : "发布置信度"} {Math.round(confidence * 100)}% · 资料覆盖{evidenceComplete ? "完整" : "不足"}
@@ -1443,6 +1480,45 @@ function FactorEvidence({ factor }: { factor: ScoringFactor }) {
     {factor.reason && <p>{factor.reason}</p>}
     {!!factor.evidence_ids?.length && <small>证据：{factor.evidence_ids.join("、")}</small>}
   </>;
+}
+
+function SystemFactorEvidence({ factor }: { factor: SystemConfidenceFactor }) {
+  return <>
+    {factor.reason && <p>{factor.reason}</p>}
+    {!!factor.evidence_ids?.length && <small>依据证据：{factor.evidence_ids.join("、")}</small>}
+  </>;
+}
+
+export function V3ConfidenceDetails({ recommendation }: { recommendation: Recommendation }) {
+  const news = recommendation.news_confidence_factors;
+  const rating = recommendation.rating_confidence_factors;
+  if (!news && !rating) return null;
+  const newsDefinitions: Array<[string, string, number, SystemConfidenceFactor]> = news ? [
+    ["S", "信息源可靠性", 30, news.source_reliability],
+    ["P", "原始性", 20, news.originality],
+    ["V", "多源交叉验证", 20, news.cross_verification],
+    ["C", "信息明确程度", 15, news.clarity],
+    ["T", "时效性与完整性", 15, news.timeliness_completeness],
+  ] : [];
+  const ratingDefinitions: Array<[string, string, number, SystemConfidenceFactor]> = rating ? [
+    ["M", "标的映射强度", 25, rating.mapping_strength],
+    ["C", "因果确定性", 20, rating.causality_certainty],
+    ["H", "历史规律", 15, rating.historical_pattern],
+    ["I", "影响规模", 15, rating.impact_scale],
+    ["T", "时间确定性", 10, rating.timing_certainty],
+    ["K", "市场一致性", 15, rating.market_consistency],
+  ] : [];
+  const factorGrid = (definitions: Array<[string, string, number, SystemConfidenceFactor]>) => <div className="score-factor-grid confidence-factor-grid">
+    {definitions.map(([code, label, weight, factor]) => <article key={`${code}-${label}`}>
+      <span>{code} · {label}</span>
+      <strong>{Math.round(factor.value * weight)} / {weight}</strong>
+      <SystemFactorEvidence factor={factor} />
+    </article>)}
+  </div>;
+  return <section className="short-term-score-details v3-confidence-details">
+    {news && <><h3>新闻可信度五因子</h3><p className="score-formula">30%S + 20%P + 20%V + 15%C + 15%T</p>{factorGrid(newsDefinitions)}</>}
+    {rating && <><h3>评级置信度六因子</h3><p className="score-formula">25%M + 20%C + 15%H + 15%I + 10%T + 15%K · 映射距离 L{recommendation.mapping_distance ?? 5}</p>{factorGrid(ratingDefinitions)}</>}
+  </section>;
 }
 
 export function ShortTermScoreDetails({ recommendation }: { recommendation: Recommendation }) {
@@ -1633,8 +1709,11 @@ export function ConclusionCard({
       <div className="conclusion-card-copy"><span>{item.asset.market} · {new Date(item.as_of).toLocaleString("zh-CN")}</span><strong>{item.asset.symbol} · {item.asset.name}</strong><p>{item.thesis.summary}</p></div>
       <ConclusionScore
         score={item.score}
+        directionScore={item.direction_score}
         rating={item.rating}
         confidence={item.confidence}
+        newsConfidence={item.news_confidence}
+        ratingConfidence={item.rating_confidence}
         evidenceComplete={item.evidence_complete}
         directionalEvidenceComplete={item.directional_evidence_complete}
         signalStatus={item.signal_status}
@@ -1642,6 +1721,7 @@ export function ConclusionCard({
         horizonDays={item.horizon_days}
         horizonUnit={item.horizon_unit}
         scoringVersion={item.scoring_version}
+        scoreSource={item.score_source}
       />
     </button>
     <ResearchAgainButton state={researchState} onResearch={onResearch} />
@@ -1713,6 +1793,7 @@ export function ChangedTargetsContent({
 }
 
 export function ConclusionDetailModal({ detail, onClose }: { detail: ConclusionDetail; onClose: () => void }) {
+  const isV3 = detail.recommendation.scoring_version === "llm-direction-v3";
   const isShortTerm = detail.recommendation.scoring_version === "short-term-impact-v1"
     || detail.recommendation.horizon_unit === "trading_sessions";
   return <div className="modal-backdrop" onClick={onClose}>
@@ -1722,8 +1803,11 @@ export function ConclusionDetailModal({ detail, onClose }: { detail: ConclusionD
       <h2>{detail.recommendation.asset.name}</h2>
       <ConclusionScore
         score={detail.recommendation.score}
+        directionScore={detail.recommendation.direction_score}
         rating={detail.recommendation.rating}
         confidence={detail.recommendation.confidence}
+        newsConfidence={detail.recommendation.news_confidence}
+        ratingConfidence={detail.recommendation.rating_confidence}
         evidenceComplete={detail.recommendation.evidence_complete}
         directionalEvidenceComplete={detail.recommendation.directional_evidence_complete}
         signalStatus={detail.recommendation.signal_status}
@@ -1731,12 +1815,20 @@ export function ConclusionDetailModal({ detail, onClose }: { detail: ConclusionD
         horizonDays={detail.recommendation.horizon_days}
         horizonUnit={detail.recommendation.horizon_unit}
         scoringVersion={detail.recommendation.scoring_version}
+        scoreSource={detail.recommendation.score_source}
       />
-      <p className="score-explanation">{isShortTerm
+      <p className="score-explanation">{isV3
+        ? "方向分是模型唯一数值判断；五级评级、新闻可信度和评级置信度均由系统独立计算，缺失信息只降低对应置信因子。"
+        : isShortTerm
         ? "影响分按 D × (45M + 25T + 15I + 15C) 计算；证据质量核验只降低置信度，不改变方向或隐藏评分。"
         : "该历史结论沿用原评分与证据门禁规则；证据不足记录继续暂不评分，供追溯和重新调研。"}</p>
-      <ModelOpinion direction={detail.recommendation.model_direction} rating={detail.recommendation.model_rating} confidence={detail.recommendation.model_confidence} />
-      {isShortTerm
+      {!isV3 && <ModelOpinion direction={detail.recommendation.model_direction} rating={detail.recommendation.model_rating} confidence={detail.recommendation.model_confidence} />}
+      {isV3
+        ? <>
+          <V3ConfidenceDetails recommendation={detail.recommendation} />
+          <div className="probability-grid"><span>牛市 <strong>{Math.round(detail.recommendation.bull_probability * 100)}%</strong></span><span>中性 <strong>{Math.round(detail.recommendation.base_probability * 100)}%</strong></span><span>熊市 <strong>{Math.round(detail.recommendation.bear_probability * 100)}%</strong></span></div>
+        </>
+        : isShortTerm
         ? <ShortTermScoreDetails recommendation={detail.recommendation} />
         : <>
           <div className="probability-grid"><span>看多 <strong>{Math.round(detail.recommendation.bull_probability * 100)}%</strong></span><span>基准 <strong>{Math.round(detail.recommendation.base_probability * 100)}%</strong></span><span>看空 <strong>{Math.round(detail.recommendation.bear_probability * 100)}%</strong></span></div>
@@ -1753,7 +1845,7 @@ export function ConclusionDetailModal({ detail, onClose }: { detail: ConclusionD
       <h3>催化剂</h3><ul>{detail.recommendation.thesis.catalysts.map((item) => <li key={item}>{item}</li>)}</ul>
       <h3>风险</h3><ul>{detail.recommendation.thesis.risks.map((item) => <li key={item}>{item}</li>)}</ul>
       <h3>失效条件</h3><ul>{detail.recommendation.thesis.invalidation_conditions.map((item) => <li key={item}>{item}</li>)}</ul>
-      {!!detail.recommendation.claim_assessments?.length && <><h3>{isShortTerm ? "逐观点证据核验" : "逐观点证据门禁"}</h3><div className="claim-assessments">{detail.recommendation.claim_assessments.map((item, index) => <article key={`${item.claim_kind}-${index}`}><span>{item.claim_kind} · {item.verdict}</span><strong>{item.claim}</strong><small>复核置信度 {Math.round(item.confidence * 100)}%{item.reason ? ` · ${item.reason}` : ""}</small></article>)}</div></>}
+      {!!detail.recommendation.claim_assessments?.length && <><h3>{isV3 || isShortTerm ? "逐观点证据核验" : "逐观点证据门禁"}</h3><div className="claim-assessments">{detail.recommendation.claim_assessments.map((item, index) => <article key={`${item.claim_kind}-${index}`}><span>{item.claim_kind} · {item.verdict}</span><strong>{item.claim}</strong><small>证据核验 {Math.round(item.confidence * 100)}%{item.reason ? ` · ${item.reason}` : ""}</small></article>)}</div></>}
       {detail.event && <><h3>关联事件</h3><p>{detail.event.headline}</p></>}
       <h3>新闻与证据</h3><div className="evidence-links">{conclusionReferences(detail).map((item) => <a key={`${item.url}-${item.label}`} href={item.url} target="_blank" rel="noreferrer"><strong>{item.label}</strong><span>{item.source}</span></a>)}</div>
     </article>
@@ -1972,7 +2064,7 @@ export function ConclusionsPage({ apiBase }: { apiBase: string }) {
   }
   return (
     <section className="app-page conclusions-page">
-      <PageHeading eyebrow="RESEARCH OUTCOMES" title="研究结论" copy="新研究按未来 1–3 个交易日评估；证据质量只降低置信度，不再隐藏、归零或强制改成观望。" />
+      <PageHeading eyebrow="RESEARCH OUTCOMES" title="研究结论" copy="新研究按事件类型使用 30、90 或 180 个自然日评级周期；新闻可信度与评级置信度独立计算。" />
       <form className="page-filters" onSubmit={(e) => { e.preventDefault(); load(); }}>
         <input aria-label="搜索结论" placeholder="标的、代码或核心观点" value={filters.q} onChange={(e) => setFilters({ ...filters, q: e.target.value })} />
         <select aria-label="市场" value={filters.market} onChange={(e) => setFilters({ ...filters, market: e.target.value })}><option value="">全部市场</option><option value="US">美股</option><option value="CN">A股</option><option value="HK">港股</option><option value="CRYPTO">加密</option></select>

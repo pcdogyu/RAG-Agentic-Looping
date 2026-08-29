@@ -360,7 +360,7 @@ def test_fmp_parses_commodity_and_fx_master_lists(monkeypatch):
     assert assets["CLUSD"].market is Market.COMMODITY
     assert assets["EURUSD"].asset_class is AssetClass.FX
     assert assets["EURUSD"].market is Market.FX
-    assert TARGET_SCORING_VERSION == "target-transmission-v2"
+    assert TARGET_SCORING_VERSION == "llm-direction-v3"
 
 
 def test_fmp_parses_macro_quote_list_payload(monkeypatch):

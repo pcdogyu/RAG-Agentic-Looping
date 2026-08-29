@@ -254,9 +254,10 @@ class OutcomeService:
             (forecast - realized) ** 2
             for forecast, realized in zip(predicted, actual, strict=True)
         ) / 3
-        if abs(recommendation.score) < 15:
+        neutral_threshold = 30 if recommendation.scoring_version == "llm-direction-v3" else 15
+        if abs(recommendation.direction_score or recommendation.score) < neutral_threshold:
             direction_correct = abs(raw_return) <= neutral_band
-        elif recommendation.score > 0:
+        elif (recommendation.direction_score or recommendation.score) > 0:
             direction_correct = raw_return > neutral_band
         else:
             direction_correct = raw_return < -neutral_band

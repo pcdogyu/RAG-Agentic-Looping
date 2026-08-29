@@ -4,7 +4,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from backend.app.domain import (
     ActionStage,
@@ -15,6 +15,7 @@ from backend.app.domain import (
     MacroFactor,
     MacroFactorType,
     NewsEvent,
+    ScoreSource,
     SourceQuality,
     TargetConfidenceFactors,
     TargetImpact,
@@ -22,16 +23,22 @@ from backend.app.domain import (
     TradeStatus,
     TransmissionFactors,
 )
+from backend.app.services.confidence_v3 import (
+    RATING_CONFIDENCE_VERSION,
+    SCORING_VERSION,
+    event_horizon_days,
+    rating_confidence_score,
+    rating_for_direction_score,
+)
 from backend.app.services.directional_scoring import (
-    target_confidence_score,
     target_transmission_score,
 )
 
-TARGET_SCORING_VERSION = "target-transmission-v2"
-TARGET_CONFIDENCE_VERSION = "target-component-confidence-v2"
+TARGET_SCORING_VERSION = SCORING_VERSION
+TARGET_CONFIDENCE_VERSION = RATING_CONFIDENCE_VERSION
 MAX_TARGET_IMPACTS = 6
 MAX_DIRECT_TARGETS = 3
-TRADE_SCORE_THRESHOLD = 0.25
+TRADE_SCORE_THRESHOLD = 30
 TRADE_CONFIDENCE_THRESHOLD = 0.55
 
 
@@ -65,6 +72,7 @@ class TargetImpactDraft(BaseModel):
     target_name: str
     asset_id: str | None = None
     action_id: str | None = None
+    direction_score: int | None = Field(default=None, ge=-100, le=100)
     direction: int = Field(default=0, ge=-1, le=1)
     factors: TransmissionFactors = Field(default_factory=TransmissionFactors)
     confidence_factors: TargetConfidenceFactors = Field(
@@ -89,6 +97,65 @@ class EventImpactDraft(BaseModel):
     macro_factors: list[MacroFactorDraft] = Field(default_factory=list, max_length=12)
     impacts: list[TargetImpactDraft] = Field(default_factory=list, max_length=MAX_TARGET_IMPACTS)
     missing_information: list[str] = Field(default_factory=list)
+
+
+class ModelTargetImpactDraft(BaseModel):
+    """The v3 LLM contract: direction score is its only numeric conclusion."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    target_type: TargetType
+    target_name: str
+    asset_id: str | None = None
+    action_id: str | None = None
+    direction_score: int = Field(ge=-100, le=100)
+    macro_factor_ids: list[str] = Field(default_factory=list)
+    transmission_path: list[str] = Field(default_factory=list)
+    rationale: str = ""
+    evidence_ids: list[str] = Field(default_factory=list)
+    missing_information: list[str] = Field(default_factory=list)
+
+
+class ModelMacroFactorDraft(BaseModel):
+    """Text-only macro context; the model does not assign numeric strength."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    factor_type: MacroFactorType
+    name: str
+    description: str
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class ModelEventImpactDraft(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    summary: str
+    affected_markets: list[str] = Field(default_factory=list)
+    affected_sectors: list[str] = Field(default_factory=list)
+    scenarios: list[str] = Field(default_factory=list)
+    catalysts: list[str] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+    unresolved_questions: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
+    macro_factors: list[ModelMacroFactorDraft] = Field(default_factory=list, max_length=12)
+    impacts: list[ModelTargetImpactDraft] = Field(
+        default_factory=list, max_length=MAX_TARGET_IMPACTS
+    )
+    missing_information: list[str] = Field(default_factory=list)
+
+
+def internal_event_draft(value: ModelEventImpactDraft) -> EventImpactDraft:
+    payload = value.model_dump(mode="json")
+    payload["macro_factors"] = [
+        MacroFactorDraft(**item, strength=0).model_dump(mode="json")
+        for item in payload["macro_factors"]
+    ]
+    payload["impacts"] = [
+        TargetImpactDraft(**item).model_dump(mode="json") for item in payload["impacts"]
+    ]
+    return EventImpactDraft.model_validate(payload)
 
 
 _SOURCE_WEIGHTS = {
@@ -214,27 +281,41 @@ def finalize_impacts(
         )
         factors = item.factors.model_copy(update={"event_strength": event_strength})
         missing = _dedupe_strings([*item.missing_information, *action_missing])
-        score = target_transmission_score(
+        legacy_score = target_transmission_score(
             direction=item.direction,
             **factors.model_dump(),
         )
-        confidence = target_confidence_score(
-            fact_confidence=fact_confidence,
-            direction_clarity=item.confidence_factors.direction_clarity,
-            source_reliability=item.confidence_factors.source_reliability,
-            transmission_certainty=item.confidence_factors.transmission_certainty,
-            market_context_completeness=(
-                item.confidence_factors.market_context_completeness
-            ),
-        ).confidence
+        score_points = item.direction_score
+        if score_points is None:
+            score_points = legacy_score.score_points
+        if technical_failure:
+            score_points = max(-69, min(69, score_points))
         referenced_evidence = [
             valid_ids[value] for value in item.evidence_ids if value in valid_ids
         ]
         if not referenced_evidence:
             missing = _dedupe_strings([*missing, "impact_evidence"])
+        candidate = next(
+            (
+                value
+                for value in event.candidates
+                if asset is not None and value.asset.asset_id == asset.asset_id
+            ),
+            None,
+        )
+        confidence_score = rating_confidence_score(
+            direction_score=score_points,
+            event=event,
+            candidate=candidate,
+            transmission_path=item.transmission_path,
+            cited_evidence_ids=referenced_evidence,
+            evidence=evidence,
+            missing_information=missing,
+        )
+        confidence = confidence_score.confidence
         tradeable = bool(
             asset
-            and abs(score.score) >= TRADE_SCORE_THRESHOLD
+            and score_points >= TRADE_SCORE_THRESHOLD
             and confidence >= TRADE_CONFIDENCE_THRESHOLD
             and not missing
             and not technical_failure
@@ -244,12 +325,20 @@ def finalize_impacts(
                 target_type=item.target_type,
                 target_name=item.target_name,
                 asset=asset,
-                direction=item.direction,
-                score=score.score,
-                rating=score.rating,
+                direction=1 if score_points > 0 else -1 if score_points < 0 else 0,
+                score=score_points / 100,
+                direction_score=score_points,
+                rating=rating_for_direction_score(score_points),
                 confidence=confidence,
+                rating_confidence=confidence,
                 factors=factors,
                 confidence_factors=item.confidence_factors,
+                rating_confidence_factors=confidence_score.factors,
+                mapping_distance=confidence_score.mapping_distance,
+                score_source=(
+                    ScoreSource.RULE_FALLBACK if technical_failure else ScoreSource.LLM
+                ),
+                horizon_days=event_horizon_days(event.event_type),
                 macro_factor_ids=[
                     value for value in item.macro_factor_ids if value in factor_ids
                 ],
@@ -299,20 +388,23 @@ def _impact(
     asset: AssetRef | None = None,
     macro_factor_ids: list[str] | None = None,
 ) -> TargetImpactDraft:
+    transmission = TransmissionFactors(
+        event_strength=factors[0],
+        target_relevance=factors[1],
+        transmission_directness=factors[2],
+        realization_probability=factors[3],
+        novelty=factors[4],
+        persistence=factors[5],
+    )
+    score = target_transmission_score(direction=direction, **transmission.model_dump())
     return TargetImpactDraft(
         target_type=target_type,
         target_name=target_name,
         asset_id=asset.asset_id if asset else None,
         action_id=action.id,
+        direction_score=score.score_points,
         direction=direction,
-        factors=TransmissionFactors(
-            event_strength=factors[0],
-            target_relevance=factors[1],
-            transmission_directness=factors[2],
-            realization_probability=factors[3],
-            novelty=factors[4],
-            persistence=factors[5],
-        ),
+        factors=transmission,
         confidence_factors=TargetConfidenceFactors(
             direction_clarity=confidence[0],
             source_reliability=confidence[1],

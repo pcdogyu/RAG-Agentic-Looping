@@ -130,6 +130,11 @@ class TradeStatus(StrEnum):
     TRADEABLE = "tradeable"
 
 
+class ScoreSource(StrEnum):
+    LLM = "llm"
+    RULE_FALLBACK = "rule_fallback"
+
+
 class HorizonUnit(StrEnum):
     CALENDAR_DAYS = "calendar_days"
     TRADING_SESSIONS = "trading_sessions"
@@ -285,12 +290,19 @@ class TargetImpact(BaseModel):
     asset: AssetRef | None = None
     direction: int = Field(default=0, ge=-1, le=1)
     score: float = Field(default=0, ge=-1, le=1)
+    direction_score: int | None = Field(default=None, ge=-100, le=100)
     rating: Rating = Rating.WATCH
     confidence: float = Field(default=0, ge=0, le=1)
+    rating_confidence: float | None = Field(default=None, ge=0, le=1)
     factors: TransmissionFactors = Field(default_factory=TransmissionFactors)
     confidence_factors: TargetConfidenceFactors = Field(
         default_factory=TargetConfidenceFactors
     )
+    rating_confidence_factors: RatingConfidenceFactorsV3 | None = None
+    mapping_distance: int = Field(default=5, ge=0, le=5)
+    score_source: ScoreSource = ScoreSource.LLM
+    horizon_days: int = Field(default=90, ge=1, le=730)
+    horizon_unit: HorizonUnit = HorizonUnit.CALENDAR_DAYS
     macro_factor_ids: list[str] = Field(default_factory=list)
     transmission_path: list[str] = Field(default_factory=list)
     rationale: str = ""
@@ -299,6 +311,14 @@ class TargetImpact(BaseModel):
     trade_status: TradeStatus = TradeStatus.UNTRADEABLE
     execution_supported: bool = False
     technical_failure: bool = False
+
+    @model_validator(mode="after")
+    def synchronize_v3_aliases(self) -> TargetImpact:
+        if self.direction_score is None:
+            self.direction_score = max(-100, min(100, round(self.score * 100)))
+        if self.rating_confidence is None:
+            self.rating_confidence = self.confidence
+        return self
 
 
 class AnalysisStep(BaseModel):
@@ -391,6 +411,55 @@ class ScoringFactor(BaseModel):
     evidence_ids: list[UUID] = Field(default_factory=list)
 
 
+class SystemConfidenceFactor(BaseModel):
+    """One deterministic confidence input and its user-facing audit basis."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    value: float = Field(default=0, ge=0, le=1)
+    reason: str = ""
+    evidence_ids: list[UUID] = Field(default_factory=list)
+
+
+class NewsConfidenceFactors(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_reliability: SystemConfidenceFactor = Field(
+        default_factory=SystemConfidenceFactor
+    )
+    originality: SystemConfidenceFactor = Field(default_factory=SystemConfidenceFactor)
+    cross_verification: SystemConfidenceFactor = Field(
+        default_factory=SystemConfidenceFactor
+    )
+    clarity: SystemConfidenceFactor = Field(default_factory=SystemConfidenceFactor)
+    timeliness_completeness: SystemConfidenceFactor = Field(
+        default_factory=SystemConfidenceFactor
+    )
+
+
+class RatingConfidenceFactorsV3(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mapping_strength: SystemConfidenceFactor = Field(
+        default_factory=SystemConfidenceFactor
+    )
+    causality_certainty: SystemConfidenceFactor = Field(
+        default_factory=SystemConfidenceFactor
+    )
+    historical_pattern: SystemConfidenceFactor = Field(
+        default_factory=SystemConfidenceFactor
+    )
+    impact_scale: SystemConfidenceFactor = Field(
+        default_factory=SystemConfidenceFactor
+    )
+    timing_certainty: SystemConfidenceFactor = Field(
+        default_factory=SystemConfidenceFactor
+    )
+    market_consistency: SystemConfidenceFactor = Field(
+        default_factory=SystemConfidenceFactor
+    )
+
+
 class ImpactFactors(BaseModel):
     """Inputs to the versioned 1-3 trading-session impact formula."""
 
@@ -419,6 +488,7 @@ class Recommendation(BaseModel):
     run_id: UUID
     asset: AssetRef
     score: int = Field(ge=-100, le=100)
+    direction_score: int | None = Field(default=None, ge=-100, le=100)
     # `model_score` is retained only for audit. `raw_score` and `score` are
     # calculated by deterministic program logic.
     model_score: int | None = Field(default=None, ge=-100, le=100)
@@ -428,6 +498,7 @@ class Recommendation(BaseModel):
     raw_score: int = Field(default=0, ge=-100, le=100)
     rating: Rating
     confidence: float = Field(ge=0, le=1)
+    rating_confidence: float | None = Field(default=None, ge=0, le=1)
     bull_probability: float = Field(ge=0, le=1)
     base_probability: float = Field(ge=0, le=1)
     bear_probability: float = Field(ge=0, le=1)
@@ -436,6 +507,12 @@ class Recommendation(BaseModel):
     impact_factors: ImpactFactors | None = None
     confidence_factors: ConfidenceFactors | None = None
     fact_confidence: float | None = Field(default=None, ge=0, le=1)
+    news_confidence: float | None = Field(default=None, ge=0, le=1)
+    news_confidence_version: str | None = None
+    news_confidence_factors: NewsConfidenceFactors | None = None
+    rating_confidence_factors: RatingConfidenceFactorsV3 | None = None
+    mapping_distance: int = Field(default=5, ge=0, le=5)
+    score_source: ScoreSource = ScoreSource.LLM
     evidence_warnings: list[str] = Field(default_factory=list)
     valuation_low: float | None = None
     valuation_high: float | None = None
@@ -461,7 +538,13 @@ class Recommendation(BaseModel):
         if abs(total - 1.0) > 0.02:
             raise ValueError("bull/base/bear probabilities must sum to 1")
         if self.signal_status is None:
-            if self.scoring_version == "short-term-impact-v1":
+            if self.scoring_version == "llm-direction-v3":
+                self.signal_status = (
+                    SignalStatus.NEUTRAL
+                    if abs(self.direction_score or self.score) < 30
+                    else SignalStatus.DIRECTIONAL
+                )
+            elif self.scoring_version == "short-term-impact-v1":
                 self.signal_status = (
                     SignalStatus.NEUTRAL
                     if abs(self.score) < 15
@@ -477,6 +560,12 @@ class Recommendation(BaseModel):
             # Backward-compatible read of recommendations stored before raw
             # and final scores were separated.
             self.raw_score = self.score
+        if self.direction_score is None:
+            self.direction_score = self.score
+        if self.rating_confidence is None:
+            self.rating_confidence = self.confidence
+        if self.news_confidence is None:
+            self.news_confidence = self.fact_confidence
         if self.model_score is not None:
             # Backfill display-safe model opinion labels for recommendations
             # stored before these fields were introduced.
@@ -542,10 +631,20 @@ class EventReport(BaseModel):
     evidence_complete: bool = False
     scoring_version: str = "event-report-v1"
     fact_confidence: float = Field(default=0, ge=0, le=1)
+    news_confidence: float | None = Field(default=None, ge=0, le=1)
+    news_confidence_version: str | None = None
+    news_confidence_factors: NewsConfidenceFactors | None = None
+    rating_confidence_version: str | None = None
     macro_factors: list[MacroFactor] = Field(default_factory=list)
     impacts: list[TargetImpact] = Field(default_factory=list, max_length=6)
     trade_status: TradeStatus = TradeStatus.UNTRADEABLE
     missing_information: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def synchronize_news_confidence(self) -> EventReport:
+        if self.news_confidence is None:
+            self.news_confidence = self.fact_confidence
+        return self
 
 
 class EventResearchRun(BaseModel):

@@ -16,8 +16,14 @@ type TargetImpact = {
   asset: { symbol: string; name: string; asset_class: string } | null;
   direction: -1 | 0 | 1;
   score: number;
+  direction_score?: number;
   rating: string;
   confidence: number;
+  rating_confidence?: number;
+  mapping_distance?: number;
+  score_source?: "llm" | "rule_fallback";
+  horizon_days?: number;
+  horizon_unit?: "calendar_days" | "trading_sessions";
   transmission_path: string[];
   rationale: string;
   missing_information: string[];
@@ -42,8 +48,12 @@ export type AnalysisLog = {
     kind: "asset_recommendation";
     rating: string;
     score: number;
+    direction_score?: number;
     raw_score?: number;
     confidence: number;
+    rating_confidence?: number;
+    news_confidence?: number;
+    score_source?: "llm" | "rule_fallback";
     evidence_complete: boolean;
     directional_evidence_complete?: boolean;
     signal_status?: "technical_failure" | "insufficient_evidence" | "neutral" | "directional";
@@ -56,6 +66,7 @@ export type AnalysisLog = {
   } | {
     kind: "event_report";
     confidence: number;
+    news_confidence?: number;
     evidence_complete: boolean;
     summary: string;
     affected_markets: string[];
@@ -209,8 +220,13 @@ export function AnalysisTraceList({ logs }: { logs: AnalysisLog[] }) {
           {log.result?.kind === "asset_recommendation" ? <div className="trace-result">
             <div><span>信号状态</span><strong>{labels[log.result.signal_status || ""] || "旧版结论"}</strong></div>
             <div><span>最终结果</span><strong>{labels[log.result.rating] || log.result.rating}</strong></div>
-            <div><span>{log.result.scoring_version === "target-transmission-v2" ? "目标影响分" : "影响分"}</span><strong>{log.result.score > 0 ? "+" : ""}{log.result.score}</strong></div>
-            {log.result.scoring_version === "short-term-impact-v1" ? <>
+            <div><span>{log.result.scoring_version === "llm-direction-v3" ? "方向分" : log.result.scoring_version === "target-transmission-v2" ? "目标影响分" : "影响分"}</span><strong>{(log.result.direction_score ?? log.result.score) > 0 ? "+" : ""}{log.result.direction_score ?? log.result.score}</strong></div>
+            {log.result.scoring_version === "llm-direction-v3" ? <>
+              <div><span>新闻可信度</span><strong>{Math.round((log.result.news_confidence ?? log.result.fact_confidence ?? 0) * 100)}%</strong></div>
+              <div><span>评级置信度</span><strong>{Math.round((log.result.rating_confidence ?? log.result.confidence) * 100)}%</strong></div>
+              <div><span>评级周期</span><strong>未来 {log.result.horizon_days ?? 90} 个自然日</strong></div>
+              <div><span>分数来源</span><strong>{log.result.score_source === "rule_fallback" ? "规则回退" : "大模型"}</strong></div>
+            </> : log.result.scoring_version === "short-term-impact-v1" ? <>
               <div><span>新闻事实置信度</span><strong>{Math.round((log.result.fact_confidence ?? log.result.confidence) * 100)}%</strong></div>
               <div><span>评级置信度</span><strong>{Math.round(log.result.confidence * 100)}%</strong></div>
               <div><span>研究期限</span><strong>未来 1–{log.result.horizon_days ?? 3} 个交易日</strong></div>
@@ -224,17 +240,18 @@ export function AnalysisTraceList({ logs }: { logs: AnalysisLog[] }) {
           </div> : log.result?.kind === "event_report" ? <div className="trace-result event-report-result">
             <div><span>研报类型</span><strong>逐目标宏观传导</strong></div>
             <div><span>事件状态</span><strong>{labels[log.result.trade_status || "untradeable"]}</strong></div>
-            <div><span>事实置信度</span><strong>{Math.round((log.result.fact_confidence ?? log.result.confidence) * 100)}%</strong></div>
+            <div><span>新闻可信度</span><strong>{Math.round((log.result.news_confidence ?? log.result.fact_confidence ?? log.result.confidence) * 100)}%</strong></div>
             <div><span>证据</span><strong>{log.result.evidence_complete ? "完整" : "不足"}</strong></div>
             <p><b>事实摘要：</b>{log.result.summary}</p>
             <div className="target-impact-scroll">
               <table className="target-impact-table">
-                <thead><tr><th>目标</th><th>方向</th><th>分数</th><th>置信度</th><th>传导路径</th><th>状态</th><th>缺失信息</th></tr></thead>
+                <thead><tr><th>目标</th><th>方向</th><th>方向分</th><th>评级置信度</th><th>评级周期</th><th>传导路径</th><th>状态</th><th>缺失信息</th></tr></thead>
                 <tbody>{(log.result.impacts || []).map((impact) => <tr key={`${impact.target_type}-${impact.asset?.symbol || impact.target_name}`}>
                   <td><strong>{impact.target_name}</strong>{impact.asset && <small>{impact.asset.symbol}</small>}</td>
                   <td>{labels[impact.rating] || impact.rating}</td>
-                  <td>{impact.score > 0 ? "+" : ""}{impact.score.toFixed(2)}</td>
-                  <td>{Math.round(impact.confidence * 100)}%</td>
+                  <td>{(impact.direction_score ?? Math.round(impact.score * 100)) > 0 ? "+" : ""}{impact.direction_score ?? Math.round(impact.score * 100)}</td>
+                  <td>{Math.round((impact.rating_confidence ?? impact.confidence) * 100)}%</td>
+                  <td>未来 {impact.horizon_days ?? 90} 个自然日</td>
                   <td>{impact.transmission_path.join(" → ") || "—"}</td>
                   <td>{labels[impact.trade_status]}</td>
                   <td>{impact.missing_information.join("、") || "—"}</td>

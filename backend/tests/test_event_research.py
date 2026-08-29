@@ -12,8 +12,8 @@ from backend.app.domain import (
     TargetType,
 )
 from backend.app.main import _analysis_logs
-from backend.app.services.event_research import EventReportDraft, EventResearchService
-from backend.app.services.macro_impacts import TargetImpactDraft
+from backend.app.services.event_research import EventResearchService
+from backend.app.services.macro_impacts import ModelEventImpactDraft
 from backend.app.services.mcp_registry import SearchResult
 from backend.app.storage import (
     list_event_research_runs,
@@ -24,28 +24,29 @@ from backend.app.storage import (
 
 
 class EventResearchLlm:
-    def generate_json(self, *, prompt, **kwargs):
+    def generate_json(self, *, prompt, schema, **kwargs):
         evidence_id = re.search(r'"id":\s*"([0-9a-f-]{36})"', prompt).group(1)
-        return EventReportDraft(
-            summary="该事件可能影响区域风险偏好，但当前只有一个聚合来源。",
-            affected_markets=["亚洲市场"],
-            affected_sectors=["供应链"],
-            scenarios=["事态缓和", "维持现状", "进一步升级"],
-            catalysts=["新增官方通报"],
-            risks=["单一来源可能不完整"],
-            unresolved_questions=["是否有独立来源确认"],
-            evidence_ids=[evidence_id],
-            impacts=[
-                TargetImpactDraft(
-                    target_type=TargetType.OTHER,
-                    target_name="区域风险偏好",
-                    rationale="证据尚不足以绑定交易工具。",
-                    evidence_ids=[evidence_id],
-                    missing_information=["tradable_asset_path"],
-                )
-            ],
-            confidence=0.72,
-        ).model_dump(mode="json")
+        payload = {
+            "summary": "该事件可能影响区域风险偏好，但当前只有一个聚合来源。",
+            "affected_markets": ["亚洲市场"],
+            "affected_sectors": ["供应链"],
+            "scenarios": ["事态缓和", "维持现状", "进一步升级"],
+            "catalysts": ["新增官方通报"],
+            "risks": ["单一来源可能不完整"],
+            "unresolved_questions": ["是否有独立来源确认"],
+            "evidence_ids": [evidence_id],
+            "impacts": [{
+                "target_type": TargetType.OTHER.value,
+                "target_name": "区域风险偏好",
+                "direction_score": 0,
+                "transmission_path": ["供应链事件", "区域风险偏好"],
+                "rationale": "证据尚不足以绑定交易工具。",
+                "evidence_ids": [evidence_id],
+                "missing_information": ["tradable_asset_path"],
+            }],
+        }
+        assert schema is ModelEventImpactDraft
+        return schema.model_validate(payload).model_dump(mode="json")
 
 
 class AllEvidenceEventResearchLlm(EventResearchLlm):
@@ -56,12 +57,17 @@ class AllEvidenceEventResearchLlm(EventResearchLlm):
 
 
 class EvidenceOnlyEventResearchLlm(EventResearchLlm):
+    def __init__(self):
+        self.evidence_ids_by_call = []
+
     def generate_json(self, *, prompt, **kwargs):
         payload = super().generate_json(prompt=prompt, **kwargs)
         evidence_payload = prompt.split("证据：", 1)[-1]
-        payload["evidence_ids"] = re.findall(
+        evidence_ids = re.findall(
             r'"id":\s*"([0-9a-f-]{36})"', evidence_payload
         )
+        self.evidence_ids_by_call.append(evidence_ids)
+        payload["evidence_ids"] = evidence_ids
         return payload
 
 
@@ -110,7 +116,10 @@ def test_event_report_is_neutral_and_marks_single_source_evidence_incomplete(db,
 
     assert result.status.value == "insufficient_evidence"
     assert result.report is not None
-    assert result.report.confidence == 0.54
+    assert result.report.news_confidence == 0.61
+    assert result.report.news_confidence_version == "news-confidence-v1"
+    assert result.report.rating_confidence_version == "system-rating-confidence-v3"
+    assert result.report.confidence == result.report.news_confidence
     assert result.report.evidence_complete is False
     assert result.missing_requirements == ["one official source or two independent sources"]
     assert len(list_event_research_runs(db)) == 1
@@ -158,7 +167,9 @@ def test_event_model_timeout_returns_retryable_conservative_report(db, tmp_path)
     assert result.status.value == "insufficient_evidence"
     assert result.retryable_reason == "model_TimeoutError"
     assert result.report is not None
-    assert result.report.confidence <= 0.45
+    assert result.report.news_confidence == 0.775
+    assert result.report.news_confidence_version == "news-confidence-v1"
+    assert result.report.confidence == result.report.news_confidence
     assert any(step.status == "fallback" for step in result.analysis_steps)
     assert llm.calls == 1
 
@@ -253,18 +264,23 @@ def test_event_research_uses_one_bounded_web_supplement(monkeypatch, db, tmp_pat
     monkeypatch.setattr(
         "backend.app.services.event_research.search_enabled_sources_sync", fake_search
     )
+    llm = EvidenceOnlyEventResearchLlm()
     result = EventResearchService(
         db,
         Settings(fmp_access_token="", fmp_mcp_url="", reports_dir=tmp_path),
-        EvidenceOnlyEventResearchLlm(),
+        llm,
     ).run(event, EventResearchRun(event_id=event.id, as_of=observed))
 
     assert 1 <= len(calls) <= 3
+    assert result.analysis_steps[1].status == "completed", result.analysis_steps[1].summary
+    assert [len(item) for item in llm.evidence_ids_by_call] == [1, 2]
     assert result.status.value == "completed", (
         result.missing_requirements,
         result.contradictions,
-        [step.model_dump(mode="json") for step in result.analysis_steps],
-    )
+            [step.model_dump(mode="json") for step in result.analysis_steps],
+            llm.evidence_ids_by_call,
+            [item.model_dump(mode="json") for item in result.evidence],
+        )
     assert len(result.evidence) == 2
     assert [step.phase for step in result.analysis_steps].count("web_search_verification") == 1
 

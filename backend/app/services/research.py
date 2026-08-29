@@ -13,7 +13,7 @@ from uuid import UUID, uuid4
 from celery.exceptions import SoftTimeLimitExceeded
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.orm import Session
 
 from backend.app.config import Settings, get_settings
@@ -34,6 +34,7 @@ from backend.app.domain import (
     Recommendation,
     ResearchRun,
     RunStatus,
+    ScoreSource,
     ScoringFactor,
     SignalStatus,
     SourceQuality,
@@ -46,23 +47,29 @@ from backend.app.domain import (
     as_utc,
     model_direction_for,
     model_rating_for,
-    rating_for,
     utc_now,
 )
 from backend.app.llm import LlmGateway, gateway
 from backend.app.providers.registry import ProviderRegistry
+from backend.app.services.confidence_v3 import (
+    NEWS_CONFIDENCE_VERSION,
+    RATING_CONFIDENCE_VERSION,
+    SCORING_VERSION,
+    event_horizon_days,
+    news_confidence_score,
+    rating_for_direction_score,
+    select_news_confidence_evidence,
+)
+from backend.app.services.confidence_v3 import (
+    rating_confidence_score as rating_confidence_score_v3,
+)
 from backend.app.services.directional_scoring import (
-    blocked_probabilities,
     probabilities_for_score,
-    rating_confidence_score,
-    round_half_up,
-    short_term_impact_score,
 )
 from backend.app.services.macro_impacts import (
     TARGET_SCORING_VERSION,
     EventImpactDraft,
     TargetImpactDraft,
-    fact_confidence_for,
     finalize_impacts,
 )
 from backend.app.services.mcp_registry import SearchRequest, search_enabled_sources_sync
@@ -81,12 +88,15 @@ from backend.app.services.source_lineage import (
     source_group,
 )
 from backend.app.storage import (
+    get_event,
     get_event_research_for_event,
     get_evidence,
     get_news,
     get_news_by_content_hash,
     get_run,
     list_news,
+    list_outcomes,
+    list_recommendations,
     save_event,
     save_news,
     save_recommendation,
@@ -98,9 +108,9 @@ _checkpoint_setup_done = False
 SOURCE_GATE = "one official source or two independent sources"
 INSUFFICIENT_EVIDENCE_MARKER = "现有证据不足"
 DIRECTION_SCORE_INSTRUCTION = (
-    "方向只能针对当前研究工具，写入 target_impact；禁止输出全局方向、全局分数或全局评级。"
-    "target_impact 必须包含 direction、六个传导因子、四个方向置信因子、传导路径、理由、"
-    "证据和关键缺失信息。最终 score/rating/confidence/trade_status 全部由程序计算。"
+    "当前工具是唯一评级目标，只能输出一个 direction_score（-100 到 100）作为最终数值判断；"
+    "不得输出评级、概率、新闻可信度、评级置信度或任何置信因子。"
+    "同时返回传导路径、证据和关键缺失信息，评级和两种置信度全部由程序计算。"
 )
 
 
@@ -116,6 +126,7 @@ class DraftOutput(BaseModel):
     invalidation_conditions: list[str] = Field(default_factory=list)
     evidence_ids: list[str] = Field(default_factory=list)
     score: int = Field(default=0, ge=-100, le=100)
+    direction_score: int | None = Field(default=None, ge=-100, le=100)
     direction: ModelDirection | None = None
     rating: Rating | None = None
     confidence: float = Field(default=0.3, ge=0, le=1)
@@ -125,6 +136,8 @@ class DraftOutput(BaseModel):
     impact_factors: ImpactFactors = Field(default_factory=ImpactFactors)
     confidence_factors: ConfidenceFactors = Field(default_factory=ConfidenceFactors)
     target_impact: TargetImpactDraft | None = None
+    transmission_path: list[str] = Field(default_factory=list)
+    missing_information: list[str] = Field(default_factory=list)
     valuation_low: float | None = None
     valuation_high: float | None = None
 
@@ -132,6 +145,10 @@ class DraftOutput(BaseModel):
     def normalize_model_opinion(self) -> DraftOutput:
         # Score is the single source of truth. Normalizing these redundant
         # labels prevents a small model from returning contradictory fields.
+        if self.direction_score is not None:
+            self.score = self.direction_score
+        else:
+            self.direction_score = self.score
         if self.target_impact is not None:
             self.direction = {
                 1: ModelDirection.BULLISH,
@@ -148,6 +165,56 @@ class DraftOutput(BaseModel):
             ModelDirection.BEARISH: -1,
         }[self.direction]
         return self
+
+
+class ModelDraftOutput(BaseModel):
+    """Strict v3 response schema used for the research-model call."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    summary: str
+    historical_context: str = ""
+    financials_and_growth: str = ""
+    products_or_protocol: str = ""
+    competition: str = ""
+    valuation_or_tokenomics: str = ""
+    catalysts: list[str] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+    invalidation_conditions: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
+    direction_score: int = Field(ge=-100, le=100)
+    transmission_path: list[str] = Field(default_factory=list)
+    missing_information: list[str] = Field(default_factory=list)
+
+
+class ModelDraftRepairOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    summary: str | None = None
+    historical_context: str | None = None
+    financials_and_growth: str | None = None
+    products_or_protocol: str | None = None
+    competition: str | None = None
+    valuation_or_tokenomics: str | None = None
+    catalysts: list[str] | None = None
+    risks: list[str] | None = None
+    invalidation_conditions: list[str] | None = None
+    evidence_ids: list[str] | None = None
+    direction_score: int = Field(ge=-100, le=100)
+    transmission_path: list[str] | None = None
+    missing_information: list[str] | None = None
+
+
+def internal_draft(value: ModelDraftOutput) -> DraftOutput:
+    probabilities = probabilities_for_score(value.direction_score)
+    return DraftOutput(
+        **value.model_dump(),
+        score=value.direction_score,
+        confidence=0,
+        bull_probability=probabilities[0],
+        base_probability=probabilities[1],
+        bear_probability=probabilities[2],
+    )
 
 
 class DraftRepairOutput(BaseModel):
@@ -849,7 +916,8 @@ class ResearchService:
             "event_type": event.event_type.value,
             "direct_impact": event.direct_impact,
             "actions": [item.model_dump(mode="json") for item in event.actions],
-            "horizon_days": event.horizon_days,
+            "horizon_days": event_horizon_days(event.event_type),
+            "horizon_unit": HorizonUnit.CALENDAR_DAYS.value,
             "published_at": event.published_at.isoformat(),
             "candidates": [
                 {
@@ -894,13 +962,13 @@ class ResearchService:
             f"{compact_evidence(evidence, self.settings.research_prompt_evidence_chars, max_per_group=2)}\n"
             "混合检索上下文："
             f"{compact_json_records(state.get('retrieved_context', []), self.settings.research_prompt_context_chars)}\n"
-            "只能引用 evidence_ids 中存在的证据。无法判断的因子填 0 并降低置信度，不得编造；"
-            "当前工具就是唯一评级目标；target_impact.asset_id 必须等于研究对象 asset_id。"
+            "只能引用 evidence_ids 中存在的证据。信息不足时将 direction_score 设为 0，"
+            "并写入 missing_information，不得编造；当前工具就是唯一评级目标。"
             "区分事件事实、市场反应和收益方向；不要把公告完整误写成方向证据充分。"
         )
         draft_error: str | None = None
         try:
-            draft = self.llm.generate_json(
+            draft_payload = self.llm.generate_json(
                 model=self.settings.ollama_research_model,
                 lane="research",
                 system=(
@@ -908,18 +976,20 @@ class ResearchService:
                     f"{DIRECTION_SCORE_INSTRUCTION}"
                 ),
                 prompt=prompt,
-                schema=DraftOutput,
+                schema=ModelDraftOutput,
                 operation="report_drafting",
                 entity_type="research_run",
                 entity_id=run.id,
             )
+            draft_output = internal_draft(ModelDraftOutput.model_validate(draft_payload))
         except SoftTimeLimitExceeded:
             raise
         except Exception as exc:
             draft_error = type(exc).__name__
             run.retryable_reason = f"model_{type(exc).__name__}"
-            draft = self._fallback_draft(run, evidence).model_dump(mode="json")
-        draft_output = DraftOutput.model_validate(draft)
+            draft_output = self._fallback_draft(
+                run, evidence, state.get("factor_summary", {})
+            )
         run.analysis_steps.append(
             AnalysisStep(
                 phase="report_drafting",
@@ -929,15 +999,12 @@ class ResearchService:
                 if not draft_error
                 else "research-fallback:v1",
                 summary=(
-                    f"已生成研究草稿，初始置信度 {draft_output.confidence:.0%}，引用 "
+                    f"已生成研究草稿，方向分 {draft_output.direction_score:+d}，引用 "
                     f"{len(draft_output.evidence_ids)} 条证据。"
                     + (f" 模型不可用（{draft_error}），当前为保守回退结果。" if draft_error else "")
                 ),
                 metrics={
-                    "confidence": draft_output.confidence,
-                    "score": draft_output.score,
-                    "direction": draft_output.direction.value,
-                    "rating": draft_output.rating.value,
+                    "direction_score": draft_output.direction_score,
                     "citation_count": len(draft_output.evidence_ids),
                 },
             )
@@ -946,21 +1013,41 @@ class ResearchService:
         return {"run": run.model_dump(mode="json"), "draft": draft_output.model_dump(mode="json")}
 
     @staticmethod
-    def _fallback_draft(run: ResearchRun, evidence: list[dict[str, Any]]) -> DraftOutput:
+    def _fallback_draft(
+        run: ResearchRun,
+        evidence: list[dict[str, Any]],
+        factor_summary: dict[str, Any] | None = None,
+    ) -> DraftOutput:
         ids = [item["id"] for item in evidence]
         unavailable = ScoringFactor(
             value=0,
             reason="研究模型不可用，无法评估该因子。",
             evidence_ids=[],
         )
+        factor_summary = factor_summary or {}
+        signal = factor_summary.get("signal")
+        reliability = factor_summary.get("reliability")
+        fallback_score = (
+            round(float(signal) * 100)
+            if isinstance(signal, int | float)
+            and isinstance(reliability, int | float)
+            and reliability > 0
+            else 0
+        )
+        fallback_score = max(-69, min(69, fallback_score))
+        probabilities = probabilities_for_score(fallback_score)
         return DraftOutput(
             summary=f"已收集 {len(evidence)} 条与 {run.asset.name} 相关的证据，但本地研究模型不可用或证据不足。",
             catalysts=[],
             risks=["模型综合分析尚未完成", "当前证据可能不完整"],
             invalidation_conditions=["补充官方披露后重新评估"],
             evidence_ids=ids,
-            score=0,
-            confidence=min(0.45, len(evidence) * 0.1),
+            score=fallback_score,
+            direction_score=fallback_score,
+            confidence=0,
+            bull_probability=probabilities[0],
+            base_probability=probabilities[1],
+            bear_probability=probabilities[2],
             impact_factors=ImpactFactors(
                 direction=0,
                 magnitude=unavailable,
@@ -1233,15 +1320,9 @@ class ResearchService:
         assessments: list[ClaimEvidenceAssessment] = []
         semantic_missing: list[str] = []
 
-        impact_factors, _, _ = self._resolved_impact_factors(
-            run, state.get("event"), draft, evidence
-        )
-        preview = short_term_impact_score(
-            direction=impact_factors.direction,
-            magnitude=impact_factors.magnitude.value,
-            persistence=impact_factors.persistence.value,
-            representativeness=impact_factors.representativeness.value,
-            market_confirmation=impact_factors.market_confirmation.value,
+        preview_score = draft.direction_score or 0
+        preview_direction = (
+            1 if preview_score >= 30 else -1 if preview_score <= -30 else 0
         )
 
         if structural_complete and not run.retryable_reason:
@@ -1261,7 +1342,7 @@ class ResearchService:
                         "unrelated 表示证据与观点无关，insufficient 表示无法证明。"
                     ),
                     prompt=(
-                        f"程序待验证方向分：{preview.score}。\n"
+                        f"模型待验证方向分：{preview_score}。\n"
                         f"待验证观点：{json.dumps(requested_claims, ensure_ascii=False)}\n"
                         "证据："
                         f"{compact_evidence(state.get('evidence', []), self.settings.research_prompt_evidence_chars, max_per_group=2)}\n"
@@ -1338,7 +1419,6 @@ class ResearchService:
                 stance_signal = (
                     stance_numerator / stance_denominator if stance_denominator else 0.0
                 )
-                preview_direction = impact_factors.direction
                 stance_aligned = bool(
                     preview_direction == 0
                     or preview_direction * stance_signal >= 0.2
@@ -1347,7 +1427,7 @@ class ResearchService:
                     preview_direction == 0
                     or (semantic.direction_supported and stance_aligned)
                 )
-                if abs(preview.score) >= 15 and not direction_supported:
+                if abs(preview_score) >= 30 and not direction_supported:
                     semantic_missing.append(
                         "claim stances do not support the deterministic direction"
                     )
@@ -1486,7 +1566,7 @@ class ResearchService:
             run.analysis_steps.append(
                 AnalysisStep(
                     phase="historical_point_in_time_guard",
-                    executor="target-transmission-v2",
+                    executor=SCORING_VERSION,
                     summary="历史回放仅使用研究截止时已观察证据，已禁用实时搜索和当前基本面。",
                 )
             )
@@ -1777,7 +1857,18 @@ class ResearchService:
         }
         current_payload = current.model_dump(
             mode="json",
-            exclude={"direction", "rating"},
+            exclude={
+                "score",
+                "direction",
+                "rating",
+                "confidence",
+                "bull_probability",
+                "base_probability",
+                "bear_probability",
+                "impact_factors",
+                "confidence_factors",
+                "target_impact",
+            },
         )
         prompt = (
             f"当前报告：{json.dumps(current_payload, ensure_ascii=False, separators=(',', ':'))}\n"
@@ -1788,7 +1879,7 @@ class ResearchService:
             "可用证据："
             f"{compact_evidence(state.get('evidence', []), min(self.settings.research_prompt_evidence_chars, 4000), max_per_group=2)}\n"
             "逐项修复清单中的缺失章节。能够由证据支持时必须填写；无法支持时不得留空，"
-            f"应明确写明“{INSUFFICIENT_EVIDENCE_MARKER}”并保持低置信度和中性分数。"
+            f"应明确写明“{INSUFFICIENT_EVIDENCE_MARKER}”并将 direction_score 设为 0。"
             "每个重要事实和方向观点都必须绑定 valid_evidence_ids 中实际支持它的证据；"
             "不得生成、猜测或沿用无效 evidence id。删除无法被证据支持的断言，不得编造。"
             "同一原始报道的转载、改写或聚合副本只算一个独立来源，不能用来满足两份独立来源要求。"
@@ -1806,11 +1897,11 @@ class ResearchService:
                     "必须逐项执行本轮修复清单；缺失内容只能补充为证据支持的结论，"
                     f"否则明确标注“{INSUFFICIENT_EVIDENCE_MARKER}”，不能留空。"
                     "同一故事的转载不构成独立佐证，无关官方文件不构成观点支持。"
-                    "修订时必须重新评估方向分数，不能机械沿用当前报告的 score。"
+                    "修订时必须重新评估 direction_score，不能机械沿用当前方向分。"
                     f"{DIRECTION_SCORE_INSTRUCTION}"
                 ),
                 prompt=prompt,
-                schema=DraftRepairOutput,
+                schema=ModelDraftRepairOutput,
                 operation="report_revision",
                 entity_type="research_run",
                 entity_id=run.id,
@@ -1820,11 +1911,13 @@ class ResearchService:
                     1024,
                 ),
             )
-            repair = DraftRepairOutput.model_validate(repair_payload)
+            repair = ModelDraftRepairOutput.model_validate(repair_payload)
             updates = repair.model_dump(exclude_none=True)
             repaired_evidence_ids = updates.pop("evidence_ids", None)
             merged = current.model_dump(mode="json")
             merged.update(updates)
+            if repair.direction_score is not None:
+                merged["score"] = repair.direction_score
             if repaired_evidence_ids is not None:
                 merged["evidence_ids"] = list(
                     dict.fromkeys([*current.evidence_ids, *repaired_evidence_ids])
@@ -1836,8 +1929,8 @@ class ResearchService:
         except Exception as exc:
             revision_error = type(exc).__name__
             run.retryable_reason = f"model_{type(exc).__name__}"
-            current.confidence = min(current.confidence, 0.5)
             current.score = 0
+            current.direction_score = 0
             revised_output = current
         invalid_evidence_ids = [
             value
@@ -1861,7 +1954,7 @@ class ResearchService:
                 if not revision_error
                 else "revision-fallback:v1",
                 summary=(
-                    f"已根据校验结果修订报告，置信度调整为 {revised_output.confidence:.0%}。"
+                    f"已根据校验结果修订报告，方向分调整为 {revised_output.direction_score:+d}。"
                     + (
                         f" 模型不可用（{revision_error}），已强制采用中性保守结论。"
                         if revision_error
@@ -1869,10 +1962,7 @@ class ResearchService:
                     )
                 ),
                 metrics={
-                    "confidence": revised_output.confidence,
-                    "score": revised_output.score,
-                    "direction": revised_output.direction.value,
-                    "rating": revised_output.rating.value,
+                    "direction_score": revised_output.direction_score,
                     "requested_repairs": verification.missing_requirements,
                     "invalid_evidence_ids_removed": invalid_evidence_ids,
                     "independent_source_lineages": len(source_lineages),
@@ -2023,93 +2113,160 @@ class ResearchService:
         )
         return impacts[0] if impacts else None
 
+    def _historical_reactions(
+        self,
+        run: ResearchRun,
+        event: NewsEvent,
+        horizon_days: int,
+    ) -> list[int]:
+        outcomes = {
+            (item.recommendation_id, item.horizon_days): item
+            for item in list_outcomes(self.db)
+        }
+        neutral_band = min(0.10, max(0.005, 0.02 * (horizon_days / 20) ** 0.5))
+        reactions: list[int] = []
+        for recommendation in list_recommendations(self.db, limit=5000):
+            if recommendation.asset.asset_id != run.asset.asset_id:
+                continue
+            outcome = outcomes.get((recommendation.id, horizon_days))
+            source_run = get_run(self.db, recommendation.run_id)
+            source_event = (
+                get_event(self.db, source_run.event_id)
+                if source_run is not None and source_run.event_id is not None
+                else None
+            )
+            if outcome is None or source_event is None or source_event.event_type is not event.event_type:
+                continue
+            reactions.append(
+                1
+                if outcome.raw_return > neutral_band
+                else -1
+                if outcome.raw_return < -neutral_band
+                else 0
+            )
+        return reactions
+
     def _finalize(self, state: ResearchState) -> dict[str, Any]:
         run = ResearchRun.model_validate(state["run"])
         draft = DraftOutput.model_validate(state["draft"])
         verification = VerificationOutput.model_validate(state["verification"])
-        structural_complete = verification.evidence_complete
-        semantic_complete = verification.semantic_evidence_complete
         evidence = [Evidence.model_validate(item) for item in state.get("evidence", [])]
-        impact_factors, mapping_confidence, factor_warnings = (
-            self._resolved_impact_factors(
-                run,
-                state.get("event"),
-                draft,
-                evidence,
-            )
+        event = NewsEvent.model_validate(state["event"]) if state.get("event") else None
+        fallback = bool(run.retryable_reason and run.retryable_reason.startswith("model_"))
+        score = draft.direction_score or 0
+        if fallback:
+            score = max(-69, min(69, score))
+        probabilities = probabilities_for_score(score)
+        signal_status = (
+            SignalStatus.NEUTRAL if abs(score) < 30 else SignalStatus.DIRECTIONAL
         )
-        impact_score = short_term_impact_score(
-            direction=impact_factors.direction,
-            magnitude=impact_factors.magnitude.value,
-            persistence=impact_factors.persistence.value,
-            representativeness=impact_factors.representativeness.value,
-            market_confirmation=impact_factors.market_confirmation.value,
-        )
-        confidence_factors, confidence_warnings = self._adjusted_confidence_factors(
-            draft,
-            evidence,
-            verification,
-        )
-        confidence_score = rating_confidence_score(
-            direction_clarity=confidence_factors.direction_clarity.value,
-            source_reliability=confidence_factors.source_reliability.value,
-            magnitude_certainty=confidence_factors.magnitude_certainty.value,
-            market_context_completeness=(
-                confidence_factors.market_context_completeness.value
+        horizon_days = event_horizon_days(event.event_type) if event else 90
+        candidate = next(
+            (
+                item
+                for item in event.candidates
+                if item.asset.asset_id == run.asset.asset_id
             ),
+            None,
+        ) if event else None
+        valid_evidence_ids = {str(item.id): item.id for item in evidence}
+        cited_ids = [
+            valid_evidence_ids[item]
+            for item in draft.evidence_ids
+            if item in valid_evidence_ids
+        ]
+        path = draft.transmission_path or (
+            [event.headline, run.asset.name] if event else [run.asset.name]
         )
-        technical_failure = bool(
-            run.retryable_reason and run.retryable_reason.startswith("model_")
-        )
-        target_impact = self._v2_target_impact(
-            run,
-            state.get("event"),
-            draft,
-            evidence,
-            technical_failure=technical_failure,
-        )
-        score = (
-            round_half_up(target_impact.score * 100)
-            if target_impact is not None
-            else (0 if technical_failure else impact_score.score)
-        )
-        if technical_failure:
-            signal_status = SignalStatus.TECHNICAL_FAILURE
-            probabilities = blocked_probabilities(technical_failure=True)
-        elif abs(score) < (25 if target_impact is not None else 15):
-            signal_status = SignalStatus.NEUTRAL
-            probabilities = probabilities_for_score(
-                score,
-                base_probability=draft.base_probability,
+        missing_information = list(dict.fromkeys(draft.missing_information))
+        if not cited_ids:
+            missing_information.append("impact_evidence")
+
+        if event:
+            news_items = [
+                item
+                for news_id in event.news_item_ids
+                if (item := get_news(self.db, news_id)) is not None
+            ]
+            news_evidence = select_news_confidence_evidence(evidence, news_items)
+            news_score = news_confidence_score(event, news_evidence, news_items)
+            event_run = get_event_research_for_event(self.db, event.id)
+            event_report = event_run.report if event_run else None
+            if (
+                event_report
+                and event_report.news_confidence_version == NEWS_CONFIDENCE_VERSION
+                and event_report.news_confidence is not None
+                and event_report.news_confidence_factors is not None
+            ):
+                news_confidence = event_report.news_confidence
+                news_confidence_factors = event_report.news_confidence_factors
+            else:
+                news_confidence = news_score.confidence
+                news_confidence_factors = news_score.factors
+            historical_reactions = self._historical_reactions(run, event, horizon_days)
+            rating_score = rating_confidence_score_v3(
+                direction_score=score,
+                event=event,
+                candidate=candidate,
+                transmission_path=path,
+                cited_evidence_ids=cited_ids,
+                evidence=evidence,
+                missing_information=missing_information,
+                factor_summary=state.get("factor_summary", {}),
+                historical_reactions=historical_reactions,
             )
         else:
-            signal_status = SignalStatus.DIRECTIONAL
-            probabilities = probabilities_for_score(
-                score,
-                base_probability=draft.base_probability,
-            )
-        confidence = (
-            target_impact.confidence
-            if target_impact is not None
-            else (0.0 if technical_failure else confidence_score.confidence)
+            news_score = None
+            news_confidence = 0.0
+            news_confidence_factors = None
+            historical_reactions = []
+            rating_score = None
+
+        confidence = rating_score.confidence if rating_score else 0.0
+        rating = rating_for_direction_score(score)
+        score_source = ScoreSource.RULE_FALLBACK if fallback else ScoreSource.LLM
+        tradeable = bool(
+            score_source is ScoreSource.LLM
+            and verification.evidence_complete
+            and rating in {Rating.BULLISH, Rating.STRONGLY_BULLISH}
+            and confidence >= 0.55
+            and not missing_information
         )
+        target_impact = TargetImpact(
+            target_type=TargetType.TRADABLE_ASSET,
+            target_name=run.asset.name,
+            asset=run.asset,
+            direction=1 if score > 0 else -1 if score < 0 else 0,
+            score=score / 100,
+            direction_score=score,
+            rating=rating,
+            confidence=confidence,
+            rating_confidence=confidence,
+            rating_confidence_factors=rating_score.factors if rating_score else None,
+            mapping_distance=rating_score.mapping_distance if rating_score else 5,
+            score_source=score_source,
+            horizon_days=horizon_days,
+            horizon_unit=HorizonUnit.CALENDAR_DAYS,
+            transmission_path=path,
+            rationale=draft.summary,
+            evidence_ids=cited_ids,
+            missing_information=missing_information,
+            trade_status=TradeStatus.TRADEABLE if tradeable else TradeStatus.UNTRADEABLE,
+            execution_supported=run.asset.asset_class in {AssetClass.EQUITY, AssetClass.CRYPTO},
+            technical_failure=fallback,
+        )
+
         evidence_warnings = list(
             dict.fromkeys(
                 [
                     *verification.missing_requirements,
                     *verification.unsupported_claims,
                     *verification.contradictions,
-                    *factor_warnings,
-                    *confidence_warnings,
+                    *missing_information,
                 ]
             )
         )
-        valid_evidence_ids = {str(item.id): item.id for item in run.evidence}
-        thesis_evidence_ids = [
-            valid_evidence_ids[item]
-            for item in draft.evidence_ids
-            if item in valid_evidence_ids
-        ]
+        thesis_evidence_ids = list(cited_ids)
         for assessment in verification.claim_assessments:
             thesis_evidence_ids.extend(assessment.evidence_ids)
         thesis = Thesis(
@@ -2124,128 +2281,87 @@ class ResearchService:
             invalidation_conditions=draft.invalidation_conditions,
             evidence_ids=list(dict.fromkeys(thesis_evidence_ids)),
         )
-        model_opinion_available = target_impact is None and not (
-            run.retryable_reason and run.retryable_reason.startswith("model_")
-        )
         recommendation = Recommendation(
             run_id=run.id,
             asset=run.asset,
             score=score,
-            model_score=draft.score if model_opinion_available else None,
-            model_direction=draft.direction if model_opinion_available else None,
-            model_rating=draft.rating if model_opinion_available else None,
-            model_confidence=draft.confidence if model_opinion_available else None,
+            direction_score=score,
+            model_score=score if not fallback else None,
+            model_direction=(
+                ModelDirection.BULLISH
+                if score >= 30
+                else ModelDirection.BEARISH
+                if score <= -30
+                else ModelDirection.NEUTRAL
+            ) if not fallback else None,
+            model_rating=rating if not fallback else None,
+            model_confidence=None,
             raw_score=score,
-            rating=target_impact.rating if target_impact is not None else rating_for(score),
+            rating=rating,
             confidence=confidence,
+            rating_confidence=confidence,
             bull_probability=probabilities[0],
             base_probability=probabilities[1],
             bear_probability=probabilities[2],
-            horizon_days=3,
-            horizon_unit=HorizonUnit.TRADING_SESSIONS,
-            impact_factors=impact_factors,
-            confidence_factors=confidence_factors,
-            fact_confidence=(
-                fact_confidence_for(evidence)
-                if target_impact is not None
-                else (
-                    0.0
-                    if technical_failure
-                    else confidence_factors.source_reliability.value
-                )
-            ),
+            horizon_days=horizon_days,
+            horizon_unit=HorizonUnit.CALENDAR_DAYS,
+            fact_confidence=news_confidence,
+            news_confidence=news_confidence,
+            news_confidence_version=NEWS_CONFIDENCE_VERSION,
+            news_confidence_factors=news_confidence_factors,
+            rating_confidence_factors=rating_score.factors if rating_score else None,
+            mapping_distance=rating_score.mapping_distance if rating_score else 5,
+            score_source=score_source,
             evidence_warnings=evidence_warnings,
             valuation_low=draft.valuation_low,
             valuation_high=draft.valuation_high,
             thesis=thesis,
             as_of=run.as_of,
-            evidence_complete=structural_complete,
-            directional_evidence_complete=structural_complete and semantic_complete,
-            direction_verified=not technical_failure,
+            evidence_complete=verification.evidence_complete,
+            directional_evidence_complete=(
+                verification.evidence_complete and verification.semantic_evidence_complete
+            ),
+            direction_verified=True,
             signal_status=signal_status,
             evidence_strength=verification.evidence_strength,
-            mapping_confidence=mapping_confidence,
+            mapping_confidence=(
+                min(candidate.relevance, candidate.mapping_confidence) if candidate else 0.0
+            ),
             claim_assessments=verification.claim_assessments,
             primary_gate_reason=None,
             gate_reasons=[],
-            scoring_version=(
-                TARGET_SCORING_VERSION
-                if target_impact is not None
-                else "short-term-impact-v1"
-            ),
-            calibration_version=(
-                "target-component-confidence-v2"
-                if target_impact is not None
-                else "component-confidence-v1"
-            ),
+            scoring_version=SCORING_VERSION,
+            calibration_version=RATING_CONFIDENCE_VERSION,
             impact=target_impact,
         )
         run.recommendation = recommendation
-        if signal_status is SignalStatus.TECHNICAL_FAILURE:
-            run.status = RunStatus.FAILED
-            run.error = f"研究依赖不可用：{run.retryable_reason}"
-        else:
-            run.status = RunStatus.COMPLETED
+        run.status = RunStatus.COMPLETED
+        run.error = None
         run.completed_at = utc_now()
         run.analysis_steps.append(
             AnalysisStep(
                 phase="finalization",
-                status="failed" if technical_failure else "completed",
+                status="fallback" if fallback else "completed",
                 executor="rating-engine",
-                model=(
-                    TARGET_SCORING_VERSION
-                    if target_impact is not None
-                    else "short-term-impact-v1"
-                ),
+                model=SCORING_VERSION,
                 summary=(
-                    f"最终状态 {signal_status.value}，目标影响分 {score}，"
-                    f"评级置信度 {confidence:.0%}；证据提示 {len(evidence_warnings)} 项。"
+                    f"最终状态 {signal_status.value}，方向分 {score}，"
+                    f"新闻可信度 {news_confidence:.0%}，评级置信度 {confidence:.0%}。"
                 ),
                 metrics={
-                    "rating": recommendation.rating.value,
+                    "rating": rating.value,
                     "signal_status": signal_status.value,
-                    "model_score": draft.score,
-                    "model_direction": draft.direction.value if draft.direction else None,
-                    "model_rating": draft.rating.value if draft.rating else None,
-                    "model_confidence": draft.confidence,
-                    "raw_score": score,
-                    "score": score,
-                    "confidence": confidence,
-                    "evidence_complete": structural_complete,
-                    "semantic_evidence_complete": semantic_complete,
-                    "evidence_strength": verification.evidence_strength,
-                    "mapping_confidence": mapping_confidence,
-                    "fact_confidence": recommendation.fact_confidence,
+                    "direction_score": score,
+                    "news_confidence": news_confidence,
+                    "rating_confidence": confidence,
+                    "score_source": score_source.value,
+                    "horizon_days": horizon_days,
+                    "horizon_unit": HorizonUnit.CALENDAR_DAYS.value,
+                    "historical_sample_count": len(historical_reactions),
+                    "evidence_complete": verification.evidence_complete,
+                    "semantic_evidence_complete": verification.semantic_evidence_complete,
                     "evidence_warnings": evidence_warnings,
-                    "target_impact": (
-                        target_impact.model_dump(mode="json")
-                        if target_impact is not None
-                        else None
-                    ),
-                    "score_components": {
-                        "magnitude": impact_score.magnitude_contribution,
-                        "persistence": impact_score.persistence_contribution,
-                        "representativeness": (
-                            impact_score.representativeness_contribution
-                        ),
-                        "market_confirmation": (
-                            impact_score.market_confirmation_contribution
-                        ),
-                    },
-                    "confidence_components": {
-                        "direction_clarity": (
-                            confidence_score.direction_clarity_contribution
-                        ),
-                        "source_reliability": (
-                            confidence_score.source_reliability_contribution
-                        ),
-                        "magnitude_certainty": (
-                            confidence_score.magnitude_certainty_contribution
-                        ),
-                        "market_context_completeness": (
-                            confidence_score.market_context_completeness_contribution
-                        ),
-                    },
+                    "target_impact": target_impact.model_dump(mode="json"),
                 },
             )
         )
@@ -2259,21 +2375,6 @@ class ResearchService:
         path = self.settings.reports_dir / f"{run.asset.symbol}_{run.id}.md"
         recommendation = run.recommendation
         assert recommendation is not None
-        model_direction = (
-            recommendation.model_direction.value
-            if recommendation.model_direction
-            else "unavailable"
-        )
-        model_rating = (
-            recommendation.model_rating.value
-            if recommendation.model_rating
-            else "unavailable"
-        )
-        model_confidence = (
-            f"{recommendation.model_confidence:.0%}"
-            if recommendation.model_confidence is not None
-            else "unavailable"
-        )
         citations = "\n".join(
             f"- [{item.source_name}]({item.source_url}) — {item.claim}" for item in run.evidence
         )
@@ -2288,7 +2389,7 @@ class ResearchService:
         rating_label = {
             Rating.STRONGLY_BULLISH: "强烈看多",
             Rating.BULLISH: "看多",
-            Rating.WATCH: "观望",
+            Rating.WATCH: "中性",
             Rating.BEARISH: "看空",
             Rating.STRONGLY_BEARISH: "强烈看空",
         }[recommendation.rating]
@@ -2296,12 +2397,11 @@ class ResearchService:
             f"# {run.asset.name} ({run.asset.symbol})\n\n"
             f"- 评级：{rating_label}\n"
             f"- 信号状态：{recommendation.signal_status.value}\n"
-            f"- 1–3 交易日影响分：{recommendation.score}\n"
-            f"- 模型意见分（仅审计）：{recommendation.model_score}\n"
-            f"- 7B 模型方向 / 五档评级：{model_direction} / {model_rating}\n"
-            f"- 7B 模型原始置信度：{model_confidence}\n"
+            f"- 方向分：{recommendation.direction_score}\n"
+            f"- 评分来源：{recommendation.score_source.value}\n"
             f"- 评级置信度：{recommendation.confidence:.0%}\n"
-            f"- 新闻事实置信度：{(recommendation.fact_confidence or 0):.0%}\n"
+            f"- 新闻可信度：{(recommendation.news_confidence or 0):.0%}\n"
+            f"- 评级周期：未来 {recommendation.horizon_days} 个自然日\n"
             f"- 截止时间：{run.as_of.isoformat()}\n"
             f"- 资料覆盖：{'完整' if recommendation.evidence_complete else '不足'}\n"
             f"- 逐观点证据核验：{'完整' if recommendation.directional_evidence_complete else '存在提示'}\n\n"

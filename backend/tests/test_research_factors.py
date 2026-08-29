@@ -98,6 +98,26 @@ def test_market_window_never_exceeds_event_horizon_or_as_of():
     assert "market_reaction:5d_exceeds_event_horizon" in result.missing_requirements
 
 
+def test_market_factors_include_the_event_calendar_horizon_to_date_window():
+    result = compute_research_factors(
+        as_of=datetime(2025, 1, 6, 23, tzinfo=UTC),
+        event_at=datetime(2025, 1, 2, 8, tzinfo=UTC),
+        horizon_days=90,
+        event_details={"after_market_close": False},
+        asset_prices=_prices([100, 110, 112, 114, 116, 120]),
+        benchmark_prices=_prices([100, 101, 102, 103, 104, 105]),
+        industry_prices=_prices([100, 102, 104, 106, 108, 110]),
+    )
+
+    factors = {item.key: item for item in result.factors}
+    horizon = factors["asset_return_horizon_90cd_pct"]
+    assert horizon.value == pytest.approx(20)
+    assert horizon.inputs["horizon_days"] == 90
+    assert horizon.inputs["window_complete"] is False
+    assert "excess_vs_benchmark_horizon_90cd_pct" in factors
+    assert "excess_vs_industry_horizon_90cd_pct" in factors
+
+
 def test_earnings_factors_measure_consensus_surprise_and_comparable_growth():
     result = compute_research_factors(
         as_of=datetime(2025, 7, 1, tzinfo=UTC),

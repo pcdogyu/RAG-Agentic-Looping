@@ -32,6 +32,7 @@ import {
   sourceFilterRescanPath,
   SourcesPage,
   type Recommendation,
+  V3ConfidenceDetails,
 } from "./AppPages";
 
 const shortTermRecommendation: Recommendation = {
@@ -92,7 +93,7 @@ describe("open source and search settings", () => {
     }));
 
     expect(markup).toContain("发布分：0");
-    expect(markup).toContain("评级：观望");
+    expect(markup).toContain("评级：中性");
     expect(markup).toContain("发布置信度 95% · 资料覆盖完整");
   });
 
@@ -117,6 +118,93 @@ describe("open source and search settings", () => {
     expect(markup).not.toContain("暂不评分");
   });
 
+  it("shows the v3 direction, independent confidences, and calendar horizon", () => {
+    const markup = renderToStaticMarkup(createElement(ConclusionScore, {
+      score: 72,
+      directionScore: 72,
+      rating: "strongly_bullish",
+      confidence: 0.81,
+      ratingConfidence: 0.81,
+      newsConfidence: 0.95,
+      evidenceComplete: true,
+      signalStatus: "directional",
+      horizonDays: 90,
+      horizonUnit: "calendar_days",
+      scoringVersion: "llm-direction-v3",
+      scoreSource: "llm",
+    }));
+
+    expect(markup).toContain("方向分：+72");
+    expect(markup).toContain("五级评级：强烈看多");
+    expect(markup).toContain("新闻可信度 95%");
+    expect(markup).toContain("评级置信度 81%");
+    expect(markup).toContain("未来 90 个自然日");
+    expect(markup).not.toContain("交易日");
+  });
+
+  it("keeps a rule fallback score visible and marks it explicitly", () => {
+    const markup = renderToStaticMarkup(createElement(ConclusionScore, {
+      score: 69,
+      directionScore: 69,
+      rating: "bullish",
+      confidence: 0.3,
+      ratingConfidence: 0.3,
+      newsConfidence: 0.9,
+      evidenceComplete: false,
+      signalStatus: "directional",
+      horizonDays: 180,
+      scoringVersion: "llm-direction-v3",
+      scoreSource: "rule_fallback",
+    }));
+
+    expect(markup).toContain("方向分：+69");
+    expect(markup).toContain("看多 · 规则回退");
+    expect(markup).not.toContain("暂不评分");
+  });
+
+  it("renders all v3 confidence factors and mapping distance", () => {
+    const factor = (value: number, reason: string) => ({ value, reason, evidence_ids: ["evidence-1"] });
+    const recommendation: Recommendation = {
+      ...shortTermRecommendation,
+      score: 40,
+      direction_score: 40,
+      rating: "bullish",
+      confidence: 0.64,
+      rating_confidence: 0.64,
+      news_confidence: 0.88,
+      scoring_version: "llm-direction-v3",
+      calibration_version: "system-rating-confidence-v3",
+      score_source: "llm",
+      horizon_days: 90,
+      horizon_unit: "calendar_days",
+      mapping_distance: 1,
+      news_confidence_factors: {
+        source_reliability: factor(1, "官方来源"),
+        originality: factor(1, "一手原文"),
+        cross_verification: factor(0.7, "单一官方来源"),
+        clarity: factor(0.85, "正式宣布"),
+        timeliness_completeness: factor(0.9, "字段完整"),
+      },
+      rating_confidence_factors: {
+        mapping_strength: factor(0.95, "直接映射"),
+        causality_certainty: factor(0.8, "传导路径完整"),
+        historical_pattern: factor(0, "没有历史样本"),
+        impact_scale: factor(0.6, "影响可量化"),
+        timing_certainty: factor(0.75, "日期明确"),
+        market_consistency: factor(0, "没有市场数据"),
+      },
+    };
+
+    const markup = renderToStaticMarkup(createElement(V3ConfidenceDetails, { recommendation }));
+
+    for (const label of ["信息源可靠性", "原始性", "多源交叉验证", "信息明确程度", "时效性与完整性", "标的映射强度", "因果确定性", "历史规律", "影响规模", "时间确定性", "市场一致性"]) {
+      expect(markup).toContain(label);
+    }
+    expect(markup).toContain("映射距离 L1");
+    expect(markup).toContain("没有历史样本");
+    expect(markup).toContain("没有市场数据");
+  });
+
   it("does not score a conclusion whose evidence gate is incomplete", () => {
     const markup = renderToStaticMarkup(createElement(ConclusionScore, {
       score: null,
@@ -128,7 +216,7 @@ describe("open source and search settings", () => {
     }));
 
     expect(markup).toContain("暂不评分");
-    expect(markup).toContain("方向证据不足 · 评级：观望");
+    expect(markup).toContain("方向证据不足 · 评级：中性");
     expect(markup).toContain("门禁后参考置信度 0%");
     expect(markup).not.toContain("发布分：0");
   });
@@ -166,14 +254,14 @@ describe("open source and search settings", () => {
     expect(markup).toContain("缺少美元和美债收益率同步确认");
   });
 
-  it("normalizes the model typo 官网 to 观望", () => {
+  it("normalizes the model typo 官网 to 中性", () => {
     const markup = renderToStaticMarkup(createElement(ModelOpinion, {
       direction: "neutral",
       rating: "官网",
       confidence: 0.6,
     }));
 
-    expect(markup).toContain("观望 / Watch");
+    expect(markup).toContain("中性 / Neutral");
     expect(markup).not.toContain("<strong>官网</strong>");
   });
 

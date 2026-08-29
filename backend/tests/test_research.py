@@ -9,17 +9,19 @@ from celery.exceptions import SoftTimeLimitExceeded
 from backend.app.config import Settings
 from backend.app.domain import (
     CandidateAsset,
-    ConfidenceFactors,
+    EventReport,
+    EventResearchRun,
     EventType,
     Evidence,
     HorizonUnit,
     ImpactFactors,
+    NewsConfidenceFactors,
     NewsEvent,
     NewsItem,
     Rating,
     ResearchRun,
     RunStatus,
-    ScoringFactor,
+    ScoreSource,
     SignalStatus,
     SourceQuality,
 )
@@ -27,12 +29,19 @@ from backend.app.providers.registry import SEED_ASSETS
 from backend.app.services.mcp_registry import SearchResult
 from backend.app.services.research import (
     DraftOutput,
-    DraftRepairOutput,
+    ModelDraftOutput,
+    ModelDraftRepairOutput,
     ResearchService,
     SemanticVerificationOutput,
     VerificationOutput,
 )
-from backend.app.storage import get_event, get_run, save_event, save_news
+from backend.app.storage import (
+    get_event,
+    get_run,
+    save_event,
+    save_event_research_run,
+    save_news,
+)
 
 
 class FakeRegistry:
@@ -83,111 +92,52 @@ class FakeResearchLlm:
                 "direction_supported": True,
                 "contradictions": [],
             }
-        return DraftOutput(
-            summary="Services growth supports the medium-term thesis, subject to valuation risk.",
-            historical_context="Prior earnings provide a comparison point.",
-            financials_and_growth="Revenue and net income are cited from structured data.",
-            products_or_protocol="Services and hardware are the main product groups.",
-            competition="Competition remains strong.",
-            valuation_or_tokenomics="Valuation requires a margin of safety.",
-            catalysts=["Services growth"],
-            risks=["Valuation compression"],
-            invalidation_conditions=["Revenue growth turns negative"],
-            evidence_ids=ids,
-            score=35,
-            confidence=0.75,
-            bull_probability=0.6,
-            base_probability=0.25,
-            bear_probability=0.15,
-            impact_factors=ImpactFactors(
-                direction=1,
-                magnitude=ScoringFactor(
-                    value=0.4,
-                    reason="The disclosed change is material but not extreme.",
-                    evidence_ids=ids[:1],
-                ),
-                persistence=ScoringFactor(
-                    value=0.2,
-                    reason="Only one update is available.",
-                    evidence_ids=ids[:1],
-                ),
-                representativeness=ScoringFactor(
-                    value=0.8,
-                    reason="The event directly concerns the issuer.",
-                    evidence_ids=ids[:1],
-                ),
-                market_confirmation=ScoringFactor(
-                    value=0.2,
-                    reason="Limited market confirmation is available.",
-                    evidence_ids=ids[:1],
-                ),
-            ),
-            confidence_factors=ConfidenceFactors(
-                direction_clarity=ScoringFactor(
-                    value=0.9,
-                    reason="The expected direction is clear.",
-                    evidence_ids=ids[:1],
-                ),
-                source_reliability=ScoringFactor(
-                    value=0.9,
-                    reason="The source is reliable.",
-                    evidence_ids=ids[:1],
-                ),
-                magnitude_certainty=ScoringFactor(
-                    value=0.8,
-                    reason="The disclosed magnitude is measurable.",
-                    evidence_ids=ids[:1],
-                ),
-                market_context_completeness=ScoringFactor(
-                    value=0.6,
-                    reason="Some market context is available.",
-                    evidence_ids=ids[:1],
-                ),
-            ),
-        ).model_dump(mode="json")
+        direction_score = 35
+        payload = {
+            "summary": "Services growth supports the medium-term thesis, subject to valuation risk.",
+            "historical_context": "Prior earnings provide a comparison point.",
+            "financials_and_growth": "Revenue and net income are cited from structured data.",
+            "products_or_protocol": "Services and hardware are the main product groups.",
+            "competition": "Competition remains strong.",
+            "valuation_or_tokenomics": "Valuation requires a margin of safety.",
+            "catalysts": ["Services growth"],
+            "risks": ["Valuation compression"],
+            "invalidation_conditions": ["Revenue growth turns negative"],
+            "evidence_ids": ids,
+            "direction_score": direction_score,
+            "transmission_path": ["Services revenue growth", "Apple earnings"],
+            "missing_information": [],
+        }
+        return schema.model_validate(payload).model_dump(mode="json")
 
 
 class FakeStrongResearchLlm(FakeResearchLlm):
     def generate_json(self, **kwargs):
         payload = super().generate_json(**kwargs)
-        if kwargs.get("schema") is DraftOutput:
-            payload["score"] = 80
-            payload["confidence"] = 0.85
+        if kwargs.get("schema") in {ModelDraftOutput, ModelDraftRepairOutput}:
+            payload["direction_score"] = 80
         return payload
 
 
 class NeutralResearchLlm(FakeResearchLlm):
     def generate_json(self, **kwargs):
         payload = super().generate_json(**kwargs)
-        if kwargs.get("schema") is DraftOutput:
-            payload.update(
-                score=80,
-                bull_probability=0.25,
-                base_probability=0.5,
-                bear_probability=0.25,
-            )
-            for name in (
-                "magnitude",
-                "persistence",
-                "representativeness",
-                "market_confirmation",
-            ):
-                payload["impact_factors"][name]["value"] = 0
+        if kwargs.get("schema") in {ModelDraftOutput, ModelDraftRepairOutput}:
+            payload["direction_score"] = 0
         return payload
 
 
 class MissingFactorResearchLlm(FakeResearchLlm):
     def generate_json(self, **kwargs):
         payload = super().generate_json(**kwargs)
-        if kwargs.get("schema") is DraftOutput:
-            payload.pop("impact_factors", None)
-            payload.pop("confidence_factors", None)
+        if kwargs.get("schema") in {ModelDraftOutput, ModelDraftRepairOutput}:
+            payload["direction_score"] = 0
         return payload
 
 
 class FailingDraftLlm(FakeResearchLlm):
     def generate_json(self, **kwargs):
-        if kwargs.get("schema") is DraftOutput:
+        if kwargs.get("schema") is ModelDraftOutput:
             raise TimeoutError("research model unavailable")
         return super().generate_json(**kwargs)
 
@@ -250,16 +200,15 @@ class CapturingResearchLlm(FakeResearchLlm):
 
 class IncompleteRevisionLlm:
     def generate_json(self, **kwargs):
-        return DraftOutput(
-            summary="",
-            products_or_protocol="",
-            valuation_or_tokenomics="",
-            risks=[],
-            invalidation_conditions=[],
-            evidence_ids=["not-a-valid-evidence-id"],
-            score=50,
-            confidence=0.8,
-        ).model_dump(mode="json")
+        return {
+            "summary": "",
+            "products_or_protocol": "",
+            "valuation_or_tokenomics": "",
+            "risks": [],
+            "invalidation_conditions": [],
+            "evidence_ids": ["not-a-valid-evidence-id"],
+            "direction_score": 0,
+        }
 
 
 class TargetedRegistry:
@@ -420,6 +369,23 @@ def test_research_graph_produces_verified_recommendation(db, tmp_path):
             )
         ],
     )
+    shared_news_factors = NewsConfidenceFactors()
+    save_event_research_run(
+        db,
+        EventResearchRun(
+            event_id=event.id,
+            status=RunStatus.COMPLETED,
+            as_of=as_of,
+            report=EventReport(
+                summary="Shared event report",
+                scoring_version="llm-direction-v3",
+                news_confidence=0.42,
+                news_confidence_version="news-confidence-v1",
+                news_confidence_factors=shared_news_factors,
+                rating_confidence_version="system-rating-confidence-v3",
+            ),
+        ),
+    )
     settings = Settings(
         database_url="sqlite:///./data/test_agent.db",
         reports_dir=tmp_path,
@@ -437,16 +403,22 @@ def test_research_graph_produces_verified_recommendation(db, tmp_path):
     assert run.recommendation is not None
     assert run.recommendation.evidence_complete is True
     assert run.recommendation.rating is Rating.BULLISH
-    assert run.recommendation.score == 38
-    assert run.recommendation.raw_score == 38
-    assert run.recommendation.confidence == 0.835
-    assert run.recommendation.fact_confidence == 0.9
-    assert run.recommendation.horizon_days == 3
-    assert run.recommendation.horizon_unit is HorizonUnit.TRADING_SESSIONS
-    assert run.recommendation.scoring_version == "short-term-impact-v1"
-    assert run.recommendation.calibration_version == "component-confidence-v1"
-    assert run.recommendation.impact_factors is not None
-    assert run.recommendation.confidence_factors is not None
+    assert run.recommendation.score == 35
+    assert run.recommendation.direction_score == 35
+    assert run.recommendation.raw_score == 35
+    assert run.recommendation.rating_confidence == run.recommendation.confidence
+    assert run.recommendation.news_confidence == run.recommendation.fact_confidence
+    assert run.recommendation.news_confidence == 0.42
+    assert run.recommendation.news_confidence_factors == shared_news_factors
+    assert run.recommendation.news_confidence != run.recommendation.rating_confidence
+    assert run.recommendation.horizon_days == 30
+    assert run.recommendation.horizon_unit is HorizonUnit.CALENDAR_DAYS
+    assert run.recommendation.scoring_version == "llm-direction-v3"
+    assert run.recommendation.calibration_version == "system-rating-confidence-v3"
+    assert run.recommendation.news_confidence_version == "news-confidence-v1"
+    assert run.recommendation.news_confidence_factors is not None
+    assert run.recommendation.rating_confidence_factors is not None
+    assert run.recommendation.score_source is ScoreSource.LLM
     assert run.recommendation.thesis.evidence_ids
     assert round(
         100
@@ -477,14 +449,13 @@ def test_research_graph_produces_verified_recommendation(db, tmp_path):
     )
     assert strong_run.recommendation is not None
     assert strong_run.recommendation.evidence_complete is True
-    # The model's self-reported 80 is retained only for audit and cannot change
-    # the program score derived from the structured factors.
+    # Direction score is the model's only published numeric conclusion.
     assert strong_run.recommendation.model_score == 80
     assert strong_run.recommendation.model_direction.value == "bullish"
     assert strong_run.recommendation.model_rating is Rating.STRONGLY_BULLISH
-    assert strong_run.recommendation.model_confidence == 0.85
-    assert strong_run.recommendation.raw_score == run.recommendation.raw_score
-    assert strong_run.recommendation.rating is Rating.BULLISH
+    assert strong_run.recommendation.model_confidence is None
+    assert strong_run.recommendation.raw_score == 80
+    assert strong_run.recommendation.rating is Rating.STRONGLY_BULLISH
     assert strong_run.verification_round == 1
 
 
@@ -504,8 +475,7 @@ def test_missing_structured_factors_default_to_zero_without_technical_failure(
     assert run.recommendation.score == 0
     assert run.recommendation.rating is Rating.WATCH
     assert run.recommendation.signal_status is SignalStatus.NEUTRAL
-    assert run.recommendation.impact_factors is not None
-    assert run.recommendation.impact_factors.magnitude.value == 0
+    assert run.recommendation.direction_score == 0
 
 
 def test_final_status_distinguishes_neutral_insufficient_and_technical_failure(
@@ -573,7 +543,7 @@ def test_final_status_distinguishes_neutral_insufficient_and_technical_failure(
 
     assert neutral.status is RunStatus.COMPLETED
     assert neutral.recommendation.signal_status.value == "neutral"
-    assert neutral.recommendation.model_score == 80
+    assert neutral.recommendation.model_score == 0
     assert neutral.recommendation.raw_score == 0
     assert neutral.recommendation.score == 0
 
@@ -581,28 +551,25 @@ def test_final_status_distinguishes_neutral_insufficient_and_technical_failure(
     assert insufficient.recommendation.evidence_complete is True
     assert insufficient.recommendation.directional_evidence_complete is False
     assert insufficient.recommendation.signal_status is SignalStatus.DIRECTIONAL
-    assert insufficient.recommendation.score == 38
-    assert 0 < insufficient.recommendation.confidence < (
-        insufficient.recommendation.model_confidence or 0
-    )
+    assert insufficient.recommendation.score == 35
+    assert insufficient.recommendation.model_confidence is None
+    assert insufficient.recommendation.confidence > 0
     assert insufficient.recommendation.evidence_warnings
     assert insufficient.recommendation.gate_reasons == []
     assert insufficient.recommendation.primary_gate_reason is None
 
     assert verifier_unavailable.status is RunStatus.COMPLETED
-    assert verifier_unavailable.recommendation.score == 38
+    assert verifier_unavailable.recommendation.score == 35
     assert verifier_unavailable.retryable_reason is None
     assert any(
         "verifier unavailable" in warning
         for warning in verifier_unavailable.recommendation.evidence_warnings
     )
 
-    assert technical.status is RunStatus.FAILED
-    assert technical.recommendation.signal_status.value == "technical_failure"
-    assert technical.recommendation.score == 0
-    assert technical.recommendation.confidence == 0
-    assert technical.recommendation.bull_probability == 0.2
-    assert technical.recommendation.base_probability == 0.6
+    assert technical.status is RunStatus.COMPLETED
+    assert technical.recommendation.score_source is ScoreSource.RULE_FALLBACK
+    assert abs(technical.recommendation.score) <= 69
+    assert technical.recommendation.impact.trade_status.value == "untradeable"
     assert technical.retryable_reason.startswith("model_")
 
     assert low_confidence.status is RunStatus.COMPLETED
@@ -642,9 +609,9 @@ def test_research_draft_respects_cpu_prompt_budgets(db, tmp_path):
     )
 
     assert len(llm.prompts) == 1
-    assert "方向只能针对当前研究工具" in llm.systems[0]
-    assert "最终 score/rating/confidence/trade_status 全部由程序计算" in llm.systems[0]
-    assert "六个传导因子" in llm.systems[0]
+    assert "当前工具是唯一评级目标" in llm.systems[0]
+    assert "只能输出一个 direction_score" in llm.systems[0]
+    assert "评级和两种置信度全部由程序计算" in llm.systems[0]
     assert "当前工具就是唯一评级目标" in llm.prompts[0]
     assert llm.prompts[0].count("x") <= settings.research_prompt_evidence_chars
     assert llm.prompts[0].count("y") <= settings.research_prompt_context_chars
@@ -678,13 +645,13 @@ def test_research_revision_recalculates_required_direction_score(db, tmp_path):
         }
     )
 
-    assert "方向只能针对当前研究工具" in llm.systems[0]
-    assert "禁止输出全局方向" in llm.systems[0]
+    assert "当前工具是唯一评级目标" in llm.systems[0]
+    assert "不得输出评级、概率、新闻可信度、评级置信度" in llm.systems[0]
     assert "本轮修复清单" in llm.prompts[0]
     assert "valid_evidence_ids" in llm.prompts[0]
     assert "转载、改写或聚合副本只算一个独立来源" in llm.prompts[0]
     assert "Form 4 或持股变动文件不能支持" in llm.prompts[0]
-    assert llm.calls[0]["schema"] is DraftRepairOutput
+    assert llm.calls[0]["schema"] is ModelDraftRepairOutput
     assert llm.calls[0]["max_input_tokens"] == (
         settings.ollama_research_revision_max_input_tokens
     )
@@ -875,7 +842,7 @@ def test_explicit_historical_replay_skips_live_providers(db, tmp_path, monkeypat
     assert run.evidence == []
     assert run.status is RunStatus.COMPLETED
     assert run.recommendation is not None
-    assert run.recommendation.score == 38
+    assert run.recommendation.score == 35
     assert run.recommendation.evidence_warnings
 
 
@@ -964,7 +931,7 @@ def test_verification_gap_is_advisory_and_does_not_trigger_second_research_pass(
     assert run.verification_round == 1
     assert len({item.independent_group for item in run.evidence}) == 1
     assert run.recommendation is not None
-    assert run.recommendation.score == 38
+    assert run.recommendation.score == 35
     assert "one official source or two independent sources" in (
         run.recommendation.evidence_warnings
     )

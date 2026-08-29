@@ -35,8 +35,12 @@ type Recommendation = {
   id: string;
   asset: { symbol: string; name: string; market: string };
   score: number;
+  direction_score?: number;
   rating: string;
   confidence: number;
+  rating_confidence?: number;
+  news_confidence?: number;
+  score_source?: "llm" | "rule_fallback";
   evidence_complete: boolean;
   directional_evidence_complete?: boolean;
   signal_status?: "technical_failure" | "insufficient_evidence" | "neutral" | "directional";
@@ -164,7 +168,7 @@ type DashboardSnapshot = Snapshot & { analysis_logs: AnalysisLog[] };
 const labels: Record<string, string> = {
   strongly_bullish: "强烈看多",
   bullish: "看多",
-  watch: "观望",
+  watch: "中性",
   bearish: "看空",
   strongly_bearish: "强烈看空",
   insufficient_evidence: "证据不足",
@@ -412,7 +416,7 @@ export default function App() {
 
   const confidenceAverage = useMemo(() => {
     if (!snapshot.recommendations.length) return 0;
-    return snapshot.recommendations.reduce((sum, item) => sum + item.confidence, 0) /
+    return snapshot.recommendations.reduce((sum, item) => sum + (item.rating_confidence ?? item.confidence), 0) /
       snapshot.recommendations.length;
   }, [snapshot.recommendations]);
 
@@ -470,7 +474,7 @@ export default function App() {
         <Metric label="组合净值" value={portfolio ? money(portfolio.nav_usd) : "—"} note="模拟资金" />
         <Metric label="可用现金" value={portfolio ? money(portfolio.cash_usd) : "—"} note="最低保留 10%" />
         <Metric label="事件队列" value={String(snapshot.events.length)} note="最近 30 条" />
-        <Metric label="平均置信度" value={`${Math.round(confidenceAverage * 100)}%`} note="独立于方向评分" />
+        <Metric label="平均评级置信度" value={`${Math.round(confidenceAverage * 100)}%`} note="与新闻可信度独立" />
       </section>
 
       <section className="grid">
@@ -516,29 +520,33 @@ export default function App() {
         </div>
 
         <div className="panel recommendations-panel">
-          <PanelTitle title="最新建议" meta="短线影响与置信度" />
+          <PanelTitle title="最新建议" meta="方向分与双置信度" />
           <div className="recommendations">
             {snapshot.recommendations.length === 0 && <Empty text="完成一次深度研究后将在这里生成建议。" />}
-            {snapshot.recommendations.map((item) => (
-              <button className="recommendation" key={item.id} onClick={() => setSelected(item)}>
+            {snapshot.recommendations.map((item) => {
+              const directionScore = item.direction_score ?? item.score;
+              const threshold = item.scoring_version === "llm-direction-v3" ? 30 : 15;
+              return <button className="recommendation" key={item.id} onClick={() => setSelected(item)}>
                 <div className="ticker">
                   <strong>{item.asset.symbol}</strong>
                   <span>{item.asset.name}</span>
                 </div>
-                <div className={`score ${item.score >= 15 ? "positive" : item.score <= -15 ? "negative" : "neutral"}`}>
-                  {item.score > 0 ? "+" : ""}{item.score}
+                <div className={`score ${directionScore >= threshold ? "positive" : directionScore <= -threshold ? "negative" : "neutral"}`}>
+                  {directionScore > 0 ? "+" : ""}{directionScore}
                 </div>
                 <div>
                   <strong>{labels[item.rating] || item.rating}</strong>
-                  <span className="muted">置信度 {Math.round(item.confidence * 100)}%</span>
+                  <span className="muted">评级置信度 {Math.round((item.rating_confidence ?? item.confidence) * 100)}%</span>
                 </div>
                 <span className={`evidence ${item.scoring_version === "short-term-impact-v1" || item.evidence_complete ? "verified" : "limited"}`}>
-                  {item.scoring_version === "short-term-impact-v1"
+                  {item.scoring_version === "llm-direction-v3"
+                    ? `新闻可信度 ${Math.round((item.news_confidence ?? item.fact_confidence ?? 0) * 100)}% · ${item.horizon_days ?? 90} 个自然日${item.score_source === "rule_fallback" ? " · 规则回退" : ""}`
+                    : item.scoring_version === "short-term-impact-v1"
                     ? `事实置信度 ${Math.round((item.fact_confidence ?? item.confidence) * 100)}%`
                     : labels[item.signal_status || ""] || (item.evidence_complete ? "资料覆盖完整" : "资料覆盖不足")}
                 </span>
-              </button>
-            ))}
+              </button>;
+            })}
           </div>
         </div>
       </section>
@@ -549,8 +557,10 @@ export default function App() {
             <button className="close" onClick={() => setSelected(null)}>×</button>
             <p className="eyebrow">{selected.asset.market} · {selected.asset.symbol}</p>
             <h2>{selected.asset.name}</h2>
-            <div className="modal-score"><strong>{selected.score}</strong><span>{labels[selected.rating]}</span></div>
-            <p className="muted">{selected.scoring_version === "short-term-impact-v1"
+            <div className="modal-score"><strong>{selected.direction_score ?? selected.score}</strong><span>{labels[selected.rating]}</span></div>
+            <p className="muted">{selected.scoring_version === "llm-direction-v3"
+              ? `方向分 · 新闻可信度 ${Math.round((selected.news_confidence ?? selected.fact_confidence ?? 0) * 100)}% · 评级置信度 ${Math.round((selected.rating_confidence ?? selected.confidence) * 100)}% · 未来 ${selected.horizon_days ?? 90} 个自然日${selected.score_source === "rule_fallback" ? " · 规则回退" : ""}`
+              : selected.scoring_version === "short-term-impact-v1"
               ? `短线影响 · 新闻事实置信度 ${Math.round((selected.fact_confidence ?? selected.confidence) * 100)}% · 评级置信度 ${Math.round(selected.confidence * 100)}% · 未来 1–${selected.horizon_days ?? 3} 个交易日`
               : <>{labels[selected.signal_status || ""] || "旧版结论"} · 程序原始分 {selected.raw_score ?? selected.score}{selected.directional_evidence_complete !== undefined && ` · 方向证据${selected.directional_evidence_complete ? "通过" : "未通过"}`}</>}
             </p>
@@ -559,7 +569,7 @@ export default function App() {
             <ul>{selected.thesis.catalysts.map((item) => <li key={item}>{item}</li>)}</ul>
             <h3>风险</h3>
             <ul>{selected.thesis.risks.map((item) => <li key={item}>{item}</li>)}</ul>
-            <footer>置信度 {Math.round(selected.confidence * 100)}% · 仅用于研究和模拟</footer>
+            <footer>评级置信度 {Math.round((selected.rating_confidence ?? selected.confidence) * 100)}% · 仅用于研究和模拟</footer>
           </article>
         </div>
       )}
