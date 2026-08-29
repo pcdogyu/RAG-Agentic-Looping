@@ -1684,10 +1684,15 @@ def _asset_mapping_is_terminal(event: NewsEvent) -> bool:
         (step for step in reversed(event.analysis_steps) if step.phase == "asset_mapping"),
         None,
     )
-    return bool(
-        (queue_step and queue_step.status == "completed")
-        or (mapping_step and mapping_step.status in {"completed", "unmapped"})
-    )
+    if queue_step is not None:
+        if queue_step.status == "completed":
+            return True
+        return bool(
+            mapping_step
+            and mapping_step.occurred_at > queue_step.occurred_at
+            and mapping_step.status in {"completed", "unmapped"}
+        )
+    return bool(mapping_step and mapping_step.status in {"completed", "unmapped"})
 
 
 def _revoke_model_task(task_id: str) -> None:

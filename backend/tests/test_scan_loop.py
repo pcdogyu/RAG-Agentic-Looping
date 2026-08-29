@@ -1462,6 +1462,38 @@ def test_stale_retrying_mapping_is_requeued(db, monkeypatch):
     assert queued[0]["force"] is True
 
 
+def test_queued_secondary_mapping_is_not_terminal_after_deterministic_unmapped():
+    observed = datetime(2026, 8, 22, 12, 0, tzinfo=UTC)
+    event = NewsEvent(
+        news_item_ids=[],
+        headline="Secondary mapping is still pending",
+        event_type="other",
+        direct_impact="Deterministic mapping found no candidate.",
+        source_quality=SourceQuality.PROFESSIONAL,
+        published_at=observed,
+        observed_at=observed,
+        as_of=observed,
+        analysis_steps=[
+            AnalysisStep(
+                phase="asset_mapping",
+                status="unmapped",
+                executor="provider-registry",
+                summary="No deterministic candidate.",
+                occurred_at=observed,
+            ),
+            AnalysisStep(
+                phase="asset_mapping_queue",
+                status="queued",
+                executor="celery",
+                summary="Secondary model mapping queued.",
+                occurred_at=observed + timedelta(minutes=1),
+            ),
+        ],
+    )
+
+    assert not worker._asset_mapping_is_terminal(event)
+
+
 def test_stale_mapping_recovery_cancels_terminal_event_without_requeue(db, monkeypatch):
     observed = datetime(2026, 8, 22, 12, 0, tzinfo=UTC)
     event = NewsEvent(
