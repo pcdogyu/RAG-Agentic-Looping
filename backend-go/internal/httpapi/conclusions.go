@@ -95,6 +95,7 @@ func (s *Server) queryConclusions(r *http.Request, kind, search, market, rating,
 			FROM recommendations r
 			LEFT JOIN research_runs rr ON rr.id=r.run_id
 			WHERE $1 IN ('all','asset')
+			  AND (rr.payload->>'retryable_reason') IS NULL
 			  AND ($3='' OR lower(r.payload #>> '{asset,market}')=lower($3))
 			  AND ($4='' OR r.rating=$4)
 			  AND ($5='' OR coalesce((r.payload->>'evidence_complete')::boolean,false)=($5='complete'))
@@ -105,6 +106,7 @@ func (s *Server) queryConclusions(r *http.Request, kind, search, market, rating,
 			LEFT JOIN news_events e ON e.id=er.event_id
 			WHERE $1 IN ('all','event') AND $3='' AND $4=''
 			  AND er.status IN ('completed','insufficient_evidence')
+			  AND (er.payload->>'retryable_reason') IS NULL
 			  AND er.payload->'report' IS NOT NULL
 			  AND ($5='' OR coalesce((er.payload #>> '{report,evidence_complete}')::boolean,false)=($5='complete'))
 			  AND ($2='' OR concat_ws(' ',e.headline,er.payload #>> '{report,summary}',er.payload #>> '{report,affected_markets}',er.payload #>> '{report,affected_sectors}') ILIKE '%'||$2||'%')

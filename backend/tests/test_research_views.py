@@ -88,6 +88,7 @@ def event_run(
     impacts: list[TargetImpact],
     report: bool = True,
     news_confidence: float = 0.67,
+    retryable_reason: str | None = None,
 ) -> EventResearchRun:
     now = utc_now()
     event = NewsEvent(
@@ -104,6 +105,7 @@ def event_run(
     run = EventResearchRun(
         event_id=event.id,
         status=status,
+        retryable_reason=retryable_reason,
         report=(
             EventReport(
                 summary=f"{name} report",
@@ -258,6 +260,40 @@ def test_research_conclusions_unify_visible_terminal_results_and_detail(db):
     }
     assert events_by_title["insufficient macro"]["report"]["rating"] is None
     assert first.json()["items"][0]["id"] != second.json()["items"][0]["id"]
+
+
+def test_research_conclusions_exclude_retryable_fallbacks(db):
+    now = utc_now()
+    asset_item, asset_run = recommendation(
+        asset("RETRYABLE"),
+        rating=Rating.WATCH,
+        score=0,
+        as_of=now,
+    )
+    asset_run.status = RunStatus.INSUFFICIENT_EVIDENCE
+    asset_run.retryable_reason = "model_LlmError"
+    save_run(db, asset_run)
+    save_recommendation(db, asset_item)
+
+    event_item = event_run(
+        db,
+        "retryable fallback event",
+        status=RunStatus.INSUFFICIENT_EVIDENCE,
+        impacts=[],
+        retryable_reason="model_LlmError",
+    )
+
+    with TestClient(app) as client:
+        conclusions = client.get("/api/v1/research-conclusions?limit=10")
+        failures = client.get("/api/v1/failed-research-runs?limit=10")
+
+    assert conclusions.status_code == 200
+    assert failures.status_code == 200
+    conclusion_ids = {item["id"] for item in conclusions.json()["items"]}
+    failure_ids = {item["id"] for item in failures.json()}
+    assert str(asset_item.id) not in conclusion_ids
+    assert str(event_item.id) not in conclusion_ids
+    assert {str(asset_run.id), str(event_item.id)} <= failure_ids
 
 
 def test_target_changes_split_macro_and_assets_and_link_latest_research(db):

@@ -911,6 +911,9 @@ def list_research_conclusions(
             row.id: ResearchRun.model_validate(row.payload) for row in run_rows
         }
         for recommendation in recommendations:
+            run = runs_by_id.get(recommendation.run_id)
+            if run is not None and run.retryable_reason is not None:
+                continue
             asset = recommendation.asset
             if market and asset.market.value.casefold() != market.casefold():
                 continue
@@ -937,7 +940,7 @@ def list_research_conclusions(
                     "asset": asset.model_dump(mode="json"),
                     "event": None,
                     "recommendation": _public_recommendation(
-                        recommendation, runs_by_id.get(recommendation.run_id)
+                        recommendation, run
                     ),
                     "report": None,
                 }
@@ -960,6 +963,8 @@ def list_research_conclusions(
         events_by_id = {row.id: row.payload for row in stored_events}
         for row in event_rows:
             run = EventResearchRun.model_validate(row.payload)
+            if run.retryable_reason is not None:
+                continue
             report = run.report
             if report is None:
                 continue
