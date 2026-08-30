@@ -435,6 +435,6 @@ def test_macro_change_keeps_published_report_visible_during_refresh(db):
     assert response.status_code == 200
     items = response.json()["items"]
     assert len(items) == 1
-    assert items[0]["label"] == "能源行业"
+    assert items[0]["label"] == "能源"
     assert items[0]["current"]["rating"] == "bearish"
     assert items[0]["latest_detail"]["id"] == str(refreshing.id)

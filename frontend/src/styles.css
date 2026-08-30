@@ -508,6 +508,21 @@ h1 span { color: var(--mint); font-weight: 400; }
 .target-change-rating-row b { flex: 0 0 auto; color: var(--amber); font: 500 12px "DM Mono", monospace; }
 .target-change-rating-row b.positive { color: var(--mint); }
 .target-change-rating-row b.negative { color: var(--red); }
+.target-trend-summary { display: grid; gap: 6px; padding: 7px; border: 1px solid rgba(88,214,255,.3); border-radius: 7px; background: rgba(88,214,255,.04); }
+.target-trend-summary__periods { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; }
+.target-trend-period { display: grid; gap: 3px; min-width: 0; padding: 6px; border: 1px solid var(--line); border-radius: 5px; background: var(--panel); }
+.target-trend-period h4 { margin: 0; color: var(--muted); font-size: 8px; font-weight: 500; }
+.target-trend-period p { margin: 0; }
+.target-trend-period__signal { display: flex; align-items: baseline; justify-content: space-between; gap: 4px; }
+.target-trend-period__signal strong { overflow: hidden; color: var(--text); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.target-trend-period__score { color: var(--muted); font: 500 11px "DM Mono", monospace; }
+.target-trend-period__score.positive { color: var(--mint); }
+.target-trend-period__score.negative { color: var(--red); }
+.target-trend-period__confidence { color: var(--muted); font-size: 7px; line-height: 1.35; }
+.target-trend-period__provisional, .target-trend-summary__notice { color: var(--amber); }
+.target-trend-summary__evidence, .target-trend-summary__notice, .target-trend-summary__regime { margin: 0; font-size: 8px; line-height: 1.4; }
+.target-trend-summary__evidence { color: var(--muted); }
+.target-trend-summary__regime { color: var(--red); font-weight: 600; }
 .target-change-field.unchanged strong { color: var(--muted); font-weight: 400; }
 .target-change-latest { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
 .target-change-latest.with-research { grid-template-columns: repeat(2, minmax(0, 1fr)) 76px; align-items: end; gap: 4px; }

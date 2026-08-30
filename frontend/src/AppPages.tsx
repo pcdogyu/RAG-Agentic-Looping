@@ -2,6 +2,7 @@ import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 
 import AnalysisPage, { type AnalysisLog } from "./AnalysisPage";
 import ModelLogsPage from "./ModelLogs";
+import { TargetTrendSummary, type TargetTrend } from "./TargetTrendSummary";
 
 export type AppRoute = "home" | "source-filter" | "sources" | "asset-universe" | "news" | "queue" | "analysis" | "conclusions" | "targets" | "model-logs" | "search" | "weknora";
 
@@ -1385,6 +1386,7 @@ export type TargetChange = {
   previous: { rating: string; direction_score: number | null; rating_confidence: number | null };
   current: { rating: string; direction_score: number | null; rating_confidence: number | null };
   latest: { rating: string; direction_score: number | null; rating_confidence: number | null; news_confidence: number | null };
+  trend?: TargetTrend;
   latest_detail: { kind: "event" | "asset"; id: string; researched_at: string };
   change_detail_id: string;
 };
@@ -2237,7 +2239,8 @@ export function TargetChangeGrid({
             </button>
           </div>
         </header>
-        <div className="target-change-field changed"><span>评级变化</span><div className="target-change-rating-row"><strong>{recommendationRatingLabel(item.previous.rating)} → {recommendationRatingLabel(item.current.rating)}</strong><b className={score === null ? "neutral" : score < 0 ? "negative" : score > 0 ? "positive" : "neutral"} title="最新方向分">{score === null ? "—" : `${score > 0 ? "+" : ""}${score}`}</b></div></div>
+        <div className="target-change-field changed"><span>{item.kind === "macro" ? "最近事件评级变化" : "评级变化"}</span><div className="target-change-rating-row"><strong>{recommendationRatingLabel(item.previous.rating)} → {recommendationRatingLabel(item.current.rating)}</strong><b className={score === null ? "neutral" : score < 0 ? "negative" : score > 0 ? "positive" : "neutral"} title="最新方向分">{score === null ? "—" : `${score > 0 ? "+" : ""}${score}`}</b></div></div>
+        {item.kind === "macro" && item.trend && <TargetTrendSummary trend={item.trend} />}
         <div className={`target-change-latest${onResearch ? " with-research" : ""}`}>
           <span>新闻可信度<strong>{newsConfidence === null ? "—" : `${Math.round(newsConfidence * 100)}%`}</strong></span>
           <span>评级置信度<strong>{confidence === null ? "—" : `${Math.round(confidence * 100)}%`}</strong></span>

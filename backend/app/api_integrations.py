@@ -75,6 +75,13 @@ from backend.app.services.source_filter import (
     save_source_filter,
     source_filter_payload,
 )
+from backend.app.services.target_trends import (
+    CanonicalTarget,
+    TargetObservation,
+    TargetTrend,
+    aggregate_target_trend,
+    canonicalize_target,
+)
 from backend.app.storage import (
     event_news_item_ids,
     get_event,
@@ -1130,6 +1137,75 @@ def _impact_state(impact: TargetImpact) -> dict[str, Any]:
     }
 
 
+def _trend_state(value: Any) -> dict[str, Any]:
+    return {
+        "rating": value.rating.value,
+        "direction_score": value.score,
+        "rating_confidence": value.confidence,
+        "provisional": value.provisional,
+    }
+
+
+def _public_target_trend(trend: TargetTrend) -> dict[str, Any]:
+    return {
+        "algorithm_version": "dual-horizon-v1",
+        "short_term": _trend_state(trend.short_term),
+        "long_term": _trend_state(trend.long_term),
+        "composite": _trend_state(trend.combined),
+        "event_count_90d": trend.long_term.event_count,
+        "eligible_event_count_90d": trend.long_term.eligible_event_count,
+        "ignored_event_count_90d": trend.long_term.ignored_event_count,
+        "regime_break": trend.long_term.regime_break,
+    }
+
+
+def _representative_macro_impact(impacts: list[TargetImpact]) -> TargetImpact:
+    return max(
+        impacts,
+        key=lambda impact: (
+            impact.rating_confidence or 0,
+            len(impact.evidence_ids),
+            -len(impact.missing_information),
+            _normalized_target_text(impact.target_name),
+        ),
+    )
+
+
+def _canonical_observation(
+    impacts: list[TargetImpact],
+    *,
+    occurred_at: datetime,
+    news_confidence: float,
+    provisional: bool,
+) -> TargetObservation:
+    weights = [max(0.05, impact.rating_confidence or 0) for impact in impacts]
+    total_weight = sum(weights)
+
+    def weighted(value: Any) -> float:
+        return sum(
+            float(value(impact)) * weight
+            for impact, weight in zip(impacts, weights, strict=True)
+        ) / total_weight
+
+    scores = [impact.direction_score or 0 for impact in impacts]
+    conflicting_aliases = max(scores) - min(scores) >= 30
+    insufficient = provisional or conflicting_aliases or all(
+        impact.technical_failure for impact in impacts
+    )
+    return TargetObservation(
+        occurred_at=occurred_at,
+        score=weighted(lambda impact: impact.direction_score or 0),
+        rating_confidence=weighted(lambda impact: impact.rating_confidence or 0),
+        news_confidence=news_confidence,
+        persistence=weighted(lambda impact: impact.factors.persistence),
+        realization_probability=weighted(
+            lambda impact: impact.factors.realization_probability
+        ),
+        insufficient_evidence=insufficient,
+        provisional=insufficient,
+    )
+
+
 def _macro_target_changes(db: Session) -> list[dict[str, Any]]:
     rows = list(
         db.scalars(
@@ -1139,10 +1215,10 @@ def _macro_target_changes(db: Session) -> list[dict[str, Any]]:
     )
     security_names, security_symbols = _security_aliases(db)
     parsed: list[tuple[EventResearchRunRow, EventResearchRun]] = []
-    aliases: dict[tuple[str, str], str] = {}
+    aliases: dict[tuple[str, str], Any] = {}
     for row in rows:
         run = EventResearchRun.model_validate(row.payload)
-        if run.report is None or (
+        if run.retryable_reason is not None or run.report is None or (
             row.status not in _VISIBLE_EVENT_STATUSES and not run.report_history
         ):
             continue
@@ -1153,68 +1229,133 @@ def _macro_target_changes(db: Session) -> list[dict[str, Any]]:
                 and impact.asset
                 and impact.asset.asset_class not in {AssetClass.EQUITY, AssetClass.CRYPTO}
             ):
-                aliases[(impact.target_type.value, _macro_target_base(impact.target_name))] = (
-                    impact.asset.asset_id
-                )
+                aliases[
+                    (impact.target_type.value, _macro_target_base(impact.target_name))
+                ] = impact.asset
 
-    previous_by_key: dict[str, tuple[TargetImpact, EventResearchRun, datetime]] = {}
-    latest_by_key: dict[str, tuple[TargetImpact, EventResearchRun, datetime]] = {}
-    changes: dict[
-        str,
-        tuple[TargetImpact, TargetImpact, EventResearchRun, datetime],
-    ] = {}
+    event_ids = {run.event_id for _, run in parsed}
+    event_rows = (
+        db.scalars(select(EventRow).where(EventRow.id.in_(event_ids))).all()
+        if event_ids
+        else []
+    )
+    event_times = {row.id: as_utc(row.published_at) for row in event_rows}
+    snapshots_by_key: dict[str, list[dict[str, Any]]] = {}
     for row, run in parsed:
-        report_impacts: dict[str, TargetImpact] = {}
+        report = run.report
+        if report is None:
+            continue
+        grouped_impacts: dict[str, dict[str, Any]] = {}
         for impact in run.report.impacts if run.report else []:
             if impact.target_type not in _MACRO_TARGET_TYPES or _resembles_security_target(
                 impact, security_names, security_symbols
             ):
                 continue
             alias_key = (impact.target_type.value, _macro_target_base(impact.target_name))
-            stable_id = (
-                impact.asset.asset_id
+            stable_asset = (
+                impact.asset
                 if impact.asset
                 and impact.asset.asset_class not in {AssetClass.EQUITY, AssetClass.CRYPTO}
                 else aliases.get(alias_key)
             )
-            key = stable_id or f"{impact.target_type.value}:{alias_key[1]}"
-            report_impacts[key] = impact
-        stamp = as_utc(row.updated_at)
-        for key, impact in report_impacts.items():
-            previous = previous_by_key.get(key)
-            if previous and previous[0].rating != impact.rating:
-                changes[key] = (previous[0], impact, run, stamp)
-            previous_by_key[key] = (impact, run, stamp)
-            latest_by_key[key] = (impact, run, stamp)
+            canonical = canonicalize_target(
+                impact.target_name,
+                impact.target_type,
+                asset_id=stable_asset.asset_id if stable_asset else None,
+                asset_class=stable_asset.asset_class if stable_asset else None,
+            )
+            group = grouped_impacts.setdefault(
+                canonical.key,
+                {"canonical": canonical, "impacts": [], "asset": stable_asset},
+            )
+            group["impacts"].append(impact)
+            if group["asset"] is None and stable_asset is not None:
+                group["asset"] = stable_asset
+
+        published_at = event_times.get(run.event_id, as_utc(run.as_of))
+        changed_at = as_utc(row.updated_at)
+        provisional = (
+            row.status == RunStatus.INSUFFICIENT_EVIDENCE.value
+            or not report.evidence_complete
+        )
+        for key, group in grouped_impacts.items():
+            impacts = group["impacts"]
+            observation = _canonical_observation(
+                impacts,
+                occurred_at=published_at,
+                news_confidence=report.news_confidence or report.fact_confidence,
+                provisional=provisional,
+            )
+            snapshot = {
+                "canonical": group["canonical"],
+                "impact": _representative_macro_impact(impacts),
+                "asset": group["asset"],
+                "run": run,
+                "changed_at": changed_at,
+                "observation": observation,
+                "provisional": observation.provisional,
+            }
+            snapshots_by_key.setdefault(key, []).append(snapshot)
 
     output: list[dict[str, Any]] = []
-    for key, (previous, current, change_run, changed_at) in changes.items():
-        latest, latest_run, latest_at = latest_by_key[key]
+    now = utc_now()
+    for key, snapshots in snapshots_by_key.items():
+        snapshots.sort(
+            key=lambda item: (item["changed_at"], item["run"].id.int)
+        )
+        previous_snapshot: dict[str, Any] | None = None
+        latest_change: tuple[dict[str, Any], dict[str, Any]] | None = None
+        for snapshot in snapshots:
+            if (
+                previous_snapshot is not None
+                and previous_snapshot["impact"].rating != snapshot["impact"].rating
+            ):
+                latest_change = (previous_snapshot, snapshot)
+            previous_snapshot = snapshot
+        if latest_change is None:
+            continue
+        previous, current = latest_change
+        latest = snapshots[-1]
+        latest_impact = latest["impact"]
+        latest_run = latest["run"]
+        canonical: CanonicalTarget = latest["canonical"]
+        display_asset = latest["asset"] or latest_impact.asset
+        trend = aggregate_target_trend(
+            [snapshot["observation"] for snapshot in snapshots], as_of=now
+        )
         output.append(
             {
                 "kind": "macro",
                 "key": key,
-                "label": latest.target_name,
-                "symbol": latest.asset.symbol if latest.asset else None,
-                "market": latest.asset.market.value if latest.asset else None,
-                "target_type": latest.target_type.value,
-                "changed_at": changed_at,
-                "previous": _impact_state(previous),
-                "current": _impact_state(current),
+                "label": canonical.label,
+                "symbol": display_asset.symbol if display_asset else None,
+                "market": display_asset.market.value if display_asset else None,
+                "target_type": canonical.target_type,
+                "changed_at": current["changed_at"],
+                "previous": {
+                    **_impact_state(previous["impact"]),
+                    "provisional": previous["provisional"],
+                },
+                "current": {
+                    **_impact_state(current["impact"]),
+                    "provisional": current["provisional"],
+                },
                 "latest": {
-                    **_impact_state(latest),
+                    **_impact_state(latest_impact),
+                    "provisional": latest["provisional"],
                     "news_confidence": (
                         latest_run.report.news_confidence
                         if latest_run.report
                         else None
                     ),
                 },
+                "trend": _public_target_trend(trend),
                 "latest_detail": {
                     "kind": "event",
                     "id": latest_run.id,
-                    "researched_at": latest_at,
+                    "researched_at": latest["changed_at"],
                 },
-                "change_detail_id": change_run.id,
+                "change_detail_id": current["run"].id,
             }
         )
     return sorted(
