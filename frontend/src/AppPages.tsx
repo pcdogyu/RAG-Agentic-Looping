@@ -2223,7 +2223,7 @@ export function TargetChangeGrid({
       const confidence = item.latest.rating_confidence;
       return <article className={`target-change-card ${item.kind}`} key={item.key}>
         <header>
-          <span>{item.kind === "macro" ? (targetTypeLabels[item.target_type] ?? item.target_type) : item.market} · {new Date(item.changed_at).toLocaleString("zh-CN")}</span>
+          <span>{item.target_type === "commodity_price" || item.kind === "macro" ? (targetTypeLabels[item.target_type] ?? item.target_type) : item.market} · {new Date(item.changed_at).toLocaleString("zh-CN")}</span>
           <div className="target-change-symbol-row">
             <button
               type="button"
@@ -2239,8 +2239,8 @@ export function TargetChangeGrid({
             </button>
           </div>
         </header>
-        <div className="target-change-field changed"><span>{item.kind === "macro" ? "最近事件评级变化" : "评级变化"}</span><div className="target-change-rating-row"><strong>{recommendationRatingLabel(item.previous.rating)} → {recommendationRatingLabel(item.current.rating)}</strong><b className={score === null ? "neutral" : score < 0 ? "negative" : score > 0 ? "positive" : "neutral"} title="最新方向分">{score === null ? "—" : `${score > 0 ? "+" : ""}${score}`}</b></div></div>
-        {item.kind === "macro" && item.trend && <TargetTrendSummary trend={item.trend} />}
+        <div className="target-change-field changed"><span>{item.latest_detail.kind === "event" ? "最近事件评级变化" : "评级变化"}</span><div className="target-change-rating-row"><strong>{recommendationRatingLabel(item.previous.rating)} → {recommendationRatingLabel(item.current.rating)}</strong><b className={score === null ? "neutral" : score < 0 ? "negative" : score > 0 ? "positive" : "neutral"} title="最新方向分">{score === null ? "—" : `${score > 0 ? "+" : ""}${score}`}</b></div></div>
+        {item.trend && <TargetTrendSummary trend={item.trend} />}
         <div className={`target-change-latest${onResearch ? " with-research" : ""}`}>
           <span>新闻可信度<strong>{newsConfidence === null ? "—" : `${Math.round(newsConfidence * 100)}%`}</strong></span>
           <span>评级置信度<strong>{confidence === null ? "—" : `${Math.round(confidence * 100)}%`}</strong></span>
@@ -2252,7 +2252,7 @@ export function TargetChangeGrid({
 }
 
 export function targetChangeResearchKey(item: TargetChange) {
-  return item.kind === "macro"
+  return item.latest_detail.kind === "event"
     ? `event:${item.latest_detail.id}`
     : `asset:${item.key}`;
 }
@@ -2311,7 +2311,7 @@ function TargetChangeSection({
   }, [load]);
 
   return <section className={`target-change-section ${kind}`}>
-    <header><div><p className="eyebrow">{kind === "macro" ? "MACRO / SECTOR" : "SECURITY TARGETS"}</p><h2>{title}</h2><p>{copy}</p></div><button type="button" disabled={loading} onClick={() => void load()}>{loading ? "刷新中…" : "刷新"}</button></header>
+    <header><div><p className="eyebrow">{kind === "macro" ? "MACRO / SECTOR" : "INSTRUMENT TARGETS"}</p><h2>{title}</h2><p>{copy}</p></div><button type="button" disabled={loading} onClick={() => void load()}>{loading ? "刷新中…" : "刷新"}</button></header>
     {error && <div className="page-error target-change-error"><span>{error}</span><button type="button" onClick={() => void load()}>重试</button></div>}
     {!items.length && !error && (loading ? <div className="page-message">正在加载{title}…</div> : <div className="page-empty">当前没有最近评级变化。</div>)}
     {!!items.length && <TargetChangeGrid items={items} onOpen={onOpen} detailLoadingId={detailLoadingId} researchStates={researchStates} onResearch={onResearch} />}
@@ -2352,7 +2352,7 @@ export function ChangedTargetsPage({ apiBase }: { apiBase: string }) {
     researchInFlight.current.add(stateKey);
     setResearchStates((current) => ({ ...current, [stateKey]: { status: "pending" } }));
     try {
-      if (item.kind === "macro") await researchEventConclusion(apiBase, item.latest_detail.id);
+      if (item.latest_detail.kind === "event") await researchEventConclusion(apiBase, item.latest_detail.id);
       else await researchConclusion(apiBase, item.latest_detail.id);
       setResearchStates((current) => ({ ...current, [stateKey]: { status: "queued" } }));
     } catch (reason) {
@@ -2363,11 +2363,11 @@ export function ChangedTargetsPage({ apiBase }: { apiBase: string }) {
   }
 
   return <section className="app-page targets-page">
-    <PageHeading eyebrow="RATING CHANGES" title="标的评级变化" copy="左侧追踪宏观经济、行业及跨资产目标，右侧追踪具体证券；仅展示最近一次五级评级变化。" />
+    <PageHeading eyebrow="RATING CHANGES" title="标的评级变化" copy="左侧追踪宏观经济、行业及跨资产目标，右侧追踪具体证券与商品价格；仅展示最近一次五级评级变化。" />
     {detailError && <div className="page-error target-detail-error"><span>{detailError}</span></div>}
     <div className="target-change-split">
-      <TargetChangeSection apiBase={apiBase} kind="macro" title="宏观经济与行业变化" copy="经济、行业、商品、汇率、利率、供给、航运与风险资产。" onOpen={(item) => void openLatestResearch(item)} detailLoadingId={detailLoadingId} researchStates={researchStates} onResearch={(item) => void researchAgain(item)} />
-      <TargetChangeSection apiBase={apiBase} kind="asset" title="具体标的变化" copy="股票与加密资产的最新五级评级变化及研究结论。" onOpen={(item) => void openLatestResearch(item)} detailLoadingId={detailLoadingId} researchStates={researchStates} onResearch={(item) => void researchAgain(item)} />
+      <TargetChangeSection apiBase={apiBase} kind="macro" title="宏观经济与行业变化" copy="经济、行业、汇率、利率、供给、航运与风险资产。" onOpen={(item) => void openLatestResearch(item)} detailLoadingId={detailLoadingId} researchStates={researchStates} onResearch={(item) => void researchAgain(item)} />
+      <TargetChangeSection apiBase={apiBase} kind="asset" title="具体标的变化" copy="股票、加密资产与商品价格的最新五级评级变化及研究结论。" onOpen={(item) => void openLatestResearch(item)} detailLoadingId={detailLoadingId} researchStates={researchStates} onResearch={(item) => void researchAgain(item)} />
     </div>
     {selectedAsset && <ConclusionDetailModal detail={selectedAsset} onClose={() => setSelectedAsset(null)} />}
     {selectedEvent && <EventConclusionDetailModal detail={selectedEvent} onClose={() => setSelectedEvent(null)} />}

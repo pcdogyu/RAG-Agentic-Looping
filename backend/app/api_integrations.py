@@ -839,7 +839,6 @@ _EVENT_REFRESH_FEED_STATUSES = {
 _MACRO_TARGET_TYPES = {
     TargetType.ECONOMY,
     TargetType.SUPPLY_VOLUME,
-    TargetType.COMMODITY_PRICE,
     TargetType.FX_RATE,
     TargetType.INTEREST_RATE,
     TargetType.SECTOR,
@@ -847,6 +846,7 @@ _MACRO_TARGET_TYPES = {
     TargetType.SHIPPING,
     TargetType.OTHER,
 }
+_COMMODITY_TARGET_TYPES = {TargetType.COMMODITY_PRICE}
 
 
 def _encode_union_cursor(stamp: datetime, kind: str, item_id: UUID) -> str:
@@ -1206,7 +1206,12 @@ def _canonical_observation(
     )
 
 
-def _macro_target_changes(db: Session) -> list[dict[str, Any]]:
+def _event_target_changes(
+    db: Session,
+    *,
+    target_types: set[TargetType],
+    kind: Literal["macro", "asset"],
+) -> list[dict[str, Any]]:
     rows = list(
         db.scalars(
             select(EventResearchRunRow)
@@ -1225,7 +1230,7 @@ def _macro_target_changes(db: Session) -> list[dict[str, Any]]:
         parsed.append((row, run))
         for impact in run.report.impacts:
             if (
-                impact.target_type in _MACRO_TARGET_TYPES
+                impact.target_type in target_types
                 and impact.asset
                 and impact.asset.asset_class not in {AssetClass.EQUITY, AssetClass.CRYPTO}
             ):
@@ -1247,7 +1252,7 @@ def _macro_target_changes(db: Session) -> list[dict[str, Any]]:
             continue
         grouped_impacts: dict[str, dict[str, Any]] = {}
         for impact in run.report.impacts if run.report else []:
-            if impact.target_type not in _MACRO_TARGET_TYPES or _resembles_security_target(
+            if impact.target_type not in target_types or _resembles_security_target(
                 impact, security_names, security_symbols
             ):
                 continue
@@ -1325,7 +1330,7 @@ def _macro_target_changes(db: Session) -> list[dict[str, Any]]:
         )
         output.append(
             {
-                "kind": "macro",
+                "kind": kind,
                 "key": key,
                 "label": canonical.label,
                 "symbol": display_asset.symbol if display_asset else None,
@@ -1362,6 +1367,22 @@ def _macro_target_changes(db: Session) -> list[dict[str, Any]]:
         output,
         key=lambda item: (as_utc(item["changed_at"]), UUID(str(item["change_detail_id"])).int),
         reverse=True,
+    )
+
+
+def _macro_target_changes(db: Session) -> list[dict[str, Any]]:
+    return _event_target_changes(
+        db,
+        target_types=_MACRO_TARGET_TYPES,
+        kind="macro",
+    )
+
+
+def _commodity_target_changes(db: Session) -> list[dict[str, Any]]:
+    return _event_target_changes(
+        db,
+        target_types=_COMMODITY_TARGET_TYPES,
+        kind="asset",
     )
 
 
@@ -1402,6 +1423,29 @@ def _asset_target_changes(db: Session) -> list[dict[str, Any]]:
     ]
 
 
+def _concrete_target_changes(db: Session) -> list[dict[str, Any]]:
+    changes_by_key: dict[str, dict[str, Any]] = {}
+    for item in [*_asset_target_changes(db), *_commodity_target_changes(db)]:
+        current = changes_by_key.get(item["key"])
+        item_sort_key = (
+            as_utc(item["changed_at"]),
+            UUID(str(item["change_detail_id"])).int,
+        )
+        if current is None or item_sort_key > (
+            as_utc(current["changed_at"]),
+            UUID(str(current["change_detail_id"])).int,
+        ):
+            changes_by_key[item["key"]] = item
+    return sorted(
+        changes_by_key.values(),
+        key=lambda item: (
+            as_utc(item["changed_at"]),
+            UUID(str(item["change_detail_id"])).int,
+        ),
+        reverse=True,
+    )
+
+
 @router.get("/api/v1/target-changes")
 def list_target_changes(
     db: Db,
@@ -1409,7 +1453,10 @@ def list_target_changes(
     cursor: str | None = None,
     limit: int = Query(default=50, ge=1, le=100),
 ) -> dict[str, Any]:
-    changes = _macro_target_changes(db) if kind == "macro" else _asset_target_changes(db)
+    if kind == "macro":
+        changes = _macro_target_changes(db)
+    else:
+        changes = _concrete_target_changes(db)
     if cursor:
         cursor_time, cursor_id = _decode_cursor(cursor)
         changes = [

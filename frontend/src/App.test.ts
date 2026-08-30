@@ -556,6 +556,8 @@ describe("changed targets page", () => {
     expect(markup).toContain("标的评级变化");
     expect(markup).toContain("宏观经济与行业变化");
     expect(markup).toContain("具体标的变化");
+    expect(markup).toContain("股票、加密资产与商品价格");
+    expect(markup).not.toContain("经济、行业、商品、汇率");
     expect(markup).toContain("正在加载宏观经济与行业变化");
     expect(markup).toContain("正在加载具体标的变化");
   });
@@ -648,6 +650,33 @@ describe("changed targets page", () => {
     expect(markup).toContain("已进入队列");
     expect(targetChangeResearchKey(macroItems[0])).toBe("event:macro-detail-0");
     expect(targetChangeResearchKey(assetItems[0])).toBe("asset:asset-0");
+    const commodityItem = {
+      ...assetItems[0],
+      key: "commodity:CLUSD",
+      label: "WTI 原油",
+      symbol: "CLUSD",
+      market: "COMMODITY",
+      target_type: "commodity_price",
+      latest_detail: { kind: "event" as const, id: "commodity-event", researched_at: "2026-08-29T08:00:00Z" },
+      trend: {
+        short_term: { rating: "bearish", direction_score: -52, rating_confidence: 0.68, provisional: false },
+        long_term: { rating: "watch", direction_score: -12, rating_confidence: 0.58, provisional: false },
+        composite: { rating: "bearish", direction_score: -34, rating_confidence: 0.63, provisional: false },
+        event_count_90d: 4,
+        eligible_event_count_90d: 4,
+        ignored_event_count_90d: 0,
+        regime_break: false,
+      },
+    };
+    expect(targetChangeResearchKey(commodityItem)).toBe("event:commodity-event");
+    const commodityMarkup = renderToStaticMarkup(createElement(TargetChangeGrid, {
+      items: [commodityItem],
+      onOpen: () => undefined,
+    }));
+    expect(commodityMarkup).toContain("商品价格");
+    expect(commodityMarkup).toContain("最近事件评级变化");
+    expect(commodityMarkup).toContain("长期趋势");
+    expect(commodityMarkup).toContain("短期冲击");
     expect(markup).toContain("评级变化");
     expect(markup).toContain("最新方向分");
     expect(markup).toContain("新闻可信度");

@@ -326,6 +326,28 @@ def test_target_changes_split_macro_and_assets_and_link_latest_research(db):
         save_recommendation(db, item)
 
     oil = asset("CLUSD", asset_class=AssetClass.COMMODITY)
+    for item, run in (
+        recommendation(
+            oil,
+            rating=Rating.WATCH,
+            score=0,
+            as_of=now - timedelta(minutes=12),
+        ),
+        recommendation(
+            oil,
+            rating=Rating.BEARISH,
+            score=-35,
+            as_of=now - timedelta(minutes=11),
+        ),
+        recommendation(
+            oil,
+            rating=Rating.BEARISH,
+            score=-40,
+            as_of=now - timedelta(minutes=10),
+        ),
+    ):
+        save_run(db, run)
+        save_recommendation(db, item)
     event_run(
         db,
         "macro baseline",
@@ -347,7 +369,7 @@ def test_target_changes_split_macro_and_assets_and_link_latest_research(db):
             ),
         ],
     )
-    changed_macro = event_run(
+    changed_commodity = event_run(
         db,
         "macro changed",
         status=RunStatus.INSUFFICIENT_EVIDENCE,
@@ -360,7 +382,7 @@ def test_target_changes_split_macro_and_assets_and_link_latest_research(db):
             )
         ],
     )
-    latest_macro = event_run(
+    latest_commodity = event_run(
         db,
         "macro latest",
         status=RunStatus.INSUFFICIENT_EVIDENCE,
@@ -381,21 +403,27 @@ def test_target_changes_split_macro_and_assets_and_link_latest_research(db):
 
     assert macro.status_code == 200
     macro_items = macro.json()["items"]
-    assert len(macro_items) == 1
-    assert macro_items[0]["previous"]["rating"] == "watch"
-    assert macro_items[0]["current"]["rating"] == "bearish"
-    assert macro_items[0]["latest"]["direction_score"] == -55
-    assert macro_items[0]["latest"]["news_confidence"] == 0.67
-    assert macro_items[0]["change_detail_id"] == str(changed_macro.id)
-    assert macro_items[0]["latest_detail"]["id"] == str(latest_macro.id)
+    assert macro_items == []
     assert all("SECURITY" not in item["label"] for item in macro_items)
     assert assets.status_code == 200
     asset_items = assets.json()["items"]
-    assert len(asset_items) == 1
-    assert asset_items[0]["current"]["rating"] == "bullish"
-    assert asset_items[0]["latest"]["direction_score"] == 55
-    assert asset_items[0]["latest"]["news_confidence"] == 0.72
-    assert asset_items[0]["latest_detail"]["id"] == str(latest_asset.id)
+    assert len(asset_items) == 2
+    items_by_type = {item["target_type"]: item for item in asset_items}
+    security_item = items_by_type["tradable_asset"]
+    assert security_item["current"]["rating"] == "bullish"
+    assert security_item["latest"]["direction_score"] == 55
+    assert security_item["latest"]["news_confidence"] == 0.72
+    assert security_item["latest_detail"]["id"] == str(latest_asset.id)
+    commodity_item = items_by_type["commodity_price"]
+    assert commodity_item["kind"] == "asset"
+    assert commodity_item["previous"]["rating"] == "watch"
+    assert commodity_item["current"]["rating"] == "bearish"
+    assert commodity_item["latest"]["direction_score"] == -55
+    assert commodity_item["latest"]["news_confidence"] == 0.67
+    assert commodity_item["change_detail_id"] == str(changed_commodity.id)
+    assert commodity_item["latest_detail"]["kind"] == "event"
+    assert commodity_item["latest_detail"]["id"] == str(latest_commodity.id)
+    assert commodity_item["trend"]["algorithm_version"] == "dual-horizon-v1"
 
 
 def test_macro_change_keeps_published_report_visible_during_refresh(db):
