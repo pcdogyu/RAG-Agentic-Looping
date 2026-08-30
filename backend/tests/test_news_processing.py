@@ -83,7 +83,11 @@ def test_outbox_claim_tracks_dispatch_success_and_failure(db):
         dispatch_delay_seconds=0,
     )
 
-    claims = claim_news_dispatches(db, limit=10, now=BASE_TIME + timedelta(days=1))
+    claims = claim_news_dispatches(
+        db,
+        limit=10,
+        now=datetime.now(UTC) + timedelta(days=1),
+    )
     claims_by_news = {claim.news_id: claim for claim in claims}
     mark_news_dispatched(db, claims_by_news[first.id], "task-success")
     mark_news_dispatch_failed(db, claims_by_news[second.id], "broker unavailable")
