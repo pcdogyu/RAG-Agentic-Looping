@@ -163,6 +163,7 @@ func conclusionItem(row conclusionRow) (map[string]any, error) {
 		"asset":          nil,
 		"event":          map[string]any{"id": payload["event_id"], "headline": headline, "event_type": defaultAny(event["event_type"], "other")},
 		"recommendation": nil,
+		"refresh":        publicFullEventResearch(payload),
 		"report": map[string]any{"confidence": report["confidence"], "news_confidence": report["news_confidence"],
 			"direction_score": directionScore, "rating": rating,
 			"impact_count": len(impacts), "affected_markets": defaultAny(report["affected_markets"], []any{}),
@@ -222,6 +223,14 @@ func normalizeRecommendation(payload map[string]any) {
 	if payload == nil {
 		return
 	}
+	if asset, ok := payload["asset"].(map[string]any); ok {
+		normalizeAsset(asset)
+	}
+	if impact, ok := payload["impact"].(map[string]any); ok {
+		if asset, ok := impact["asset"].(map[string]any); ok {
+			normalizeAsset(asset)
+		}
+	}
 	if value, ok := payload["direction_score"]; !ok || value == nil {
 		payload["direction_score"] = payload["score"]
 	}
@@ -241,6 +250,44 @@ func normalizeRecommendation(payload map[string]any) {
 			payload[key] = value
 		}
 	}
+}
+
+func normalizeAsset(asset map[string]any) {
+	if asset == nil {
+		return
+	}
+	defaults := map[string]any{
+		"sector_id": "", "industry_id": "", "raw_sector": "", "raw_industry": "",
+		"instrument_type": "", "market_cap": nil, "market_cap_rank": nil, "last_synced_at": nil,
+	}
+	for key, value := range defaults {
+		if _, ok := asset[key]; !ok {
+			asset[key] = value
+		}
+	}
+	if stamp := parseAnyTime(asset["last_synced_at"]); stamp != nil {
+		asset["last_synced_at"] = jsonTime(*stamp)
+	}
+}
+
+func publicFullEventResearch(run map[string]any) any {
+	steps, _ := run["analysis_steps"].([]any)
+	for index := len(steps) - 1; index >= 0; index-- {
+		step, _ := steps[index].(map[string]any)
+		if stringValue(step["phase"]) != "full_event_research" {
+			continue
+		}
+		if stringValue(step["status"]) == "completed" {
+			return nil
+		}
+		metrics, _ := step["metrics"].(map[string]any)
+		stage := stringValue(metrics["stage"])
+		if stage == "" {
+			stage = "event_extraction"
+		}
+		return map[string]any{"status": step["status"], "stage": stage, "error": metrics["error"]}
+	}
+	return nil
 }
 
 func decodeCursor(value string) (conclusionCursor, error) {

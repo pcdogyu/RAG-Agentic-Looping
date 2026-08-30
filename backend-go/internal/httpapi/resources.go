@@ -15,8 +15,7 @@ import (
 )
 
 func (s *Server) assets(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.db.Query(r.Context(), `SELECT id,asset_class,market,symbol,name,exchange_or_provider,currency,
-		aliases::jsonb,products::jsonb,competitors::jsonb,issuer_id,primary_listing_asset_id,lot_size,active FROM assets`)
+	rows, err := s.db.Query(r.Context(), `SELECT `+assetJSON+` FROM assets`)
 	if err != nil {
 		writeError(w, 500, "database query failed")
 		return
@@ -24,20 +23,14 @@ func (s *Server) assets(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	items := make([]any, 0)
 	for rows.Next() {
-		var id, class, market, symbol, name, exchange, currency string
-		var aliasesBody, productsBody, competitorsBody []byte
-		var issuer, primary *string
-		var lot int
-		var active bool
-		if rows.Scan(&id, &class, &market, &symbol, &name, &exchange, &currency, &aliasesBody, &productsBody, &competitorsBody, &issuer, &primary, &lot, &active) != nil {
+		var body []byte
+		if rows.Scan(&body) != nil {
 			writeError(w, 500, "stored asset is invalid")
 			return
 		}
-		var aliases, products, competitors any
-		_ = json.Unmarshal(aliasesBody, &aliases)
-		_ = json.Unmarshal(productsBody, &products)
-		_ = json.Unmarshal(competitorsBody, &competitors)
-		items = append(items, map[string]any{"asset_id": id, "asset_class": class, "market": market, "symbol": symbol, "name": name, "exchange_or_provider": exchange, "currency": currency, "aliases": aliases, "products": products, "competitors": competitors, "issuer_id": issuer, "primary_listing_asset_id": primary, "lot_size": lot, "active": active})
+		item, _ := decodeDefault(body, map[string]any{}).(map[string]any)
+		normalizeAsset(item)
+		items = append(items, item)
 	}
 	writeJSON(w, 200, items)
 }
@@ -95,7 +88,10 @@ func (s *Server) researchRuns(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	s.writeMappedPayloadRows(w, r, `SELECT payload::jsonb FROM research_runs ORDER BY created_at DESC LIMIT $1`, []any{limit}, func(item map[string]any) {
+	s.writeMappedPayloadRows(w, r, `SELECT payload FROM research_runs ORDER BY created_at DESC LIMIT $1`, []any{limit}, func(item map[string]any) {
+		if asset, ok := item["asset"].(map[string]any); ok {
+			normalizeAsset(asset)
+		}
 		if recommendation, ok := item["recommendation"].(map[string]any); ok {
 			normalizeRecommendation(recommendation)
 		}
@@ -269,7 +265,7 @@ func (s *Server) eventConclusionDetail(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "event conclusion news query failed")
 		return
 	}
-	writeJSON(w, 200, map[string]any{"run": run, "event": event, "report": run["report"], "news": news, "evidence": defaultAny(run["evidence"], []any{})})
+	writeJSON(w, 200, map[string]any{"run": run, "refresh": publicFullEventResearch(run), "event": event, "report": run["report"], "news": news, "evidence": defaultAny(run["evidence"], []any{})})
 }
 
 func (s *Server) newsForEvent(r *http.Request, event map[string]any) ([]any, error) {

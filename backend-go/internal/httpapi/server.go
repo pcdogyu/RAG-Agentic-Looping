@@ -19,42 +19,28 @@ import (
 )
 
 type Server struct {
-	cfg    config.Config
-	db     *pgxpool.Pool
-	redis  *redis.Client
-	router http.Handler
+	cfg              config.Config
+	db               *pgxpool.Pool
+	redis            *redis.Client
+	router           http.Handler
+	nativeOperations []operation
 }
 
-const totalContractOperations = 72
-const nativeContractOperations = 18
+const totalContractOperations = 78
 
 func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) (*Server, error) {
-	if cfg.Environment == "production" && nativeContractOperations != totalContractOperations {
-		return nil, fmt.Errorf("Go cutover blocked: %d of %d contract operations are native", nativeContractOperations, totalContractOperations)
-	}
 	s := &Server{cfg: cfg, db: db, redis: redisClient}
+	s.nativeOperations = s.operations()
+	if cfg.Environment == "production" && len(s.nativeOperations) != totalContractOperations {
+		return nil, fmt.Errorf("Go cutover blocked: %d of %d contract operations are native", len(s.nativeOperations), totalContractOperations)
+	}
 	r := chi.NewRouter()
 	r.Use(requestLog, recoverer, etagMiddleware)
 	r.Get("/go/health", s.goHealth)
 	r.Get("/go/migration-status", s.migrationStatus)
-	r.Get("/api/v1/assets", s.assets)
-	r.Get("/api/v1/news", s.news)
-	r.Get("/api/v1/events", s.events)
-	r.Get("/api/v1/research-runs", s.researchRuns)
-	r.Get("/api/v1/research-runs/{runID}", s.researchRun)
-	r.Get("/api/v1/event-research-runs", s.eventResearchRuns)
-	r.Get("/api/v1/event-research-runs/{runID}", s.eventResearchRun)
-	r.Get("/api/v1/recommendations", s.recommendations)
-	r.Get("/api/v1/conclusions", s.conclusions)
-	r.Get("/api/v1/conclusions/{recommendationID}", s.conclusionDetail)
-	r.Get("/api/v1/event-conclusions/{runID}", s.eventConclusionDetail)
-	r.Get("/api/v1/outcomes", s.outcomes)
-	r.Get("/api/v1/evolution", s.evolutions)
-	r.Get("/api/v1/model-logs", s.modelLogs)
-	r.Get("/api/v1/model-logs/{auditID}", s.modelLog)
-	r.Get("/api/v1/model-usage", s.modelUsage)
-	r.Get("/api/v1/research-conclusions", s.researchConclusions)
-	r.Get("/api/v1/failed-research-runs", s.failedResearchRuns)
+	for _, item := range s.nativeOperations {
+		r.MethodFunc(item.Method, item.Path, item.Handler)
+	}
 
 	if cfg.AllowLegacyProxy {
 		target, err := url.Parse(cfg.LegacyAPIURL)
@@ -76,7 +62,13 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) (*Serve
 }
 
 func (s *Server) migrationStatus(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"total_operations": totalContractOperations, "native_operations": nativeContractOperations, "remaining_operations": totalContractOperations - nativeContractOperations, "cutover_ready": nativeContractOperations == totalContractOperations})
+	native := len(s.nativeOperations)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"total_operations": totalContractOperations, "native_operations": native,
+		"remaining_operations": totalContractOperations - native,
+		"cutover_ready":        native == totalContractOperations,
+		"native_operation_ids": operationIDs(s.nativeOperations),
+	})
 }
 
 func (s *Server) Handler() http.Handler { return s.router }

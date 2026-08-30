@@ -9,34 +9,92 @@ import (
 )
 
 type Config struct {
-	Address          string
-	DatabaseURL      string
-	RedisURL         string
-	LegacyAPIURL     string
-	AllowLegacyProxy bool
-	Environment      string
-	WorkerID         string
-	WorkerQueues     []string
-	LeaseDuration    time.Duration
-	PollInterval     time.Duration
-	MarketAdapterURL string
-	MLAdapterURL     string
+	Address              string
+	DatabaseURL          string
+	RedisURL             string
+	LegacyAPIURL         string
+	AllowLegacyProxy     bool
+	Environment          string
+	WorkerID             string
+	WorkerQueues         []string
+	LeaseDuration        time.Duration
+	PollInterval         time.Duration
+	MarketAdapterURL     string
+	MLAdapterURL         string
+	AdminAPIToken        string
+	MCPSecretKey         string
+	WeknoraURL           string
+	ScanInterval         time.Duration
+	ExtractModel         string
+	AssistModel          string
+	ResearchModel        string
+	CodeModel            string
+	EvolutionEnabled     bool
+	EvolutionAutoMerge   bool
+	InitialCash          float64
+	MaxEquityWeight      float64
+	MaxCryptoWeight      float64
+	MaxTotalCryptoWeight float64
+	MinimumCashWeight    float64
+	EquityCostBPS        int
+	CryptoCostBPS        int
+	FMPBaseURL           string
+	FMPAccessToken       string
+	FMPRateLimit         int
+	FMPNewsLookback      int
+	SECIdentity          string
+	AkshareEnabled       bool
+	AkshareIPv4Only      bool
+	RSSFeeds             []string
+	OfficialRSSFeeds     []string
+	CoinGeckoURL         string
+	DefiLlamaURL         string
+	WebSearchTimeout     time.Duration
 }
 
 func Load() (Config, error) {
 	cfg := Config{
-		Address:          env("GO_API_ADDRESS", ":8081"),
-		DatabaseURL:      normalizeDatabaseURL(env("DATABASE_URL", "postgresql://agent:agent@postgres:5432/agent")),
-		RedisURL:         env("REDIS_URL", "redis://redis:6379/0"),
-		LegacyAPIURL:     strings.TrimRight(env("LEGACY_API_URL", "http://api:8000"), "/"),
-		AllowLegacyProxy: envBool("GO_ALLOW_LEGACY_PROXY", false),
-		Environment:      env("APP_ENV", "development"),
-		WorkerID:         env("GO_WORKER_ID", hostname()),
-		WorkerQueues:     split(env("GO_WORKER_QUEUES", "io,extract,assist,research,code")),
-		LeaseDuration:    envDuration("GO_JOB_LEASE", 3*time.Minute),
-		PollInterval:     envDuration("GO_JOB_POLL_INTERVAL", time.Second),
-		MarketAdapterURL: strings.TrimRight(env("MARKET_ADAPTER_URL", "http://market-adapter:8091"), "/"),
-		MLAdapterURL:     strings.TrimRight(env("ML_ADAPTER_URL", "http://ml-adapter:8092"), "/"),
+		Address:              env("GO_API_ADDRESS", ":8081"),
+		DatabaseURL:          normalizeDatabaseURL(env("DATABASE_URL", "postgresql://agent:agent@postgres:5432/agent")),
+		RedisURL:             env("REDIS_URL", "redis://redis:6379/0"),
+		LegacyAPIURL:         strings.TrimRight(env("LEGACY_API_URL", "http://api:8000"), "/"),
+		AllowLegacyProxy:     envBool("GO_ALLOW_LEGACY_PROXY", false),
+		Environment:          env("APP_ENV", "development"),
+		WorkerID:             env("GO_WORKER_ID", hostname()),
+		WorkerQueues:         split(env("GO_WORKER_QUEUES", "io,extract,assist,research,code")),
+		LeaseDuration:        envDuration("GO_JOB_LEASE", 3*time.Minute),
+		PollInterval:         envDuration("GO_JOB_POLL_INTERVAL", time.Second),
+		MarketAdapterURL:     strings.TrimRight(env("MARKET_ADAPTER_URL", "http://market-adapter:8091"), "/"),
+		MLAdapterURL:         strings.TrimRight(env("ML_ADAPTER_URL", "http://ml-adapter:8092"), "/"),
+		AdminAPIToken:        env("ADMIN_API_TOKEN", ""),
+		MCPSecretKey:         env("MCP_SECRET_KEY", ""),
+		WeknoraURL:           env("WEKNORA_DEFAULT_URL", "http://10.15.0.28/"),
+		ScanInterval:         time.Duration(envInt("SCAN_INTERVAL_MINUTES", 10)) * time.Minute,
+		ExtractModel:         env("OLLAMA_EXTRACT_MODEL", "qwen2.5:3b"),
+		AssistModel:          env("OLLAMA_ASSIST_MODEL", "qwen2.5:7b"),
+		ResearchModel:        env("OLLAMA_RESEARCH_MODEL", "qwen2.5:7b"),
+		CodeModel:            env("OLLAMA_CODE_MODEL", "qwen2.5-coder:7b"),
+		EvolutionEnabled:     envBool("EVOLUTION_ENABLED", false),
+		EvolutionAutoMerge:   envBool("EVOLUTION_AUTO_MERGE", false),
+		InitialCash:          envFloat("INITIAL_CASH", 100000),
+		MaxEquityWeight:      envFloat("MAX_EQUITY_WEIGHT", 0.08),
+		MaxCryptoWeight:      envFloat("MAX_CRYPTO_WEIGHT", 0.05),
+		MaxTotalCryptoWeight: envFloat("MAX_TOTAL_CRYPTO_WEIGHT", 0.15),
+		MinimumCashWeight:    envFloat("MINIMUM_CASH_WEIGHT", 0.2),
+		EquityCostBPS:        envInt("EQUITY_COST_BPS", 15),
+		CryptoCostBPS:        envInt("CRYPTO_COST_BPS", 25),
+		FMPBaseURL:           strings.TrimRight(env("FMP_BASE_URL", "https://financialmodelingprep.com/stable"), "/"),
+		FMPAccessToken:       env("FMP_ACCESS_TOKEN", ""),
+		FMPRateLimit:         envInt("FMP_RATE_LIMIT_PER_MINUTE", 55),
+		FMPNewsLookback:      envInt("FMP_NEWS_LOOKBACK_HOURS", 12),
+		SECIdentity:          env("SEC_IDENTITY", ""),
+		AkshareEnabled:       envBool("AKSHARE_ASSET_MASTER_ENABLED", true),
+		AkshareIPv4Only:      envBool("AKSHARE_IPV4_ONLY", true),
+		RSSFeeds:             split(env("RSS_FEED_URLS", "")),
+		OfficialRSSFeeds:     split(env("OFFICIAL_RSS_FEED_URLS", "")),
+		CoinGeckoURL:         strings.TrimRight(env("COINGECKO_BASE_URL", "https://api.coingecko.com/api/v3"), "/"),
+		DefiLlamaURL:         strings.TrimRight(env("DEFILLAMA_BASE_URL", "https://api.llama.fi"), "/"),
+		WebSearchTimeout:     time.Duration(envInt("WEB_SEARCH_TIMEOUT_SECONDS", 20)) * time.Second,
 	}
 	if cfg.Environment == "production" && cfg.AllowLegacyProxy {
 		return Config{}, fmt.Errorf("legacy API proxy is forbidden in production")
@@ -76,6 +134,30 @@ func envDuration(name string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	parsed, err := time.ParseDuration(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func envInt(name string, fallback int) int {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func envFloat(name string, fallback float64) float64 {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
 	if err != nil {
 		return fallback
 	}

@@ -3,6 +3,7 @@ module github.com/pcdogyu/RAG-Agentic-Looping/backend-go
 go 1.21
 
 require (
+	github.com/fernet/fernet-go v0.0.0-20240119011108-303da6aec611
 	github.com/go-chi/chi/v5 v5.0.12
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.5.5
