@@ -9,7 +9,14 @@ from pydantic import BaseModel, Field
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
-from backend.app.db import EventResearchRunRow, EventRow, NewsProcessingRow, NewsRow, ResearchRunRow
+from backend.app.db import (
+    EventResearchRunRow,
+    EventRow,
+    NewsProcessingRow,
+    NewsRow,
+    NewsSourceStateRow,
+    ResearchRunRow,
+)
 from backend.app.domain import (
     EventResearchRun,
     NewsEvent,
@@ -90,14 +97,23 @@ class NewsBoardItem(BaseModel):
 
 class NewsBoardSource(BaseModel):
     source: str
-    latest_published_at: datetime
+    latest_published_at: datetime | None = None
     item_count: int = Field(ge=0)
     items: list[NewsBoardItem] = Field(default_factory=list)
     error: str | None = None
+    discovery_status: str = "unchecked"
+    last_attempt_at: datetime | None = None
+    last_success_at: datetime | None = None
+    watermark_at: datetime | None = None
+    last_error: str | None = None
+    last_discovered_count: int = Field(default=0, ge=0)
+    last_new_count: int = Field(default=0, ge=0)
 
 
 class NewsBoardResponse(BaseModel):
     generated_at: datetime
+    last_refresh_at: datetime | None = None
+    last_success_at: datetime | None = None
     per_source: int = Field(ge=1, le=50)
     total_sources: int = Field(ge=0)
     sources: list[NewsBoardSource]
@@ -186,8 +202,10 @@ def build_news_board(
         .group_by(NewsRow.source)
         .order_by(desc("latest"), NewsRow.source)
     ).all()
+    state_rows = list(db.scalars(select(NewsSourceStateRow)).all())
+    states_by_source = {row.source: row for row in state_rows}
 
-    grouped_rows: list[tuple[str, datetime, list[NewsRow], str | None]] = []
+    grouped_rows: list[tuple[str, datetime | None, list[NewsRow], str | None]] = []
     selected_rows: list[NewsRow] = []
     for source, latest in source_rows:
         try:
@@ -199,13 +217,38 @@ def build_news_board(
                     .limit(per_source)
                 )
             )
-            grouped_rows.append((source, as_utc(latest), rows, None))
+            grouped_rows.append((source, as_utc(latest) if latest else None, rows, None))
             selected_rows.extend(rows)
         except Exception as exc:
             db.rollback()
             grouped_rows.append(
-                (source, as_utc(latest), [], f"{type(exc).__name__}: source query failed")
+                (
+                    source,
+                    as_utc(latest) if latest else None,
+                    [],
+                    f"{type(exc).__name__}: source query failed",
+                )
             )
+    known_sources = {source for source, *_rest in grouped_rows}
+    for state in state_rows:
+        if state.source in known_sources:
+            continue
+        if state.status != "error" and state.watermark_at is None:
+            continue
+        grouped_rows.append((state.source, None, [], None))
+    grouped_rows.sort(
+        key=lambda value: (
+            as_utc(value[1]).timestamp()
+            if value[1] is not None
+            else (
+                as_utc(states_by_source[value[0]].watermark_at).timestamp()
+                if states_by_source.get(value[0]) is not None
+                and states_by_source[value[0]].watermark_at is not None
+                else 0
+            )
+        ),
+        reverse=True,
+    )
 
     selected_ids = {row.id for row in selected_rows}
     events_by_news: dict[UUID, list[NewsEvent]] = defaultdict(list)
@@ -245,6 +288,7 @@ def build_news_board(
     processing_by_news = processing_rows_by_news(db, selected_ids)
     sources: list[NewsBoardSource] = []
     for source, latest, rows, error in grouped_rows:
+        source_state = states_by_source.get(source)
         items: list[NewsBoardItem] = []
         for row in rows:
             events = sorted(
@@ -322,11 +366,36 @@ def build_news_board(
                 item_count=len(items),
                 items=items,
                 error=error,
+                discovery_status=(source_state.status if source_state else "unchecked"),
+                last_attempt_at=(
+                    as_utc(source_state.last_attempt_at)
+                    if source_state and source_state.last_attempt_at
+                    else None
+                ),
+                last_success_at=(
+                    as_utc(source_state.last_success_at)
+                    if source_state and source_state.last_success_at
+                    else None
+                ),
+                watermark_at=(
+                    as_utc(source_state.watermark_at)
+                    if source_state and source_state.watermark_at
+                    else None
+                ),
+                last_error=source_state.last_error if source_state else None,
+                last_discovered_count=(
+                    source_state.last_discovered_count if source_state else 0
+                ),
+                last_new_count=source_state.last_new_count if source_state else 0,
             )
         )
 
+    attempts = [as_utc(row.last_attempt_at) for row in state_rows if row.last_attempt_at]
+    successes = [as_utc(row.last_success_at) for row in state_rows if row.last_success_at]
     return NewsBoardResponse(
         generated_at=now,
+        last_refresh_at=max(attempts) if attempts else None,
+        last_success_at=max(successes) if successes else None,
         per_source=per_source,
         total_sources=len(sources),
         sources=sources,

@@ -11,6 +11,7 @@ from backend.app.providers.akshare_provider import (
     AkShareProvider,
     _request_address_family,
 )
+from backend.app.providers.base import ProviderError
 
 
 class FakeFrame:
@@ -50,6 +51,28 @@ def test_akshare_naive_timestamp_is_interpreted_as_shanghai_time(monkeypatch):
     assert len(items) == 1
     assert items[0].published_at == datetime(2026, 8, 22, 9, 30, tzinfo=UTC)
     assert items[0].raw_metadata["time_normalization"] == TIME_NORMALIZATION_MARKER
+
+
+def test_akshare_news_failure_is_reported_instead_of_silently_empty(monkeypatch):
+    def fail():
+        raise ConnectionError("upstream unavailable")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "akshare",
+        SimpleNamespace(stock_info_global_em=fail),
+    )
+    provider = AkShareProvider()
+
+    with pytest.raises(ProviderError, match="upstream unavailable"):
+        provider.discover_news(
+            since=datetime(2026, 8, 22, 9, 0, tzinfo=UTC),
+            limit=10,
+        )
+
+    assert provider.last_errors == [
+        "news: ConnectionError: upstream unavailable"
+    ]
 
 
 class SecurityFrame:

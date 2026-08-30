@@ -3,6 +3,7 @@ from hashlib import sha256
 
 from fastapi.testclient import TestClient
 
+from backend.app.db import NewsSourceStateRow
 from backend.app.domain import (
     AnalysisStep,
     CandidateAsset,
@@ -91,6 +92,45 @@ def test_news_board_limits_each_source_and_orders_sources_by_latest_item(db):
     assert all(group.item_count == 50 for group in payload.sources)
     assert payload.sources[0].items[0].title == "FMP-51"
     assert payload.sources[1].items[-1].title == "金十-2"
+
+
+def test_news_board_exposes_source_refresh_health_and_errors(db):
+    attempted = BASE_TIME + timedelta(hours=3)
+    db.add_all(
+        [
+            NewsSourceStateRow(
+                source="金十",
+                provider="mcp-news",
+                status="healthy",
+                watermark_at=attempted,
+                last_attempt_at=attempted,
+                last_success_at=attempted,
+                last_discovered_count=5,
+                last_new_count=2,
+            ),
+            NewsSourceStateRow(
+                source="东方财富/AkShare",
+                provider="akshare",
+                status="error",
+                last_attempt_at=attempted + timedelta(minutes=1),
+                last_error="ProviderError: upstream unavailable",
+                consecutive_failures=1,
+            ),
+        ]
+    )
+    db.commit()
+    assert save_news(db, news("金十刷新", minutes=1))
+
+    payload = build_news_board(db)
+
+    groups = {group.source: group for group in payload.sources}
+    assert payload.last_refresh_at == attempted + timedelta(minutes=1)
+    assert payload.last_success_at == attempted
+    assert groups["金十"].discovery_status == "healthy"
+    assert groups["金十"].last_discovered_count == 5
+    assert groups["金十"].last_new_count == 2
+    assert groups["东方财富/AkShare"].discovery_status == "error"
+    assert groups["东方财富/AkShare"].last_error == "ProviderError: upstream unavailable"
 
 
 def test_news_board_projects_pipeline_states_and_status_priority(db):

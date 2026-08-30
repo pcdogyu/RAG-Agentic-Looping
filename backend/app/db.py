@@ -123,6 +123,33 @@ class NewsRow(Base):
     raw_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
+class NewsSourceStateRow(Base):
+    """Durable discovery watermark and health for one visible news source."""
+
+    __tablename__ = "news_source_states"
+
+    source: Mapped[str] = mapped_column(String(120), primary_key=True)
+    provider: Mapped[str] = mapped_column(String(80), default="")
+    status: Mapped[str] = mapped_column(String(30), default="unchecked", index=True)
+    watermark_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    last_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    last_success_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_discovered_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_new_count: Mapped[int] = mapped_column(Integer, default=0)
+    consecutive_failures: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, index=True
+    )
+
+
 class NewsProcessingRow(Base):
     """Durable lifecycle for one news item's extraction work."""
 

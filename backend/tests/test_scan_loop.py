@@ -961,6 +961,55 @@ def test_scan_runs_with_the_task_owned_gate_as_its_only_lock(db, monkeypatch):
     assert worker._read_scan_status(redis)["state"] == "idle"
 
 
+def test_scan_completes_after_discovery_while_extraction_runs_from_outbox(db, monkeypatch):
+    redis = FakeRedis()
+    published = worker.utc_now() - timedelta(minutes=1)
+    item = NewsItem(
+        source="金十数据",
+        source_quality=SourceQuality.PROFESSIONAL,
+        title="独立发现批次",
+        url="https://example.com/decoupled-discovery",
+        published_at=published,
+        as_of=published,
+        content_hash=sha256(b"decoupled-discovery").hexdigest(),
+    )
+    dispatched: list[set] = []
+    monkeypatch.setattr(worker, "_redis_client", lambda: redis)
+    monkeypatch.setattr(worker.scan_news, "update_state", lambda **_kwargs: None)
+    monkeypatch.setattr(worker.notifier, "send", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(worker, "filter_news_items", lambda _db, items: (items, 0))
+    monkeypatch.setattr(
+        worker,
+        "dispatch_news_processing_outbox",
+        lambda *, limit, news_ids: (
+            dispatched.append(news_ids)
+            or {
+                "claimed": 1,
+                "queued": [{"news_id": str(item.id), "task_id": "extract-1"}],
+                "failed": 0,
+            }
+        ),
+    )
+
+    class OneItemRegistry:
+        last_errors = []
+        last_source_reports = []
+
+        def discover_news(self, *, since, limit):
+            return [item]
+
+    monkeypatch.setattr(worker, "ProviderRegistry", OneItemRegistry)
+
+    result = worker.scan_news.apply(task_id="decoupled-scan").get()
+
+    assert result["status"] == "completed"
+    assert result["new"] == 1
+    assert result["extraction_queued"] == 1
+    assert dispatched == [{item.id}]
+    assert worker._read_scan_status(redis)["state"] == "idle"
+    assert redis.get(worker.SCAN_GATE_KEY) is None
+
+
 def test_stale_scan_cannot_overwrite_or_clear_current_status():
     redis = FakeRedis()
     redis.set(worker.SCAN_GATE_KEY, "current-task")
@@ -1028,6 +1077,31 @@ def test_scan_queue_is_idempotent_and_completion_anchors_countdown(monkeypatch):
     assert next_scan - completed_at == timedelta(minutes=20)
     assert status["state"] == "idle"
     assert redis.get(worker.SCAN_GATE_KEY) is None
+
+
+def test_scan_countdown_is_anchored_to_discovery_start():
+    redis = FakeRedis()
+    task_id = "fixed-cadence-scan"
+    started_at = datetime(2026, 8, 22, 12, 0, tzinfo=UTC)
+    redis.set(worker.SCAN_GATE_KEY, task_id)
+    worker._update_scan_status(
+        redis,
+        state="running",
+        task_id=task_id,
+        phase="discovering",
+        started_at=started_at.isoformat(),
+    )
+
+    status = worker._complete_scan(
+        redis,
+        task_id,
+        {"status": "completed", "discovered": 2, "events": 0},
+        started_at + timedelta(minutes=2),
+    )
+
+    assert datetime.fromisoformat(status["next_scan_at"]) == started_at + timedelta(
+        minutes=worker.settings.scan_interval_minutes
+    )
 
 
 def test_scan_loop_waits_until_due_and_bootstraps_without_state(monkeypatch):

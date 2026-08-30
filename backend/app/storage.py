@@ -139,6 +139,16 @@ def get_news_by_content_hash(db: Session, content_hash: str) -> NewsItem | None:
     return news_from_row(row) if row else None
 
 
+def get_news_by_url(db: Session, url: str) -> NewsItem | None:
+    row = db.scalar(
+        select(NewsRow)
+        .where(NewsRow.url == url)
+        .order_by(NewsRow.observed_at.desc())
+        .limit(1)
+    )
+    return news_from_row(row) if row else None
+
+
 def get_news(db: Session, news_id: UUID) -> NewsItem | None:
     row = db.get(NewsRow, news_id)
     return news_from_row(row) if row else None

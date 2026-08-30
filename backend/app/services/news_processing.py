@@ -14,6 +14,7 @@ from backend.app.services.source_lineage import enrich_news_lineage
 from backend.app.storage import (
     event_news_item_ids,
     get_news_by_content_hash,
+    get_news_by_url,
     news_from_row,
     news_row_from_item,
 )
@@ -126,7 +127,7 @@ def stage_news_for_extraction(
     """Atomically persist a news item and its durable dispatch intent."""
 
     item = enrich_news_lineage(item)
-    stored = get_news_by_content_hash(db, item.content_hash)
+    stored = get_news_by_content_hash(db, item.content_hash) or get_news_by_url(db, item.url)
     if stored is not None:
         return _stage_existing_news(
             db,

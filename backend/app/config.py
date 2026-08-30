@@ -104,8 +104,10 @@ class Settings(BaseSettings):
     cloud_llm_api_key: str = ""
     cloud_llm_model: str = ""
 
-    scan_interval_minutes: int = Field(default=20, ge=5, le=1440)
+    scan_interval_minutes: int = Field(default=10, ge=5, le=1440)
     scan_batch_size: int = Field(default=40, ge=1, le=200)
+    news_discovery_lookback_hours: int = Field(default=24, ge=1, le=168)
+    news_watermark_overlap_minutes: int = Field(default=10, ge=1, le=120)
     event_cluster_window_hours: int = Field(default=72, ge=1, le=720)
     targeted_evidence_limit: int = Field(default=120, ge=10, le=500)
     auto_research: bool = True

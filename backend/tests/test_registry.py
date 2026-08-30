@@ -1,7 +1,8 @@
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 
 from backend.app.config import Settings
-from backend.app.domain import AssetClass, AssetRef, Market
+from backend.app.domain import AssetClass, AssetRef, Market, NewsItem, SourceQuality
 from backend.app.providers.registry import ProviderRegistry
 
 
@@ -61,6 +62,45 @@ def _cn_asset() -> AssetRef:
         currency="CNY",
         lot_size=100,
     )
+
+
+def test_news_discovery_keeps_an_independent_budget_per_source(db, monkeypatch):
+    now = datetime(2026, 8, 30, 3, tzinfo=UTC)
+
+    class NewsProvider:
+        def __init__(self, name, source):
+            self.name = name
+            self.source = source
+
+        def discover_news(self, *, since, limit):
+            assert since < now
+            return [
+                NewsItem(
+                    source=self.source,
+                    source_quality=SourceQuality.PROFESSIONAL,
+                    title=f"{self.source}-{index}",
+                    url=f"https://example.com/{self.source}/{index}",
+                    published_at=now - timedelta(minutes=index),
+                    as_of=now - timedelta(minutes=index),
+                    content_hash=sha256(f"{self.source}-{index}".encode()).hexdigest(),
+                )
+                for index in range(3)
+            ]
+
+    registry = ProviderRegistry(Settings(fmp_access_token="", fmp_mcp_url=""))
+    registry.providers = [NewsProvider("one", "来源一"), NewsProvider("two", "来源二")]
+    monkeypatch.setattr(
+        "backend.app.providers.registry.fetch_enabled_news_feeds_sync",
+        lambda since, limit: ([], []),
+    )
+
+    items = registry.discover_news(since=now - timedelta(hours=1), limit=2)
+
+    assert len(items) == 4
+    assert {source: sum(item.source == source for item in items) for source in {"来源一", "来源二"}} == {
+        "来源一": 2,
+        "来源二": 2,
+    }
 
 
 def test_special_purpose_companies_are_not_industry_representatives():

@@ -23,7 +23,15 @@ from sqlalchemy.orm import Session
 from backend.app.api_assets import router as assets_router
 from backend.app.api_integrations import router as integrations_router
 from backend.app.config import get_settings
-from backend.app.db import ModelCallAuditRow, NewsRow, SessionLocal, engine, get_db, init_db
+from backend.app.db import (
+    ModelCallAuditRow,
+    NewsRow,
+    NewsSourceStateRow,
+    SessionLocal,
+    engine,
+    get_db,
+    init_db,
+)
 from backend.app.domain import (
     EventResearchRun,
     EvolutionCandidate,
@@ -371,14 +379,22 @@ def health() -> dict:
     except Exception:
         pass
     latest_news = None
+    latest_discovery = None
     try:
         with SessionLocal() as db:
             latest_news = db.scalar(select(func.max(NewsRow.observed_at)))
+            latest_discovery = db.scalar(select(func.max(NewsSourceStateRow.last_success_at)))
     except Exception:
         pass
     if latest_news and latest_news.tzinfo is None:
         latest_news = latest_news.replace(tzinfo=utc_now().tzinfo)
-    news_age_seconds = (utc_now() - latest_news).total_seconds() if latest_news else None
+    if latest_discovery and latest_discovery.tzinfo is None:
+        latest_discovery = latest_discovery.replace(tzinfo=utc_now().tzinfo)
+    freshness_at = max(
+        (value for value in (latest_news, latest_discovery) if value is not None),
+        default=None,
+    )
+    news_age_seconds = (utc_now() - freshness_at).total_seconds() if freshness_at else None
     data_fresh = bool(
         news_age_seconds is not None
         and news_age_seconds <= settings.scan_interval_minutes * 180
@@ -459,6 +475,7 @@ def health() -> dict:
         "fmp_configured": provider_settings.fmp_enabled,
         "fmp_mcp_configured": bool(settings.fmp_mcp_url),
         "latest_news_at": latest_news,
+        "latest_news_discovery_at": latest_discovery,
         "news_age_seconds": news_age_seconds,
         "data_fresh": data_fresh,
         "telegram_configured": bool(settings.telegram_bot_token and settings.telegram_chat_id),
@@ -497,10 +514,15 @@ def news_board(
     db: Session = Depends(get_db),
 ):
     extraction_queue = get_news_extraction_queue(limit=200)
+    extraction_items = (
+        extraction_queue.get("items", [])
+        if extraction_queue.get("state") in {"queued", "running", "paused"}
+        else []
+    )
     return build_news_board(
         db,
         per_source=per_source,
-        extraction_items=extraction_queue.get("items", []),
+        extraction_items=extraction_items,
     )
 
 

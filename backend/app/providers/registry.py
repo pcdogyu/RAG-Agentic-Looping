@@ -22,6 +22,7 @@ from backend.app.services.mcp_registry import (
     call_enabled_purpose_sync,
     fetch_enabled_news_feeds_sync,
 )
+from backend.app.services.news_sources import NewsSourceDiscoveryReport
 
 SEED_ASSETS = [
     AssetRef(
@@ -552,6 +553,7 @@ class ProviderRegistry:
         self._assets = {asset.asset_id: asset for asset in SEED_ASSETS}
         self.add_assets(assets or [])
         self.last_errors: list[str] = []
+        self.last_source_reports: list[NewsSourceDiscoveryReport] = []
         self.mapping_errors: list[str] = []
 
     def _source_enabled(self, name: str, default: bool = True) -> bool:
@@ -749,20 +751,86 @@ class ProviderRegistry:
         unique: dict[str, NewsItem] = {}
         seen_urls: set[str] = set()
         self.last_errors = []
+        attempted_at = datetime.now(UTC)
+        reports: dict[str, NewsSourceDiscoveryReport] = {}
+
+        def expected_sources(provider: object) -> list[str]:
+            if provider is self.fmp:
+                return ["FMP Stock News", "FMP Crypto News", "FMP General News"]
+            if provider is self.akshare:
+                return ["东方财富/AkShare"]
+            return []
+
+        def record_success(provider_name: str, names: list[str], items: list[NewsItem]) -> None:
+            grouped: dict[str, list[NewsItem]] = {}
+            for item in items:
+                grouped.setdefault(item.source, []).append(item)
+            for source in set(names) | set(grouped):
+                source_items = grouped.get(source, [])
+                reports[source] = NewsSourceDiscoveryReport(
+                    source=source,
+                    provider=provider_name,
+                    status="healthy",
+                    attempted_at=attempted_at,
+                    discovered_count=len(source_items),
+                    latest_published_at=(
+                        max(item.published_at for item in source_items)
+                        if source_items
+                        else None
+                    ),
+                )
+
+        def record_error(provider_name: str, names: list[str], error: str) -> None:
+            for source in names or [provider_name]:
+                reports[source] = NewsSourceDiscoveryReport(
+                    source=source,
+                    provider=provider_name,
+                    status="error",
+                    attempted_at=attempted_at,
+                    error=error[:500],
+                )
+
         for provider in self.providers:
             if provider is self.fmp and not self._source_enabled("FMP", self.settings.fmp_enabled):
                 continue
+            names = expected_sources(provider)
             try:
-                for item in provider.discover_news(since=since, limit=limit):
+                provider_items = provider.discover_news(since=since, limit=limit)
+                record_success(provider.name, names, provider_items)
+                for item in provider_items:
                     if item.url in seen_urls:
                         continue
                     unique[item.content_hash] = item
                     seen_urls.add(item.url)
             except Exception as exc:
-                self.last_errors.append(f"{provider.name}: {type(exc).__name__}")
+                detail = f"{type(exc).__name__}: {exc}"[:500]
+                self.last_errors.append(f"{provider.name}: {detail}")
+                record_error(provider.name, names, detail)
                 continue
+
+        with SessionLocal() as db:
+            mcp_names = list(
+                db.scalars(
+                    select(McpSourceRow.name)
+                    .where(McpSourceRow.enabled.is_(True))
+                    .order_by(McpSourceRow.priority.desc())
+                ).all()
+            )
+            feed_rows = list(
+                db.scalars(
+                    select(McpSourceRow).where(McpSourceRow.name.in_(mcp_names))
+                ).all()
+            )
+        mcp_names = [
+            row.name for row in feed_rows if "news_feed" in (row.tool_mappings or {})
+        ]
         try:
             items, errors = fetch_enabled_news_feeds_sync(since, limit)
+            errors_by_source = {item["source"]: item["error"] for item in errors}
+            successful_names = [name for name in mcp_names if name not in errors_by_source]
+            record_success("mcp-news", successful_names, items)
+            for source, error in errors_by_source.items():
+                record_error("mcp-news", [source], error)
             for item in items:
                 if item.url in seen_urls:
                     continue
@@ -772,8 +840,24 @@ class ProviderRegistry:
                 f"{item['source']}: MCP news feed ({item['error']})" for item in errors
             )
         except Exception as exc:
-            self.last_errors.append(f"mcp-news: {type(exc).__name__}")
-        return sorted(unique.values(), key=lambda item: item.published_at, reverse=True)[:limit]
+            detail = f"{type(exc).__name__}: {exc}"[:500]
+            self.last_errors.append(f"mcp-news: {detail}")
+            record_error("mcp-news", mcp_names, detail)
+
+        by_source: dict[str, list[NewsItem]] = {}
+        for item in unique.values():
+            by_source.setdefault(item.source, []).append(item)
+        output = [
+            item
+            for source_items in by_source.values()
+            for item in sorted(
+                source_items,
+                key=lambda value: value.published_at,
+                reverse=True,
+            )[:limit]
+        ]
+        self.last_source_reports = list(reports.values())
+        return sorted(output, key=lambda item: item.published_at, reverse=True)
 
     def resolve_assets(self, query: str) -> list[AssetRef]:
         exact: list[AssetRef] = []

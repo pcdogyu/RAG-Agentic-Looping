@@ -73,6 +73,31 @@ def test_news_discovery_uses_fmp_specific_lookback(monkeypatch):
     assert [item.title for item in items] == ["Inside the FMP lookback"]
 
 
+def test_news_limit_is_applied_per_fmp_feed(monkeypatch):
+    now = datetime(2026, 8, 22, 12, tzinfo=UTC)
+    provider = FmpProvider(Settings(fmp_access_token="", fmp_mcp_url=""))
+
+    def fake_news(tool, arguments, endpoint, params, ttl=900):
+        if tool == "getGeneralNews":
+            return []
+        return [
+            {
+                "title": f"{tool}-{index}",
+                "url": f"https://example.invalid/{tool}/{index}",
+                "publishedDate": (now - timedelta(minutes=index)).isoformat(),
+            }
+            for index in range(2)
+        ]
+
+    monkeypatch.setattr("backend.app.providers.fmp.utc_now", lambda: now)
+    monkeypatch.setattr(provider, "_mcp_or_rest", fake_news)
+
+    items = provider.discover_news(since=now - timedelta(hours=1), limit=2)
+
+    assert len(items) == 4
+    assert {item.source for item in items} == {"FMP Stock News", "FMP Crypto News"}
+
+
 def test_symbol_search_preserves_otc_adr_underlying_issuer(monkeypatch):
     provider = FmpProvider(Settings(fmp_access_token="", fmp_mcp_url=""))
     monkeypatch.setattr(

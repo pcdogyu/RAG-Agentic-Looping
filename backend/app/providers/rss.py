@@ -26,6 +26,7 @@ class RssProvider:
         for url, quality in feeds:
             feed = feedparser.parse(url)
             source = feed.feed.get("title", url)
+            feed_items: list[NewsItem] = []
             for entry in feed.entries:
                 title = entry.get("title", "")
                 link = entry.get("link", "")
@@ -35,7 +36,7 @@ class RssProvider:
                 )
                 if not title or not link or published < since:
                     continue
-                output.append(
+                feed_items.append(
                     NewsItem(
                         source=source,
                         source_quality=quality,
@@ -47,7 +48,10 @@ class RssProvider:
                         content_hash=sha256(f"{title}|{link}".encode()).hexdigest(),
                     )
                 )
-        return sorted(output, key=lambda item: item.published_at, reverse=True)[:limit]
+            output.extend(
+                sorted(feed_items, key=lambda item: item.published_at, reverse=True)[:limit]
+            )
+        return sorted(output, key=lambda item: item.published_at, reverse=True)
 
     def resolve_assets(self, query: str) -> list[AssetRef]:
         return []

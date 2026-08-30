@@ -248,7 +248,7 @@ class FmpProvider:
                         raw_metadata={"crypto": crypto, "site": item.get("site")},
                     )
                 )
-        return output[:limit]
+        return sorted(output, key=lambda item: item.published_at, reverse=True)
 
     def resolve_assets(self, query: str) -> list[AssetRef]:
         payload = self._mcp_or_rest(

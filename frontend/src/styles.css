@@ -332,7 +332,8 @@ h1 span { color: var(--mint); font-weight: 400; }
 .queue-card-timing { display: grid; grid-template-columns: 1fr; gap: 2px; min-width: 0; color: var(--muted); font: 400 8px "DM Mono", monospace; }
 .queue-card-timing span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .news-board-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
-.news-board-toolbar > span { color: var(--muted); font-size: 11px; }
+.news-board-refresh-summary { display: grid; gap: 4px; color: var(--muted); font-size: 11px; }
+.news-board-refresh-summary small { font: 400 9px "DM Mono", monospace; }
 .news-board-toolbar > button { min-width: 110px; padding: 9px 15px; border: 1px solid var(--line); border-radius: 8px; color: var(--text); background: var(--model-surface); cursor: pointer; }
 .news-board-toolbar > button:hover { border-color: var(--mint); color: var(--mint); }
 .news-board-toolbar > button:disabled { opacity: .55; cursor: default; }
@@ -341,7 +342,12 @@ h1 span { color: var(--mint); font-weight: 400; }
 .news-source-panel > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 16px 18px; border-bottom: 1px solid var(--line); }
 .news-source-panel > header .eyebrow { margin-bottom: 5px; }
 .news-source-panel > header h3 { margin: 0; color: var(--text); font-size: 16px; }
-.news-source-panel > header > span { flex: 0 0 auto; padding: 4px 7px; border: 1px solid var(--line); border-radius: 5px; color: var(--muted); font: 400 9px "DM Mono", monospace; }
+.news-source-refresh { display: grid; justify-items: end; gap: 4px; color: var(--muted); font: 400 8px "DM Mono", monospace; text-align: right; }
+.news-source-health { display: inline-flex; align-items: center; gap: 5px; }
+.news-source-health i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; box-shadow: 0 0 7px currentColor; }
+.news-source-health.healthy { color: var(--mint); }
+.news-source-health.error { color: var(--red); }
+.news-source-count { padding: 4px 7px; border: 1px solid var(--line); border-radius: 5px; color: var(--muted); font-size: 9px; }
 .news-source-panel > .page-error, .news-source-panel > .page-empty { margin: 12px; }
 .news-source-items { min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
 .news-board-item { display: grid; gap: 9px; padding: 15px 18px; border-bottom: 1px solid var(--line); }

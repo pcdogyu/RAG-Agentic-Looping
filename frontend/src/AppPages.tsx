@@ -977,14 +977,23 @@ export type NewsBoardItem = {
 
 export type NewsBoardSource = {
   source: string;
-  latest_published_at: string;
+  latest_published_at: string | null;
   item_count: number;
   items: NewsBoardItem[];
   error: string | null;
+  discovery_status?: "healthy" | "error" | "unchecked" | string;
+  last_attempt_at?: string | null;
+  last_success_at?: string | null;
+  watermark_at?: string | null;
+  last_error?: string | null;
+  last_discovered_count?: number;
+  last_new_count?: number;
 };
 
 type NewsBoardResponse = {
   generated_at: string;
+  last_refresh_at: string | null;
+  last_success_at: string | null;
   per_source: number;
   total_sources: number;
   sources: NewsBoardSource[];
@@ -1027,6 +1036,16 @@ const sourceQualityLabels: Record<string, string> = {
 
 type NewsRetryState = { status: "pending" | "queued" | "error"; error?: string };
 
+const discoveryStatusLabels: Record<string, string> = {
+  healthy: "抓取正常",
+  error: "抓取异常",
+  unchecked: "等待首次抓取",
+};
+
+export function formatNewsRefreshTime(value?: string | null) {
+  return value ? new Date(value).toLocaleString("zh-CN") : "尚未成功";
+}
+
 export function NewsSourcePanel({ group, retryStates = {}, onRetry }: {
   group: NewsBoardSource;
   retryStates?: Record<string, NewsRetryState>;
@@ -1035,9 +1054,17 @@ export function NewsSourcePanel({ group, retryStates = {}, onRetry }: {
   return <section className="news-source-panel">
     <header>
       <div><p className="eyebrow">NEWS SOURCE</p><h3>{group.source}</h3></div>
-      <span>最新 {group.item_count}/50 条</span>
+      <div className="news-source-refresh">
+        <span className={`news-source-health ${group.discovery_status ?? "unchecked"}`}>
+          <i />{discoveryStatusLabels[group.discovery_status ?? "unchecked"] ?? group.discovery_status}
+        </span>
+        <small>成功 {formatNewsRefreshTime(group.last_success_at)}</small>
+        <small>本轮发现 {group.last_discovered_count ?? 0} · 新增 {group.last_new_count ?? 0}</small>
+        <span className="news-source-count">最新 {group.item_count}/50 条</span>
+      </div>
     </header>
     {group.error && <div className="page-error">{group.error}</div>}
+    {group.last_error && <div className="page-error">数据源错误：{group.last_error}</div>}
     {!group.error && !group.items.length && <div className="page-empty">该来源暂无新闻。</div>}
     <div className="news-source-items">
       {group.items.map((item) => {
@@ -1074,6 +1101,7 @@ export function NewsPage({ apiBase }: { apiBase: string }) {
   const [board, setBoard] = useState<NewsBoardResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [refreshMessage, setRefreshMessage] = useState("");
   const [retryStates, setRetryStates] = useState<Record<string, NewsRetryState>>({});
 
   const load = useCallback(async (signal?: AbortSignal, showLoading = false) => {
@@ -1118,13 +1146,39 @@ export function NewsPage({ apiBase }: { apiBase: string }) {
     }
   }
 
+  async function refreshSources() {
+    if (loading) return;
+    setLoading(true);
+    try {
+      const response = await fetch(`${apiBase}/api/v1/scan`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ background: true }),
+      });
+      const payload = await response.json() as { status?: string; detail?: unknown };
+      if (!response.ok) {
+        throw new Error(typeof payload.detail === "string" ? payload.detail : `新闻抓取请求失败（HTTP ${response.status}）`);
+      }
+      setRefreshMessage(payload.status === "already_queued" ? "新闻抓取正在执行，完成后自动更新。" : "新闻抓取已排队。");
+      await load();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "新闻抓取请求失败");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   return <section className="app-page news-page">
     <PageHeading eyebrow="LIVE NEWS PIPELINE" title="新闻" copy="按来源查看最新 50 条新闻及其抽取、股票映射、研究和修订状态；实时事件触发更新，断线时自动回退轮询。" />
     <div className="news-board-toolbar">
-      <span>{board ? `${board.total_sources} 个来源 · 每来源最新 ${board.per_source} 条` : "正在读取新闻来源…"}</span>
-      <button type="button" disabled={loading} onClick={() => void load(undefined, true)}>{loading ? "刷新中…" : "立即刷新"}</button>
+      <div className="news-board-refresh-summary">
+        <span>{board ? `${board.total_sources} 个来源 · 每来源最新 ${board.per_source} 条` : "正在读取新闻来源…"}</span>
+        {board && <small>最近成功刷新：{formatNewsRefreshTime(board.last_success_at)}</small>}
+      </div>
+      <button type="button" disabled={loading} onClick={() => void refreshSources()}>{loading ? "刷新中…" : "立即刷新"}</button>
     </div>
     {error && <div className="page-error">{error}</div>}
+    {refreshMessage && <div className="page-message">{refreshMessage}</div>}
     {!board && loading && <div className="page-message">正在读取新闻状态…</div>}
     {board && !board.sources.length && <div className="page-empty">当前没有已入库新闻。</div>}
     {board && <div className="news-source-grid" data-columns={newsSourceDesktopColumns}>{board.sources.map((group) => <NewsSourcePanel group={group} retryStates={retryStates} onRetry={(item) => void retry(item)} key={group.source} />)}</div>}

@@ -61,6 +61,49 @@
         "title": "AssetClass",
         "type": "string"
       },
+      "AssetEditInput": {
+        "properties": {
+          "active": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active"
+          },
+          "aliases": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 50,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Aliases"
+          },
+          "industry_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Industry Id"
+          }
+        },
+        "title": "AssetEditInput",
+        "type": "object"
+      },
       "AssetRef": {
         "additionalProperties": false,
         "properties": {
@@ -99,6 +142,16 @@
             "title": "Exchange Or Provider",
             "type": "string"
           },
+          "industry_id": {
+            "default": "",
+            "title": "Industry Id",
+            "type": "string"
+          },
+          "instrument_type": {
+            "default": "",
+            "title": "Instrument Type",
+            "type": "string"
+          },
           "issuer_id": {
             "anyOf": [
               {
@@ -110,6 +163,18 @@
             ],
             "title": "Issuer Id"
           },
+          "last_synced_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Synced At"
+          },
           "lot_size": {
             "default": 1,
             "minimum": 1,
@@ -118,6 +183,30 @@
           },
           "market": {
             "$ref": "#/components/schemas/Market"
+          },
+          "market_cap": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Market Cap"
+          },
+          "market_cap_rank": {
+            "anyOf": [
+              {
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Market Cap Rank"
           },
           "name": {
             "title": "Name",
@@ -140,6 +229,21 @@
             },
             "title": "Products",
             "type": "array"
+          },
+          "raw_industry": {
+            "default": "",
+            "title": "Raw Industry",
+            "type": "string"
+          },
+          "raw_sector": {
+            "default": "",
+            "title": "Raw Sector",
+            "type": "string"
+          },
+          "sector_id": {
+            "default": "",
+            "title": "Sector Id",
+            "type": "string"
           },
           "symbol": {
             "title": "Symbol",
@@ -1689,6 +1793,30 @@
             "title": "Generated At",
             "type": "string"
           },
+          "last_refresh_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Refresh At"
+          },
+          "last_success_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Success At"
+          },
           "per_source": {
             "maximum": 50,
             "minimum": 1,
@@ -1719,6 +1847,11 @@
       },
       "NewsBoardSource": {
         "properties": {
+          "discovery_status": {
+            "default": "unchecked",
+            "title": "Discovery Status",
+            "type": "string"
+          },
           "error": {
             "anyOf": [
               {
@@ -1742,19 +1875,84 @@
             "title": "Items",
             "type": "array"
           },
+          "last_attempt_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Attempt At"
+          },
+          "last_discovered_count": {
+            "default": 0,
+            "minimum": 0,
+            "title": "Last Discovered Count",
+            "type": "integer"
+          },
+          "last_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Error"
+          },
+          "last_new_count": {
+            "default": 0,
+            "minimum": 0,
+            "title": "Last New Count",
+            "type": "integer"
+          },
+          "last_success_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Success At"
+          },
           "latest_published_at": {
-            "format": "date-time",
-            "title": "Latest Published At",
-            "type": "string"
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Published At"
           },
           "source": {
             "title": "Source",
             "type": "string"
+          },
+          "watermark_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Watermark At"
           }
         },
         "required": [
           "source",
-          "latest_published_at",
           "item_count"
         ],
         "title": "NewsBoardSource",
@@ -3776,6 +3974,169 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/v1/admin/asset-universe/backfill": {
+      "post": {
+        "operationId": "backfill_asset_mappings_api_v1_admin_asset_universe_backfill_post",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "days",
+            "required": false,
+            "schema": {
+              "default": 7,
+              "maximum": 30,
+              "minimum": 1,
+              "title": "Days",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-admin-token",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Admin-Token"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Backfill Asset Mappings"
+      }
+    },
+    "/api/v1/admin/asset-universe/refresh": {
+      "post": {
+        "operationId": "refresh_asset_universe_api_v1_admin_asset_universe_refresh_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-admin-token",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Admin-Token"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Refresh Asset Universe"
+      }
+    },
+    "/api/v1/admin/assets/{asset_id}": {
+      "patch": {
+        "operationId": "edit_asset_api_v1_admin_assets__asset_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "asset_id",
+            "required": true,
+            "schema": {
+              "title": "Asset Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-admin-token",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Admin-Token"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssetEditInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Edit Asset"
+      }
+    },
     "/api/v1/admin/fact-source-groups": {
       "get": {
         "operationId": "list_fact_source_groups_api_v1_admin_fact_source_groups_get",
@@ -4419,6 +4780,130 @@
           }
         },
         "summary": "Analysis Logs"
+      }
+    },
+    "/api/v1/asset-universe": {
+      "get": {
+        "operationId": "asset_universe_api_v1_asset_universe_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Q",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "market",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Market",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "sector_id",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Sector Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "industry_id",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Industry Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "active",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": true,
+              "title": "Active"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Asset Universe"
+      }
+    },
+    "/api/v1/asset-universe/status": {
+      "get": {
+        "operationId": "asset_universe_status_api_v1_asset_universe_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Asset Universe Status"
       }
     },
     "/api/v1/assets": {
@@ -5132,6 +5617,44 @@
           }
         },
         "summary": "Retry Failed Research Runs"
+      }
+    },
+    "/api/v1/industries": {
+      "get": {
+        "operationId": "industries_api_v1_industries_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "market",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Market",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Industries"
       }
     },
     "/api/v1/integrations/weknora": {

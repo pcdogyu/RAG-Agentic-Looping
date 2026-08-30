@@ -16,6 +16,7 @@ import requests
 from dateutil.parser import parse as parse_datetime
 
 from backend.app.domain import AssetClass, AssetRef, Market, NewsItem, SourceQuality
+from backend.app.providers.base import ProviderError
 from backend.app.providers.cache import cache
 from backend.app.services.industry_taxonomy import normalize_industry
 
@@ -96,8 +97,10 @@ class AkShareProvider:
 
             with _request_address_family(self.settings.akshare_ipv4_only):
                 frame = ak.stock_info_global_em()
-        except Exception:
-            return []
+        except Exception as exc:
+            error = f"news: {type(exc).__name__}: {exc}"[:500]
+            self.last_errors.append(error)
+            raise ProviderError(error) from exc
         output: list[NewsItem] = []
         for row in frame.head(limit * 2).to_dict(orient="records"):
             title = str(row.get("标题") or row.get("title") or "")

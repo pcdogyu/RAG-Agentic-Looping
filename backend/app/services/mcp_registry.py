@@ -609,8 +609,10 @@ async def fetch_enabled_news_feeds(
                 continue
             output.setdefault(item.content_hash, item)
             output_urls.add(item.url)
+    # ``limit`` is a per-source budget. Each source is capped in ``fetch_row``;
+    # applying another global cap here lets a high-volume feed starve its peers.
     items = sorted(output.values(), key=lambda item: item.published_at, reverse=True)
-    return items[:limit], errors
+    return items, errors
 
 
 def fetch_enabled_news_feeds_sync(

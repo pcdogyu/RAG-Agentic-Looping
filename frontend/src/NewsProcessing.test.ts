@@ -9,6 +9,27 @@ import {
 } from "./AppPages";
 
 describe("durable news processing", () => {
+  it("shows source discovery health and the last successful refresh", () => {
+    const group: NewsBoardSource = {
+      source: "东方财富/AkShare",
+      latest_published_at: null,
+      item_count: 0,
+      error: null,
+      discovery_status: "error",
+      last_success_at: "2026-08-30T02:50:00Z",
+      last_discovered_count: 0,
+      last_new_count: 0,
+      last_error: "ProviderError: upstream unavailable",
+      items: [],
+    };
+
+    const markup = renderToStaticMarkup(createElement(NewsSourcePanel, { group }));
+
+    expect(markup).toContain("抓取异常");
+    expect(markup).toContain("数据源错误：ProviderError: upstream unavailable");
+    expect(markup).toContain("本轮发现 0 · 新增 0");
+  });
+
   it("shows an interrupted item with its recovery action", () => {
     const group: NewsBoardSource = {
       source: "金十",

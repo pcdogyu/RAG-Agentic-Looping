@@ -90,6 +90,11 @@ from backend.app.services.news_processing import (
 from backend.app.services.news_processing import (
     recover_orphaned_news as recover_orphaned_news_rows,
 )
+from backend.app.services.news_sources import (
+    filter_news_by_source_watermark,
+    news_source_watermarks,
+    record_news_source_reports,
+)
 from backend.app.services.notifications import notifier
 from backend.app.services.outcomes import OutcomeService
 from backend.app.services.portfolio import PortfolioService
@@ -116,6 +121,7 @@ from backend.app.storage import (
     get_event_research_run,
     get_news,
     get_news_by_content_hash,
+    get_news_by_url,
     get_run,
     get_run_for_event_asset,
     list_assets,
@@ -1113,6 +1119,11 @@ def _complete_scan(
     if _decode(client.get(SCAN_GATE_KEY)) != task_id:
         return _read_scan_status(client)
     completed_at = completed_at or utc_now()
+    status = _read_scan_status(client)
+    started_at = _parse_timestamp(status.get("started_at")) or completed_at
+    interval = timedelta(minutes=settings.scan_interval_minutes)
+    elapsed_seconds = max(0.0, (completed_at - started_at).total_seconds())
+    next_scan_at = started_at + interval * (int(elapsed_seconds // interval.total_seconds()) + 1)
     payload = _update_scan_status(
         client,
         state="idle",
@@ -1122,7 +1133,7 @@ def _complete_scan(
         current=int(result.get("discovered", 0)),
         total=int(result.get("discovered", 0)),
         last_completed_at=completed_at.isoformat(),
-        next_scan_at=(completed_at + timedelta(minutes=settings.scan_interval_minutes)).isoformat(),
+        next_scan_at=next_scan_at.isoformat(),
         last_result=result,
         last_error=None,
     )
@@ -2409,7 +2420,7 @@ def _recover_stale_scan_gate(client: Redis, *, now: datetime | None = None) -> b
 
 @celery_app.task(name="market_loop.ensure_scan_loop")
 def ensure_scan_loop() -> dict:
-    """Start immediately when uninitialized, then ten minutes after completion."""
+    """Start immediately when uninitialized, then on the next fixed discovery slot."""
 
     client = _redis_client()
     recovered = _recover_stale_scan_gate(client)
@@ -2480,13 +2491,14 @@ def _persist_news_for_extraction(
     items: list[NewsItem],
     *,
     scan_task_id: str | None = None,
+    dispatch_delay_seconds: int = 0,
 ) -> list[NewsItem]:
     processed_ids = event_news_item_ids(db)
     pending: list[NewsItem] = []
     seen_ids: set[UUID] = set()
     for discovered in items:
         item = enrich_news_lineage(discovered)
-        stored = get_news_by_content_hash(db, item.content_hash)
+        stored = get_news_by_content_hash(db, item.content_hash) or get_news_by_url(db, item.url)
         if stored is not None:
             item = stored
         if item.id in processed_ids or item.id in seen_ids:
@@ -2495,6 +2507,7 @@ def _persist_news_for_extraction(
             db,
             item,
             scan_task_id=scan_task_id,
+            dispatch_delay_seconds=dispatch_delay_seconds,
         )
         seen_ids.add(item.id)
         pending.append(item)
@@ -2600,13 +2613,22 @@ def scan_news(self) -> dict:
         )
         init_db()
         registry = ProviderRegistry()
-        since = utc_now() - timedelta(minutes=settings.scan_interval_minutes * 2)
+        discovery_now = utc_now()
+        since = discovery_now - timedelta(hours=settings.news_discovery_lookback_hours)
+        with SessionLocal() as db:
+            watermarks = news_source_watermarks(db)
         items = _discover_news_with_heartbeat(
             client,
             task_id,
             registry,
             since=since,
             limit=settings.scan_batch_size,
+        )
+        items = filter_news_by_source_watermark(
+            items,
+            watermarks,
+            lookback_start=since,
+            overlap_minutes=settings.news_watermark_overlap_minutes,
         )
         _require_scan_gate(client, task_id)
         with SessionLocal() as db:
@@ -2616,55 +2638,51 @@ def scan_news(self) -> dict:
                 db,
                 accepted_items,
                 scan_task_id=task_id,
+                dispatch_delay_seconds=0,
             )
+        new_counts: dict[str, int] = {}
+        for item in pending_items:
+            new_counts[item.source] = new_counts.get(item.source, 0) + 1
+        source_reports = list(getattr(registry, "last_source_reports", []))
+        if source_reports:
+            with SessionLocal() as db:
+                record_news_source_reports(db, source_reports, new_counts=new_counts)
         for error in registry.last_errors:
             notifier.send(f"数据源故障：{error}")
         _require_scan_gate(client, task_id)
+        dispatch = (
+            dispatch_news_processing_outbox(
+                limit=len(pending_items),
+                news_ids={item.id for item in pending_items},
+            )
+            if pending_items
+            else {"claimed": 0, "queued": [], "failed": 0}
+        )
         metadata = {
             "discovered": len(items),
             "accepted": len(accepted_items),
             "filtered": filtered_count,
+            "new": len(pending_items),
+            "extraction_queued": len(dispatch["queued"]),
+            "dispatch_failed": dispatch["failed"],
         }
         self.update_state(
             state="PROGRESS",
             meta={
-                "phase": "extraction_queued",
-                "current": 0,
-                "total": len(pending_items),
+                "phase": "completed",
+                "current": len(items),
+                "total": len(items),
             },
         )
-        _update_scan_status(
-            client,
-            state="running",
-            phase="extraction_queued",
-            current=0,
-            total=len(pending_items),
-        )
-        _wait_if_scan_paused(
-            client,
-            task_id,
-            phase="extraction_queued",
-            current=0,
-            total=len(pending_items),
-        )
-        task_ids, extraction_workflow = _build_news_extraction_workflow(
-            client,
-            task_id,
-            pending_items,
-            metadata,
-        )
-        if task_ids and extraction_workflow is not None:
-            return self.replace(extraction_workflow)
         result = {
             "status": "completed",
             **metadata,
             "events": 0,
             "extraction_completed": 0,
-            "extraction_failed": 0,
+            "extraction_failed": dispatch["failed"],
             "research_queued": 0,
             "asset_mapping_queued": 0,
         }
-        _finish_news_extraction_queue(client, task_id)
         _complete_scan(client, task_id, result)
         return result
     except Ignore:
