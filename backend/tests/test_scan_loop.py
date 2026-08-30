@@ -317,6 +317,42 @@ def test_news_extraction_registry_sorts_active_items_and_keeps_failed(monkeypatc
     assert payload["truncated"] is True
 
 
+def test_news_extraction_registry_ignores_superseded_scan_snapshot(monkeypatch):
+    redis = FakeRedis()
+    monkeypatch.setattr(worker, "_redis_client", lambda: redis)
+    worker._initialize_news_extraction_queue(
+        redis,
+        "stale-scan",
+        [
+            {
+                "task_id": "stale-task",
+                "news_id": "stale-news",
+                "title": "stale",
+                "status": "running",
+            }
+        ],
+        {},
+    )
+    stale_payload = worker._read_news_extraction_queue(redis)
+    stale_payload.update(state="interrupted", error="scan heartbeat expired")
+    worker._write_news_extraction_queue(redis, stale_payload)
+    worker._update_scan_status(
+        redis,
+        task_id="current-scan",
+        state="idle",
+        phase="completed",
+    )
+
+    payload = worker.get_news_extraction_queue()
+
+    assert payload["scan_task_id"] is None
+    assert payload["state"] == "idle"
+    assert payload["total_items"] == 0
+    assert payload["items"] == []
+    assert payload["error"] is None
+    assert worker._read_news_extraction_queue(redis)["error"] == "scan heartbeat expired"
+
+
 def test_clear_news_extraction_queue_cancels_active_and_failed_items():
     redis = FakeRedis()
     now = datetime(2026, 8, 26, 8, 0, tzinfo=UTC).isoformat()

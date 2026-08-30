@@ -727,7 +727,16 @@ def get_news_extraction_queue(limit: int = 200) -> dict[str, Any]:
     """Return the current per-news 3B work list without exposing Celery payloads."""
 
     try:
-        payload = _read_news_extraction_queue(_redis_client())
+        client = _redis_client()
+        payload = _read_news_extraction_queue(client)
+        queue_scan_task_id = payload.get("scan_task_id")
+        current_scan_task_id = _read_scan_status(client).get("task_id")
+        if (
+            queue_scan_task_id
+            and current_scan_task_id
+            and queue_scan_task_id != current_scan_task_id
+        ):
+            payload = _default_news_extraction_queue()
         generated_at = utc_now()
         counts = _news_extraction_counts(payload)
         status_rank = {"running": 0, "retrying": 1, "queued": 2, "failed": 3}
