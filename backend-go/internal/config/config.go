@@ -25,6 +25,7 @@ type Config struct {
 	MCPSecretKey         string
 	WeknoraURL           string
 	ScanInterval         time.Duration
+	ResearchCooldown     time.Duration
 	ExtractModel         string
 	AssistModel          string
 	ResearchModel        string
@@ -70,6 +71,7 @@ func Load() (Config, error) {
 		MCPSecretKey:         env("MCP_SECRET_KEY", ""),
 		WeknoraURL:           env("WEKNORA_DEFAULT_URL", "http://10.15.0.28/"),
 		ScanInterval:         time.Duration(envInt("SCAN_INTERVAL_MINUTES", 10)) * time.Minute,
+		ResearchCooldown:     time.Duration(envInt("RESEARCH_ASSET_COOLDOWN_HOURS", 24)) * time.Hour,
 		ExtractModel:         env("OLLAMA_EXTRACT_MODEL", "qwen2.5:3b"),
 		AssistModel:          env("OLLAMA_ASSIST_MODEL", "qwen2.5:7b"),
 		ResearchModel:        env("OLLAMA_RESEARCH_MODEL", "qwen2.5:7b"),

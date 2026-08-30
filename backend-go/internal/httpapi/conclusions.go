@@ -240,6 +240,36 @@ func normalizeRecommendation(payload map[string]any) {
 	if value, ok := payload["news_confidence"]; !ok || value == nil {
 		payload["news_confidence"] = payload["fact_confidence"]
 	}
+	if numberValue(payload["raw_score"]) == 0 && numberValue(payload["score"]) != 0 {
+		payload["raw_score"] = payload["score"]
+	}
+	if value, ok := payload["signal_status"]; !ok || value == nil || stringValue(value) == "" {
+		score := numberValue(payload["score"])
+		version := stringValue(payload["scoring_version"])
+		switch {
+		case version == "llm-direction-v3":
+			if direction := payload["direction_score"]; direction != nil {
+				score = numberValue(direction)
+			}
+			if math.Abs(score) < 30 {
+				payload["signal_status"] = "neutral"
+			} else {
+				payload["signal_status"] = "directional"
+			}
+		case version == "short-term-impact-v1":
+			if math.Abs(score) < 15 {
+				payload["signal_status"] = "neutral"
+			} else {
+				payload["signal_status"] = "directional"
+			}
+		case !boolValue(payload["evidence_complete"]):
+			payload["signal_status"] = "insufficient_evidence"
+		case math.Abs(score) < 20:
+			payload["signal_status"] = "neutral"
+		default:
+			payload["signal_status"] = "directional"
+		}
+	}
 	defaults := map[string]any{
 		"news_confidence_version": nil, "news_confidence_factors": nil,
 		"rating_confidence_factors": nil, "mapping_distance": float64(5),
@@ -259,6 +289,7 @@ func normalizeAsset(asset map[string]any) {
 	defaults := map[string]any{
 		"sector_id": "", "industry_id": "", "raw_sector": "", "raw_industry": "",
 		"instrument_type": "", "market_cap": nil, "market_cap_rank": nil, "last_synced_at": nil,
+		"issuer_id": nil, "primary_listing_asset_id": nil, "lot_size": float64(1), "active": true,
 	}
 	for key, value := range defaults {
 		if _, ok := asset[key]; !ok {

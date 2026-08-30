@@ -141,12 +141,16 @@ func fetchOllamaModels(ctx context.Context, client *http.Client, base string) []
 }
 
 func (s *Server) scanStatus(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.scanStatusPayload(r.Context()))
+}
+
+func (s *Server) scanStatusPayload(ctx context.Context) map[string]any {
 	payload := map[string]any{
 		"state": "idle", "task_id": nil, "phase": nil, "paused_from_phase": nil,
 		"current": 0, "total": 0, "started_at": nil, "heartbeat_at": nil,
 		"last_completed_at": nil, "next_scan_at": nil, "last_result": nil, "last_error": nil,
 	}
-	raw, err := s.redis.Get(r.Context(), scanStatusKey).Bytes()
+	raw, err := s.redis.Get(ctx, scanStatusKey).Bytes()
 	if err == nil {
 		var stored map[string]any
 		if json.Unmarshal(raw, &stored) == nil {
@@ -160,7 +164,7 @@ func (s *Server) scanStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	payload["interval_seconds"] = int(s.cfg.ScanInterval.Seconds())
 	payload["server_time"] = time.Now().UTC().Format(time.RFC3339Nano)
-	writeJSON(w, http.StatusOK, payload)
+	return payload
 }
 
 func (s *Server) newsExtractionQueue(w http.ResponseWriter, r *http.Request) {
@@ -631,7 +635,7 @@ func timeOrNil(value *time.Time) any {
 	if value == nil {
 		return nil
 	}
-	return value.UTC()
+	return jsonTime(*value)
 }
 func jsonTimeOrNil(value *time.Time) any {
 	if value == nil {

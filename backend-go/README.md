@@ -10,11 +10,14 @@ profile and is not the web upstream.
   while the frozen contract actually contained 78 rather than the documented
   72. The coverage gate now derives its count from the registered native route
   manifest and verifies every operation ID against the frozen OpenAPI file.
-- Batch 2 owns 52 of 78 operations. It includes durable read APIs, asset master
+- Batch 2 brought ownership to 52 of 78 operations. It includes durable read APIs, asset master
   data, source/MCP configuration, operational queue views, the news board,
   analysis logs, paper portfolio APIs, and the SSE snapshot stream.
-- Batch 3 will port the remaining 26 command and workflow operations before
-  production cutover. The Python service remains the rollback target.
+- Batch 3 owns all 78 operations. The remaining command, retry, queue-control,
+  admin search, scan/research, and target-change APIs are native Go. Go publishes
+  Kombu-compatible Celery messages to the existing Python execution workers, so
+  the API cutover does not require an unsafe simultaneous worker rewrite. The
+  Python API remains the rollback target until the upstream is switched.
 
 ## Safety gates
 

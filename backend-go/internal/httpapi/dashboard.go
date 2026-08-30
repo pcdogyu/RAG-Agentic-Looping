@@ -179,7 +179,7 @@ func (s *Server) buildNewsBoard(r *http.Request, perSource int) (map[string]any,
 					}
 				}
 			}
-			items = append(items, map[string]any{"id": row.ID, "title": row.Title, "summary": row.Summary, "url": row.URL, "source_quality": row.Quality, "published_at": row.Published.UTC(), "observed_at": row.Observed.UTC(), "status": status, "status_updated_at": updated, "status_detail": detail, "retryable": status == "orphaned" || status == "failed", "events": eventItems, "assets": assetItems})
+			items = append(items, map[string]any{"id": row.ID, "title": row.Title, "summary": row.Summary, "url": row.URL, "source_quality": row.Quality, "published_at": jsonTime(row.Published), "observed_at": jsonTime(row.Observed), "status": status, "status_updated_at": jsonTime(updated), "status_detail": detail, "retryable": status == "orphaned" || status == "failed", "events": eventItems, "assets": assetItems})
 		}
 		output = append(output, map[string]any{"source": source.Name, "latest_published_at": timeOrNil(source.Latest), "item_count": len(items), "items": items, "error": nil, "discovery_status": defaultValue(state.Status, "unchecked"), "last_attempt_at": timeOrNil(state.LastAttempt), "last_success_at": timeOrNil(state.LastSuccess), "watermark_at": timeOrNil(state.Watermark), "last_error": state.LastError, "last_discovered_count": state.Discovered, "last_new_count": state.New})
 	}

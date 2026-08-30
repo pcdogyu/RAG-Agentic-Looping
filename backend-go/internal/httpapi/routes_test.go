@@ -10,7 +10,7 @@ import (
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/config"
 )
 
-func TestNativeOperationsMatchFrozenContractAndCompleteBatchTwo(t *testing.T) {
+func TestNativeOperationsMatchFrozenContractAndCompleteBatchThree(t *testing.T) {
 	body, err := os.ReadFile("../../contracts/openapi.json")
 	if err != nil {
 		t.Fatal(err)
@@ -39,8 +39,8 @@ func TestNativeOperationsMatchFrozenContractAndCompleteBatchTwo(t *testing.T) {
 	}
 
 	operations := (&Server{}).operations()
-	if got, want := len(operations), 52; got != want {
-		t.Fatalf("batch two must own %d native operations, got %d", want, got)
+	if got, want := len(operations), 78; got != want {
+		t.Fatalf("batch three must own %d native operations, got %d", want, got)
 	}
 	seenIDs := map[string]bool{}
 	seenRoutes := map[string]bool{}
@@ -84,7 +84,7 @@ func TestMigrationStatusIsDerivedFromRegisteredRoutes(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload.Total != 78 || payload.Native != 52 || payload.Remaining != 26 || payload.Ready {
+	if payload.Total != 78 || payload.Native != 78 || payload.Remaining != 0 || !payload.Ready {
 		t.Fatalf("unexpected migration status: %+v", payload)
 	}
 	if len(payload.OperationID) != payload.Native || !sort.StringsAreSorted(payload.OperationID) {
