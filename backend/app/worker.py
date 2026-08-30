@@ -140,7 +140,6 @@ ASSET_RESEARCH_PRIORITY = 3
 # Smaller numeric values therefore run before larger values on this broker.
 EVENT_RESEARCH_PRIORITY = 1
 SCAN_GATE_KEY = "market-loop:scan:active"
-SCAN_LOCK_KEY = "market-loop:scan:lock"
 SCAN_PAUSE_KEY = "market-loop:scan:pause"
 SCAN_STATUS_KEY = "market-loop:scan:status"
 NEWS_EXTRACTION_QUEUE_KEY = "market-loop:scan:news-extraction-queue"
@@ -153,6 +152,7 @@ SCAN_VISIBILITY_TIMEOUT_SECONDS = max(
 )
 SCAN_GATE_TTL_SECONDS = SCAN_VISIBILITY_TIMEOUT_SECONDS
 SCAN_HEARTBEAT_STALE_SECONDS = max(600, settings.model_task_lease_seconds * 2)
+SCAN_HEARTBEAT_INTERVAL_SECONDS = min(60, max(5, SCAN_HEARTBEAT_STALE_SECONDS // 4))
 celery_app = Celery("market-loop", broker=settings.redis_url, backend=settings.redis_url)
 celery_app.conf.update(
     task_serializer="json",
@@ -2424,6 +2424,57 @@ def ensure_scan_loop() -> dict:
     return {"status": enqueue_status, "task_id": task_id, "recovered_stale": recovered}
 
 
+def _touch_scan_heartbeat(client: Redis, task_id: str) -> bool:
+    """Refresh a live scan without changing its current phase or progress."""
+
+    if not _renew_scan_gate(client, task_id):
+        return False
+    payload = _read_scan_status(client)
+    if payload.get("task_id") != task_id or payload.get("state") not in {
+        "queued",
+        "running",
+        "retrying",
+        "paused",
+    }:
+        return False
+    payload["heartbeat_at"] = utc_now().isoformat()
+    client.set(SCAN_STATUS_KEY, json.dumps(payload, ensure_ascii=False, default=str))
+    return True
+
+
+def _discover_news_with_heartbeat(
+    client: Redis,
+    task_id: str,
+    registry: ProviderRegistry,
+    *,
+    since: datetime,
+    limit: int,
+) -> list[NewsItem]:
+    """Keep the scan lease fresh while synchronous providers are running."""
+
+    heartbeat_stop = Event()
+
+    def refresh_lease() -> None:
+        while not heartbeat_stop.wait(SCAN_HEARTBEAT_INTERVAL_SECONDS):
+            try:
+                if not _touch_scan_heartbeat(client, task_id):
+                    break
+            except Exception:
+                break
+
+    heartbeat_thread = Thread(
+        target=refresh_lease,
+        name=f"news-scan-heartbeat-{task_id}",
+        daemon=True,
+    )
+    heartbeat_thread.start()
+    try:
+        return registry.discover_news(since=since, limit=limit)
+    finally:
+        heartbeat_stop.set()
+        heartbeat_thread.join(timeout=1)
+
+
 def _persist_news_for_extraction(
     db,
     items: list[NewsItem],
@@ -2527,13 +2578,6 @@ def scan_news(self) -> dict:
     client = _redis_client()
     if not _claim_scan_gate(client, task_id):
         return {"status": "already_running", "discovered": 0, "events": 0}
-    lock = client.lock(
-        SCAN_LOCK_KEY,
-        timeout=SCAN_GATE_TTL_SECONDS,
-        blocking_timeout=0,
-    )
-    if not lock.acquire(blocking=False):
-        return {"status": "already_running", "discovered": 0, "events": 0}
     try:
         started_at = utc_now()
         _update_scan_status(
@@ -2557,7 +2601,14 @@ def scan_news(self) -> dict:
         init_db()
         registry = ProviderRegistry()
         since = utc_now() - timedelta(minutes=settings.scan_interval_minutes * 2)
-        items = registry.discover_news(since=since, limit=settings.scan_batch_size)
+        items = _discover_news_with_heartbeat(
+            client,
+            task_id,
+            registry,
+            since=since,
+            limit=settings.scan_batch_size,
+        )
+        _require_scan_gate(client, task_id)
         with SessionLocal() as db:
             accepted_items, filtered_count = filter_news_items(db, items)
         with SessionLocal() as db:
@@ -2649,9 +2700,6 @@ def scan_news(self) -> dict:
             error=f"{type(exc).__name__}",
         )
         raise
-    finally:
-        if lock.owned():
-            lock.release()
 
 
 @celery_app.task(bind=True, name="market_loop.extract_news_item", max_retries=2)

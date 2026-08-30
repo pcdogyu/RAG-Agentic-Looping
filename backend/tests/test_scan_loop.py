@@ -902,6 +902,65 @@ def test_scan_gate_claim_never_replaces_another_task():
     assert redis.get(worker.SCAN_GATE_KEY) == b"active-task"
 
 
+def test_scan_discovery_refreshes_the_owned_lease(monkeypatch):
+    redis = FakeRedis()
+    redis.set(worker.SCAN_GATE_KEY, "scan-heartbeat")
+    worker._update_scan_status(
+        redis,
+        state="running",
+        task_id="scan-heartbeat",
+        phase="discovering",
+    )
+    monkeypatch.setattr(worker, "SCAN_HEARTBEAT_INTERVAL_SECONDS", 0.01)
+
+    class SlowRegistry:
+        def discover_news(self, *, since, limit):
+            assert since.tzinfo is not None
+            assert limit == 40
+            sleep(0.04)
+            return []
+
+    items = worker._discover_news_with_heartbeat(
+        redis,
+        "scan-heartbeat",
+        SlowRegistry(),
+        since=worker.utc_now() - timedelta(minutes=20),
+        limit=40,
+    )
+
+    assert items == []
+    assert redis.expirations
+    assert redis.expirations[-1] == (
+        worker.SCAN_GATE_KEY,
+        worker.SCAN_GATE_TTL_SECONDS,
+    )
+    assert worker._read_scan_status(redis)["task_id"] == "scan-heartbeat"
+
+
+def test_scan_runs_with_the_task_owned_gate_as_its_only_lock(db, monkeypatch):
+    redis = FakeRedis()
+    monkeypatch.setattr(worker, "_redis_client", lambda: redis)
+    monkeypatch.setattr(worker.scan_news, "update_state", lambda **_kwargs: None)
+    monkeypatch.setattr(worker.notifier, "send", lambda *_args, **_kwargs: None)
+
+    class EmptyRegistry:
+        last_errors = []
+
+        def discover_news(self, *, since, limit):
+            assert since.tzinfo is not None
+            assert limit == worker.settings.scan_batch_size
+            return []
+
+    monkeypatch.setattr(worker, "ProviderRegistry", EmptyRegistry)
+
+    result = worker.scan_news.apply(task_id="single-lease-scan").get()
+
+    assert result["status"] == "completed"
+    assert result["discovered"] == 0
+    assert redis.get(worker.SCAN_GATE_KEY) is None
+    assert worker._read_scan_status(redis)["state"] == "idle"
+
+
 def test_stale_scan_cannot_overwrite_or_clear_current_status():
     redis = FakeRedis()
     redis.set(worker.SCAN_GATE_KEY, "current-task")
