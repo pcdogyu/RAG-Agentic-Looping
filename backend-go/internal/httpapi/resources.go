@@ -113,6 +113,7 @@ func (s *Server) researchRuns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeMappedPayloadRows(w, r, `SELECT payload FROM research_runs ORDER BY created_at DESC LIMIT $1`, []any{limit}, func(item map[string]any) {
+		normalizeRunTimestamps(item)
 		if asset, ok := item["asset"].(map[string]any); ok {
 			normalizeAsset(asset)
 		}
@@ -123,7 +124,7 @@ func (s *Server) researchRuns(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) researchRun(w http.ResponseWriter, r *http.Request) {
-	s.writePayloadByID(w, r, "research_runs", chi.URLParam(r, "runID"), "run not found")
+	s.writeMappedPayloadByID(w, r, "research_runs", chi.URLParam(r, "runID"), "run not found", normalizeRunTimestamps)
 }
 
 func (s *Server) eventResearchRuns(w http.ResponseWriter, r *http.Request) {
@@ -131,11 +132,11 @@ func (s *Server) eventResearchRuns(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	s.writePayloadRows(w, r, `SELECT payload::jsonb FROM event_research_runs ORDER BY created_at DESC LIMIT $1`, []any{limit})
+	s.writeMappedPayloadRows(w, r, `SELECT payload::jsonb FROM event_research_runs ORDER BY created_at DESC LIMIT $1`, []any{limit}, normalizeRunTimestamps)
 }
 
 func (s *Server) eventResearchRun(w http.ResponseWriter, r *http.Request) {
-	s.writePayloadByID(w, r, "event_research_runs", chi.URLParam(r, "runID"), "event research run not found")
+	s.writeMappedPayloadByID(w, r, "event_research_runs", chi.URLParam(r, "runID"), "event research run not found", normalizeRunTimestamps)
 }
 
 func (s *Server) recommendations(w http.ResponseWriter, r *http.Request) {
@@ -365,6 +366,10 @@ func (s *Server) writeMappedPayloadRows(w http.ResponseWriter, r *http.Request, 
 }
 
 func (s *Server) writePayloadByID(w http.ResponseWriter, r *http.Request, table, id, notFound string) {
+	s.writeMappedPayloadByID(w, r, table, id, notFound, nil)
+}
+
+func (s *Server) writeMappedPayloadByID(w http.ResponseWriter, r *http.Request, table, id, notFound string, transform func(map[string]any)) {
 	if _, err := uuid.Parse(id); err != nil {
 		writeError(w, 422, "Input should be a valid UUID")
 		return
@@ -380,9 +385,52 @@ func (s *Server) writePayloadByID(w http.ResponseWriter, r *http.Request, table,
 		writeError(w, 500, "database query failed")
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(200)
-	_, _ = w.Write(body)
+	if transform == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+		_, _ = w.Write(body)
+		return
+	}
+	var item map[string]any
+	if json.Unmarshal(body, &item) != nil {
+		writeError(w, 500, "stored payload is invalid")
+		return
+	}
+	transform(item)
+	writeJSON(w, 200, item)
+}
+
+func normalizeRunTimestamps(item map[string]any) {
+	normalizePythonTimestamps(item)
+}
+
+func normalizePythonTimestamps(value any) {
+	switch current := value.(type) {
+	case map[string]any:
+		for key, child := range current {
+			if pythonDatetimeField(key) {
+				if stamp := parseAnyTime(child); stamp != nil {
+					current[key] = jsonTime(*stamp)
+					continue
+				}
+			}
+			normalizePythonTimestamps(child)
+		}
+	case []any:
+		for _, child := range current {
+			normalizePythonTimestamps(child)
+		}
+	}
+}
+
+func pythonDatetimeField(key string) bool {
+	switch key {
+	case "as_of", "created_at", "started_at", "completed_at", "updated_at", "occurred_at",
+		"published_at", "observed_at", "generated_at", "executed_at", "last_synced_at":
+		return true
+	default:
+		return false
+	}
 }
 
 func optionalTimeQuery(w http.ResponseWriter, r *http.Request, name string) (any, bool) {

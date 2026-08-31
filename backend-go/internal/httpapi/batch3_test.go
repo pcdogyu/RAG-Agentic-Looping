@@ -118,6 +118,32 @@ func TestNormalizeEventRestoresLegacyAssetDefaults(t *testing.T) {
 	}
 }
 
+func TestNormalizeRunTimestampsMatchesPythonMicrosecondPrecision(t *testing.T) {
+	run := map[string]any{
+		"as_of":      "2026-08-31T07:00:26.528478612Z",
+		"created_at": "2026-08-31T07:00:48.439129883Z",
+		"analysis_steps": []any{map[string]any{
+			"occurred_at": "2026-08-31T07:00:48.400694566Z",
+			"metrics": map[string]any{
+				"published_at": "2026-08-31T07:00:48.123456789+00:00",
+			},
+		}},
+	}
+
+	normalizeRunTimestamps(run)
+	if run["as_of"] != "2026-08-31T07:00:26.528478Z" || run["created_at"] != "2026-08-31T07:00:48.439129Z" {
+		t.Fatalf("run timestamps were not normalized: %+v", run)
+	}
+	step := run["analysis_steps"].([]any)[0].(map[string]any)
+	if step["occurred_at"] != "2026-08-31T07:00:48.400694Z" {
+		t.Fatalf("step timestamp was not normalized: %+v", step)
+	}
+	metrics := step["metrics"].(map[string]any)
+	if metrics["published_at"] != "2026-08-31T07:00:48.123456Z" {
+		t.Fatalf("nested timestamp was not normalized: %+v", metrics)
+	}
+}
+
 func TestNormalizeNewsExtractionItemMatchesPythonResponseModel(t *testing.T) {
 	item := map[string]any{
 		"instance_id": "extract-0",
