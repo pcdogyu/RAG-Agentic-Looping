@@ -41,3 +41,17 @@ go run ./cmd/contract-diff
 The PostgreSQL-backed job integration test runs when `DATABASE_URL` or
 `TEST_DATABASE_URL` is present. The shadow image normalizes the existing
 SQLAlchemy `postgresql+psycopg://` URL for pgx.
+
+## API cutover and rollback
+
+The Web container reads its API upstream when it starts. The Compose default is
+the production-mode Go API; the Python API remains running as the rollback
+target. Switch either direction without restarting an API or worker:
+
+```text
+./ops/switch-web-api.sh go
+./ops/switch-web-api.sh python
+```
+
+The script recreates only `web`, then requires `/health` to succeed and checks
+the `X-API-Backend` response header. It never starts `go-worker`.

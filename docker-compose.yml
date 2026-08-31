@@ -161,9 +161,9 @@ services:
     entrypoint: ["/usr/local/bin/api"]
     env_file: .env
     environment:
-      APP_ENV: development
+      APP_ENV: production
       GO_API_ADDRESS: ":8081"
-      GO_ALLOW_LEGACY_PROXY: "true"
+      GO_ALLOW_LEGACY_PROXY: "false"
       LEGACY_API_URL: http://api:8000
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       OLLAMA_ASSIST_NUM_THREADS: ${OLLAMA_ASSIST_NUM_THREADS:-8}
@@ -279,6 +279,9 @@ services:
         VITE_BUILD_BRANCH: ${VITE_BUILD_BRANCH:-unknown}
     ports:
       - "80:80"
+    environment:
+      API_UPSTREAM: ${WEB_API_UPSTREAM:-http://go-api:8081}
+      API_BACKEND_NAME: ${WEB_API_BACKEND_NAME:-go}
     depends_on:
       - api
 
