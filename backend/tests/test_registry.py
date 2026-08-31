@@ -2,7 +2,14 @@ from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 
 from backend.app.config import Settings
-from backend.app.domain import AssetClass, AssetRef, Market, NewsItem, SourceQuality
+from backend.app.domain import (
+    AssetClass,
+    AssetRef,
+    AssociationTier,
+    Market,
+    NewsItem,
+    SourceQuality,
+)
 from backend.app.providers.registry import ProviderRegistry
 
 
@@ -119,6 +126,80 @@ def test_special_purpose_companies_are_not_industry_representatives():
     registry = ProviderRegistry(Settings(fmp_access_token="", fmp_mcp_url=""), assets=[shell])
 
     assert registry.industry_representatives(["industry:special_purpose"]) == []
+
+
+def test_crypto_association_tiers_enforce_exact_and_manual_only_matching():
+    settings = Settings(
+        fmp_access_token="",
+        fmp_mcp_url="",
+        fmp_enabled=False,
+        akshare_asset_master_enabled=False,
+    )
+    standard = AssetRef(
+        asset_id="crypto:coingecko:standard-coin",
+        asset_class=AssetClass.CRYPTO,
+        market=Market.CRYPTO,
+        symbol="STDCOIN",
+        name="Standard Coin",
+        exchange_or_provider="coingecko",
+    )
+    exact = AssetRef(
+        asset_id="crypto:coingecko:long-tail-identity",
+        asset_class=AssetClass.CRYPTO,
+        market=Market.CRYPTO,
+        symbol="LONGID",
+        name="Long Tail Identity",
+        exchange_or_provider="coingecko",
+        aliases=["long-tail-identity"],
+        association_tier=AssociationTier.EXACT_ONLY,
+    )
+    manual = AssetRef(
+        asset_id="crypto:coingecko:manual-stable",
+        asset_class=AssetClass.CRYPTO,
+        market=Market.CRYPTO,
+        symbol="MUSD",
+        name="Manual Stable",
+        exchange_or_provider="coingecko",
+        association_tier=AssociationTier.MANUAL_ONLY,
+    )
+    ambiguous_one = AssetRef(
+        asset_id="crypto:coingecko:ambiguous-one",
+        asset_class=AssetClass.CRYPTO,
+        market=Market.CRYPTO,
+        symbol="DUP",
+        name="Ambiguous One",
+        exchange_or_provider="coingecko",
+        association_tier=AssociationTier.EXACT_ONLY,
+    )
+    ambiguous_two = AssetRef(
+        asset_id="crypto:coingecko:ambiguous-two",
+        asset_class=AssetClass.CRYPTO,
+        market=Market.CRYPTO,
+        symbol="DUP",
+        name="Ambiguous Two",
+        exchange_or_provider="coingecko",
+        association_tier=AssociationTier.EXACT_ONLY,
+    )
+    registry = ProviderRegistry(
+        settings,
+        assets=[standard, exact, manual, ambiguous_one, ambiguous_two],
+    )
+
+    assert [item.asset_id for item in registry.shortlist_assets("STDCOIN rises")] == [
+        standard.asset_id
+    ]
+    assert registry.shortlist_assets("LONGID rises") == []
+    assert [item.asset_id for item in registry.shortlist_assets("$LONGID rises")] == [
+        exact.asset_id
+    ]
+    assert [
+        item.asset_id for item in registry.shortlist_assets("Long Tail Identity update")
+    ] == [exact.asset_id]
+    assert registry.shortlist_assets("Manual Stable MUSD") == []
+    assert registry.shortlist_assets("$DUP rises") == []
+    assert [
+        item.asset_id for item in registry.shortlist_assets("Ambiguous One update")
+    ] == [ambiguous_one.asset_id]
 
 
 def test_research_data_includes_normalized_market_and_benchmark_prices(monkeypatch):

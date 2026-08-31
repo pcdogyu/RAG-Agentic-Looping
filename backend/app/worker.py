@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta
 from functools import wraps
-from threading import Event, Thread
+from threading import Event, Lock, Thread
 from time import sleep
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
@@ -15,7 +15,7 @@ from redis import Redis
 from sqlalchemy import func, select
 
 from backend.app.config import get_settings
-from backend.app.db import NewsRow, SessionLocal, init_db
+from backend.app.db import AssetRow, EventRow, NewsRow, SessionLocal, init_db
 from backend.app.domain import (
     AnalysisStep,
     AssetRef,
@@ -125,6 +125,7 @@ from backend.app.storage import (
     get_run,
     get_run_for_event_asset,
     list_assets,
+    list_assets_cached,
     list_event_research_runs,
     list_events,
     list_events_without_downstream,
@@ -140,6 +141,26 @@ from backend.app.storage import (
 )
 
 settings = get_settings()
+_provider_registry_cache_lock = Lock()
+_provider_registry_cache_key: tuple[int, int, int] | None = None
+_provider_registry_cache: ProviderRegistry | None = None
+
+
+def _cached_provider_registry(db) -> ProviderRegistry:
+    """Reuse the versioned identity index for sequential tasks in one worker process."""
+
+    global _provider_registry_cache_key, _provider_registry_cache
+    assets = list_assets_cached(db)
+    key = (
+        len(assets),
+        id(assets[0]) if assets else 0,
+        id(assets[-1]) if assets else 0,
+    )
+    with _provider_registry_cache_lock:
+        if key != _provider_registry_cache_key or _provider_registry_cache is None:
+            _provider_registry_cache = ProviderRegistry(assets=assets)
+            _provider_registry_cache_key = key
+        return _provider_registry_cache
 DEFAULT_MODEL_TASK_PRIORITY = 5
 ASSET_RESEARCH_PRIORITY = 3
 # Kombu's Redis transport polls configured priority buckets in ascending order.
@@ -2785,7 +2806,7 @@ def extract_news_item(
                 scan_task_id=scan_task_id,
                 attempt_count=attempt,
             )
-            registry = ProviderRegistry(assets=list_assets(db))
+            registry = _cached_provider_registry(db)
             events = EventService(registry).ingest(db, [news])
             provider_errors = list(registry.last_errors)
             research_queued, mapping_queued, downstream_dispatched = (
@@ -2928,7 +2949,7 @@ def reextract_event(
             missing_news_count = len(event.news_item_ids) - len(news_items)
             if not news_items:
                 raise ValueError("event has no source news available for extraction")
-            registry = ProviderRegistry(assets=list_assets(db))
+            registry = _cached_provider_registry(db)
             service = EventService(registry)
             extracted_events = [service.extract(item) for item in news_items]
             rebuild_event_from_extractions(
@@ -3049,7 +3070,7 @@ def retry_news_item(
                 title=news.title,
                 subtitle=news.source,
             )
-            registry = ProviderRegistry(assets=list_assets(db))
+            registry = _cached_provider_registry(db)
             events = EventService(registry).ingest(db, [news])
             research_queued, mapping_queued, _ = _dispatch_extracted_events(
                 db,
@@ -3305,7 +3326,7 @@ def resolve_event_assets(
                 summary="正在使用当前股票主数据和映射模型重新识别影响标的。",
             )
             save_event_research_run(db, workflow_run)
-        registry = ProviderRegistry(assets=list_assets(db))
+        registry = _cached_provider_registry(db)
         try:
             mapping_result = None
             if force_mapping or not event.candidates:
@@ -3643,8 +3664,8 @@ def research_asset(
     model_instance_id: str | None = None,
 ) -> dict:
     init_db()
-    registry = ProviderRegistry()
     with SessionLocal() as db:
+        registry = _cached_provider_registry(db)
         queued_run = get_run(db, UUID(run_id)) if run_id else None
         if (
             queued_run
@@ -3671,7 +3692,6 @@ def research_asset(
                 queued_run.started_at = utc_now()
             queued_run.status = RunStatus.RUNNING
             save_run(db, queued_run)
-        registry.add_assets(list_assets(db))
         asset = get_asset(db, asset_id) or registry.get_asset(asset_id)
         if not asset:
             raise ValueError(f"unknown asset: {asset_id}")
@@ -3748,34 +3768,118 @@ def refresh_crypto_universe() -> dict:
 
 
 @celery_app.task(name="market_loop.refresh_asset_universe")
-def refresh_asset_universe() -> dict:
+def refresh_asset_universe(markets: list[str] | None = None) -> dict:
     """Refresh complete A-share, Hong Kong, US and crypto identities."""
 
     init_db()
     with SessionLocal() as db:
-        return AssetUniverseService(db).sync()
+        selected = [Market(item) for item in markets] if markets else None
+        return AssetUniverseService(db).sync(selected)
 
 
-@celery_app.task(name="market_loop.backfill_asset_mappings")
-def backfill_asset_mappings(days: int = 7, limit: int = 500) -> dict[str, int]:
+@celery_app.task(
+    bind=True,
+    name="market_loop.backfill_asset_mappings",
+    max_retries=None,
+)
+def backfill_asset_mappings(
+    self,
+    days: int = 30,
+    cutoff: str | None = None,
+    cursor_time: str | None = None,
+    cursor_id: str | None = None,
+    stats: dict[str, int] | None = None,
+) -> dict[str, int | str]:
     """Re-map recent empty or low-confidence events and refresh their reports."""
 
     init_db()
-    cutoff = utc_now() - timedelta(days=max(1, min(days, 30)))
-    queued = skipped = failed = 0
+    window_start = (
+        as_utc(datetime.fromisoformat(cutoff))
+        if cutoff
+        else utc_now() - timedelta(days=max(1, min(days, 30)))
+    )
+    progress = {"scanned": 0, "queued": 0, "skipped": 0, "failed": 0, **(stats or {})}
+    client = _redis_client()
+    mapping_depth = sum(
+        item.status in ACTIVE_STATUSES
+        for item in list_model_task_records("assist", redis_client=client)
+    )
+    research_depth = sum(
+        item.status in ACTIVE_STATUSES
+        for item in list_model_task_records("research", redis_client=client)
+    )
+    if mapping_depth >= 10 or research_depth >= 12:
+        self.update_state(
+            state="PROGRESS",
+            meta={
+                **progress,
+                "phase": "waiting_for_capacity",
+                "mapping_depth": mapping_depth,
+                "research_depth": research_depth,
+            },
+        )
+        raise self.retry(
+            countdown=60,
+            kwargs={
+                "days": days,
+                "cutoff": window_start.isoformat(),
+                "cursor_time": cursor_time,
+                "cursor_id": cursor_id,
+                "stats": progress,
+            },
+        )
+
     with SessionLocal() as db:
-        events = [
-            event
-            for event in list_events(db, limit=5000)
-            if event.observed_at >= cutoff
-        ]
-        for event in events[: max(1, min(limit, 2000))]:
+        registry = _cached_provider_registry(db)
+        statement = select(EventRow).where(EventRow.observed_at >= window_start)
+        if cursor_time and cursor_id:
+            stamp = as_utc(datetime.fromisoformat(cursor_time))
+            statement = statement.where(
+                (EventRow.observed_at > stamp)
+                | ((EventRow.observed_at == stamp) & (EventRow.id > UUID(cursor_id)))
+            )
+        rows = db.scalars(statement.order_by(EventRow.observed_at, EventRow.id).limit(10)).all()
+        for row in rows:
+            event = NewsEvent.model_validate(row.payload)
+            progress["scanned"] += 1
             low_confidence = not event.candidates or all(
                 min(item.relevance, item.mapping_confidence) < 0.65
                 for item in event.candidates
             )
-            if not low_confidence or _asset_mapping_is_active(event):
-                skipped += 1
+            candidate_ids = [item.asset.asset_id for item in event.candidates]
+            source_news = [
+                item
+                for news_id in event.news_item_ids
+                if (item := get_news(db, news_id)) is not None
+            ]
+            source_text = "\n".join(
+                [event.headline, *event.entities]
+                + [f"{item.title}\n{item.summary}" for item in source_news]
+            )
+            stored_assets = {
+                item.id: item
+                for item in db.scalars(
+                    select(AssetRow).where(AssetRow.id.in_(candidate_ids))
+                ).all()
+            }
+            invalid_candidate = any(
+                (stored := stored_assets.get(asset_id)) is None
+                or not stored.active
+                or stored.association_tier == "manual_only"
+                or (
+                    stored.association_tier == "exact_only"
+                    and (
+                        (known := registry.get_asset(asset_id)) is None
+                        or not registry.asset_is_mapping_eligible(source_text, known)
+                    )
+                )
+                for asset_id in candidate_ids
+            )
+            if (
+                (not low_confidence and not invalid_candidate)
+                or _asset_mapping_is_active(event)
+            ):
+                progress["skipped"] += 1
                 continue
             try:
                 task_id = enqueue_asset_mapping(
@@ -3784,10 +3888,27 @@ def backfill_asset_mappings(days: int = 7, limit: int = 500) -> dict[str, int]:
                     force=True,
                     refresh_event_report=True,
                 )
-                queued += int(task_id is not None)
+                progress["queued"] += int(task_id is not None)
             except Exception:
-                failed += 1
-    return {"queued": queued, "skipped": skipped, "failed": failed}
+                progress["failed"] += 1
+
+    if len(rows) < 10:
+        return {**progress, "status": "completed"}
+    last = rows[-1]
+    self.update_state(
+        state="PROGRESS",
+        meta={**progress, "phase": "dispatching", "days": days},
+    )
+    raise self.retry(
+        countdown=2,
+        kwargs={
+            "days": days,
+            "cutoff": window_start.isoformat(),
+            "cursor_time": as_utc(last.observed_at).isoformat(),
+            "cursor_id": str(last.id),
+            "stats": progress,
+        },
+    )
 
 
 @celery_app.task(name="market_loop.refresh_macro_universe")

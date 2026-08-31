@@ -1,6 +1,6 @@
 from backend.app.config import Settings
 from backend.app.db import AssetRow, IndustryRow
-from backend.app.domain import AssetClass, AssetRef, Market
+from backend.app.domain import AssetClass, AssetRef, AssociationTier, Market
 from backend.app.providers.cache import cache
 from backend.app.providers.crypto import CryptoProvider
 from backend.app.services.asset_universe import AssetUniverseService, universe_status
@@ -20,12 +20,18 @@ def asset(
         market=market,
         symbol=symbol,
         name=name,
-        exchange_or_provider="test",
+        exchange_or_provider={
+            Market.CN: "XSHG",
+            Market.HK: "XHKG",
+            Market.US: "NASDAQ",
+            Market.CRYPTO: "coingecko",
+        }[market],
         sector_id=(
             "sector:digital_assets" if market is Market.CRYPTO else "sector:information_technology"
         ),
         industry_id=("industry:cryptocurrency" if market is Market.CRYPTO else industry_id),
         instrument_type="crypto" if market is Market.CRYPTO else "common_stock",
+        market_cap_rank=1 if market is Market.CRYPTO else None,
     )
 
 
@@ -65,7 +71,9 @@ class Registry:
 
 
 def test_universe_sync_persists_all_markets_and_complete_crypto_directory(db):
-    result = AssetUniverseService(db, Registry()).sync()
+    result = AssetUniverseService(
+        db, Registry(), minimum_counts={item: 1 for item in Market}
+    ).sync()
 
     assert result["status"] == "completed"
     assert db.query(AssetRow).filter(AssetRow.active.is_(True)).count() == 5
@@ -82,7 +90,9 @@ def test_universe_sync_persists_all_markets_and_complete_crypto_directory(db):
 
 
 def test_universe_sync_is_failure_isolated_and_preserves_other_markets(db):
-    result = AssetUniverseService(db, Registry(fail_us=True)).sync()
+    result = AssetUniverseService(
+        db, Registry(fail_us=True), minimum_counts={item: 1 for item in Market}
+    ).sync()
 
     assert result["status"] == "completed_with_errors"
     assert result["markets"]["US"]["status"] == "failed"
@@ -92,7 +102,9 @@ def test_universe_sync_is_failure_isolated_and_preserves_other_markets(db):
 
 
 def test_universe_sync_deactivates_missing_provider_assets(db):
-    service = AssetUniverseService(db, Registry())
+    service = AssetUniverseService(
+        db, Registry(), minimum_counts={item: 1 for item in Market}
+    )
     service.sync([Market.CRYPTO])
     bitcoin = db.get(AssetRow, "crypto:coingecko:bitcoin")
     bitcoin.manual_active = False
@@ -114,7 +126,9 @@ def test_universe_sync_deactivates_missing_provider_assets(db):
 
 
 def test_universe_sync_preserves_prior_industry_when_provider_temporarily_omits_it(db):
-    service = AssetUniverseService(db, Registry())
+    service = AssetUniverseService(
+        db, Registry(), minimum_counts={item: 1 for item in Market}
+    )
     service.sync([Market.US])
     row = db.get(AssetRow, "equity:XNAS:NVDA")
     assert row.industry_id == "industry:semiconductors"
@@ -160,3 +174,128 @@ def test_crypto_provider_uses_complete_coingecko_identity_directory(monkeypatch)
     assert len(assets) == 125
     assert assets[-1].asset_id == "crypto:coingecko:coin-124"
     assert all(item.industry_id == "industry:cryptocurrency" for item in assets)
+    assert all(item.association_tier is AssociationTier.STANDARD for item in assets)
+
+
+def test_universe_quality_gate_preserves_existing_active_rows(db):
+    existing = AssetRow(
+        id="equity:NASDAQ:KEEP",
+        asset_class="equity",
+        market="US",
+        symbol="KEEP",
+        name="Keep Existing",
+        exchange_or_provider="NASDAQ",
+        currency="USD",
+        aliases=[],
+        products=[],
+        competitors=[],
+        active=True,
+    )
+    db.add(existing)
+    db.commit()
+
+    result = AssetUniverseService(db, Registry()).sync([Market.US])
+
+    assert result["markets"]["US"]["status"] == "failed"
+    assert "incomplete universe" in result["markets"]["US"]["error"]
+    assert db.get(AssetRow, existing.id).active is True
+
+
+def test_universe_market_transaction_rolls_back_partial_writes(db, monkeypatch):
+    service = AssetUniverseService(
+        db, Registry(), minimum_counts={item: 1 for item in Market}
+    )
+    original_commit = db.commit
+    commits = 0
+
+    def fail_market_commit_once():
+        nonlocal commits
+        commits += 1
+        if commits == 3:
+            raise RuntimeError("simulated market commit failure")
+        return original_commit()
+
+    monkeypatch.setattr(db, "commit", fail_market_commit_once)
+
+    result = service.sync([Market.US])
+
+    assert result["markets"]["US"]["status"] == "failed"
+    assert db.get(AssetRow, "equity:XNAS:NVDA") is None
+
+
+def test_us_sync_deactivates_previously_misclassified_non_us_listing(db):
+    polluted = AssetRow(
+        id="equity:XSHG:000159",
+        asset_class="equity",
+        market="US",
+        symbol="000159",
+        name="国际实业",
+        exchange_or_provider="XSHG",
+        currency="CNY",
+        aliases=[],
+        products=[],
+        competitors=[],
+        active=True,
+    )
+    db.add(polluted)
+    db.commit()
+
+    result = AssetUniverseService(
+        db, Registry(), minimum_counts={item: 1 for item in Market}
+    ).sync([Market.US])
+
+    assert result["markets"]["US"]["status"] == "completed"
+    assert db.get(AssetRow, polluted.id).active is False
+
+
+def test_crypto_provider_tiers_ranked_long_tail_and_stable_assets(monkeypatch):
+    directory = [
+        {"id": "bitcoin", "symbol": "btc", "name": "Bitcoin"},
+        {"id": "long-tail", "symbol": "long", "name": "Long Tail"},
+        {"id": "duplicate-one", "symbol": "dup", "name": "Duplicate One"},
+        {"id": "duplicate-two", "symbol": "dup", "name": "Duplicate Two"},
+        {"id": "tether", "symbol": "usdt", "name": "Tether"},
+    ]
+    ranked = [
+        {
+            "id": "bitcoin",
+            "symbol": "btc",
+            "name": "Bitcoin",
+            "market_cap": 1_000,
+            "market_cap_rank": 1,
+        },
+        {
+            "id": "tether",
+            "symbol": "usdt",
+            "name": "Tether",
+            "market_cap": 900,
+            "market_cap_rank": 2,
+        },
+    ]
+
+    class Response:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self.payload
+
+    provider = CryptoProvider(Settings(coingecko_base_url="https://coins.example.test"))
+
+    def get(url, **_kwargs):
+        return Response(ranked if url.endswith("/coins/markets") else directory)
+
+    monkeypatch.setattr(provider.client, "get", get)
+    monkeypatch.setattr(cache, "remember", lambda key, ttl, loader: loader())
+
+    tiers = {item.symbol: item.association_tier for item in provider.all_assets()}
+
+    assert tiers == {
+        "BTC": AssociationTier.STANDARD,
+        "LONG": AssociationTier.EXACT_ONLY,
+        "DUP": AssociationTier.MANUAL_ONLY,
+        "USDT": AssociationTier.MANUAL_ONLY,
+    }

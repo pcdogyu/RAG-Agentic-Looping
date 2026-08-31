@@ -47,18 +47,29 @@ func (s *Server) refreshAssetUniverse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	taskID := uuid.NewString()
-	if err := s.publishCelery(r.Context(), "market_loop.refresh_asset_universe", "io", taskID, nil, nil, 5); err != nil {
+	market := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("market")))
+	var kwargs map[string]any
+	markets := []string{"CN", "HK", "US", "CRYPTO"}
+	if market != "" {
+		if market != "CN" && market != "HK" && market != "US" && market != "CRYPTO" {
+			validationError(w, "market", "Input should be 'CN', 'HK', 'US' or 'CRYPTO'")
+			return
+		}
+		markets = []string{market}
+		kwargs = map[string]any{"markets": markets}
+	}
+	if err := s.publishCelery(r.Context(), "market_loop.refresh_asset_universe", "io", taskID, nil, kwargs, 5); err != nil {
 		writeError(w, http.StatusServiceUnavailable, "asset universe refresh could not be queued")
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"task_id": taskID, "status": "queued"})
+	writeJSON(w, http.StatusAccepted, map[string]any{"task_id": taskID, "status": "queued", "markets": markets})
 }
 
 func (s *Server) backfillAssetMappings(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	days, ok := intQuery(w, r.URL.Query(), "days", 7, 1, 30)
+	days, ok := intQuery(w, r.URL.Query(), "days", 30, 1, 30)
 	if !ok {
 		return
 	}

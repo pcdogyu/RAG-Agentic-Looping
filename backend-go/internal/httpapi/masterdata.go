@@ -19,6 +19,7 @@ const assetJSON = `jsonb_build_object(
 	'products',products::jsonb,'competitors',competitors::jsonb,'sector_id',sector_id,
 	'industry_id',industry_id,'raw_sector',raw_sector,'raw_industry',raw_industry,
 	'instrument_type',instrument_type,'market_cap',market_cap,'market_cap_rank',market_cap_rank,
+	'association_tier',association_tier,'association_reason',association_reason,
 	'last_synced_at',last_synced_at,'issuer_id',issuer_id,
 	'primary_listing_asset_id',primary_listing_asset_id,'lot_size',lot_size,'active',active)`
 
@@ -49,6 +50,13 @@ func (s *Server) assetUniverse(w http.ResponseWriter, r *http.Request) {
 	}
 	if value := strings.TrimSpace(query.Get("industry_id")); value != "" {
 		add(`industry_id=$%d`, value)
+	}
+	if value := strings.TrimSpace(query.Get("association_tier")); value != "" {
+		if value != "standard" && value != "exact_only" && value != "manual_only" {
+			validationError(w, "association_tier", "Input should be 'standard', 'exact_only' or 'manual_only'")
+			return
+		}
+		add(`association_tier=$%d`, value)
 	}
 	active := query.Get("active")
 	if active == "" {
@@ -124,6 +132,7 @@ func (s *Server) industries(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) assetUniverseStatus(w http.ResponseWriter, r *http.Request) {
 	counts := map[string][2]int{}
+	tierCounts := map[string]map[string]int{}
 	rows, err := s.db.Query(r.Context(), `SELECT market,count(*)::int,count(nullif(industry_id,''))::int FROM assets WHERE active=true GROUP BY market`)
 	if err != nil {
 		writeError(w, 500, "asset universe status query failed")
@@ -137,6 +146,22 @@ func (s *Server) assetUniverseStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	rows.Close()
+	tierRows, err := s.db.Query(r.Context(), `SELECT market,association_tier,count(*)::int FROM assets WHERE active=true GROUP BY market,association_tier`)
+	if err != nil {
+		writeError(w, 500, "asset universe status query failed")
+		return
+	}
+	for tierRows.Next() {
+		var market, tier string
+		var count int
+		if tierRows.Scan(&market, &tier, &count) == nil {
+			if tierCounts[market] == nil {
+				tierCounts[market] = map[string]int{}
+			}
+			tierCounts[market][tier] = count
+		}
+	}
+	tierRows.Close()
 	syncRows, err := s.db.Query(r.Context(), `SELECT market,status,asset_count,industry_count,added_count,updated_count,deactivated_count,last_error,started_at,completed_at FROM asset_universe_sync ORDER BY market`)
 	if err != nil {
 		writeError(w, 500, "asset universe status query failed")
@@ -161,19 +186,24 @@ func (s *Server) assetUniverseStatus(w http.ResponseWriter, r *http.Request) {
 		if value[0] > 0 {
 			rate = float64(value[1]) / float64(value[0])
 		}
+		marketTiers := tierCounts[market]
+		if marketTiers == nil {
+			marketTiers = map[string]int{}
+		}
 		activeCounts[market] = value[0]
 		markets = append(markets, map[string]any{"market": market, "status": status, "asset_count": assetCount, "industry_count": industryCount,
 			"added_count": added, "updated_count": updated, "deactivated_count": deactivated, "classified_count": value[1],
 			"unclassified_count": value[0] - value[1], "classification_rate": round4(rate), "last_error": nullableStringPointer(lastError),
-			"started_at": isoTimeOrNil(started), "completed_at": isoTimeOrNil(completed)})
+			"association_tier_counts": marketTiers, "started_at": isoTimeOrNil(started), "completed_at": isoTimeOrNil(completed)})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"markets": markets, "active_counts": activeCounts})
 }
 
 type assetEditInput struct {
-	Aliases    *[]string `json:"aliases"`
-	IndustryID *string   `json:"industry_id"`
-	Active     *bool     `json:"active"`
+	Aliases         *[]string `json:"aliases"`
+	IndustryID      *string   `json:"industry_id"`
+	Active          *bool     `json:"active"`
+	AssociationTier *string   `json:"association_tier"`
 }
 
 func (s *Server) editAsset(w http.ResponseWriter, r *http.Request) {
@@ -227,6 +257,26 @@ func (s *Server) editAsset(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 500, "asset update failed")
 			return
 		}
+	}
+	if input.AssociationTier != nil {
+		tier := strings.TrimSpace(*input.AssociationTier)
+		if tier != "auto" && tier != "standard" && tier != "exact_only" && tier != "manual_only" {
+			validationError(w, "association_tier", "Input should be 'auto', 'standard', 'exact_only' or 'manual_only'")
+			return
+		}
+		if tier == "auto" {
+			_, err = tx.Exec(r.Context(), `UPDATE assets SET manual_association_tier=NULL,association_tier=coalesce(provider_association_tier,'standard'),association_reason=coalesce(provider_association_reason,'provider_verified') WHERE id=$1`, assetID)
+		} else {
+			_, err = tx.Exec(r.Context(), `UPDATE assets SET manual_association_tier=$2,association_tier=$2,association_reason='manual_override' WHERE id=$1`, assetID, tier)
+		}
+		if err != nil {
+			writeError(w, 500, "asset update failed")
+			return
+		}
+	}
+	if _, err = tx.Exec(r.Context(), `UPDATE assets SET last_synced_at=now() WHERE id=$1`, assetID); err != nil {
+		writeError(w, 500, "asset update failed")
+		return
 	}
 	var body []byte
 	if err = tx.QueryRow(r.Context(), `SELECT `+assetJSON+` FROM assets WHERE id=$1`, assetID).Scan(&body); err != nil {

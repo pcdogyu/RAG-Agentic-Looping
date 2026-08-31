@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -8,7 +8,8 @@ from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.orm import Session
 
 from backend.app.db import AssetRow, IndustryRow, get_db
-from backend.app.services.asset_universe import universe_status
+from backend.app.domain import AssociationTier, Market, utc_now
+from backend.app.services.asset_universe import SYNC_MARKETS, universe_status
 from backend.app.services.mcp_registry import require_admin_token
 from backend.app.storage import asset_from_row
 
@@ -29,6 +30,7 @@ class AssetEditInput(BaseModel):
     aliases: list[str] | None = Field(default=None, max_length=50)
     industry_id: str | None = None
     active: bool | None = None
+    association_tier: AssociationTier | Literal["auto"] | None = None
 
 
 @router.get("/api/v1/asset-universe")
@@ -38,6 +40,7 @@ def asset_universe(
     market: str = "",
     sector_id: str = "",
     industry_id: str = "",
+    association_tier: AssociationTier | None = None,
     active: bool | None = True,
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=100, ge=1, le=500),
@@ -60,6 +63,8 @@ def asset_universe(
         filters.append(AssetRow.sector_id == sector_id)
     if industry_id:
         filters.append(AssetRow.industry_id == industry_id)
+    if association_tier is not None:
+        filters.append(AssetRow.association_tier == association_tier.value)
     if active is not None:
         filters.append(AssetRow.active.is_(active))
     if filters:
@@ -115,11 +120,20 @@ def asset_universe_status(db: Db):
     status_code=202,
     dependencies=[Depends(require_admin)],
 )
-def refresh_asset_universe():
+def refresh_asset_universe(market: Market | None = None):
     from backend.app.worker import refresh_asset_universe as refresh_task
 
-    task = refresh_task.apply_async(queue="io")
-    return {"task_id": task.id, "status": "queued"}
+    kwargs = {"markets": [market.value]} if market is not None else {}
+    task = refresh_task.apply_async(kwargs=kwargs, queue="io")
+    return {
+        "task_id": task.id,
+        "status": "queued",
+        "markets": (
+            [market.value]
+            if market is not None
+            else [item.value for item in SYNC_MARKETS]
+        ),
+    }
 
 
 @router.post(
@@ -127,7 +141,7 @@ def refresh_asset_universe():
     status_code=202,
     dependencies=[Depends(require_admin)],
 )
-def backfill_asset_mappings(days: int = Query(default=7, ge=1, le=30)):
+def backfill_asset_mappings(days: int = Query(default=30, ge=1, le=30)):
     from backend.app.worker import backfill_asset_mappings as backfill_task
 
     task = backfill_task.apply_async(kwargs={"days": days}, queue="io")
@@ -154,6 +168,21 @@ def edit_asset(asset_id: str, payload: AssetEditInput, db: Db):
     if payload.active is not None:
         row.manual_active = payload.active
         row.active = payload.active
+    if "association_tier" in payload.model_fields_set:
+        row.manual_association_tier = (
+            None
+            if payload.association_tier in {None, "auto"}
+            else payload.association_tier.value
+        )
+        if row.manual_association_tier:
+            row.association_tier = row.manual_association_tier
+            row.association_reason = "manual_override"
+        else:
+            row.association_tier = (
+                row.provider_association_tier or AssociationTier.STANDARD.value
+            )
+            row.association_reason = row.provider_association_reason or "provider_verified"
+    row.last_synced_at = utc_now()
     db.add(row)
     db.commit()
     db.refresh(row)

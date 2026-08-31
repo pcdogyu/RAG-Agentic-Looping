@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from threading import Lock
 from uuid import UUID
 
-from sqlalchemy import desc, exists, select
+from sqlalchemy import desc, exists, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -56,6 +57,13 @@ def upsert_asset(db: Session, asset: AssetRef, *, commit: bool = True) -> AssetR
     row.instrument_type = asset.instrument_type
     row.market_cap = asset.market_cap
     row.market_cap_rank = asset.market_cap_rank
+    if row.manual_association_tier is None:
+        row.provider_association_tier = asset.association_tier.value
+        row.provider_association_reason = asset.association_reason
+    row.association_tier = row.manual_association_tier or row.provider_association_tier
+    row.association_reason = (
+        "manual_override" if row.manual_association_tier else row.provider_association_reason
+    )
     row.last_synced_at = asset.last_synced_at
     row.issuer_id = asset.issuer_id
     row.primary_listing_asset_id = asset.primary_listing_asset_id
@@ -86,6 +94,8 @@ def asset_from_row(row: AssetRow) -> AssetRef:
         instrument_type=row.instrument_type or "",
         market_cap=row.market_cap,
         market_cap_rank=row.market_cap_rank,
+        association_tier=row.association_tier or "standard",
+        association_reason=row.association_reason or "provider_verified",
         last_synced_at=row.last_synced_at,
         issuer_id=row.issuer_id,
         primary_listing_asset_id=row.primary_listing_asset_id,
@@ -96,6 +106,32 @@ def asset_from_row(row: AssetRow) -> AssetRef:
 
 def list_assets(db: Session) -> list[AssetRef]:
     return [asset_from_row(row) for row in db.scalars(select(AssetRow)).all()]
+
+
+_asset_snapshot_lock = Lock()
+_asset_snapshot_version: tuple[object, ...] | None = None
+_asset_snapshot: tuple[AssetRef, ...] = ()
+
+
+def list_assets_cached(db: Session) -> list[AssetRef]:
+    """Reuse the immutable asset master inside a worker until its DB revision changes."""
+
+    global _asset_snapshot_version, _asset_snapshot
+    version = tuple(
+        db.execute(
+            select(
+                func.count(AssetRow.id),
+                func.max(AssetRow.last_synced_at),
+                func.max(AssetRow.id),
+                func.sum(func.length(AssetRow.name)),
+            )
+        ).one()
+    )
+    with _asset_snapshot_lock:
+        if version != _asset_snapshot_version:
+            _asset_snapshot = tuple(list_assets(db))
+            _asset_snapshot_version = version
+        return list(_asset_snapshot)
 
 
 def get_asset(db: Session, asset_id: str) -> AssetRef | None:

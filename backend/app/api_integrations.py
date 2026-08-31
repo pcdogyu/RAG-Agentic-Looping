@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from backend.app.config import get_settings
 from backend.app.db import (
+    AssetRow,
     EventResearchRunRow,
     EventRow,
     IntegrationSettingRow,
@@ -775,9 +776,7 @@ def list_conclusions(
         )
     rows = list(
         db.scalars(
-            statement.order_by(desc(RecommendationRow.as_of), desc(RecommendationRow.id)).limit(
-                limit + 1
-            )
+            statement.order_by(desc(RecommendationRow.as_of), desc(RecommendationRow.id))
         ).all()
     )
     items: list[Recommendation] = []
@@ -800,7 +799,7 @@ def list_conclusions(
         if evidence_status == "incomplete" and recommendation.evidence_complete:
             continue
         items.append(recommendation)
-    has_more = len(rows) > limit
+    has_more = len(items) > limit
     items = items[:limit]
     run_ids = {item.run_id for item in items}
     run_rows = (
@@ -1429,6 +1428,99 @@ def _asset_target_changes(db: Session) -> list[dict[str, Any]]:
     ]
 
 
+def _current_asset_ratings(
+    db: Session,
+    *,
+    market: str = "",
+    rating: str = "",
+    q: str = "",
+) -> list[dict[str, Any]]:
+    rows = db.scalars(
+        select(RecommendationRow)
+        .join(AssetRow, AssetRow.id == RecommendationRow.asset_id)
+        .where(
+            AssetRow.active.is_(True),
+            AssetRow.market.in_(("CN", "HK", "US", "CRYPTO")),
+        )
+        .order_by(
+            RecommendationRow.asset_id,
+            RecommendationRow.as_of,
+            RecommendationRow.id,
+        )
+    ).all()
+    history: dict[str, list[Recommendation]] = {}
+    for row in rows:
+        history.setdefault(row.asset_id, []).append(
+            Recommendation.model_validate(row.payload)
+        )
+    query_text = q.strip().casefold()
+    output: list[dict[str, Any]] = []
+    for recommendations in history.values():
+        latest = recommendations[-1]
+        previous = recommendations[-2] if len(recommendations) > 1 else None
+        if market and latest.asset.market.value.casefold() != market.casefold():
+            continue
+        if rating and latest.rating.value.casefold() != rating.casefold():
+            continue
+        if query_text and query_text not in (
+            f"{latest.asset.symbol} {latest.asset.name} {' '.join(latest.asset.aliases)}"
+        ).casefold():
+            continue
+        output.append(
+            {
+                "kind": "asset",
+                "key": latest.asset.asset_id,
+                "label": latest.asset.name,
+                "symbol": latest.asset.symbol,
+                "market": latest.asset.market.value,
+                "target_type": TargetType.TRADABLE_ASSET.value,
+                "rated_at": latest.as_of,
+                "changed_at": latest.as_of,
+                "previous": (
+                    {
+                        "rating": previous.rating.value,
+                        "direction_score": previous.direction_score,
+                        "rating_confidence": previous.rating_confidence,
+                    }
+                    if previous
+                    else None
+                ),
+                "current": {
+                    "rating": latest.rating.value,
+                    "direction_score": latest.direction_score,
+                    "rating_confidence": latest.rating_confidence,
+                },
+                "latest": {
+                    "rating": latest.rating.value,
+                    "direction_score": latest.direction_score,
+                    "rating_confidence": latest.rating_confidence,
+                    "news_confidence": latest.news_confidence,
+                },
+                "change_state": (
+                    "first"
+                    if previous is None
+                    else "changed"
+                    if previous.rating != latest.rating
+                    else "unchanged"
+                ),
+                "latest_detail": {
+                    "kind": "asset",
+                    "id": latest.id,
+                    "researched_at": latest.as_of,
+                },
+                "change_detail_id": latest.id,
+            }
+        )
+    return sorted(
+        output,
+        key=lambda item: (
+            as_utc(item["rated_at"]),
+            UUID(str(item["change_detail_id"])).int,
+        ),
+        reverse=True,
+    )
+
+
 def _concrete_target_changes(db: Session) -> list[dict[str, Any]]:
     changes_by_key: dict[str, dict[str, Any]] = {}
     for item in [*_asset_target_changes(db), *_commodity_target_changes(db)]:
@@ -1456,10 +1548,18 @@ def _concrete_target_changes(db: Session) -> list[dict[str, Any]]:
 def list_target_changes(
     db: Db,
     kind: Literal["macro", "asset"],
+    scope: Literal["current", "changed"] = "changed",
+    market: str = "",
+    rating: str = "",
+    q: str = "",
     cursor: str | None = None,
     limit: int = Query(default=50, ge=1, le=100),
 ) -> dict[str, Any]:
-    if kind == "macro":
+    if scope == "current" and kind != "asset":
+        raise HTTPException(422, "current scope is only available for asset targets")
+    if scope == "current":
+        changes = _current_asset_ratings(db, market=market, rating=rating, q=q)
+    elif kind == "macro":
         changes = _macro_target_changes(db)
     else:
         changes = _concrete_target_changes(db)
@@ -1468,9 +1568,11 @@ def list_target_changes(
         changes = [
             item
             for item in changes
-            if as_utc(item["changed_at"]) < as_utc(cursor_time)
+            if as_utc(item["rated_at"] if scope == "current" else item["changed_at"])
+            < as_utc(cursor_time)
             or (
-                as_utc(item["changed_at"]) == as_utc(cursor_time)
+                as_utc(item["rated_at"] if scope == "current" else item["changed_at"])
+                == as_utc(cursor_time)
                 and UUID(str(item["change_detail_id"])).int < cursor_id.int
             )
         ]
@@ -1479,6 +1581,7 @@ def list_target_changes(
     next_cursor = None
     if has_more and visible:
         next_cursor = _encode_cursor(
-            visible[-1]["changed_at"], UUID(str(visible[-1]["change_detail_id"]))
+            visible[-1]["rated_at"] if scope == "current" else visible[-1]["changed_at"],
+            UUID(str(visible[-1]["change_detail_id"])),
         )
     return {"items": visible, "next_cursor": next_cursor}
