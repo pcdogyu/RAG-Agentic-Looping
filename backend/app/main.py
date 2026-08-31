@@ -80,7 +80,7 @@ from backend.app.services.research_queue import (
 )
 from backend.app.services.source_filter import filter_news_items
 from backend.app.storage import (
-    ensure_asset,
+    ensure_assets,
     get_asset,
     get_event,
     get_event_research_run,
@@ -286,8 +286,7 @@ async def lifespan(app: FastAPI):
         seed_integrations(db, settings)
         startup_registry = _provider_registry(db)
         AssetUniverseService(db, startup_registry).seed_industries()
-        for asset in startup_registry.all_assets():
-            ensure_asset(db, asset, commit=False)
+        ensure_assets(db, startup_registry.all_assets(), commit=False)
         db.commit()
     if not settings.database_url.startswith("sqlite"):
         _load_persisted_model_queue_snapshot()

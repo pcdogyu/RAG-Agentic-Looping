@@ -115,6 +115,7 @@ from backend.app.services.source_filter import filter_news_items
 from backend.app.services.source_lineage import canonicalize_url, enrich_news_lineage
 from backend.app.storage import (
     ensure_asset,
+    ensure_assets,
     event_news_item_ids,
     get_asset,
     get_event,
@@ -4017,8 +4018,7 @@ def seed_assets() -> dict:
     init_db()
     registry = ProviderRegistry()
     with SessionLocal() as db:
-        for asset in registry.all_assets():
-            ensure_asset(db, asset)
+        ensure_assets(db, registry.all_assets())
         count = len(list_assets(db))
     return {"assets": count}
 

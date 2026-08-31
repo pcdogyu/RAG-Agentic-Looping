@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import datetime, timedelta
 from threading import Lock
 from uuid import UUID
@@ -88,6 +89,27 @@ def ensure_asset(db: Session, asset: AssetRef, *, commit: bool = True) -> AssetR
     if row is not None:
         return asset_from_row(row)
     return upsert_asset(db, asset, commit=commit)
+
+
+def ensure_assets(
+    db: Session,
+    assets: Iterable[AssetRef],
+    *,
+    commit: bool = True,
+) -> int:
+    """Insert only missing identities using one master-ID scan."""
+
+    existing_ids = set(db.scalars(select(AssetRow.id)).all())
+    inserted = 0
+    for asset in assets:
+        if asset.asset_id in existing_ids:
+            continue
+        upsert_asset(db, asset, commit=False)
+        existing_ids.add(asset.asset_id)
+        inserted += 1
+    if commit:
+        db.commit()
+    return inserted
 
 
 def asset_from_row(row: AssetRow) -> AssetRef:

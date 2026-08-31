@@ -2,7 +2,7 @@ from sqlalchemy import create_engine, inspect, text
 
 from backend.app.db import ensure_asset_identity_columns
 from backend.app.domain import AssetClass, AssetRef, Market, as_utc, utc_now
-from backend.app.storage import ensure_asset, get_asset, upsert_asset
+from backend.app.storage import ensure_asset, ensure_assets, get_asset, upsert_asset
 
 
 def test_asset_identity_fields_round_trip(db):
@@ -59,6 +59,34 @@ def test_ensure_asset_does_not_reactivate_or_replace_master_identity(db):
     assert stored.instrument_type == "adr"
     assert as_utc(stored.last_synced_at) == synced_at
     assert stored.active is False
+
+
+def test_ensure_assets_inserts_only_missing_identities(db):
+    canonical = AssetRef(
+        asset_id="equity:NASDAQ:KEEP",
+        asset_class=AssetClass.EQUITY,
+        market=Market.US,
+        symbol="KEEP",
+        name="Canonical Name",
+        exchange_or_provider="NASDAQ",
+        active=False,
+    )
+    upsert_asset(db, canonical)
+    stale = canonical.model_copy(update={"name": "Stale Name", "active": True})
+    missing = canonical.model_copy(
+        update={
+            "asset_id": "equity:NASDAQ:NEW",
+            "symbol": "NEW",
+            "name": "New Asset",
+            "active": True,
+        }
+    )
+
+    inserted = ensure_assets(db, [stale, missing, missing])
+
+    assert inserted == 1
+    assert get_asset(db, canonical.asset_id) == canonical
+    assert get_asset(db, missing.asset_id) == missing
 
 
 def test_legacy_sqlite_asset_table_upgrade_is_idempotent():
