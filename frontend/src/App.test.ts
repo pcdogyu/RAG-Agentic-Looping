@@ -554,14 +554,16 @@ describe("changed targets page", () => {
   it("labels the page as rating changes", () => {
     const markup = renderToStaticMarkup(createElement(ChangedTargetsPage, { apiBase: "" }));
 
-    expect(markup).toContain("标的评级与变化");
-    expect(markup).toContain("当前资产评级");
+    expect(markup).toContain("标的评级变化");
+    expect(markup).not.toContain("当前资产评级");
+    expect(markup).not.toContain("正在加载当前评级");
     expect(markup).toContain("宏观经济与行业变化");
     expect(markup).toContain("具体标的变化");
     expect(markup).toContain("股票、加密资产与商品价格");
     expect(markup).not.toContain("经济、行业、商品、汇率");
     expect(markup).toContain("正在加载宏观经济与行业变化");
     expect(markup).toContain("正在加载具体标的变化");
+    expect(markup.indexOf("宏观经济与行业变化")).toBeLessThan(markup.indexOf("具体标的变化"));
   });
 
   it("keeps legacy target cards compatible with the new four-column grid", () => {
