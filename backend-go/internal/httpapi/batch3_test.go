@@ -67,6 +67,18 @@ func TestMergeConcreteTargetChangesIncludesCommoditiesAndKeepsLatestKey(t *testi
 	}
 }
 
+func TestMergeConcreteTargetChangesPreservesInputOrderForExactTies(t *testing.T) {
+	stamp := time.Date(2026, 8, 31, 1, 2, 13, 0, time.UTC)
+	id := "00000000-0000-0000-0000-000000000001"
+	crude := map[string]any{"key": "commodity:fmp:CLUSD", "changed_at": stamp, "change_detail_id": id}
+	brent := map[string]any{"key": "commodity:fmp:BZUSD", "changed_at": stamp, "change_detail_id": id}
+
+	changes := mergeConcreteTargetChanges([]map[string]any{crude, brent})
+	if len(changes) != 2 || changes[0]["key"] != crude["key"] || changes[1]["key"] != brent["key"] {
+		t.Fatalf("exact ties must preserve source order: %+v", changes)
+	}
+}
+
 func TestNormalizeEventRestoresLegacyAssetDefaults(t *testing.T) {
 	event := map[string]any{"candidates": []any{map[string]any{"asset": map[string]any{
 		"asset_id": "equity:NASDAQ:TEST", "symbol": "TEST",
