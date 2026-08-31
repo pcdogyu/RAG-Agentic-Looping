@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -37,6 +38,7 @@ func writeAPIFailure(w http.ResponseWriter, err error) {
 		writeError(w, failure.Status, failure.Detail)
 		return
 	}
+	slog.Error("command operation failed", "error", err)
 	writeError(w, http.StatusInternalServerError, "internal operation failed")
 }
 
