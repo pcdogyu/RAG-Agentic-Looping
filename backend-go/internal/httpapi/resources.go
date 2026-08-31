@@ -265,7 +265,10 @@ func (s *Server) eventConclusionDetail(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "event conclusion news query failed")
 		return
 	}
-	writeJSON(w, 200, map[string]any{"run": run, "refresh": publicFullEventResearch(run), "event": event, "report": run["report"], "news": news, "evidence": defaultAny(run["evidence"], []any{})})
+	publicRun := deepCloneObject(run)
+	publicReport := objectValue(publicRun["report"])
+	publicReport["impacts"] = sanitizePublishedImpacts(publicReport["impacts"])
+	writeJSON(w, 200, map[string]any{"run": publicRun, "refresh": publicFullEventResearch(publicRun), "event": event, "report": publicReport, "news": news, "evidence": defaultAny(publicRun["evidence"], []any{})})
 }
 
 func (s *Server) newsForEvent(r *http.Request, event map[string]any) ([]any, error) {

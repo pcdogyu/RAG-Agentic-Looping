@@ -155,7 +155,7 @@ func conclusionItem(row conclusionRow) (map[string]any, error) {
 	if headline == "" {
 		headline = stringValue(report["summary"])
 	}
-	impacts, _ := report["impacts"].([]any)
+	impacts := sanitizePublishedImpacts(report["impacts"])
 	directionScore, rating := representativeImpact(impacts)
 	return map[string]any{
 		"kind": "event", "id": row.ID, "occurred_at": iso(row.OccurredAt), "status": payload["status"],

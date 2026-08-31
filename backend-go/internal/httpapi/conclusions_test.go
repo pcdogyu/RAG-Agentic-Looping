@@ -44,3 +44,28 @@ func TestRepresentativeImpactUsesStrongestAbsoluteScoreAndKeepsFirstTie(t *testi
 		})
 	}
 }
+
+func TestSanitizePublishedImpactsRemovesActivityAndRebindsStockPrice(t *testing.T) {
+	hood := map[string]any{"asset_id": "hood-id", "symbol": "HOOD", "name": "Robinhood Markets, Inc.", "asset_class": "equity"}
+	ibkr := map[string]any{"asset_id": "ibkr-id", "symbol": "IBKR", "name": "Interactive Brokers Group, Inc.", "asset_class": "equity"}
+	impacts := []any{
+		map[string]any{"target_name": "Interactive Brokers Group, Inc.", "target_type": "tradable_asset", "asset": ibkr, "direction_score": 0.0},
+		map[string]any{"target_name": "Robinhood Markets, Inc.", "target_type": "tradable_asset", "asset": hood, "direction_score": 0.0},
+		map[string]any{"target_name": "交易量增加", "target_type": "economy", "direction_score": 80.0},
+		map[string]any{"target_name": "市场活跃度提升", "target_type": "economy", "direction_score": 75.0},
+		map[string]any{"target_name": "零售交易者参与度提高", "target_type": "economy", "direction_score": 90.0},
+		map[string]any{"target_name": "Robinhood 股价", "target_type": "economy", "direction_score": 85.0, "evidence_ids": []any{"ev-1"}},
+	}
+
+	got := sanitizePublishedImpacts(impacts)
+	if len(got) != 2 {
+		t.Fatalf("got %d impacts, want 2: %#v", len(got), got)
+	}
+	hoodImpact := objectValue(got[1])
+	if stringValue(hoodImpact["target_type"]) != "tradable_asset" || stringValue(objectValue(hoodImpact["asset"])["symbol"]) != "HOOD" {
+		t.Fatalf("Robinhood stock price was not rebound to HOOD: %#v", hoodImpact)
+	}
+	if numberValue(hoodImpact["direction_score"]) != 85 {
+		t.Fatalf("got HOOD score %v, want 85", hoodImpact["direction_score"])
+	}
+}
