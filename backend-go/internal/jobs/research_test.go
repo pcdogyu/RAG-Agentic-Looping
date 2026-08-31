@@ -52,3 +52,27 @@ func TestResearchLimitsUseThirtyFourAndThirtyFiveMinutes(t *testing.T) {
 		t.Fatal("soft research limit must be lower than hard limit")
 	}
 }
+
+func TestResearchRuntimeDistributesClaimsAcrossModelCapacity(t *testing.T) {
+	runtime := &researchRuntime{cfg: config.Config{ResearchURLs: []string{"http://one", "http://two", "http://three"}}}
+	want := []string{"research-0", "research-1", "research-2", "research-0"}
+	for index, expected := range want {
+		if actual := runtime.nextResearchInstance("research-0"); actual != expected {
+			t.Fatalf("claim %d: expected %s, got %s", index, expected, actual)
+		}
+	}
+}
+
+func TestResearchRuntimePreservesFallbackWithoutEndpoints(t *testing.T) {
+	runtime := &researchRuntime{}
+	if actual := runtime.nextResearchInstance("research-7"); actual != "research-7" {
+		t.Fatalf("expected fallback instance, got %s", actual)
+	}
+}
+
+func TestResearchEndpointIndexUsesConfiguredPosition(t *testing.T) {
+	values := []string{"http://one", "http://two", "http://three"}
+	if actual := researchEndpointIndex(values, "http://three"); actual != 2 {
+		t.Fatalf("expected endpoint 2, got %d", actual)
+	}
+}

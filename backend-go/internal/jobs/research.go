@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -25,6 +26,8 @@ const (
 	researchAssetTask = "market_loop.research_asset"
 )
 
+var errResearchInactive = errors.New("research run was cancelled or superseded")
+
 // permanentJobError records a terminal business failure without asking the
 // durable queue to redeliver the same work. Research time limits are handled
 // this way because the failure is already visible in the retry UI.
@@ -33,10 +36,11 @@ type permanentJobError struct{ error }
 func (permanentJobError) Permanent() bool { return true }
 
 type researchRuntime struct {
-	cfg    config.Config
-	db     *pgxpool.Pool
-	redis  *redis.Client
-	client *http.Client
+	cfg          config.Config
+	db           *pgxpool.Pool
+	redis        *redis.Client
+	client       *http.Client
+	nextEndpoint atomic.Uint64
 }
 
 func (runtime *researchRuntime) shared() *ExtractRuntime {
@@ -130,10 +134,8 @@ func (runtime *researchRuntime) researchEvent(ctx context.Context, job Job) (any
 	if supersededOrTerminal(run, job.ID.String()) {
 		return run, nil
 	}
-	instanceID := stringValue(envelope.Kwargs["model_instance_id"])
-	if instanceID != "" {
-		run["model_instance_id"] = instanceID
-	}
+	instanceID := runtime.nextResearchInstance(stringValue(envelope.Kwargs["model_instance_id"]))
+	run["model_instance_id"] = instanceID
 	run["status"], run["error"], run["updated_at"] = "running", nil, iso(time.Now())
 	evidence, err := runtime.eventEvidence(ctx, runID, event, boolValue(run["historical_replay"]))
 	if err != nil {
@@ -142,6 +144,9 @@ func (runtime *researchRuntime) researchEvent(ctx context.Context, job Job) (any
 	run["evidence"] = evidencePayload(evidence, runID)
 	appendAnalysisStep(run, analysisStep("event_evidence_gathering", "completed", "go-worker", fmt.Sprintf("已从事件关联新闻收集 %d 条证据，覆盖 %d 个独立来源。", len(evidence), independentGroupCount(evidence)), map[string]any{"evidence_count": len(evidence), "independent_sources": independentGroupCount(evidence)}))
 	if err := runtime.saveEventResearch(ctx, run, evidence); err != nil {
+		if errors.Is(err, errResearchInactive) {
+			return map[string]any{"status": "superseded", "event_research_run_id": runID}, nil
+		}
 		return nil, runtime.failEventResearch(ctx, job, run, err)
 	}
 	draft, err := runtime.generateEventDraft(ctx, runID, event, evidence, instanceID)
@@ -151,6 +156,9 @@ func (runtime *researchRuntime) researchEvent(ctx context.Context, job Job) (any
 	appendAnalysisStep(run, analysisStep("event_report_drafting", "completed", "ollama", fmt.Sprintf("已生成逐目标事件研报草稿，包含 %d 个目标，引用 %d 条证据。", len(draft.Impacts), len(draft.EvidenceIDs)), map[string]any{"direction_scores": impactScores(draft.Impacts), "citation_count": len(draft.EvidenceIDs)}))
 	run["status"] = "verifying"
 	if err := runtime.saveEventResearch(ctx, run, evidence); err != nil {
+		if errors.Is(err, errResearchInactive) {
+			return map[string]any{"status": "superseded", "event_research_run_id": runID}, nil
+		}
 		return nil, runtime.failEventResearch(ctx, job, run, err)
 	}
 	complete, missing, contradictions := verifyEventDraft(draft, evidence, parseTime(run["as_of"]))
@@ -166,6 +174,9 @@ func (runtime *researchRuntime) researchEvent(ctx context.Context, job Job) (any
 	run["retryable_reason"], run["error"], run["updated_at"] = nil, nil, iso(time.Now())
 	appendAnalysisStep(run, analysisStep("event_report_finalization", "completed", "go-rating-engine", fmt.Sprintf("逐目标事件研报已定稿，共 %d 个目标。", len(anySlice(report["impacts"]))), map[string]any{"confidence": report["confidence"], "evidence_complete": complete, "target_count": len(anySlice(report["impacts"]))}))
 	if err := runtime.saveEventResearch(ctx, run, evidence); err != nil {
+		if errors.Is(err, errResearchInactive) {
+			return map[string]any{"status": "superseded", "event_research_run_id": runID}, nil
+		}
 		return nil, runtime.failEventResearch(ctx, job, run, err)
 	}
 	queued, err := runtime.enqueueTargetResearches(ctx, event, report, 3)
@@ -196,15 +207,16 @@ func (runtime *researchRuntime) researchAsset(ctx context.Context, job Job) (any
 	if supersededOrTerminal(run, job.ID.String()) || stringValue(run["status"]) == "coalesced" {
 		return run, nil
 	}
-	instanceID := stringValue(envelope.Kwargs["model_instance_id"])
-	if instanceID != "" {
-		run["model_instance_id"] = instanceID
-	}
+	instanceID := runtime.nextResearchInstance(stringValue(envelope.Kwargs["model_instance_id"]))
+	run["model_instance_id"] = instanceID
 	started := time.Now().UTC()
 	softCtx, cancel := context.WithTimeout(ctx, runtime.cfg.ResearchSoftLimit)
 	defer cancel()
 	run["status"], run["started_at"], run["error"], run["updated_at"] = "running", iso(started), nil, iso(started)
 	if err := runtime.saveRun(ctx, run, nil); err != nil {
+		if errors.Is(err, errResearchInactive) {
+			return map[string]any{"status": "superseded", "run_id": runID}, nil
+		}
 		return nil, err
 	}
 	var event map[string]any
@@ -220,6 +232,9 @@ func (runtime *researchRuntime) researchAsset(ctx context.Context, job Job) (any
 	run["evidence"] = evidencePayload(evidence, runID)
 	appendAnalysisStep(run, analysisStep("evidence_gathering", "completed", "go-worker", fmt.Sprintf("已收集 %d 条标的研究证据。", len(evidence)), map[string]any{"evidence_count": len(evidence)}))
 	if err := runtime.saveRun(softCtx, run, evidence); err != nil {
+		if errors.Is(err, errResearchInactive) {
+			return map[string]any{"status": "superseded", "run_id": runID}, nil
+		}
 		return nil, runtime.handleAssetError(ctx, job, run, err)
 	}
 	draft, err := runtime.generateAssetDraft(softCtx, runID, objectValue(run["asset"]), event, evidence, instanceID)
@@ -240,6 +255,9 @@ func (runtime *researchRuntime) researchAsset(ctx context.Context, job Job) (any
 	run["completed_at"], run["updated_at"] = iso(time.Now()), iso(time.Now())
 	appendAnalysisStep(run, analysisStep("finalization", "completed", "go-rating-engine", fmt.Sprintf("最终状态 %s，方向分 %+d，新闻可信度 %.0f%%，评级置信度 %.0f%%。", recommendation["signal_status"], int(numberValue(recommendation["score"])), numberValue(recommendation["news_confidence"])*100, numberValue(recommendation["rating_confidence"])*100), map[string]any{"rating": recommendation["rating"], "signal_status": recommendation["signal_status"], "direction_score": recommendation["score"], "news_confidence": recommendation["news_confidence"], "rating_confidence": recommendation["rating_confidence"], "score_source": "llm"}))
 	if err := runtime.saveRecommendationAndRun(softCtx, run, recommendation, evidence); err != nil {
+		if errors.Is(err, errResearchInactive) {
+			return map[string]any{"status": "superseded", "run_id": runID}, nil
+		}
 		return nil, runtime.handleAssetError(ctx, job, run, err)
 	}
 	runtime.finishResearchTracking(ctx, job.ID.String(), "completed", job.Attempt, assetID, stringValue(objectValue(run["asset"])["name"]), stringValue(objectValue(run["asset"])["symbol"]), "", map[string]any{"rating": recommendation["rating"], "score": recommendation["score"]})
@@ -286,6 +304,22 @@ func supersededOrTerminal(run map[string]any, taskID string) bool {
 	default:
 		return false
 	}
+}
+
+// nextResearchInstance assigns each concurrent claim to a different model
+// endpoint. Legacy Celery queues were sharded by instance, but the durable Go
+// queue is shared; trusting a migrated instance hint would therefore let all
+// worker slots drain one legacy shard into the same model.
+func (runtime *researchRuntime) nextResearchInstance(fallback string) string {
+	capacity := len(runtime.cfg.ResearchURLs)
+	if capacity == 0 {
+		return fallback
+	}
+	if capacity == 1 {
+		return "research-0"
+	}
+	index := (runtime.nextEndpoint.Add(1) - 1) % uint64(capacity)
+	return fmt.Sprintf("research-%d", index)
 }
 
 func (runtime *researchRuntime) eventEvidence(ctx context.Context, runID uuid.UUID, event map[string]any, historical bool) ([]researchEvidence, error) {
@@ -369,12 +403,13 @@ func (runtime *researchRuntime) saveEventResearch(ctx context.Context, run map[s
 		return err
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
-	result, err := tx.Exec(ctx, `UPDATE event_research_runs SET status=$2,payload=$3,updated_at=now() WHERE id=$1 AND status<>'cancelled'`, runID, run["status"], encoded)
+	expectedTaskID := stringValue(run["celery_task_id"])
+	result, err := tx.Exec(ctx, `UPDATE event_research_runs SET status=$2,payload=$3,updated_at=now() WHERE id=$1 AND status<>'cancelled' AND ($4='' OR COALESCE(payload->>'celery_task_id','')=$4)`, runID, run["status"], encoded, expectedTaskID)
 	if err != nil {
 		return err
 	}
 	if result.RowsAffected() == 0 {
-		return errors.New("event research was cancelled")
+		return errResearchInactive
 	}
 	if err := persistEvidence(ctx, tx, runID, evidence); err != nil {
 		return err
@@ -397,12 +432,13 @@ func (runtime *researchRuntime) saveRun(ctx context.Context, run map[string]any,
 		return err
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
-	result, err := tx.Exec(ctx, `UPDATE research_runs SET status=$2,payload=$3,updated_at=now() WHERE id=$1 AND status<>'cancelled'`, runID, run["status"], encoded)
+	expectedTaskID := stringValue(run["celery_task_id"])
+	result, err := tx.Exec(ctx, `UPDATE research_runs SET status=$2,payload=$3,updated_at=now() WHERE id=$1 AND status<>'cancelled' AND ($4='' OR COALESCE(payload->>'celery_task_id','')=$4)`, runID, run["status"], encoded, expectedTaskID)
 	if err != nil {
 		return err
 	}
 	if result.RowsAffected() == 0 {
-		return errors.New("asset research was cancelled")
+		return errResearchInactive
 	}
 	if evidence != nil {
 		if err := persistEvidence(ctx, tx, runID, evidence); err != nil {
@@ -443,12 +479,13 @@ func (runtime *researchRuntime) saveRecommendationAndRun(ctx context.Context, ru
 		return err
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
-	result, err := tx.Exec(ctx, `UPDATE research_runs SET status='completed',payload=$2,updated_at=now() WHERE id=$1 AND status<>'cancelled'`, runID, runEncoded)
+	expectedTaskID := stringValue(run["celery_task_id"])
+	result, err := tx.Exec(ctx, `UPDATE research_runs SET status='completed',payload=$2,updated_at=now() WHERE id=$1 AND status<>'cancelled' AND ($3='' OR COALESCE(payload->>'celery_task_id','')=$3)`, runID, runEncoded, expectedTaskID)
 	if err != nil || result.RowsAffected() == 0 {
 		if err != nil {
 			return err
 		}
-		return errors.New("asset research was cancelled")
+		return errResearchInactive
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO recommendations(id,run_id,asset_id,score,rating,confidence,as_of,payload) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(run_id) DO UPDATE SET score=excluded.score,rating=excluded.rating,confidence=excluded.confidence,as_of=excluded.as_of,payload=excluded.payload`, recommendationID, runID, stringValue(objectValue(recommendation["asset"])["asset_id"]), int(numberValue(recommendation["score"])), recommendation["rating"], recommendation["confidence"], parseTime(recommendation["as_of"]), recommendationEncoded); err != nil {
 		return err
@@ -502,7 +539,8 @@ func (runtime *researchRuntime) callResearchModel(ctx context.Context, entityID 
 	logicalID := uuid.New()
 	var lastErr error
 	for attempt := 1; attempt <= 2; attempt++ {
-		for index, baseURL := range preferredEndpoints(runtime.cfg.ResearchURLs, instanceID, "research") {
+		for _, baseURL := range preferredEndpoints(runtime.cfg.ResearchURLs, instanceID, "research") {
+			endpoint := researchEndpointIndex(runtime.cfg.ResearchURLs, baseURL)
 			started := time.Now().UTC()
 			body, _ := json.Marshal(request)
 			httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(baseURL, "/")+"/api/chat", bytes.NewReader(body))
@@ -514,7 +552,7 @@ func (runtime *researchRuntime) callResearchModel(ctx context.Context, entityID 
 			response, err := runtime.client.Do(httpRequest)
 			if err != nil {
 				lastErr = err
-				runtime.persistResearchAudit(context.WithoutCancel(ctx), logicalID, entityID, entityType, operation, attempt, "failed", started, messages, schema, "", nil, err.Error(), 0, 0, index)
+				runtime.persistResearchAudit(context.WithoutCancel(ctx), logicalID, entityID, entityType, operation, attempt, "failed", started, messages, schema, "", nil, err.Error(), 0, 0, endpoint)
 				continue
 			}
 			payload, readErr := io.ReadAll(io.LimitReader(response.Body, 12<<20))
@@ -525,7 +563,7 @@ func (runtime *researchRuntime) callResearchModel(ctx context.Context, entityID 
 				} else {
 					lastErr = fmt.Errorf("ollama research returned %s", response.Status)
 				}
-				runtime.persistResearchAudit(context.WithoutCancel(ctx), logicalID, entityID, entityType, operation, attempt, "failed", started, messages, schema, string(payload), nil, lastErr.Error(), 0, 0, index)
+				runtime.persistResearchAudit(context.WithoutCancel(ctx), logicalID, entityID, entityType, operation, attempt, "failed", started, messages, schema, string(payload), nil, lastErr.Error(), 0, 0, endpoint)
 				continue
 			}
 			var modelResponse ollamaResponse
@@ -535,13 +573,13 @@ func (runtime *researchRuntime) callResearchModel(ctx context.Context, entityID 
 			}
 			if err := json.Unmarshal([]byte(modelResponse.Message.Content), target); err != nil {
 				lastErr = err
-				runtime.persistResearchAudit(context.WithoutCancel(ctx), logicalID, entityID, entityType, operation, attempt, "failed", started, messages, schema, modelResponse.Message.Content, nil, err.Error(), modelResponse.PromptTokens, modelResponse.CompletionTokens, index)
+				runtime.persistResearchAudit(context.WithoutCancel(ctx), logicalID, entityID, entityType, operation, attempt, "failed", started, messages, schema, modelResponse.Message.Content, nil, err.Error(), modelResponse.PromptTokens, modelResponse.CompletionTokens, endpoint)
 				continue
 			}
 			parsed, _ := json.Marshal(target)
 			var parsedValue any
 			_ = json.Unmarshal(parsed, &parsedValue)
-			runtime.persistResearchAudit(context.WithoutCancel(ctx), logicalID, entityID, entityType, operation, attempt, "completed", started, messages, schema, modelResponse.Message.Content, parsedValue, "", modelResponse.PromptTokens, modelResponse.CompletionTokens, index)
+			runtime.persistResearchAudit(context.WithoutCancel(ctx), logicalID, entityID, entityType, operation, attempt, "completed", started, messages, schema, modelResponse.Message.Content, parsedValue, "", modelResponse.PromptTokens, modelResponse.CompletionTokens, endpoint)
 			return nil
 		}
 	}
@@ -549,6 +587,15 @@ func (runtime *researchRuntime) callResearchModel(ctx context.Context, entityID 
 		lastErr = errors.New("no research model endpoint configured")
 	}
 	return lastErr
+}
+
+func researchEndpointIndex(values []string, selected string) int {
+	for index, value := range values {
+		if value == selected {
+			return index
+		}
+	}
+	return 0
 }
 
 func (runtime *researchRuntime) persistResearchAudit(ctx context.Context, logicalID, entityID uuid.UUID, entityType, operation string, attempt int, status string, started time.Time, messages, schema any, raw string, parsed any, errorValue string, promptTokens, completionTokens, endpoint int) {
