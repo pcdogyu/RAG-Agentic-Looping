@@ -284,6 +284,7 @@ services:
     environment:
       API_UPSTREAM: ${WEB_API_UPSTREAM:-http://go-api:8081}
       API_BACKEND_NAME: ${WEB_API_BACKEND_NAME:-go}
+      GO_API_UPSTREAM: ${GO_API_UPSTREAM:-http://go-api:8081}
     depends_on:
       - api
 
