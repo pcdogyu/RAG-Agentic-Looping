@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -17,6 +18,7 @@ type Worker struct {
 	Lease        time.Duration
 	PollInterval time.Duration
 	Handlers     map[string]Handler
+	Concurrency  int
 	active       atomic.Int64
 }
 
@@ -24,30 +26,61 @@ func (w *Worker) Run(ctx context.Context) error {
 	if w.Store == nil || w.ID == "" {
 		return errors.New("worker store and ID are required")
 	}
+	if w.Concurrency <= 0 {
+		w.Concurrency = 1
+	}
+	heartbeatCtx, stopHeartbeat := context.WithCancel(ctx)
+	defer stopHeartbeat()
+	go w.workerHeartbeat(heartbeatCtx)
+	var group sync.WaitGroup
+	for index := 0; index < w.Concurrency; index++ {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			w.claimLoop(ctx)
+		}()
+	}
+	group.Wait()
+	return ctx.Err()
+}
+
+func (w *Worker) workerHeartbeat(ctx context.Context) {
 	heartbeat := time.NewTicker(10 * time.Second)
 	defer heartbeat.Stop()
+	write := func() {
+		if err := w.Store.WorkerHeartbeat(ctx, w.ID, w.Queues, w.Concurrency, int(w.active.Load())); err != nil && ctx.Err() == nil {
+			slog.Error("worker heartbeat", "error", err)
+		}
+	}
+	write()
 	for {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return
 		case <-heartbeat.C:
-			if err := w.Store.WorkerHeartbeat(ctx, w.ID, w.Queues, 1, int(w.active.Load())); err != nil {
-				slog.Error("worker heartbeat", "error", err)
-			}
-		default:
+			write()
 		}
+	}
+}
+
+func (w *Worker) claimLoop(ctx context.Context) {
+	for ctx.Err() == nil {
 		job, err := w.Store.Claim(ctx, w.ID, w.Queues, w.Lease)
 		if errors.Is(err, ErrNoJob) {
 			select {
 			case <-ctx.Done():
-				return ctx.Err()
+				return
 			case <-time.After(w.PollInterval):
 				continue
 			}
 		}
 		if err != nil {
 			slog.Error("claim job", "error", err)
-			time.Sleep(w.PollInterval)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(w.PollInterval):
+			}
 			continue
 		}
 		w.active.Add(1)

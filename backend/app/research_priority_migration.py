@@ -15,6 +15,8 @@ from backend.app.storage import get_event, get_event_research_run, save_event_re
 from backend.app.worker import (
     EVENT_RESEARCH_PRIORITY,
     _clear_research_dispatch,
+    _enqueue_go_research_job,
+    _go_research_worker_enabled,
     _record_research_dispatch,
     research_event,
 )
@@ -113,13 +115,24 @@ def migrate_queued_event_priorities(*, apply: bool = False) -> dict[str, Any]:
                     )
                 )
                 save_event_research_run(db, current)
-                research_event.apply_async(
-                    args=[str(current.event_id), str(current.id)],
-                    kwargs={"model_instance_id": instance.id},
-                    queue=broker_queue_name("research", instance.id),
-                    task_id=new_task_id,
-                    priority=EVENT_RESEARCH_PRIORITY,
-                )
+                if _go_research_worker_enabled():
+                    _enqueue_go_research_job(
+                        db,
+                        task_id=new_task_id,
+                        task_type="market_loop.research_event",
+                        args=[str(current.event_id), str(current.id)],
+                        kwargs={"model_instance_id": instance.id},
+                        priority=EVENT_RESEARCH_PRIORITY,
+                        dedupe_key=f"research-run:{current.id}",
+                    )
+                else:
+                    research_event.apply_async(
+                        args=[str(current.event_id), str(current.id)],
+                        kwargs={"model_instance_id": instance.id},
+                        queue=broker_queue_name("research", instance.id),
+                        task_id=new_task_id,
+                        priority=EVENT_RESEARCH_PRIORITY,
+                    )
             except Exception as exc:
                 db.rollback()
                 _clear_research_dispatch(str(current.id), new_task_id)

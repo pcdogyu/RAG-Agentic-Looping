@@ -181,7 +181,11 @@ func (s *Store) Complete(ctx context.Context, id uuid.UUID, workerID string, res
 func (s *Store) Fail(ctx context.Context, job Job, workerID string, cause error) error {
 	status := "retrying"
 	var available time.Time
-	if job.Attempt >= job.MaxAttempts {
+	var permanent interface{ Permanent() bool }
+	if errors.As(cause, &permanent) && permanent.Permanent() {
+		status = "failed"
+		available = time.Now().UTC()
+	} else if job.Attempt >= job.MaxAttempts {
 		status = "failed"
 		available = time.Now().UTC()
 	} else {
@@ -240,6 +244,68 @@ func (s *Store) ReconcileExpired(ctx context.Context) (int64, error) {
 			lease_owner=NULL,lease_until=NULL
 		WHERE status='running' AND lease_until < now()`)
 	return result.RowsAffected(), err
+}
+
+// ReconcileResearchBusinessState mirrors durable Go job failures into the
+// user-facing research rows. A worker process can disappear before its handler
+// gets a chance to persist the soft-timeout state; the scheduler closes that
+// gap after the job lease is reconciled.
+func (s *Store) ReconcileResearchBusinessState(ctx context.Context, hardLimit time.Duration) (int64, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT j.id,j.task_type,j.status,r.id,r.payload::jsonb
+		FROM go_jobs j
+		JOIN research_runs r ON r.payload->>'celery_task_id'=j.id::text
+		WHERE j.task_type='market_loop.research_asset'
+		  AND j.status IN ('retrying','failed')
+		  AND r.status IN ('queued','running','verifying')
+		UNION ALL
+		SELECT j.id,j.task_type,j.status,r.id,r.payload::jsonb
+		FROM go_jobs j
+		JOIN event_research_runs r ON r.payload->>'celery_task_id'=j.id::text
+		WHERE j.task_type='market_loop.research_event'
+		  AND j.status IN ('retrying','failed')
+		  AND r.status IN ('queued','running','verifying')`)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	var changed int64
+	for rows.Next() {
+		var jobID, taskType, jobStatus, runID string
+		var body []byte
+		if err := rows.Scan(&jobID, &taskType, &jobStatus, &runID, &body); err != nil {
+			return changed, err
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			return changed, err
+		}
+		status := "queued"
+		if jobStatus == "failed" {
+			status = "failed"
+			payload["completed_at"] = iso(time.Now())
+			if taskType == researchAssetTask && !parseTime(payload["started_at"]).IsZero() && time.Since(parseTime(payload["started_at"])) >= hardLimit {
+				payload["retryable_reason"] = "research_time_limit"
+				payload["error"] = fmt.Sprintf("研究超时 / Research timed out: hard limit %s", hardLimit)
+				appendAnalysisStep(payload, analysisStep("research_time_limit", "failed", "go-scheduler", fmt.Sprintf("Worker 租约失效后确认单标的研究超过硬时限 %s，已标记为可重试失败。 / The worker lease expired after the %s hard limit.", hardLimit, hardLimit), map[string]any{"hard_limit_seconds": int(hardLimit.Seconds()), "job_id": jobID}))
+			} else {
+				payload["retryable_reason"] = "model_worker_lease"
+				payload["error"] = "Go research worker lease expired / Go 研究 Worker 租约失效"
+			}
+		}
+		payload["status"], payload["updated_at"] = status, iso(time.Now())
+		encoded, _ := json.Marshal(payload)
+		table := "research_runs"
+		if taskType == researchEventTask {
+			table = "event_research_runs"
+		}
+		command, err := s.pool.Exec(ctx, fmt.Sprintf("UPDATE %s SET status=$2,payload=$3,updated_at=now() WHERE id=$1 AND status IN ('queued','running','verifying')", table), runID, status, encoded) //nolint:gosec
+		if err != nil {
+			return changed, err
+		}
+		changed += command.RowsAffected()
+	}
+	return changed, rows.Err()
 }
 
 func (s *Store) WorkerHeartbeat(ctx context.Context, id string, queues []string, concurrency, active int) error {

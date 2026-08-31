@@ -16,6 +16,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/jobs"
 )
 
 const (
@@ -31,6 +32,42 @@ type apiFailure struct {
 func (e *apiFailure) Error() string { return e.Detail }
 
 func fail(status int, detail string) error { return &apiFailure{Status: status, Detail: detail} }
+
+func ternaryString(condition bool, yes, no string) string {
+	if condition {
+		return yes
+	}
+	return no
+}
+
+func (s *Server) researchGoEnabled() bool {
+	for _, lane := range s.cfg.WorkerCompletedLanes {
+		if strings.TrimSpace(lane) == "research" {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) publishResearch(ctx context.Context, task, taskID string, args []any, kwargs map[string]any, priority int, runID string) error {
+	if !s.researchGoEnabled() {
+		return s.publishCelery(ctx, task, "research."+stringValue(kwargs["model_instance_id"]), taskID, args, kwargs, priority)
+	}
+	id, err := uuid.Parse(taskID)
+	if err != nil {
+		return err
+	}
+	_, err = jobs.NewStore(s.db).Enqueue(ctx, jobs.EnqueueParams{ID: id, Queue: "research", TaskType: task, Payload: map[string]any{"args": args, "kwargs": kwargs}, Priority: int16(priority), MaxAttempts: 3, DedupeKey: "research-run:" + runID})
+	return err
+}
+
+func (s *Server) publishEvolution(ctx context.Context, task, taskID string, args []any, kwargs map[string]any, priority int, dedupeKey string) error {
+	if !s.goLaneCompleted("evolution") {
+		return s.publishCelery(ctx, task, "evolution."+stringValue(kwargs["model_instance_id"]), taskID, args, kwargs, priority)
+	}
+	_, err := s.enqueueGoModelJob(ctx, "code", taskID, task, args, kwargs, priority, dedupeKey)
+	return err
+}
 
 func writeAPIFailure(w http.ResponseWriter, err error) {
 	var failure *apiFailure
@@ -314,7 +351,7 @@ func (s *Server) enqueueAssetResearch(ctx context.Context, assetID, eventID stri
 	if options.RetryOf != "" {
 		metrics["retry_of_run_id"], metrics["retry_attempt"] = options.RetryOf, options.RetryAttempt
 	}
-	steps = append(steps, analysisStep(phase, "queued", "celery", "已创建深度研究任务。", metrics))
+	steps = append(steps, analysisStep(phase, "queued", ternaryString(s.researchGoEnabled(), "go-worker", "celery"), "已创建深度研究任务。", metrics))
 	run := map[string]any{
 		"id": runID, "event_id": nil, "trigger_event_ids": []any{}, "asset": asset, "status": "queued", "as_of": jsonTime(stamp),
 		"historical_replay": options.Historical, "retry_of_run_id": nil, "retry_attempt": options.RetryAttempt,
@@ -335,8 +372,7 @@ func (s *Server) enqueueAssetResearch(ctx context.Context, assetID, eventID stri
 		return queuedResearch{}, err
 	}
 	_ = s.redis.Set(ctx, "market-loop:research:dispatch:"+runID, taskID, 30*24*time.Hour).Err()
-	queue := "research." + instanceID
-	err = s.publishCelery(ctx, "market_loop.research_asset", queue, taskID, []any{assetID, nullableString(eventID), runID}, map[string]any{"model_instance_id": instanceID}, options.Priority)
+	err = s.publishResearch(ctx, "market_loop.research_asset", taskID, []any{assetID, nullableString(eventID), runID}, map[string]any{"model_instance_id": instanceID}, options.Priority, runID)
 	if err != nil {
 		run["status"], run["error"], run["completed_at"], run["updated_at"] = "failed", "research queue failed", jsonTime(time.Now()), jsonTime(time.Now())
 		failedBody, _ := json.Marshal(run)
@@ -431,14 +467,14 @@ func (s *Server) retryEventResearch(ctx context.Context, runID, preferred string
 	run["status"], run["as_of"], run["verification_round"], run["retry_count"] = "queued", jsonTime(time.Now()), 0, retryCount
 	run["missing_requirements"], run["contradictions"], run["evidence"], run["report"] = []any{}, []any{}, []any{}, nil
 	run["error"], run["retryable_reason"], run["celery_task_id"], run["model_instance_id"] = nil, nil, taskID, instanceID
-	run["analysis_steps"] = append(anySlice(run["analysis_steps"]), analysisStep("event_research_retry_queue", "queued", "celery", "已创建事件研报重新执行任务。", map[string]any{"retry_count": retryCount, "instance_id": instanceID, "priority": 1}))
+	run["analysis_steps"] = append(anySlice(run["analysis_steps"]), analysisStep("event_research_retry_queue", "queued", ternaryString(s.researchGoEnabled(), "go-worker", "celery"), "已创建事件研报重新执行任务。", map[string]any{"retry_count": retryCount, "instance_id": instanceID, "priority": 1}))
 	run["updated_at"] = jsonTime(time.Now())
 	updated, _ := json.Marshal(run)
 	if _, err = s.db.Exec(ctx, `UPDATE event_research_runs SET status='queued',payload=$2,updated_at=now() WHERE id=$1`, runID, updated); err != nil {
 		return nil, err
 	}
 	_ = s.redis.Set(ctx, "market-loop:research:dispatch:"+runID, taskID, 30*24*time.Hour).Err()
-	if err = s.publishCelery(ctx, "market_loop.research_event", "research."+instanceID, taskID, []any{eventID, runID}, map[string]any{"model_instance_id": instanceID}, 1); err != nil {
+	if err = s.publishResearch(ctx, "market_loop.research_event", taskID, []any{eventID, runID}, map[string]any{"model_instance_id": instanceID}, 1, runID); err != nil {
 		return nil, fail(http.StatusServiceUnavailable, "event research retry queue failed")
 	}
 	return map[string]any{"task_id": taskID, "run_id": runID, "retry_count": retryCount, "instance_id": instanceID, "status": "queued"}, nil
@@ -594,7 +630,7 @@ func (s *Server) proposeEvolution(w http.ResponseWriter, r *http.Request) {
 	}
 	taskID := uuid.NewString()
 	s.trackModelTask(r.Context(), "code", taskID, "code_evolution", "", fmt.Sprintf("失败案例代码演进（%d 条）", len(input.Failures)), "等待生成改进方案", "manual", instanceID)
-	if err = s.publishCelery(r.Context(), "market_loop.evolve_failures", "evolution."+instanceID, taskID, []any{input.Failures}, map[string]any{"model_instance_id": instanceID}, 5); err != nil {
+	if err = s.publishEvolution(r.Context(), "market_loop.evolve_failures", taskID, []any{input.Failures}, map[string]any{"model_instance_id": instanceID}, 5, "evolution-task:"+taskID); err != nil {
 		writeError(w, http.StatusServiceUnavailable, "evolution could not be queued")
 		return
 	}
@@ -602,7 +638,13 @@ func (s *Server) proposeEvolution(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"task_id": taskID, "status": "queued"})
 		return
 	}
-	value, waitErr := s.waitCelery(r.Context(), taskID, 30*time.Minute)
+	var value any
+	var waitErr error
+	if s.goLaneCompleted("evolution") {
+		value, waitErr = s.waitGoJob(r.Context(), taskID, 30*time.Minute)
+	} else {
+		value, waitErr = s.waitCelery(r.Context(), taskID, 30*time.Minute)
+	}
 	if waitErr != nil {
 		writeError(w, http.StatusGatewayTimeout, waitErr.Error())
 		return
@@ -638,7 +680,7 @@ func (s *Server) executeEvolution(w http.ResponseWriter, r *http.Request) {
 	}
 	taskID := uuid.NewString()
 	s.trackModelTask(r.Context(), "code", taskID, "code_evolution", candidateID, stringValue(candidate["hypothesis"]), stringValue(candidate["target_metric"]), "manual", instanceID)
-	if err = s.publishCelery(r.Context(), "market_loop.execute_evolution", "evolution."+instanceID, taskID, []any{candidateID}, map[string]any{"model_instance_id": instanceID}, 5); err != nil {
+	if err = s.publishEvolution(r.Context(), "market_loop.execute_evolution", taskID, []any{candidateID}, map[string]any{"model_instance_id": instanceID}, 5, "evolution-candidate:"+candidateID); err != nil {
 		writeError(w, http.StatusServiceUnavailable, "evolution execution could not be queued")
 		return
 	}
@@ -646,7 +688,13 @@ func (s *Server) executeEvolution(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"task_id": taskID, "status": "queued"})
 		return
 	}
-	value, waitErr := s.waitCelery(r.Context(), taskID, 30*time.Minute)
+	var value any
+	var waitErr error
+	if s.goLaneCompleted("evolution") {
+		value, waitErr = s.waitGoJob(r.Context(), taskID, 30*time.Minute)
+	} else {
+		value, waitErr = s.waitCelery(r.Context(), taskID, 30*time.Minute)
+	}
 	if waitErr != nil {
 		writeError(w, http.StatusGatewayTimeout, waitErr.Error())
 		return

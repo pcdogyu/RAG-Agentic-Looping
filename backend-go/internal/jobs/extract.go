@@ -979,12 +979,20 @@ func (runtime *ExtractRuntime) enqueueEventResearch(ctx context.Context, event m
 	if inserted.RowsAffected() == 0 {
 		return false, nil
 	}
-	if err := publishCelery(ctx, runtime.redis, "market_loop.research_event", "research."+instanceID, taskID, []any{stringValue(event["id"]), runID.String()}, map[string]any{"model_instance_id": instanceID}, 1); err != nil {
+	kwargs := map[string]any{"model_instance_id": instanceID}
+	var queueErr error
+	if completedWorkerLane(runtime.cfg, "research") {
+		_, queueErr = NewStore(runtime.db).Enqueue(ctx, EnqueueParams{ID: uuid.MustParse(taskID), Queue: "research", TaskType: researchEventTask, Payload: map[string]any{"args": []any{stringValue(event["id"]), runID.String()}, "kwargs": kwargs}, Priority: 1, MaxAttempts: 3, DedupeKey: "research-run:" + runID.String()})
+	} else {
+		queueErr = publishCelery(ctx, runtime.redis, researchEventTask, "research."+instanceID, taskID, []any{stringValue(event["id"]), runID.String()}, kwargs, 1)
+	}
+	if queueErr != nil {
 		payload["status"], payload["error"] = "failed", "event research queue failed"
 		failed, _ := json.Marshal(payload)
 		_, _ = runtime.db.Exec(ctx, `UPDATE event_research_runs SET status='failed',payload=$2,updated_at=now() WHERE id=$1`, runID, failed)
-		return false, err
+		return false, queueErr
 	}
+	runtime.recordModelTask(ctx, "research", taskID, "event_research", runID.String(), stringValue(event["headline"]), stringValue(event["event_type"]), "automatic", instanceID)
 	return true, nil
 }
 

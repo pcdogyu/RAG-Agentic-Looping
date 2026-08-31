@@ -574,13 +574,20 @@ func (runtime *ExtractRuntime) enqueueResearchAfterMapping(ctx context.Context, 
 	if forceWebSearch {
 		kwargs["force_web_search"] = true
 	}
-	if err := publishCelery(ctx, runtime.redis, "market_loop.research_event", "research."+instanceID, taskID, []any{stringValue(event["id"]), runID.String()}, kwargs, 1); err != nil {
+	var queueErr error
+	if completedWorkerLane(runtime.cfg, "research") {
+		_, queueErr = NewStore(runtime.db).Enqueue(ctx, EnqueueParams{ID: uuid.MustParse(taskID), Queue: "research", TaskType: researchEventTask, Payload: map[string]any{"args": []any{stringValue(event["id"]), runID.String()}, "kwargs": kwargs}, Priority: 1, MaxAttempts: 3, DedupeKey: "research-run:" + runID.String()})
+	} else {
+		queueErr = publishCelery(ctx, runtime.redis, researchEventTask, "research."+instanceID, taskID, []any{stringValue(event["id"]), runID.String()}, kwargs, 1)
+	}
+	if queueErr != nil {
 		run["status"], run["celery_task_id"], run["error"] = previousStatus, previousTask, "event research refresh queue failed"
 		appendAnalysisStep(run, analysisStep("forced_event_research_queue", "failed", "celery", "事件重新调研入队失败，已保留原研报。", map[string]any{}))
 		failed, _ := json.Marshal(run)
 		_, _ = runtime.db.Exec(ctx, `UPDATE event_research_runs SET status=$2,payload=$3,updated_at=now() WHERE id=$1`, runID, previousStatus, failed)
-		return "", "", err
+		return "", "", queueErr
 	}
+	runtime.recordModelTask(ctx, "research", taskID, "event_research", runID.String(), stringValue(event["headline"]), stringValue(event["event_type"]), "manual", instanceID)
 	return taskID, runID.String(), nil
 }
 

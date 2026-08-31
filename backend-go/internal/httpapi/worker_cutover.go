@@ -18,12 +18,16 @@ func (s *Server) goLaneCompleted(lane string) bool {
 }
 
 func (s *Server) enqueueGoExtract(ctx context.Context, taskID, taskType string, args []any, kwargs map[string]any, priority int, dedupeKey string) (string, error) {
+	return s.enqueueGoModelJob(ctx, "extract", taskID, taskType, args, kwargs, priority, dedupeKey)
+}
+
+func (s *Server) enqueueGoModelJob(ctx context.Context, queue, taskID, taskType string, args []any, kwargs map[string]any, priority int, dedupeKey string) (string, error) {
 	id, err := uuid.Parse(taskID)
 	if err != nil {
 		return "", err
 	}
 	queuedID, err := jobs.NewStore(s.db).Enqueue(ctx, jobs.EnqueueParams{
-		ID: id, Queue: "extract", TaskType: taskType,
+		ID: id, Queue: queue, TaskType: taskType,
 		Payload: map[string]any{"args": args, "kwargs": kwargs}, Priority: int16(priority),
 		MaxAttempts: 3, AvailableAt: time.Now().UTC(), DedupeKey: dedupeKey,
 	})

@@ -37,6 +37,8 @@ def reprocess_target_impacts(
     from backend.app.worker import (
         EVENT_RESEARCH_PRIORITY,
         _clear_research_dispatch,
+        _enqueue_go_research_job,
+        _go_research_worker_enabled,
         _record_research_dispatch,
         research_event,
     )
@@ -164,13 +166,24 @@ def reprocess_target_impacts(
                 if not _record_research_dispatch(str(run.id), task_id):
                     raise RuntimeError("research dispatch marker unavailable")
                 save_event_research_run(db, run)
-                research_event.apply_async(
-                    args=[str(event.id), str(run.id)],
-                    kwargs={"model_instance_id": instance.id},
-                    queue=broker_queue_name("research", instance.id),
-                    task_id=task_id,
-                    priority=EVENT_RESEARCH_PRIORITY,
-                )
+                if _go_research_worker_enabled():
+                    _enqueue_go_research_job(
+                        db,
+                        task_id=task_id,
+                        task_type="market_loop.research_event",
+                        args=[str(event.id), str(run.id)],
+                        kwargs={"model_instance_id": instance.id},
+                        priority=EVENT_RESEARCH_PRIORITY,
+                        dedupe_key=f"research-run:{run.id}",
+                    )
+                else:
+                    research_event.apply_async(
+                        args=[str(event.id), str(run.id)],
+                        kwargs={"model_instance_id": instance.id},
+                        queue=broker_queue_name("research", instance.id),
+                        task_id=task_id,
+                        priority=EVENT_RESEARCH_PRIORITY,
+                    )
             except Exception as exc:
                 db.rollback()
                 _clear_research_dispatch(str(run.id), task_id)

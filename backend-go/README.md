@@ -142,3 +142,59 @@ python -m backend.app.mapping_queue_cutover --apply
 The bridge accepts only `resolve_event_assets`, validates every event, keeps
 task IDs, kwargs, and priorities, persists every Go job first, then archives
 the original Redis lists under `market-loop:archive:mapping-cutover:*`.
+
+### Research lane cutover
+
+The research lane owns `market_loop.research_event` and
+`market_loop.research_asset` in Go. Event jobs keep priority `1`, asset jobs
+keep priority `3`, and the independent `go-research-worker` runs at concurrency
+`3`, matching the three configured 7B endpoints. Asset execution uses the
+34-minute cooperative limit and a 35-minute durable hard-limit reconciliation;
+timeouts are written back as retryable `research_time_limit` failures.
+
+Set `GO_WORKER_COMPLETED_LANES=extract,mapping,research`, keep the extract and
+mapping Go workers running, start `go-research-worker`, and stop the three
+Python research workers. Python and Go publishers then write all new research
+work to `go_jobs(queue=research)`.
+
+For a non-empty legacy research queue, freeze publishers and stop the Python
+research workers before previewing and applying the idempotent bridge:
+
+```text
+python -m backend.app.research_queue_cutover
+python -m backend.app.research_queue_cutover --apply
+```
+
+The bridge accepts only the two research task types, validates their durable
+run rows, preserves task IDs, kwargs and event-before-asset priorities, then
+archives the original Redis lists under
+`market-loop:archive:research-cutover:*`.
+
+### Evolution lane cutover
+
+The evolution lane owns `market_loop.evolve_from_outcomes`,
+`market_loop.evolve_failures`, and `market_loop.execute_evolution` in Go. The
+dedicated `go-evolution-worker` keeps concurrency at the configured code-model
+capacity and uses a purpose-built image containing the Go worker plus Git,
+Python/Go test toolchains, and Docker Compose. Candidate execution retains the
+clean-worktree gate, secret and protected-path checks, full validation suite,
+isolated candidate branch, optional merge/deploy verification, and rollback.
+The base branch defaults to `golang` through `EVOLUTION_BASE_BRANCH`.
+
+Set `GO_WORKER_COMPLETED_LANES=extract,mapping,research,evolution`, start
+`go-evolution-worker`, then stop the Python `evolution-worker`. Periodic IO
+dispatch, the Go and Python compatibility APIs, and queue retries will publish
+new work to `go_jobs(queue=code)`.
+
+If legacy evolution messages remain after the Python worker is stopped, first
+preview and then apply the idempotent bridge:
+
+```text
+python -m backend.app.evolution_queue_cutover
+python -m backend.app.evolution_queue_cutover --apply
+```
+
+The bridge accepts only the three registered evolution task types, validates
+candidate IDs for execution jobs, preserves task IDs, kwargs, and priorities,
+persists each Go job before archiving the original Redis lists under
+`market-loop:archive:evolution-cutover:*`.

@@ -308,7 +308,11 @@ func (s *Server) retryModelTask(ctx context.Context, queueID string, task map[st
 			taskName, args = "market_loop.execute_evolution", []any{entityID}
 		}
 		s.trackModelTask(ctx, "code", taskID, "code_evolution", entityID, stringValue(task["title"]), stringValue(task["subtitle"]), "manual", instanceID)
-		if err = s.publishCelery(ctx, taskName, "evolution."+instanceID, taskID, args, map[string]any{"model_instance_id": instanceID}, priority); err != nil {
+		dedupeKey := "evolution-task:" + taskID
+		if entityID != "" {
+			dedupeKey = "evolution-candidate:" + entityID
+		}
+		if err = s.publishEvolution(ctx, taskName, taskID, args, map[string]any{"model_instance_id": instanceID}, priority, dedupeKey); err != nil {
 			return "", fail(http.StatusServiceUnavailable, "code evolution retry could not be queued")
 		}
 		_ = s.cancelTrackedTask(ctx, "code", oldTaskID)

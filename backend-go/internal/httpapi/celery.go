@@ -112,6 +112,38 @@ func (s *Server) waitCelery(ctx context.Context, taskID string, timeout time.Dur
 	}
 }
 
+func (s *Server) waitGoJob(ctx context.Context, taskID string, timeout time.Duration) (any, error) {
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-deadline.C:
+			return nil, errors.New("background task timed out")
+		case <-ticker.C:
+			var status string
+			var result, errorValue []byte
+			err := s.db.QueryRow(ctx, `SELECT status,coalesce(result,'null'::jsonb)::jsonb,coalesce(error,'')::text FROM go_jobs WHERE id=$1`, taskID).Scan(&status, &result, &errorValue)
+			if err != nil {
+				continue
+			}
+			switch status {
+			case "completed":
+				var value any
+				if json.Unmarshal(result, &value) != nil {
+					return nil, errors.New("Go task returned invalid JSON")
+				}
+				return value, nil
+			case "failed", "cancelled":
+				return nil, fmt.Errorf("task %s: %s", status, string(errorValue))
+			}
+		}
+	}
+}
+
 func (s *Server) purgeCeleryQueue(ctx context.Context, queue string) int64 {
 	keys := []string{queue, celeryQueueKey(queue, 3), celeryQueueKey(queue, 6), celeryQueueKey(queue, 9)}
 	var purged int64

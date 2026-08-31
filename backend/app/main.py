@@ -104,6 +104,8 @@ from backend.app.storage import (
 )
 from backend.app.worker import (
     DEFAULT_MODEL_TASK_PRIORITY,
+    _enqueue_go_evolution_job,
+    _go_evolution_worker_enabled,
     cancel_news_extraction_task,
     celery_app,
     clear_news_extraction_queue,
@@ -977,17 +979,37 @@ def _enqueue_model_task_retry(
             source="manual",
             instance_id=instance.id,
         )
-        code_task = (
-            execute_evolution_task if candidate_id else evolve_from_outcomes_task
-        )
         try:
-            published = code_task.apply_async(
-                args=[str(candidate_id)] if candidate_id else [],
-                kwargs={"model_instance_id": instance.id},
-                queue=broker_queue_name("code", instance.id),
-                task_id=task_id,
-                priority=priority,
-            )
+            if _go_evolution_worker_enabled():
+                published_id = _enqueue_go_evolution_job(
+                    db,
+                    task_id=task_id,
+                    task_type=(
+                        "market_loop.execute_evolution"
+                        if candidate_id
+                        else "market_loop.evolve_from_outcomes"
+                    ),
+                    args=[str(candidate_id)] if candidate_id else [],
+                    kwargs={"model_instance_id": instance.id},
+                    priority=priority,
+                    dedupe_key=(
+                        f"evolution-candidate:{candidate_id}"
+                        if candidate_id
+                        else f"evolution-task:{task_id}"
+                    ),
+                )
+            else:
+                code_task = (
+                    execute_evolution_task if candidate_id else evolve_from_outcomes_task
+                )
+                published = code_task.apply_async(
+                    args=[str(candidate_id)] if candidate_id else [],
+                    kwargs={"model_instance_id": instance.id},
+                    queue=broker_queue_name("code", instance.id),
+                    task_id=task_id,
+                    priority=priority,
+                )
+                published_id = str(published.id)
         except Exception as exc:
             update_model_task(
                 "code",
@@ -997,7 +1019,7 @@ def _enqueue_model_task_retry(
                 error=f"{type(exc).__name__}: {exc}",
             )
             raise
-        return str(published.id)
+        return published_id
 
     if task.kind == "asset_research":
         try:
@@ -1878,12 +1900,24 @@ def propose_evolution(request: EvolutionRequest, db: Session = Depends(get_db)):
             instance_id=instance.id,
         )
         try:
-            task = evolve_failures.apply_async(
-                args=[request.failures],
-                kwargs={"model_instance_id": instance.id},
-                queue=broker_queue_name("code", instance.id),
-                task_id=task_id,
-            )
+            if _go_evolution_worker_enabled():
+                published_id = _enqueue_go_evolution_job(
+                    db,
+                    task_id=task_id,
+                    task_type="market_loop.evolve_failures",
+                    args=[request.failures],
+                    kwargs={"model_instance_id": instance.id},
+                    priority=DEFAULT_MODEL_TASK_PRIORITY,
+                    dedupe_key=f"evolution-task:{task_id}",
+                )
+            else:
+                task = evolve_failures.apply_async(
+                    args=[request.failures],
+                    kwargs={"model_instance_id": instance.id},
+                    queue=broker_queue_name("code", instance.id),
+                    task_id=task_id,
+                )
+                published_id = str(task.id)
         except Exception as exc:
             update_model_task(
                 "code",
@@ -1893,7 +1927,7 @@ def propose_evolution(request: EvolutionRequest, db: Session = Depends(get_db)):
                 error=f"{type(exc).__name__}: {exc}",
             )
             raise
-        return {"task_id": task.id, "status": "queued"}
+        return {"task_id": published_id, "status": "queued"}
     try:
         return EvolutionService().propose(db, request.failures)
     except EvolutionError as exc:
@@ -1921,12 +1955,24 @@ def execute_evolution(candidate_id: UUID, background: bool = True, db: Session =
             instance_id=instance.id,
         )
         try:
-            task = execute_evolution_task.apply_async(
-                args=[str(candidate_id)],
-                kwargs={"model_instance_id": instance.id},
-                queue=broker_queue_name("code", instance.id),
-                task_id=task_id,
-            )
+            if _go_evolution_worker_enabled():
+                published_id = _enqueue_go_evolution_job(
+                    db,
+                    task_id=task_id,
+                    task_type="market_loop.execute_evolution",
+                    args=[str(candidate_id)],
+                    kwargs={"model_instance_id": instance.id},
+                    priority=DEFAULT_MODEL_TASK_PRIORITY,
+                    dedupe_key=f"evolution-candidate:{candidate_id}",
+                )
+            else:
+                task = execute_evolution_task.apply_async(
+                    args=[str(candidate_id)],
+                    kwargs={"model_instance_id": instance.id},
+                    queue=broker_queue_name("code", instance.id),
+                    task_id=task_id,
+                )
+                published_id = str(task.id)
         except Exception as exc:
             update_model_task(
                 "code",
@@ -1937,7 +1983,7 @@ def execute_evolution(candidate_id: UUID, background: bool = True, db: Session =
                 error=f"{type(exc).__name__}: {exc}",
             )
             raise
-        return {"task_id": task.id, "status": "queued"}
+        return {"task_id": published_id, "status": "queued"}
     try:
         result = EvolutionService().execute(db, candidate)
         save_evolution(db, result)

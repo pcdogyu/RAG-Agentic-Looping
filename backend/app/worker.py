@@ -292,6 +292,22 @@ def _go_mapping_worker_enabled() -> bool:
     }
 
 
+def _go_research_worker_enabled() -> bool:
+    return "research" in {
+        value.strip()
+        for value in settings.go_worker_completed_lanes.split(",")
+        if value.strip()
+    }
+
+
+def _go_evolution_worker_enabled() -> bool:
+    return "evolution" in {
+        value.strip()
+        for value in settings.go_worker_completed_lanes.split(",")
+        if value.strip()
+    }
+
+
 def _enqueue_go_model_job(
     db,
     *,
@@ -356,6 +372,14 @@ def _enqueue_go_model_job(
 
 def _enqueue_go_extract_job(db, **kwargs) -> str:
     return _enqueue_go_model_job(db, queue="extract", **kwargs)
+
+
+def _enqueue_go_research_job(db, **kwargs) -> str:
+    return _enqueue_go_model_job(db, queue="research", **kwargs)
+
+
+def _enqueue_go_evolution_job(db, **kwargs) -> str:
+    return _enqueue_go_model_job(db, queue="code", **kwargs)
 
 
 class ScanLeaseLost(RuntimeError):
@@ -670,7 +694,35 @@ def recover_orphaned_queued_research_runs(
             save_event_research_run(db, run)
 
         try:
-            if kind == "asset":
+            if _go_research_worker_enabled():
+                task_type = (
+                    "market_loop.research_asset"
+                    if kind == "asset"
+                    else "market_loop.research_event"
+                )
+                task_args = (
+                    [
+                        run.asset.asset_id,
+                        str(run.event_id) if run.event_id else None,
+                        run_id,
+                    ]
+                    if kind == "asset"
+                    else [str(run.event_id), run_id]
+                )
+                _enqueue_go_research_job(
+                    db,
+                    task_id=task_id,
+                    task_type=task_type,
+                    args=task_args,
+                    kwargs={"model_instance_id": instance.id},
+                    priority=(
+                        ASSET_RESEARCH_PRIORITY
+                        if kind == "asset"
+                        else EVENT_RESEARCH_PRIORITY
+                    ),
+                    dedupe_key=f"research-run:{run_id}",
+                )
+            elif kind == "asset":
                 research_asset.apply_async(
                     args=[
                         run.asset.asset_id,
@@ -1503,6 +1555,7 @@ def _enqueue_research_locked(
         settings=settings,
         probe_health=True,
     )
+    use_go_worker = _go_research_worker_enabled()
     run = ResearchRun(
         event_id=event.id if event else None,
         trigger_event_ids=[event.id] if event else [],
@@ -1538,7 +1591,7 @@ def _enqueue_research_locked(
                     queue_phase
                     or ("research_retry_queue" if retry_of_run_id else "research_queue")
                 ),
-                executor="celery",
+                executor="go-worker" if use_go_worker else "celery",
                 summary=(
                     f"已为历史失败任务创建第 {retry_attempt} 次重新执行。"
                     if retry_of_run_id
@@ -1567,13 +1620,27 @@ def _enqueue_research_locked(
     save_run(db, run)
     dispatch_recorded = _record_research_dispatch(str(run.id), task_id)
     try:
-        task = research_asset.apply_async(
-            args=[asset.asset_id, str(event.id) if event else None, str(run.id)],
-            kwargs={"model_instance_id": instance.id},
-            queue=broker_queue_name("research", instance.id),
-            task_id=task_id,
-            priority=effective_priority,
-        )
+        task_args = [asset.asset_id, str(event.id) if event else None, str(run.id)]
+        task_kwargs = {"model_instance_id": instance.id}
+        if use_go_worker:
+            queued_id = _enqueue_go_research_job(
+                db,
+                task_id=task_id,
+                task_type="market_loop.research_asset",
+                args=task_args,
+                kwargs=task_kwargs,
+                priority=effective_priority,
+                dedupe_key=f"research-run:{run.id}",
+            )
+        else:
+            task = research_asset.apply_async(
+                args=task_args,
+                kwargs=task_kwargs,
+                queue=broker_queue_name("research", instance.id),
+                task_id=task_id,
+                priority=effective_priority,
+            )
+            queued_id = str(task.id)
     except Exception as exc:
         if dispatch_recorded:
             _clear_research_dispatch(str(run.id), task_id)
@@ -1590,7 +1657,7 @@ def _enqueue_research_locked(
         )
         save_run(db, run)
         raise
-    return str(task.id), run
+    return queued_id, run
 
 
 def reserve_research_run(
@@ -2240,6 +2307,7 @@ def enqueue_event_report(
         settings=settings,
         probe_health=True,
     )
+    use_go_worker = _go_research_worker_enabled()
     run = EventResearchRun(
         event_id=event.id,
         as_of=max(event.as_of, event.observed_at),
@@ -2250,7 +2318,7 @@ def enqueue_event_report(
             AnalysisStep(
                 phase="event_research_queue",
                 status="queued",
-                executor="celery",
+                executor="go-worker" if use_go_worker else "celery",
                 model=settings.ollama_research_model,
                 summary="已创建事实框架与逐目标宏观传导研报任务。",
                 metrics={
@@ -2263,13 +2331,27 @@ def enqueue_event_report(
     save_event_research_run(db, run)
     dispatch_recorded = _record_research_dispatch(str(run.id), task_id)
     try:
-        task = research_event.apply_async(
-            args=[str(event.id), str(run.id)],
-            kwargs={"model_instance_id": instance.id},
-            queue=broker_queue_name("research", instance.id),
-            task_id=task_id,
-            priority=EVENT_RESEARCH_PRIORITY,
-        )
+        task_args = [str(event.id), str(run.id)]
+        task_kwargs = {"model_instance_id": instance.id}
+        if use_go_worker:
+            queued_id = _enqueue_go_research_job(
+                db,
+                task_id=task_id,
+                task_type="market_loop.research_event",
+                args=task_args,
+                kwargs=task_kwargs,
+                priority=EVENT_RESEARCH_PRIORITY,
+                dedupe_key=f"research-run:{run.id}",
+            )
+        else:
+            task = research_event.apply_async(
+                args=task_args,
+                kwargs=task_kwargs,
+                queue=broker_queue_name("research", instance.id),
+                task_id=task_id,
+                priority=EVENT_RESEARCH_PRIORITY,
+            )
+            queued_id = str(task.id)
     except Exception as exc:
         if dispatch_recorded:
             _clear_research_dispatch(str(run.id), task_id)
@@ -2285,7 +2367,7 @@ def enqueue_event_report(
         )
         save_event_research_run(db, run)
         raise
-    return str(task.id), run
+    return queued_id, run
 
 
 def _dispatch_extracted_events(
@@ -2360,11 +2442,12 @@ def enqueue_event_research_retry(
     )
     run.celery_task_id = task_id
     run.model_instance_id = instance.id
+    use_go_worker = _go_research_worker_enabled()
     run.analysis_steps.append(
         AnalysisStep(
             phase="event_research_retry_queue",
             status="queued",
-            executor="celery",
+            executor="go-worker" if use_go_worker else "celery",
             model=settings.ollama_research_model,
             summary=f"已为历史失败事件研报创建第 {run.retry_count} 次重新执行。",
             metrics={
@@ -2377,13 +2460,27 @@ def enqueue_event_research_retry(
     save_event_research_run(db, run)
     dispatch_recorded = _record_research_dispatch(str(run.id), task_id)
     try:
-        task = research_event.apply_async(
-            args=[str(event.id), str(run.id)],
-            kwargs={"model_instance_id": instance.id},
-            queue=broker_queue_name("research", instance.id),
-            task_id=task_id,
-            priority=effective_priority,
-        )
+        task_args = [str(event.id), str(run.id)]
+        task_kwargs = {"model_instance_id": instance.id}
+        if use_go_worker:
+            queued_id = _enqueue_go_research_job(
+                db,
+                task_id=task_id,
+                task_type="market_loop.research_event",
+                args=task_args,
+                kwargs=task_kwargs,
+                priority=effective_priority,
+                dedupe_key=f"research-run:{run.id}",
+            )
+        else:
+            task = research_event.apply_async(
+                args=task_args,
+                kwargs=task_kwargs,
+                queue=broker_queue_name("research", instance.id),
+                task_id=task_id,
+                priority=effective_priority,
+            )
+            queued_id = str(task.id)
     except Exception as exc:
         if dispatch_recorded:
             _clear_research_dispatch(str(run.id), task_id)
@@ -2399,7 +2496,7 @@ def enqueue_event_research_retry(
         )
         save_event_research_run(db, run)
         raise
-    return str(task.id), run
+    return queued_id, run
 
 
 def enqueue_full_event_research(
@@ -2505,11 +2602,12 @@ def enqueue_event_research_refresh(
     )
     run.celery_task_id = task_id
     run.model_instance_id = instance.id
+    use_go_worker = _go_research_worker_enabled()
     run.analysis_steps.append(
         AnalysisStep(
             phase="forced_event_research_queue",
             status="queued",
-            executor="celery",
+            executor="go-worker" if use_go_worker else "celery",
             model=settings.ollama_research_model,
             summary="已保留当前事件研报，并创建完整事件重新调研任务。",
             metrics={
@@ -2523,16 +2621,30 @@ def enqueue_event_research_refresh(
     save_event_research_run(db, run)
     dispatch_recorded = _record_research_dispatch(str(run.id), task_id)
     try:
-        task = research_event.apply_async(
-            args=[str(event.id), str(run.id)],
-            kwargs={
-                "model_instance_id": instance.id,
-                **({"force_web_search": True} if force_web_search else {}),
-            },
-            queue=broker_queue_name("research", instance.id),
-            task_id=task_id,
-            priority=EVENT_RESEARCH_PRIORITY,
-        )
+        task_args = [str(event.id), str(run.id)]
+        task_kwargs = {
+            "model_instance_id": instance.id,
+            **({"force_web_search": True} if force_web_search else {}),
+        }
+        if use_go_worker:
+            queued_id = _enqueue_go_research_job(
+                db,
+                task_id=task_id,
+                task_type="market_loop.research_event",
+                args=task_args,
+                kwargs=task_kwargs,
+                priority=EVENT_RESEARCH_PRIORITY,
+                dedupe_key=f"research-run:{run.id}",
+            )
+        else:
+            task = research_event.apply_async(
+                args=task_args,
+                kwargs=task_kwargs,
+                queue=broker_queue_name("research", instance.id),
+                task_id=task_id,
+                priority=EVENT_RESEARCH_PRIORITY,
+            )
+            queued_id = str(task.id)
     except Exception as exc:
         if dispatch_recorded:
             _clear_research_dispatch(str(run.id), task_id)
@@ -2549,7 +2661,7 @@ def enqueue_event_research_refresh(
         )
         save_event_research_run(db, run)
         raise
-    return str(task.id), run
+    return queued_id, run
 
 
 def _recover_stale_scan_gate(client: Redis, *, now: datetime | None = None) -> bool:
@@ -4383,11 +4495,26 @@ def dispatch_evolve_from_outcomes() -> dict[str, str]:
         instance_id=instance.id,
     )
     try:
-        task = evolve_from_outcomes.apply_async(
-            kwargs={"model_instance_id": instance.id},
-            queue=broker_queue_name("code", instance.id),
-            task_id=task_id,
-        )
+        if _go_evolution_worker_enabled():
+            init_db()
+            with SessionLocal() as db:
+                queued_id = _enqueue_go_evolution_job(
+                    db,
+                    task_id=task_id,
+                    task_type="market_loop.evolve_from_outcomes",
+                    args=[],
+                    kwargs={"model_instance_id": instance.id},
+                    priority=DEFAULT_MODEL_TASK_PRIORITY,
+                    dedupe_key=f"evolution-task:{task_id}",
+                )
+            published_id = queued_id
+        else:
+            task = evolve_from_outcomes.apply_async(
+                kwargs={"model_instance_id": instance.id},
+                queue=broker_queue_name("code", instance.id),
+                task_id=task_id,
+            )
+            published_id = str(task.id)
     except Exception as exc:
         update_model_task(
             "code",
@@ -4397,7 +4524,7 @@ def dispatch_evolve_from_outcomes() -> dict[str, str]:
             error=f"{type(exc).__name__}: {exc}",
         )
         raise
-    return {"task_id": str(task.id), "instance_id": instance.id}
+    return {"task_id": published_id, "instance_id": instance.id}
 
 
 @celery_app.task(bind=True, name="market_loop.evolve_from_outcomes")

@@ -46,6 +46,12 @@ func main() {
 			} else if count > 0 {
 				slog.Warn("requeued expired leases", "count", count)
 			}
+			businessCount, businessErr := store.ReconcileResearchBusinessState(ctx, cfg.ResearchHardLimit)
+			if businessErr != nil {
+				slog.Error("reconcile research state", "error", businessErr)
+			} else if businessCount > 0 {
+				slog.Warn("reconciled research state", "count", businessCount)
+			}
 		}
 	}
 }
