@@ -114,6 +114,7 @@ from backend.app.services.research_lifecycle import (
 from backend.app.services.source_filter import filter_news_items
 from backend.app.services.source_lineage import canonicalize_url, enrich_news_lineage
 from backend.app.storage import (
+    ensure_asset,
     event_news_item_ids,
     get_asset,
     get_event,
@@ -3353,7 +3354,7 @@ def resolve_event_assets(
                 event.candidates = mapping_result.candidates
                 event.industry_ids = mapping_result.industry_ids
                 for candidate in event.candidates:
-                    upsert_asset(db, candidate.asset)
+                    candidate.asset = ensure_asset(db, candidate.asset)
                 _replace_event_step(
                     event,
                     AnalysisStep(
@@ -4017,7 +4018,7 @@ def seed_assets() -> dict:
     registry = ProviderRegistry()
     with SessionLocal() as db:
         for asset in registry.all_assets():
-            upsert_asset(db, asset)
+            ensure_asset(db, asset)
         count = len(list_assets(db))
     return {"assets": count}
 

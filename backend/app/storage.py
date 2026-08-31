@@ -75,6 +75,21 @@ def upsert_asset(db: Session, asset: AssetRef, *, commit: bool = True) -> AssetR
     return asset
 
 
+def ensure_asset(db: Session, asset: AssetRef, *, commit: bool = True) -> AssetRef:
+    """Insert a missing identity without overwriting an existing master record.
+
+    Event and research payloads intentionally retain the asset snapshot that was
+    current when they were produced.  Replaying one of those payloads must not
+    reactivate a symbol that a later provider snapshot disabled, nor restore
+    stale exchange or association metadata.
+    """
+
+    row = db.get(AssetRow, asset.asset_id)
+    if row is not None:
+        return asset_from_row(row)
+    return upsert_asset(db, asset, commit=commit)
+
+
 def asset_from_row(row: AssetRow) -> AssetRef:
     return AssetRef(
         asset_id=row.id,
