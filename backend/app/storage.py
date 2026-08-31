@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import datetime, timedelta
 from threading import Lock
 from uuid import UUID
@@ -73,6 +74,42 @@ def upsert_asset(db: Session, asset: AssetRef, *, commit: bool = True) -> AssetR
     if commit:
         db.commit()
     return asset
+
+
+def ensure_asset(db: Session, asset: AssetRef, *, commit: bool = True) -> AssetRef:
+    """Insert a missing identity without overwriting an existing master record.
+
+    Event and research payloads intentionally retain the asset snapshot that was
+    current when they were produced.  Replaying one of those payloads must not
+    reactivate a symbol that a later provider snapshot disabled, nor restore
+    stale exchange or association metadata.
+    """
+
+    row = db.get(AssetRow, asset.asset_id)
+    if row is not None:
+        return asset_from_row(row)
+    return upsert_asset(db, asset, commit=commit)
+
+
+def ensure_assets(
+    db: Session,
+    assets: Iterable[AssetRef],
+    *,
+    commit: bool = True,
+) -> int:
+    """Insert only missing identities using one master-ID scan."""
+
+    existing_ids = set(db.scalars(select(AssetRow.id)).all())
+    inserted = 0
+    for asset in assets:
+        if asset.asset_id in existing_ids:
+            continue
+        upsert_asset(db, asset, commit=False)
+        existing_ids.add(asset.asset_id)
+        inserted += 1
+    if commit:
+        db.commit()
+    return inserted
 
 
 def asset_from_row(row: AssetRow) -> AssetRef:

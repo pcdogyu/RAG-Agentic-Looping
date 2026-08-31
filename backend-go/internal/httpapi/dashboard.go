@@ -323,7 +323,7 @@ func (s *Server) buildAnalysisLogs(r *http.Request, limit int) ([]map[string]any
 		}
 		rows.Close()
 	}
-	rows, err := s.db.Query(r.Context(), `SELECT payload::jsonb,observed_at FROM news_events ORDER BY published_at DESC,priority DESC LIMIT $1`, max(limit*3, 30))
+	rows, err := s.db.Query(r.Context(), `SELECT payload::jsonb,observed_at FROM news_events ORDER BY observed_at DESC LIMIT $1`, max(limit*3, 30))
 	if err != nil {
 		return nil, err
 	}
@@ -355,6 +355,8 @@ func (s *Server) buildAnalysisLogs(r *http.Request, limit int) ([]map[string]any
 }
 
 func (s *Server) analysisEntry(r *http.Request, event, run map[string]any, eventRun bool) map[string]any {
+	normalizePythonTimestamps(event)
+	normalizePythonTimestamps(run)
 	steps := anySlice(valueFrom(run, "analysis_steps"))
 	if len(steps) == 0 {
 		steps = anySlice(valueFrom(event, "analysis_steps"))

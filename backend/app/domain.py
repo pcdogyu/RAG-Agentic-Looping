@@ -5,7 +5,7 @@ from enum import StrEnum
 from typing import Any
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 def utc_now() -> datetime:
@@ -385,6 +385,20 @@ class NewsEvent(BaseModel):
     novelty: float = Field(default=0.5, ge=0, le=1)
     priority: float = Field(default=0.5, ge=0, le=1)
     analysis_steps: list[AnalysisStep] = Field(default_factory=list)
+
+    @field_validator(
+        "entities",
+        "actions",
+        "candidates",
+        "industry_ids",
+        "analysis_steps",
+        mode="before",
+    )
+    @classmethod
+    def normalize_nullable_collections(cls, value: Any) -> Any:
+        """Treat Go nil slices like omitted optional event collections."""
+
+        return [] if value is None else value
 
 
 class Evidence(BaseModel):

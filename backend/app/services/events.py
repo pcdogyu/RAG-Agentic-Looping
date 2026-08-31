@@ -28,12 +28,12 @@ from backend.app.providers.registry import (
 from backend.app.services.confidence_v3 import event_horizon_days
 from backend.app.services.source_lineage import enrich_news_lineage, normalize_text, source_group
 from backend.app.storage import (
+    ensure_asset,
     event_news_item_ids,
     get_news_by_content_hash,
     list_events,
     save_event,
     save_news,
-    upsert_asset,
 )
 
 
@@ -110,7 +110,7 @@ class EventService:
                 continue
             event = self.extract(item)
             for candidate in event.candidates:
-                upsert_asset(db, candidate.asset)
+                candidate.asset = ensure_asset(db, candidate.asset)
             existing = next(
                 (candidate for candidate in cluster_pool if self._same_story(candidate, event)),
                 None,
