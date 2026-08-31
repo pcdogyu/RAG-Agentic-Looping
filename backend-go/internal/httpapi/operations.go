@@ -21,6 +21,7 @@ const (
 	scanStatusKey              = "market-loop:scan:status"
 	newsExtractionQueueKey     = "market-loop:scan:news-extraction-queue"
 	modelQueueOverviewCacheKey = "market-loop:model-queue-overview:snapshot:v3"
+	modelQueueSnapshotMaxAge   = 30 * time.Second
 )
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
@@ -501,11 +502,12 @@ func (s *Server) modelQueueOverview(w http.ResponseWriter, r *http.Request) {
 	}
 	if raw, err := s.redis.Get(r.Context(), modelQueueOverviewCacheKey).Bytes(); err == nil {
 		var payload map[string]any
-		if json.Unmarshal(raw, &payload) == nil {
+		if json.Unmarshal(raw, &payload) == nil && modelQueueSnapshotFresh(payload, time.Now()) {
 			truncateQueueSnapshot(payload, limit)
 			writeJSON(w, http.StatusOK, payload)
 			return
 		}
+		_ = s.redis.Del(r.Context(), modelQueueOverviewCacheKey).Err()
 	}
 	queues := make([]map[string]any, 0, 4)
 	for _, spec := range []struct {
@@ -527,6 +529,15 @@ func (s *Server) modelQueueOverview(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"generated_at": time.Now().UTC(), "queues": queues})
+}
+
+func modelQueueSnapshotFresh(payload map[string]any, now time.Time) bool {
+	generatedAt := parseAnyTime(payload["generated_at"])
+	if generatedAt == nil {
+		return false
+	}
+	age := now.Sub(*generatedAt)
+	return age >= -modelQueueSnapshotMaxAge && age <= modelQueueSnapshotMaxAge
 }
 
 func truncateQueueSnapshot(payload map[string]any, limit int) {

@@ -6,7 +6,7 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
-from threading import Condition, Lock, Thread
+from threading import Condition, Event, Lock, Thread, current_thread
 from time import monotonic
 from typing import Literal
 from uuid import UUID, uuid4
@@ -133,6 +133,8 @@ _model_queue_snapshot: tuple[float, ModelQueueOverviewResponse] | None = None
 _model_queue_refreshing = False
 _model_queue_snapshot_lock = Lock()
 _model_queue_snapshot_ready = Condition(_model_queue_snapshot_lock)
+_model_queue_snapshot_stop = Event()
+_model_queue_snapshot_thread: Thread | None = None
 _failed_research_retry_lock = Lock()
 
 
@@ -188,6 +190,21 @@ def _refresh_model_queue_snapshot_in_background() -> None:
         _refresh_model_queue_snapshot()
     except Exception:
         logger.exception("model queue snapshot refresh failed")
+
+
+def _refresh_model_queue_snapshot_periodically(stop_event: Event) -> None:
+    """Keep the Redis snapshot fresh for API consumers that do not hit FastAPI."""
+
+    global _model_queue_refreshing
+    while not stop_event.is_set():
+        with _model_queue_snapshot_ready:
+            should_refresh = not _model_queue_refreshing
+            if should_refresh:
+                _model_queue_refreshing = True
+        if should_refresh:
+            _refresh_model_queue_snapshot_in_background()
+        if stop_event.wait(MODEL_QUEUE_SNAPSHOT_TTL_SECONDS):
+            break
 
 
 def _cached_model_queue_snapshot() -> ModelQueueOverviewResponse:
@@ -258,16 +275,32 @@ def _load_persisted_model_queue_snapshot() -> None:
 
 
 def _start_model_queue_snapshot_refresh() -> None:
-    global _model_queue_refreshing
+    global _model_queue_snapshot_thread
     with _model_queue_snapshot_lock:
-        if _model_queue_refreshing:
+        if (
+            _model_queue_snapshot_thread is not None
+            and _model_queue_snapshot_thread.is_alive()
+        ):
             return
-        _model_queue_refreshing = True
-    Thread(
-        target=_refresh_model_queue_snapshot_in_background,
-        name="model-queue-snapshot",
-        daemon=True,
-    ).start()
+        _model_queue_snapshot_stop.clear()
+        _model_queue_snapshot_thread = Thread(
+            target=_refresh_model_queue_snapshot_periodically,
+            args=(_model_queue_snapshot_stop,),
+            name="model-queue-snapshot",
+            daemon=True,
+        )
+        thread = _model_queue_snapshot_thread
+    thread.start()
+
+
+def _stop_model_queue_snapshot_refresh() -> None:
+    global _model_queue_snapshot_thread
+    with _model_queue_snapshot_lock:
+        _model_queue_snapshot_stop.set()
+        thread = _model_queue_snapshot_thread
+        _model_queue_snapshot_thread = None
+    if thread is not None and thread is not current_thread():
+        thread.join(timeout=1)
 
 
 def _provider_registry(db: Session | None = None) -> ProviderRegistry:
@@ -279,6 +312,7 @@ def _provider_registry(db: Session | None = None) -> ProviderRegistry:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _stop_model_queue_snapshot_refresh()
     _reset_model_queue_snapshot()
     init_db()
     with SessionLocal() as db:
@@ -294,6 +328,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        _stop_model_queue_snapshot_refresh()
         _reset_model_queue_snapshot()
 
 
