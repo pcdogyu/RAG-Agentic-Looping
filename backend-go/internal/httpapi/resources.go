@@ -84,6 +84,9 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 }
 
 func normalizeEvent(event map[string]any) {
+	if _, ok := event["industry_ids"]; !ok {
+		event["industry_ids"] = []any{}
+	}
 	for _, raw := range anySlice(event["candidates"]) {
 		candidate, _ := raw.(map[string]any)
 		asset, _ := candidate["asset"].(map[string]any)

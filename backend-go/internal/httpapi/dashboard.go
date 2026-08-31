@@ -337,6 +337,9 @@ func (s *Server) buildAnalysisLogs(r *http.Request, limit int) ([]map[string]any
 		if json.Unmarshal(body, &event) != nil || seen[stringValue(event["id"])] {
 			continue
 		}
+		if latest := eventUpdatedAt(event); latest != nil {
+			stamp = *latest
+		}
 		entries = append(entries, analysisEntry{stamp.UTC(), s.analysisEntry(r, event, nil, false)})
 	}
 	rows.Close()
@@ -408,7 +411,7 @@ func (s *Server) analysisEntry(r *http.Request, event, run map[string]any, event
 	}
 	updated := valueFrom(run, "updated_at")
 	if updated == nil {
-		updated = valueFrom(event, "observed_at")
+		updated = eventUpdatedAt(event)
 	}
 	if stamp := parseAnyTime(updated); stamp != nil {
 		updated = iso(*stamp)
@@ -418,6 +421,18 @@ func (s *Server) analysisEntry(r *http.Request, event, run map[string]any, event
 		eventSummary = map[string]any{"id": event["id"], "headline": event["headline"], "event_type": event["event_type"], "direct_impact": event["direct_impact"], "actions": defaultAny(event["actions"], []any{}), "priority": event["priority"]}
 	}
 	return map[string]any{"id": fmt.Sprint(id), "event_id": valueFrom(event, "id"), "run_id": runID, "event_research_run_id": eventRunID, "status": status, "updated_at": updated, "news": news, "event": eventSummary, "asset": asset, "models": models, "steps": steps, "result": result}
+}
+
+func eventUpdatedAt(event map[string]any) *time.Time {
+	latest := parseAnyTime(valueFrom(event, "observed_at"))
+	for _, raw := range anySlice(valueFrom(event, "analysis_steps")) {
+		step, _ := raw.(map[string]any)
+		stamp := parseAnyTime(step["occurred_at"])
+		if stamp != nil && (latest == nil || stamp.After(*latest)) {
+			latest = stamp
+		}
+	}
+	return latest
 }
 
 func (s *Server) payloadByID(r *http.Request, table, id string) (map[string]any, error) {

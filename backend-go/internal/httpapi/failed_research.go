@@ -15,7 +15,7 @@ func (s *Server) failedResearchRuns(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(r.Context(), `
 		WITH runs AS MATERIALIZED (
 			SELECT rr.id,rr.event_id,rr.status,rr.payload::jsonb,rr.created_at,rr.updated_at,
-			       nullif(rr.payload->>'retry_of_run_id','')::uuid AS retry_of_run_id,
+			       nullif(rr.payload->>'retry_of_run_id','') AS retry_of_run_id,
 			       nullif(rr.payload->>'retryable_reason','') AS retryable_reason
 			FROM research_runs rr
 		), recommendation_runs AS MATERIALIZED (

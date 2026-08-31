@@ -78,6 +78,9 @@ func TestNormalizeEventRestoresLegacyAssetDefaults(t *testing.T) {
 			t.Fatalf("asset default %s is missing", key)
 		}
 	}
+	if industries, ok := event["industry_ids"].([]any); !ok || industries == nil || len(industries) != 0 {
+		t.Fatalf("industry_ids must be a non-nil empty list, got %#v", event["industry_ids"])
+	}
 }
 
 func TestNormalizeNewsExtractionItemMatchesPythonResponseModel(t *testing.T) {
@@ -118,5 +121,19 @@ func TestCNNewsDefaultsEncodeEmptyLists(t *testing.T) {
 		if !ok || items == nil || len(items) != 0 {
 			t.Fatalf("%s must be a non-nil empty list, got %#v", key, value[key])
 		}
+	}
+}
+
+func TestEventUpdatedAtUsesLatestAnalysisStep(t *testing.T) {
+	event := map[string]any{
+		"observed_at": "2026-08-31T01:00:00Z",
+		"analysis_steps": []any{
+			map[string]any{"occurred_at": "2026-08-31T01:05:00Z"},
+			map[string]any{"occurred_at": "2026-08-31T01:03:00Z"},
+		},
+	}
+	got := eventUpdatedAt(event)
+	if got == nil || !got.Equal(time.Date(2026, 8, 31, 1, 5, 0, 0, time.UTC)) {
+		t.Fatalf("unexpected latest event timestamp: %v", got)
 	}
 }
