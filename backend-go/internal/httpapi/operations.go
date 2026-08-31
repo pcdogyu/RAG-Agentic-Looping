@@ -214,7 +214,7 @@ func (s *Server) newsExtractionQueue(w http.ResponseWriter, r *http.Request) {
 		if active := durationUntil(item["attempt_started_at"], now); active != nil {
 			executionDuration += *active
 		}
-		copy := cloneMap(item)
+		copy := normalizeNewsExtractionItem(item)
 		copy["queue_duration_ms"] = queueDuration
 		if item["started_at"] == nil && executionDuration == 0 {
 			copy["execution_duration_ms"] = nil
@@ -340,16 +340,7 @@ func (s *Server) researchQueue(w http.ResponseWriter, r *http.Request) {
 	for _, item := range grouped {
 		items = append(items, item)
 	}
-	sort.Slice(items, func(i, j int) bool {
-		li, lj := stringValue(items[i]["status"]), stringValue(items[j]["status"])
-		if li == "queued" && lj != "queued" {
-			return true
-		}
-		if li != "queued" && lj == "queued" {
-			return false
-		}
-		return fmt.Sprint(items[i]["updated_at"]) > fmt.Sprint(items[j]["updated_at"])
-	})
+	sortResearchQueueItems(items, priority)
 	truncated := len(items) > limit
 	if truncated {
 		items = items[:limit]
@@ -359,6 +350,36 @@ func (s *Server) researchQueue(w http.ResponseWriter, r *http.Request) {
 		"counts": counts, "average_queue_duration_ms": averageInt64(queueDurations), "average_execution_duration_ms": averageInt64(executionDurations),
 		"queue_duration_sample_count": len(queueDurations), "execution_duration_sample_count": len(executionDurations),
 		"truncated": truncated, "items": items,
+	})
+}
+
+func normalizeNewsExtractionItem(item map[string]any) map[string]any {
+	result := cloneMap(item)
+	delete(result, "instance_id")
+	for _, key := range []string{"published_at", "queued_at", "started_at", "completed_at", "updated_at"} {
+		if stamp := parseAnyTime(result[key]); stamp != nil {
+			result[key] = jsonTime(*stamp)
+		}
+	}
+	return result
+}
+
+func sortResearchQueueItems(items []map[string]any, priority map[string]int) {
+	sort.Slice(items, func(i, j int) bool {
+		li, lj := stringValue(items[i]["status"]), stringValue(items[j]["status"])
+		if li == "queued" && lj != "queued" {
+			return true
+		}
+		if li != "queued" && lj == "queued" {
+			return false
+		}
+		if li == "queued" && lj == "queued" {
+			return fmt.Sprint(items[i]["queued_at"]) < fmt.Sprint(items[j]["queued_at"])
+		}
+		if priority[li] != priority[lj] {
+			return priority[li] > priority[lj]
+		}
+		return fmt.Sprint(items[i]["updated_at"]) > fmt.Sprint(items[j]["updated_at"])
 	})
 }
 

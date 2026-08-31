@@ -172,6 +172,8 @@ services:
       ML_ADAPTER_URL: http://ml-adapter:8092
     ports:
       - "8081:8081"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       api:
         condition: service_started

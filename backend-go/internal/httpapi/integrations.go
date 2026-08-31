@@ -270,7 +270,7 @@ func (s *Server) defaultFactGroupConfig(groupID string) map[string]any {
 	case "sec":
 		return map[string]any{"identity": s.cfg.SECIdentity}
 	case "cn_news":
-		return map[string]any{"akshare_asset_master_enabled": s.cfg.AkshareEnabled, "akshare_ipv4_only": s.cfg.AkshareIPv4Only, "rss_feed_urls": s.cfg.RSSFeeds, "official_rss_feed_urls": s.cfg.OfficialRSSFeeds}
+		return map[string]any{"akshare_asset_master_enabled": s.cfg.AkshareEnabled, "akshare_ipv4_only": s.cfg.AkshareIPv4Only, "rss_feed_urls": append([]string{}, s.cfg.RSSFeeds...), "official_rss_feed_urls": append([]string{}, s.cfg.OfficialRSSFeeds...)}
 	case "crypto":
 		return map[string]any{"coingecko_base_url": s.cfg.CoinGeckoURL, "defillama_base_url": s.cfg.DefiLlamaURL, "ccxt_exchange": "kraken"}
 	case "search":

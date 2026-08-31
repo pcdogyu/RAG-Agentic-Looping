@@ -57,7 +57,7 @@ const mcpSelect = `SELECT s.id,s.name,s.url,s.description,s.priority,s.enabled,s
 	coalesce(g.payload->>'group_id','') FROM mcp_sources s LEFT JOIN integration_settings g ON g.key='mcp-source-group:'||s.id`
 
 func (s *Server) loadMCPSources(ctx context.Context) ([]map[string]any, error) {
-	rows, err := s.db.Query(ctx, mcpSelect+` ORDER BY s.priority DESC`)
+	rows, err := s.db.Query(ctx, mcpSelect+` ORDER BY s.priority DESC,s.created_at DESC,s.id DESC`)
 	if err != nil {
 		return nil, err
 	}
