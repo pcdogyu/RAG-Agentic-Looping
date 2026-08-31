@@ -86,9 +86,16 @@ func TestMergeConcreteTargetChangesPreservesInputOrderForExactTies(t *testing.T)
 }
 
 func TestNormalizeEventRestoresLegacyAssetDefaults(t *testing.T) {
-	event := map[string]any{"candidates": []any{map[string]any{"asset": map[string]any{
-		"asset_id": "equity:NASDAQ:TEST", "symbol": "TEST",
-	}}}}
+	event := map[string]any{
+		"actions":      nil,
+		"published_at": "2026-08-31T01:16:10.031826987Z",
+		"candidates": []any{map[string]any{"asset": map[string]any{
+			"asset_id": "equity:NASDAQ:TEST", "symbol": "TEST",
+		}}},
+		"analysis_steps": []any{map[string]any{
+			"occurred_at": "2026-08-31T01:21:06.032377654Z",
+		}},
+	}
 	normalizeEvent(event)
 	asset := event["candidates"].([]any)[0].(map[string]any)["asset"].(map[string]any)
 	for _, key := range []string{"sector_id", "industry_id", "raw_sector", "raw_industry", "instrument_type", "market_cap", "market_cap_rank", "last_synced_at"} {
@@ -98,6 +105,16 @@ func TestNormalizeEventRestoresLegacyAssetDefaults(t *testing.T) {
 	}
 	if industries, ok := event["industry_ids"].([]any); !ok || industries == nil || len(industries) != 0 {
 		t.Fatalf("industry_ids must be a non-nil empty list, got %#v", event["industry_ids"])
+	}
+	if actions, ok := event["actions"].([]any); !ok || actions == nil || len(actions) != 0 {
+		t.Fatalf("actions must be a non-nil empty list, got %#v", event["actions"])
+	}
+	if event["published_at"] != "2026-08-31T01:16:10.031826Z" {
+		t.Fatalf("event timestamp was not normalized: %#v", event["published_at"])
+	}
+	step := event["analysis_steps"].([]any)[0].(map[string]any)
+	if step["occurred_at"] != "2026-08-31T01:21:06.032377Z" {
+		t.Fatalf("analysis timestamp was not normalized: %#v", step["occurred_at"])
 	}
 }
 

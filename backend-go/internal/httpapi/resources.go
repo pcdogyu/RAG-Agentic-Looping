@@ -84,13 +84,26 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 }
 
 func normalizeEvent(event map[string]any) {
-	if _, ok := event["industry_ids"]; !ok {
-		event["industry_ids"] = []any{}
+	for _, key := range []string{"entities", "actions", "candidates", "industry_ids", "analysis_steps"} {
+		if event[key] == nil {
+			event[key] = []any{}
+		}
+	}
+	for _, key := range []string{"published_at", "observed_at", "as_of"} {
+		if stamp := parseAnyTime(event[key]); stamp != nil {
+			event[key] = jsonTime(*stamp)
+		}
 	}
 	for _, raw := range anySlice(event["candidates"]) {
 		candidate, _ := raw.(map[string]any)
 		asset, _ := candidate["asset"].(map[string]any)
 		normalizeAsset(asset)
+	}
+	for _, raw := range anySlice(event["analysis_steps"]) {
+		step, _ := raw.(map[string]any)
+		if stamp := parseAnyTime(step["occurred_at"]); stamp != nil {
+			step["occurred_at"] = jsonTime(*stamp)
+		}
 	}
 }
 
