@@ -902,12 +902,13 @@ func (runtime *ExtractRuntime) enqueueMapping(ctx context.Context, event map[str
 	}
 	taskID := uuid.NewString()
 	instanceID := runtime.selectDownstreamInstance(ctx, "assist", len(runtime.cfg.AssistURLs))
-	step := analysisStep("asset_mapping_queue", "queued", "celery", fmt.Sprintf("确定性映射未找到标的，已创建 %s 二次标的发现任务。", runtime.cfg.AssistModel), map[string]any{"instance_id": instanceID})
+	useGoWorker := completedWorkerLane(runtime.cfg, "mapping")
+	executor := ternary(useGoWorker, "go-worker", "celery")
+	step := analysisStep("asset_mapping_queue", "queued", executor, fmt.Sprintf("确定性映射未找到标的，已创建 %s 二次标的发现任务。", runtime.cfg.AssistModel), map[string]any{"instance_id": instanceID})
 	replaceAnalysisStep(event, step)
 	if err := runtime.saveEvent(ctx, event); err != nil {
 		return false, err
 	}
-	runtime.recordModelTask(ctx, "assist", taskID, "asset_mapping", stringValue(event["id"]), stringValue(event["headline"]), stringValue(event["event_type"]), ternary(force, "manual", "automatic"), instanceID)
 	kwargs := map[string]any{"model_instance_id": instanceID}
 	if force {
 		kwargs["force_mapping"] = true
@@ -918,7 +919,21 @@ func (runtime *ExtractRuntime) enqueueMapping(ctx context.Context, event map[str
 	if forceWebSearch {
 		kwargs["force_web_search"] = true
 	}
-	if err := publishCelery(ctx, runtime.redis, "market_loop.resolve_event_assets", "mapping."+instanceID, taskID, []any{stringValue(event["id"])}, kwargs, 5); err != nil {
+	var err error
+	if useGoWorker {
+		var queuedID uuid.UUID
+		queuedID, err = NewStore(runtime.db).Enqueue(ctx, EnqueueParams{
+			ID: uuid.MustParse(taskID), Queue: "assist", TaskType: mappingTask,
+			Payload:  taskEnvelope{Args: []any{stringValue(event["id"])}, Kwargs: kwargs},
+			Priority: 5, MaxAttempts: 3, DedupeKey: "mapping:" + stringValue(event["id"]),
+		})
+		if err == nil {
+			taskID = queuedID.String()
+		}
+	} else {
+		err = publishCelery(ctx, runtime.redis, mappingTask, "mapping."+instanceID, taskID, []any{stringValue(event["id"])}, kwargs, 5)
+	}
+	if err != nil {
 		step["status"] = "failed"
 		step["summary"] = fmt.Sprintf("%s 标的发现任务入队失败。", runtime.cfg.AssistModel)
 		replaceAnalysisStep(event, step)
@@ -926,7 +941,17 @@ func (runtime *ExtractRuntime) enqueueMapping(ctx context.Context, event map[str
 		runtime.updateLaneModelTask(ctx, "assist", taskID, "failed", 1, err.Error())
 		return false, err
 	}
+	runtime.recordModelTask(ctx, "assist", taskID, "asset_mapping", stringValue(event["id"]), stringValue(event["headline"]), stringValue(event["event_type"]), ternary(force, "manual", "automatic"), instanceID)
 	return true, nil
+}
+
+func completedWorkerLane(cfg config.Config, lane string) bool {
+	for _, value := range cfg.WorkerCompletedLanes {
+		if strings.TrimSpace(value) == lane {
+			return true
+		}
+	}
+	return false
 }
 
 func (runtime *ExtractRuntime) enqueueEventResearch(ctx context.Context, event map[string]any) (bool, error) {

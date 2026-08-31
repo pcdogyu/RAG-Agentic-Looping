@@ -193,7 +193,7 @@ services:
     env_file: .env
     environment:
       APP_ENV: development
-      GO_WORKER_LANE: ${GO_WORKER_LANE:-}
+      GO_WORKER_LANE: extract
       GO_WORKER_COMPLETED_LANES: ${GO_WORKER_COMPLETED_LANES:-}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       MARKET_ADAPTER_URL: http://market-adapter:8091
@@ -207,6 +207,34 @@ services:
       OLLAMA_TIMEOUT_SECONDS: ${OLLAMA_TIMEOUT_SECONDS:-300}
       AUTO_RESEARCH: ${AUTO_RESEARCH:-true}
       EVENT_CLUSTER_WINDOW_HOURS: ${EVENT_CLUSTER_WINDOW_HOURS:-72}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  go-mapping-worker:
+    profiles: ["go-shadow"]
+    build:
+      context: .
+      dockerfile: backend-go/Dockerfile
+    entrypoint: ["/usr/local/bin/worker"]
+    env_file: .env
+    environment:
+      APP_ENV: development
+      GO_WORKER_LANE: mapping
+      GO_WORKER_COMPLETED_LANES: ${GO_WORKER_COMPLETED_LANES:-}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      OLLAMA_ASSIST_BASE_URLS: ${OLLAMA_ASSIST_BASE_URLS:-}
+      OLLAMA_ASSIST_BASE_URL: ${OLLAMA_ASSIST_BASE_URL:-http://host.docker.internal:11437}
+      OLLAMA_ASSIST_MODEL: ${OLLAMA_ASSIST_MODEL:-qwen2.5:7b}
+      OLLAMA_ASSIST_NUM_THREADS: ${OLLAMA_ASSIST_NUM_THREADS:-8}
+      OLLAMA_ASSET_MAPPING_CONTEXT_LENGTH: ${OLLAMA_ASSET_MAPPING_CONTEXT_LENGTH:-8192}
+      OLLAMA_ASSET_MAPPING_MAX_OUTPUT_TOKENS: ${OLLAMA_ASSET_MAPPING_MAX_OUTPUT_TOKENS:-1024}
+      OLLAMA_TIMEOUT_SECONDS: ${OLLAMA_TIMEOUT_SECONDS:-300}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:

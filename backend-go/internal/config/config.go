@@ -35,6 +35,9 @@ type Config struct {
 	OllamaContextLength  int
 	OllamaMaxOutput      int
 	OllamaExtractThreads int
+	OllamaAssistThreads  int
+	MappingContextLength int
+	MappingMaxOutput     int
 	OllamaKeepAlive      string
 	EventClusterWindow   time.Duration
 	AutoResearch         bool
@@ -92,6 +95,9 @@ func Load() (Config, error) {
 		OllamaContextLength:  envInt("OLLAMA_CONTEXT_LENGTH", 8192),
 		OllamaMaxOutput:      envInt("OLLAMA_MAX_OUTPUT_TOKENS", 4096),
 		OllamaExtractThreads: envInt("OLLAMA_EXTRACT_NUM_THREADS", 4),
+		OllamaAssistThreads:  envInt("OLLAMA_ASSIST_NUM_THREADS", 8),
+		MappingContextLength: envInt("OLLAMA_ASSET_MAPPING_CONTEXT_LENGTH", 8192),
+		MappingMaxOutput:     envInt("OLLAMA_ASSET_MAPPING_MAX_OUTPUT_TOKENS", 1024),
 		OllamaKeepAlive:      env("OLLAMA_KEEP_ALIVE", "0"),
 		EventClusterWindow:   time.Duration(envInt("EVENT_CLUSTER_WINDOW_HOURS", 72)) * time.Hour,
 		AutoResearch:         envBool("AUTO_RESEARCH", true),

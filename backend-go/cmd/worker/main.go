@@ -29,6 +29,8 @@ func main() {
 	handlerManifest := map[string]jobs.Handler{}
 	if lane.ID == "extract" {
 		handlerManifest = jobs.NewExtractHandlers(cfg, nil, nil)
+	} else if lane.ID == "mapping" {
+		handlerManifest = jobs.NewMappingHandlers(cfg, nil, nil)
 	}
 	if err := jobs.ValidateLaneHandlers(lane, handlerManifest); err != nil {
 		slog.Error("batch 4 handler gate", "error", err)
@@ -47,6 +49,8 @@ func main() {
 	handlers := handlerManifest
 	if lane.ID == "extract" {
 		handlers = jobs.NewExtractHandlers(cfg, dependencies.DB, dependencies.Redis)
+	} else if lane.ID == "mapping" {
+		handlers = jobs.NewMappingHandlers(cfg, dependencies.DB, dependencies.Redis)
 	}
 	worker := &jobs.Worker{Store: jobs.NewStore(dependencies.DB), ID: cfg.WorkerID, Queues: []string{lane.GoQueue},
 		Lease: cfg.LeaseDuration, PollInterval: cfg.PollInterval, Handlers: handlers}

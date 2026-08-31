@@ -282,9 +282,18 @@ def _go_extract_worker_enabled() -> bool:
     }
 
 
-def _enqueue_go_extract_job(
+def _go_mapping_worker_enabled() -> bool:
+    return "mapping" in {
+        value.strip()
+        for value in settings.go_worker_completed_lanes.split(",")
+        if value.strip()
+    }
+
+
+def _enqueue_go_model_job(
     db,
     *,
+    queue: str,
     task_id: str,
     task_type: str,
     args: list[Any],
@@ -292,7 +301,7 @@ def _enqueue_go_extract_job(
     priority: int = DEFAULT_MODEL_TASK_PRIORITY,
     dedupe_key: str | None = None,
 ) -> str:
-    """Publish one extract task to the durable Go queue during lane cutover."""
+    """Publish one model task to the durable Go queue during lane cutover."""
 
     payload = json.dumps(
         {"args": args, "kwargs": kwargs or {}},
@@ -306,7 +315,7 @@ def _enqueue_go_extract_job(
                 id,queue,task_type,payload,status,priority,max_attempts,
                 available_at,dedupe_key,created_at,updated_at
             ) VALUES(
-                :id,'extract',:task_type,CAST(:payload AS jsonb),'queued',
+                :id,:queue,:task_type,CAST(:payload AS jsonb),'queued',
                 :priority,3,now(),:dedupe_key,now(),now()
             )
             ON CONFLICT DO NOTHING
@@ -315,6 +324,7 @@ def _enqueue_go_extract_job(
         ),
         {
             "id": task_id,
+            "queue": queue,
             "task_type": task_type,
             "payload": payload,
             "priority": priority,
@@ -327,19 +337,23 @@ def _enqueue_go_extract_job(
                 """
                 SELECT id FROM go_jobs
                 WHERE id=:id OR (
-                    queue='extract' AND dedupe_key=:dedupe_key
+                    queue=:queue AND dedupe_key=:dedupe_key
                     AND status IN ('queued','running','retrying')
                 )
                 ORDER BY CASE WHEN id=:id THEN 0 ELSE 1 END
                 LIMIT 1
                 """
             ),
-            {"id": task_id, "dedupe_key": dedupe_key},
+            {"id": task_id, "queue": queue, "dedupe_key": dedupe_key},
         ).scalar_one_or_none()
     if queued_id is None:
-        raise RuntimeError("Go extract job could not be inserted")
+        raise RuntimeError(f"Go {queue} job could not be inserted")
     db.commit()
     return str(queued_id)
+
+
+def _enqueue_go_extract_job(db, **kwargs) -> str:
+    return _enqueue_go_model_job(db, queue="extract", **kwargs)
 
 
 class ScanLeaseLost(RuntimeError):
@@ -1737,6 +1751,7 @@ def enqueue_asset_mapping(
     ):
         return None
     task_id = str(uuid4())
+    use_go_worker = _go_mapping_worker_enabled()
     instance = select_model_instance(
         "assist",
         task_id=task_id,
@@ -1749,7 +1764,7 @@ def enqueue_asset_mapping(
         AnalysisStep(
             phase="asset_mapping_queue",
             status="queued",
-            executor="celery",
+            executor="go-worker" if use_go_worker else "celery",
             model=settings.ollama_assist_model,
             summary=(
                 f"确定性映射未找到标的，已创建 {settings.ollama_assist_model} 二次标的发现任务。"
@@ -1769,18 +1784,32 @@ def enqueue_asset_mapping(
         instance_id=instance.id,
     )
     try:
-        task = resolve_event_assets.apply_async(
-            args=[str(event.id)],
-            kwargs={
-                "model_instance_id": instance.id,
-                **({"force_mapping": True} if force else {}),
-                **({"refresh_event_report": True} if refresh_event_report else {}),
-                **({"force_web_search": True} if force_web_search else {}),
-            },
-            queue=broker_queue_name("assist", instance.id),
-            task_id=task_id,
-            **({"priority": priority} if priority is not None else {}),
-        )
+        task_kwargs = {
+            "model_instance_id": instance.id,
+            **({"force_mapping": True} if force else {}),
+            **({"refresh_event_report": True} if refresh_event_report else {}),
+            **({"force_web_search": True} if force_web_search else {}),
+        }
+        if use_go_worker:
+            queued_id = _enqueue_go_model_job(
+                db,
+                queue="assist",
+                task_id=task_id,
+                task_type="market_loop.resolve_event_assets",
+                args=[str(event.id)],
+                kwargs=task_kwargs,
+                priority=(priority if priority is not None else DEFAULT_MODEL_TASK_PRIORITY),
+                dedupe_key=f"mapping:{event.id}",
+            )
+        else:
+            task = resolve_event_assets.apply_async(
+                args=[str(event.id)],
+                kwargs=task_kwargs,
+                queue=broker_queue_name("assist", instance.id),
+                task_id=task_id,
+                **({"priority": priority} if priority is not None else {}),
+            )
+            queued_id = str(task.id)
     except Exception as exc:
         update_model_task(
             "assist",
@@ -1793,7 +1822,7 @@ def enqueue_asset_mapping(
             AnalysisStep(
                 phase="asset_mapping_queue",
                 status="failed",
-                executor="celery",
+                executor="go-worker" if use_go_worker else "celery",
                 model=settings.ollama_assist_model,
                 summary=(
                     f"{settings.ollama_assist_model} 标的发现任务入队失败（{type(exc).__name__}）。"
@@ -1802,7 +1831,7 @@ def enqueue_asset_mapping(
         )
         save_event(db, event)
         raise
-    return str(task.id)
+    return queued_id
 
 
 def _asset_mapping_is_terminal(event: NewsEvent) -> bool:

@@ -23,6 +23,13 @@ func TestBatchFourMigrationOrderAndLaneMappings(t *testing.T) {
 	}
 }
 
+func TestCompletedMappingAdvancesToResearch(t *testing.T) {
+	status := BatchFourMigrationStatus([]string{"extract", "mapping"})
+	if status.NextLane != "research" || status.Lanes[1].Status != "completed" {
+		t.Fatalf("unexpected post-mapping status: %+v", status)
+	}
+}
+
 func TestBatchFourRejectsSkippedLaneActivation(t *testing.T) {
 	if _, err := ValidateBatchFourActivation("research", []string{"extract"}); err == nil || !strings.Contains(err.Error(), "next lane is mapping") {
 		t.Fatalf("expected an out-of-order activation error, got %v", err)

@@ -91,8 +91,8 @@ The lane task boundary is:
 ### Extract lane cutover
 
 The extract lane has native handlers for all four registered task types. During
-cutover, set both `GO_WORKER_LANE=extract` and
-`GO_WORKER_COMPLETED_LANES=extract`, start `go-worker`, and stop only the Python
+cutover, set `GO_WORKER_COMPLETED_LANES=extract`, start `go-worker` (the Compose
+service pins this worker to the extract lane), and stop only the Python
 `extract-worker` after its Celery queues have drained. Python IO discovery keeps
 the transactional news outbox, but publishes new extraction jobs to `go_jobs`;
 the Go API does the same for manual news retry and complete event refresh.
@@ -117,3 +117,28 @@ The bridge accepts only `retry_news_item`, verifies every durable
 `news_processing` row, preserves task IDs/priorities, commits every `go_job`
 before moving the Redis list, and keeps the original list under
 `market-loop:archive:extract-cutover:*` for rollback inspection.
+
+### Mapping lane cutover
+
+The mapping lane owns `market_loop.resolve_event_assets` in Go. It preserves
+the 7B structured mapping call, verified product ownership, issuer listing
+expansion, strict source-mention checks, industry representatives, event/model
+audit state, retries, cancellation, and downstream event-research dispatch.
+
+Set `GO_WORKER_COMPLETED_LANES=extract,mapping`, keep `go-worker` running for
+extract, start the independent `go-mapping-worker`, then stop only the Python
+`mapping-worker`. Python and Go extraction publishers will route new mapping
+work to durable `go_jobs(queue=assist)` while research remains on its existing
+instance-specific Celery queues.
+
+For a non-empty legacy mapping queue, freeze publishers and stop the Python
+mapping worker before previewing and applying the bridge:
+
+```text
+python -m backend.app.mapping_queue_cutover
+python -m backend.app.mapping_queue_cutover --apply
+```
+
+The bridge accepts only `resolve_event_assets`, validates every event, keeps
+task IDs, kwargs, and priorities, persists every Go job first, then archives
+the original Redis lists under `market-loop:archive:mapping-cutover:*`.

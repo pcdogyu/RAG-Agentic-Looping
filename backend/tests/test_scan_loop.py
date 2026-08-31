@@ -1543,6 +1543,54 @@ def test_unmapped_event_queues_only_one_visible_7b_mapping_task(db, monkeypatch)
     assert event.analysis_steps[-1].model == "qwen2.5:7b"
 
 
+def test_mapping_publisher_switches_to_durable_go_queue(db, monkeypatch):
+    observed = datetime(2026, 8, 22, 12, 0, tzinfo=UTC)
+    event = NewsEvent(
+        news_item_ids=[],
+        headline="Map this event through Go",
+        event_type="product",
+        direct_impact="A named product changed.",
+        source_quality=SourceQuality.PROFESSIONAL,
+        published_at=observed,
+        observed_at=observed,
+        as_of=observed,
+    )
+    queued = []
+    monkeypatch.setattr(worker, "_go_mapping_worker_enabled", lambda: True)
+    monkeypatch.setattr(worker, "record_model_task", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        worker,
+        "_enqueue_go_model_job",
+        lambda _db, **kwargs: queued.append(kwargs) or kwargs["task_id"],
+    )
+    monkeypatch.setattr(
+        worker.resolve_event_assets,
+        "apply_async",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("cut-over mapping publisher reached Celery")
+        ),
+    )
+
+    task_id = worker.enqueue_asset_mapping(db, event, force=True, priority=1)
+
+    assert task_id is not None
+    assert queued == [
+        {
+            "queue": "assist",
+            "task_id": task_id,
+            "task_type": "market_loop.resolve_event_assets",
+            "args": [str(event.id)],
+            "kwargs": {
+                "model_instance_id": "assist-0",
+                "force_mapping": True,
+            },
+            "priority": 1,
+            "dedupe_key": f"mapping:{event.id}",
+        }
+    ]
+    assert event.analysis_steps[-1].executor == "go-worker"
+
+
 def test_stale_mapping_recovery_is_idempotent_and_requeues_once(db, monkeypatch):
     observed = datetime(2026, 8, 22, 12, 0, tzinfo=UTC)
     event = NewsEvent(
