@@ -1,6 +1,8 @@
 from datetime import timedelta
 from types import SimpleNamespace
 
+import pytest
+
 from backend.app import worker
 from backend.app.domain import EventType, NewsEvent, SourceQuality, utc_now
 from backend.app.storage import save_event
@@ -36,22 +38,20 @@ def test_asset_mapping_backfill_processes_events_in_ten_item_batches(
     )
     monkeypatch.setattr(worker.backfill_asset_mappings, "update_state", lambda **_kwargs: None)
 
-    retries: list[dict] = []
+    continuations: list[dict] = []
+    monkeypatch.setattr(
+        worker.backfill_asset_mappings,
+        "apply_async",
+        lambda **kwargs: continuations.append(kwargs),
+    )
 
-    def retry(**kwargs):
-        retries.append(kwargs)
-        raise RuntimeError("scheduled continuation")
-
-    monkeypatch.setattr(worker.backfill_asset_mappings, "retry", retry)
-
-    try:
+    with pytest.raises(worker.Ignore):
         worker.backfill_asset_mappings.run(days=30)
-    except RuntimeError as exc:
-        assert str(exc) == "scheduled continuation"
 
     assert len(queued) == 10
-    assert retries[0]["countdown"] == 2
-    assert retries[0]["kwargs"]["stats"] == {
+    assert continuations[0]["countdown"] == 2
+    assert continuations[0]["queue"] == "io"
+    assert continuations[0]["kwargs"]["stats"] == {
         "scanned": 10,
         "queued": 10,
         "skipped": 0,
@@ -76,20 +76,18 @@ def test_asset_mapping_backfill_waits_when_mapping_or_research_queue_is_full(
         "update_state",
         lambda **kwargs: states.append(kwargs),
     )
-    retries: list[dict] = []
+    continuations: list[dict] = []
+    monkeypatch.setattr(
+        worker.backfill_asset_mappings,
+        "apply_async",
+        lambda **kwargs: continuations.append(kwargs),
+    )
 
-    def retry(**kwargs):
-        retries.append(kwargs)
-        raise RuntimeError("waiting for capacity")
-
-    monkeypatch.setattr(worker.backfill_asset_mappings, "retry", retry)
-
-    try:
+    with pytest.raises(worker.Ignore):
         worker.backfill_asset_mappings.run(days=30)
-    except RuntimeError as exc:
-        assert str(exc) == "waiting for capacity"
 
     assert states[0]["state"] == "PROGRESS"
     assert states[0]["meta"]["phase"] == "waiting_for_capacity"
     assert states[0]["meta"]["mapping_depth"] == 10
-    assert retries[0]["countdown"] == 60
+    assert continuations[0]["countdown"] == 60
+    assert continuations[0]["queue"] == "io"

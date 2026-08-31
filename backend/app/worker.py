@@ -3799,6 +3799,37 @@ def backfill_asset_mappings(
         else utc_now() - timedelta(days=max(1, min(days, 30)))
     )
     progress = {"scanned": 0, "queued": 0, "skipped": 0, "failed": 0, **(stats or {})}
+
+    def continue_later(
+        *,
+        countdown: int,
+        phase: str,
+        next_cursor_time: str | None = cursor_time,
+        next_cursor_id: str | None = cursor_id,
+        **meta: object,
+    ) -> None:
+        continuation = {
+            "days": days,
+            "cutoff": window_start.isoformat(),
+            "cursor_time": next_cursor_time,
+            "cursor_id": next_cursor_id,
+            "stats": progress,
+        }
+        # Celery retry() replaces the visible PROGRESS payload with RETRY. A
+        # delayed message using the same task id lets the existing task-status
+        # API keep exposing the pause/dispatch progress until the next batch.
+        backfill_asset_mappings.apply_async(
+            kwargs=continuation,
+            queue="io",
+            task_id=str(self.request.id or "asset-backfill-continuation"),
+            countdown=countdown,
+        )
+        self.update_state(
+            state="PROGRESS",
+            meta={**progress, "phase": phase, "days": days, **meta},
+        )
+        raise Ignore()
+
     client = _redis_client()
     mapping_depth = sum(
         item.status in ACTIVE_STATUSES
@@ -3809,24 +3840,11 @@ def backfill_asset_mappings(
         for item in list_model_task_records("research", redis_client=client)
     )
     if mapping_depth >= 10 or research_depth >= 12:
-        self.update_state(
-            state="PROGRESS",
-            meta={
-                **progress,
-                "phase": "waiting_for_capacity",
-                "mapping_depth": mapping_depth,
-                "research_depth": research_depth,
-            },
-        )
-        raise self.retry(
+        continue_later(
             countdown=60,
-            kwargs={
-                "days": days,
-                "cutoff": window_start.isoformat(),
-                "cursor_time": cursor_time,
-                "cursor_id": cursor_id,
-                "stats": progress,
-            },
+            phase="waiting_for_capacity",
+            mapping_depth=mapping_depth,
+            research_depth=research_depth,
         )
 
     with SessionLocal() as db:
@@ -3895,19 +3913,11 @@ def backfill_asset_mappings(
     if len(rows) < 10:
         return {**progress, "status": "completed"}
     last = rows[-1]
-    self.update_state(
-        state="PROGRESS",
-        meta={**progress, "phase": "dispatching", "days": days},
-    )
-    raise self.retry(
+    continue_later(
         countdown=2,
-        kwargs={
-            "days": days,
-            "cutoff": window_start.isoformat(),
-            "cursor_time": as_utc(last.observed_at).isoformat(),
-            "cursor_id": str(last.id),
-            "stats": progress,
-        },
+        phase="dispatching",
+        next_cursor_time=as_utc(last.observed_at).isoformat(),
+        next_cursor_id=str(last.id),
     )
 
 
