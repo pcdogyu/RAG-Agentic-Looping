@@ -21,6 +21,16 @@ func main() {
 		slog.Error("configuration", "error", err)
 		os.Exit(1)
 	}
+	lane, err := jobs.ValidateBatchFourActivation(cfg.WorkerLane, cfg.WorkerCompletedLanes)
+	if err != nil {
+		slog.Error("batch 4 activation", "error", err)
+		os.Exit(1)
+	}
+	handlers := map[string]jobs.Handler{}
+	if err := jobs.ValidateLaneHandlers(lane, handlers); err != nil {
+		slog.Error("batch 4 handler gate", "error", err)
+		os.Exit(1)
+	}
 	dependencies, err := platform.Open(ctx, cfg)
 	if err != nil {
 		slog.Error("open platform", "error", err)
@@ -31,8 +41,8 @@ func main() {
 		slog.Error("migrate", "error", err)
 		os.Exit(1)
 	}
-	worker := &jobs.Worker{Store: jobs.NewStore(dependencies.DB), ID: cfg.WorkerID, Queues: cfg.WorkerQueues,
-		Lease: cfg.LeaseDuration, PollInterval: cfg.PollInterval, Handlers: map[string]jobs.Handler{}}
+	worker := &jobs.Worker{Store: jobs.NewStore(dependencies.DB), ID: cfg.WorkerID, Queues: []string{lane.GoQueue},
+		Lease: cfg.LeaseDuration, PollInterval: cfg.PollInterval, Handlers: handlers}
 	if err := worker.Run(ctx); err != nil && ctx.Err() == nil {
 		slog.Error("worker stopped", "error", err)
 		os.Exit(1)

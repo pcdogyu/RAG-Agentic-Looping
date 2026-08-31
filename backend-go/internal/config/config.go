@@ -16,7 +16,8 @@ type Config struct {
 	AllowLegacyProxy     bool
 	Environment          string
 	WorkerID             string
-	WorkerQueues         []string
+	WorkerLane           string
+	WorkerCompletedLanes []string
 	LeaseDuration        time.Duration
 	PollInterval         time.Duration
 	MarketAdapterURL     string
@@ -62,7 +63,8 @@ func Load() (Config, error) {
 		AllowLegacyProxy:     envBool("GO_ALLOW_LEGACY_PROXY", false),
 		Environment:          env("APP_ENV", "development"),
 		WorkerID:             env("GO_WORKER_ID", hostname()),
-		WorkerQueues:         split(env("GO_WORKER_QUEUES", "io,extract,assist,research,code")),
+		WorkerLane:           env("GO_WORKER_LANE", ""),
+		WorkerCompletedLanes: split(env("GO_WORKER_COMPLETED_LANES", "")),
 		LeaseDuration:        envDuration("GO_JOB_LEASE", 3*time.Minute),
 		PollInterval:         envDuration("GO_JOB_POLL_INTERVAL", time.Second),
 		MarketAdapterURL:     strings.TrimRight(env("MARKET_ADAPTER_URL", "http://market-adapter:8091"), "/"),

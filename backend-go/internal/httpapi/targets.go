@@ -267,18 +267,22 @@ func (s *Server) concreteTargetChanges(r *http.Request) ([]map[string]any, error
 
 func mergeConcreteTargetChanges(groups ...[]map[string]any) []map[string]any {
 	latestByKey := map[string]map[string]any{}
+	keyOrder := make([]string, 0)
 	for _, group := range groups {
 		for _, item := range group {
 			key := stringValue(item["key"])
 			current := latestByKey[key]
-			if current == nil || targetChangeAfter(item, current) {
+			if current == nil {
+				keyOrder = append(keyOrder, key)
+				latestByKey[key] = item
+			} else if targetChangeAfter(item, current) {
 				latestByKey[key] = item
 			}
 		}
 	}
 	result := make([]map[string]any, 0, len(latestByKey))
-	for _, item := range latestByKey {
-		result = append(result, item)
+	for _, key := range keyOrder {
+		result = append(result, latestByKey[key])
 	}
 	sort.SliceStable(result, func(i, j int) bool { return targetChangeAfter(result[i], result[j]) })
 	return result

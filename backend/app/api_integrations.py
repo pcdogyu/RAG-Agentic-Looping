@@ -301,7 +301,13 @@ def _source_payload(row: McpSourceRow, db: Session) -> dict[str, Any]:
 
 @router.get("/api/v1/admin/mcp-sources")
 def list_mcp_sources(db: Db) -> list[dict[str, Any]]:
-    rows = db.scalars(select(McpSourceRow).order_by(desc(McpSourceRow.priority))).all()
+    rows = db.scalars(
+        select(McpSourceRow).order_by(
+            desc(McpSourceRow.priority),
+            desc(McpSourceRow.created_at),
+            desc(McpSourceRow.id),
+        )
+    ).all()
     return [_source_payload(row, db) for row in rows]
 
 

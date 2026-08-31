@@ -78,9 +78,20 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	s.writePayloadRows(w, r, `SELECT payload::jsonb FROM news_events
+	s.writeMappedPayloadRows(w, r, `SELECT payload::jsonb FROM news_events
 		WHERE $2::timestamptz IS NULL OR (observed_at <= $2 AND published_at <= $2)
-		ORDER BY published_at DESC,priority DESC LIMIT $1`, []any{limit, asOf})
+		ORDER BY published_at DESC,priority DESC LIMIT $1`, []any{limit, asOf}, normalizeEvent)
+}
+
+func normalizeEvent(event map[string]any) {
+	if _, ok := event["industry_ids"]; !ok {
+		event["industry_ids"] = []any{}
+	}
+	for _, raw := range anySlice(event["candidates"]) {
+		candidate, _ := raw.(map[string]any)
+		asset, _ := candidate["asset"].(map[string]any)
+		normalizeAsset(asset)
+	}
 }
 
 func (s *Server) researchRuns(w http.ResponseWriter, r *http.Request) {

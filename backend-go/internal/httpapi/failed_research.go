@@ -13,35 +13,38 @@ func (s *Server) failedResearchRuns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := s.db.Query(r.Context(), `
-		WITH asset_originals AS (
+		WITH runs AS MATERIALIZED (
+			SELECT rr.id,rr.event_id,rr.status,rr.payload::jsonb,rr.created_at,rr.updated_at,
+			       nullif(rr.payload->>'retry_of_run_id','') AS retry_of_run_id,
+			       nullif(rr.payload->>'retryable_reason','') AS retryable_reason
+			FROM research_runs rr
+		), recommendation_runs AS MATERIALIZED (
+			SELECT run_id FROM recommendations
+		), retry_rollup AS (
+			SELECT child.retry_of_run_id,count(*)::int AS retry_count,
+			       (array_agg(jsonb_build_object(
+			          'id',child.id,
+			          'status',child.payload->>'status',
+			          'updated_at',child.payload->>'updated_at')
+			          ORDER BY child.created_at DESC))[1] AS latest_retry,
+			       bool_or(child.status IN ('queued','running','verifying')) AS has_active,
+			       bool_or(child.retryable_reason IS NULL AND rec.run_id IS NOT NULL) AS has_recommendation
+			FROM runs child
+			LEFT JOIN recommendation_runs rec ON rec.run_id=child.id
+			WHERE child.retry_of_run_id IS NOT NULL
+			GROUP BY child.retry_of_run_id
+		), asset_originals AS (
 			SELECT rr.id,rr.updated_at,rr.payload::jsonb,e.payload::jsonb AS event_payload,
 			       coalesce(retries.retry_count,0)::int AS retry_count,retries.latest_retry
-			FROM research_runs rr
+			FROM runs rr
 			LEFT JOIN news_events e ON e.id=rr.event_id
-			LEFT JOIN LATERAL (
-				SELECT count(*)::int AS retry_count,
-				       (array_agg(jsonb_build_object('id',child.id,'status',child.status,'updated_at',child.updated_at)
-				          ORDER BY child.updated_at DESC))[1] AS latest_retry
-				FROM research_runs child
-				WHERE child.payload->>'retry_of_run_id'=rr.id
-			) retries ON true
-			WHERE (rr.payload->>'retry_of_run_id') IS NULL
-			  AND (rr.status='failed' OR rr.payload->>'retryable_reason' IS NOT NULL)
-			  AND NOT EXISTS (
-				SELECT 1 FROM recommendations rec WHERE rec.run_id=rr.id
-				  AND rr.payload->>'retryable_reason' IS NULL
-			  )
-			  AND NOT EXISTS (
-				SELECT 1 FROM research_runs child
-				WHERE child.payload->>'retry_of_run_id'=rr.id::text
-				  AND child.status IN ('queued','running','verifying')
-			  )
-			  AND NOT EXISTS (
-				SELECT 1 FROM research_runs child
-				JOIN recommendations rec ON rec.run_id=child.id
-				WHERE child.payload->>'retry_of_run_id'=rr.id
-				  AND child.payload->>'retryable_reason' IS NULL
-			  )
+			LEFT JOIN retry_rollup retries ON retries.retry_of_run_id=rr.id
+			LEFT JOIN recommendation_runs own_rec ON own_rec.run_id=rr.id
+			WHERE rr.retry_of_run_id IS NULL
+			  AND (rr.status='failed' OR rr.retryable_reason IS NOT NULL)
+			  AND NOT (rr.retryable_reason IS NULL AND own_rec.run_id IS NOT NULL)
+			  AND NOT coalesce(retries.has_active,false)
+			  AND NOT coalesce(retries.has_recommendation,false)
 		), event_failures AS (
 			SELECT er.id,er.updated_at,er.payload::jsonb,e.payload::jsonb AS event_payload,
 			       coalesce((er.payload->>'retry_count')::int,0),NULL::jsonb
@@ -82,6 +85,9 @@ func (s *Server) failedResearchRuns(w http.ResponseWriter, r *http.Request) {
 		var asset any
 		if kind == "asset" {
 			asset = payload["asset"]
+			if value, ok := asset.(map[string]any); ok {
+				normalizeAsset(value)
+			}
 		}
 		var eventSummary any
 		if len(event) > 0 {

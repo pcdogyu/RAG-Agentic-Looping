@@ -18,6 +18,11 @@ profile and is not the web upstream.
   Kombu-compatible Celery messages to the existing Python execution workers, so
   the API cutover does not require an unsafe simultaneous worker rewrite. The
   Python API remains the rollback target until the upstream is switched.
+- Batch 4 migrates Python model workers one lane at a time, in the fixed order
+  `extract` -> `mapping` -> `research` -> `evolution`. The aliases are part of
+  the contract: mapping is Python model lane/Go queue `assist`, while evolution
+  is Python model lane/Go queue `code`. `/go/migration-status` exposes the
+  machine-readable lane plan and current next lane.
 
 ## Safety gates
 
@@ -41,3 +46,44 @@ go run ./cmd/contract-diff
 The PostgreSQL-backed job integration test runs when `DATABASE_URL` or
 `TEST_DATABASE_URL` is present. The shadow image normalizes the existing
 SQLAlchemy `postgresql+psycopg://` URL for pgx.
+
+## API cutover and rollback
+
+The Web container reads its API upstream when it starts. The Compose default is
+the production-mode Go API; the Python API remains running as the rollback
+target. Switch either direction without restarting an API or worker:
+
+```text
+./ops/switch-web-api.sh go
+./ops/switch-web-api.sh python
+```
+
+The script recreates only `web`, then requires `/health` to succeed and checks
+the `X-API-Backend` response header. It never starts `go-worker`.
+
+## Batch 4 worker gates
+
+`go-worker` is intentionally fail-closed. It requires one explicit
+`GO_WORKER_LANE`, refuses a lane that skips the fixed order, and will not open a
+database connection until every task handler for that lane is registered. The
+current batch definition therefore cannot consume production work by accident.
+
+Each lane is replaced using the same sequence:
+
+1. Implement every registered task type and golden-test its durable database,
+   Redis state, retries, cancellation, and downstream dispatch against Python.
+2. Replay copied payloads in isolation; then shadow with duplicated input and
+   side effects redirected away from production state.
+3. Drain the Python lane, switch only that publisher/consumer pair to Go, and
+   set `GO_WORKER_COMPLETED_LANES` to the completed prefix.
+4. Verify backlog, failure rate, leases, and output parity before moving to the
+   next lane. Roll back by routing that lane to Celery and restarting only its
+   Python worker.
+
+The lane task boundary is:
+
+- `extract`: news extraction, event re-extraction, news retry, and extraction
+  finalization.
+- `mapping`: event-to-asset resolution.
+- `research`: event research and asset research.
+- `evolution`: outcome evolution, manual evolution, and candidate execution.
