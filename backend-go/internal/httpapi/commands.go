@@ -317,7 +317,7 @@ func (s *Server) enqueueAssetResearch(ctx context.Context, assetID, eventID stri
 		run["retry_of_run_id"] = options.RetryOf
 	}
 	body, _ := json.Marshal(run)
-	_, err = s.db.Exec(ctx, `INSERT INTO research_runs(id,event_id,asset_id,status,payload,created_at,updated_at) VALUES($1,$2::uuid,$3,'queued',$4,$5,$5)`, runID, nullableUUID(eventID), assetID, body, now)
+	_, err = s.db.Exec(ctx, `INSERT INTO research_runs(id,event_id,asset_id,status,payload,created_at,updated_at) VALUES($1,$2,$3,'queued',$4,$5,$5)`, runID, nullableUUID(eventID), assetID, body, now)
 	if err != nil {
 		return queuedResearch{}, err
 	}
@@ -525,7 +525,7 @@ func (s *Server) researchEventConclusionAgain(w http.ResponseWriter, r *http.Req
 	}
 	eventID := stringValue(run["event_id"])
 	var newsCount int
-	if err := s.db.QueryRow(r.Context(), `SELECT count(*)::int FROM news_items WHERE id IN (SELECT jsonb_array_elements_text(payload->'news_item_ids')::uuid FROM news_events WHERE id=$1)`, eventID).Scan(&newsCount); err != nil || newsCount == 0 {
+	if err := s.db.QueryRow(r.Context(), `SELECT count(*)::int FROM news_items WHERE id IN (SELECT jsonb_array_elements_text(payload->'news_item_ids') FROM news_events WHERE id=$1)`, eventID).Scan(&newsCount); err != nil || newsCount == 0 {
 		writeError(w, http.StatusConflict, "该事件没有可用的关联原始新闻，无法执行完整重新研究。")
 		return
 	}
