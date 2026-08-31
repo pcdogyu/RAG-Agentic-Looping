@@ -26,7 +26,8 @@ trap 'rm -f "$headers_file"' EXIT HUP INT TERM
 attempt=1
 while [ "$attempt" -le 30 ]; do
   if curl -fsS -D "$headers_file" -o /dev/null "$health_url" && \
-    grep -Eiq "^X-API-Backend:[[:space:]]*$backend\r?$" "$headers_file"; then
+    tr -d '\r' < "$headers_file" | \
+      grep -Eiq "^X-API-Backend:[[:space:]]*$backend$"; then
     echo "web API backend switched to $backend; $health_url returned success"
     exit 0
   fi
