@@ -164,6 +164,7 @@ services:
       APP_ENV: production
       GO_API_ADDRESS: ":8081"
       GO_ALLOW_LEGACY_PROXY: "false"
+      GO_WORKER_COMPLETED_LANES: ${GO_WORKER_COMPLETED_LANES:-}
       LEGACY_API_URL: http://api:8000
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       OLLAMA_ASSIST_NUM_THREADS: ${OLLAMA_ASSIST_NUM_THREADS:-8}
@@ -192,7 +193,8 @@ services:
     env_file: .env
     environment:
       APP_ENV: development
-      GO_WORKER_QUEUES: io,extract,assist,research,code
+      GO_WORKER_LANE: ${GO_WORKER_LANE:-}
+      GO_WORKER_COMPLETED_LANES: ${GO_WORKER_COMPLETED_LANES:-}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       MARKET_ADAPTER_URL: http://market-adapter:8091
       ML_ADAPTER_URL: http://ml-adapter:8092

@@ -15,6 +15,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/config"
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/jobs"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -68,6 +69,7 @@ func (s *Server) migrationStatus(w http.ResponseWriter, _ *http.Request) {
 		"remaining_operations": totalContractOperations - native,
 		"cutover_ready":        native == totalContractOperations,
 		"native_operation_ids": operationIDs(s.nativeOperations),
+		"worker_migration":     jobs.BatchFourMigrationStatus(s.cfg.WorkerCompletedLanes),
 	})
 }
 

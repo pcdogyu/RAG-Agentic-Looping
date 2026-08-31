@@ -80,6 +80,12 @@ func TestMigrationStatusIsDerivedFromRegisteredRoutes(t *testing.T) {
 		Remaining   int      `json:"remaining_operations"`
 		Ready       bool     `json:"cutover_ready"`
 		OperationID []string `json:"native_operation_ids"`
+		Worker      struct {
+			Batch        int      `json:"batch"`
+			Order        []string `json:"order"`
+			NextLane     string   `json:"next_lane"`
+			CutoverReady bool     `json:"cutover_ready"`
+		} `json:"worker_migration"`
 	}
 	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
 		t.Fatal(err)
@@ -89,6 +95,9 @@ func TestMigrationStatusIsDerivedFromRegisteredRoutes(t *testing.T) {
 	}
 	if len(payload.OperationID) != payload.Native || !sort.StringsAreSorted(payload.OperationID) {
 		t.Fatalf("operation ids are incomplete or unstable")
+	}
+	if payload.Worker.Batch != 4 || payload.Worker.NextLane != "extract" || payload.Worker.CutoverReady || len(payload.Worker.Order) != 4 {
+		t.Fatalf("unexpected worker migration status: %+v", payload.Worker)
 	}
 }
 
