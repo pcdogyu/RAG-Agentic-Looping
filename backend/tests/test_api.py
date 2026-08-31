@@ -91,7 +91,11 @@ def test_asset_universe_api_lists_industries_and_protects_manual_edits():
                 "aliases": ["Apple", "苹果"],
                 "industry_id": "industry:hardware",
                 "active": True,
+                "association_tier": "exact_only",
             },
+        )
+        exact_only = client.get(
+            "/api/v1/asset-universe", params={"association_tier": "exact_only"}
         )
 
     assert assets.status_code == 200
@@ -103,13 +107,21 @@ def test_asset_universe_api_lists_industries_and_protects_manual_edits():
     assert sum(item["asset_count"] for item in us_industries.json()) >= 1
     assert universe_status.status_code == 200
     assert all(
-        {"classified_count", "unclassified_count", "classification_rate"} <= item.keys()
+        {
+            "classified_count",
+            "unclassified_count",
+            "classification_rate",
+            "association_tier_counts",
+        }
+        <= item.keys()
         for item in universe_status.json()["markets"]
     )
     assert unauthorized.status_code == 401
     assert updated.status_code == 200
     assert updated.json()["industry_id"] == "industry:hardware"
     assert updated.json()["aliases"] == ["Apple", "苹果"]
+    assert updated.json()["association_tier"] == "exact_only"
+    assert any(item["asset_id"] == "equity:XNAS:AAPL" for item in exact_only.json()["items"])
 
 
 def test_health_lists_dedicated_assist_and_research_instances(monkeypatch):

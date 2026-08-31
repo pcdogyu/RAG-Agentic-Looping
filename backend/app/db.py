@@ -63,6 +63,16 @@ class AssetRow(Base):
     instrument_type: Mapped[str] = mapped_column(String(40), default="", index=True)
     market_cap: Mapped[float | None] = mapped_column(Float, nullable=True, index=True)
     market_cap_rank: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    association_tier: Mapped[str] = mapped_column(
+        String(30), default="standard", index=True
+    )
+    association_reason: Mapped[str] = mapped_column(String(160), default="provider_verified")
+    provider_association_tier: Mapped[str] = mapped_column(
+        String(30), default="standard"
+    )
+    provider_association_reason: Mapped[str] = mapped_column(
+        String(160), default="provider_verified"
+    )
     last_synced_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True
     )
@@ -70,6 +80,9 @@ class AssetRow(Base):
         String(160), nullable=True, index=True
     )
     manual_active: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    manual_association_tier: Mapped[str | None] = mapped_column(
+        String(30), nullable=True, index=True
+    )
     issuer_id: Mapped[str | None] = mapped_column(String(240), nullable=True)
     primary_listing_asset_id: Mapped[str | None] = mapped_column(
         String(160), nullable=True
@@ -425,9 +438,14 @@ _ASSET_IDENTITY_COLUMNS = {
     "instrument_type": "VARCHAR(40) DEFAULT ''",
     "market_cap": "DOUBLE PRECISION",
     "market_cap_rank": "INTEGER",
+    "association_tier": "VARCHAR(30) DEFAULT 'standard'",
+    "association_reason": "VARCHAR(160) DEFAULT 'provider_verified'",
+    "provider_association_tier": "VARCHAR(30) DEFAULT 'standard'",
+    "provider_association_reason": "VARCHAR(160) DEFAULT 'provider_verified'",
     "last_synced_at": "TIMESTAMP WITH TIME ZONE",
     "manual_industry_id": "VARCHAR(160)",
     "manual_active": "BOOLEAN",
+    "manual_association_tier": "VARCHAR(30)",
 }
 
 

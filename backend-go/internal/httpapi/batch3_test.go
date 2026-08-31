@@ -48,6 +48,12 @@ func TestBatchThreeCanonicalTargetAndDualHorizonTrend(t *testing.T) {
 	}
 }
 
+func TestRoundPlacesMatchesPythonTiesToEven(t *testing.T) {
+	if got, want := roundPlaces(0.44325, 4), 0.4432; got != want {
+		t.Fatalf("roundPlaces ties-to-even = %v, want %v", got, want)
+	}
+}
+
 func TestMergeConcreteTargetChangesIncludesCommoditiesAndKeepsLatestKey(t *testing.T) {
 	older := time.Date(2026, 8, 29, 7, 0, 0, 0, time.UTC)
 	newer := older.Add(time.Hour)

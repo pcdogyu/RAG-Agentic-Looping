@@ -10,7 +10,14 @@ from sqlalchemy import select
 
 from backend.app.config import Settings
 from backend.app.db import McpSourceRow, SessionLocal
-from backend.app.domain import AssetClass, AssetRef, Market, NewsItem, SourceQuality
+from backend.app.domain import (
+    AssetClass,
+    AssetRef,
+    AssociationTier,
+    Market,
+    NewsItem,
+    SourceQuality,
+)
 from backend.app.providers.akshare_provider import AkShareProvider
 from backend.app.providers.crypto import CryptoProvider
 from backend.app.providers.fmp import FmpProvider
@@ -555,6 +562,7 @@ class ProviderRegistry:
         self.last_errors: list[str] = []
         self.last_source_reports: list[NewsSourceDiscoveryReport] = []
         self.mapping_errors: list[str] = []
+        self._rebuild_identity_index()
 
     def _source_enabled(self, name: str, default: bool = True) -> bool:
         try:
@@ -591,15 +599,65 @@ class ProviderRegistry:
                     ),
                 }
             )
+        self._rebuild_identity_index()
+
+    def _rebuild_identity_index(self) -> None:
+        self._mapping_assets = tuple(
+            asset
+            for asset in self._assets.values()
+            if asset.active
+            and asset.asset_class in {AssetClass.EQUITY, AssetClass.CRYPTO}
+            and asset.association_tier is not AssociationTier.MANUAL_ONLY
+        )
+        self._crypto_name_counts: dict[str, int] = {}
+        self._crypto_symbol_counts: dict[str, int] = {}
+        for asset in self._mapping_assets:
+            if asset.asset_class is not AssetClass.CRYPTO:
+                continue
+            name = compact_security_text(asset.name)
+            symbol = normalize_security_text(asset.symbol)
+            if name:
+                self._crypto_name_counts[name] = self._crypto_name_counts.get(name, 0) + 1
+            if symbol:
+                self._crypto_symbol_counts[symbol] = (
+                    self._crypto_symbol_counts.get(symbol, 0) + 1
+                )
+
+    def asset_is_mapping_eligible(self, text: str, asset: AssetRef) -> bool:
+        if not asset.active or asset.association_tier is AssociationTier.MANUAL_ONLY:
+            return False
+        if asset.association_tier is AssociationTier.STANDARD:
+            return True
+        if asset.asset_class is not AssetClass.CRYPTO:
+            return False
+        coin_id = asset.asset_id.rsplit(":", 1)[-1]
+        if coin_id and text_contains_term(text, coin_id):
+            return True
+        name = compact_security_text(asset.name)
+        if (
+            name
+            and self._crypto_name_counts.get(name) == 1
+            and text_contains_term(text, asset.name)
+        ):
+            return True
+        symbol = normalize_security_text(asset.symbol)
+        if not symbol or self._crypto_symbol_counts.get(symbol) != 1:
+            return False
+        escaped = re.escape(asset.symbol)
+        return bool(
+            re.search(rf"(?i)(?:\${escaped}\b|\b{escaped}/(?:USD|USDT)\b)", text)
+        )
 
     def refresh_crypto_universe(self) -> list[AssetRef]:
         assets = self.crypto.top_assets(20)
         self._assets.update({asset.asset_id: asset for asset in assets})
+        self._rebuild_identity_index()
         return assets
 
     def refresh_macro_universe(self) -> list[AssetRef]:
         assets = self.fmp.list_macro_assets()
         self._assets.update({asset.asset_id: asset for asset in assets})
+        self._rebuild_identity_index()
         return assets
 
     def all_assets(self) -> list[AssetRef]:
@@ -616,8 +674,8 @@ class ProviderRegistry:
         if not normalized:
             return []
         scored: list[tuple[int, float, str, AssetRef]] = []
-        for asset in self._assets.values():
-            if not asset.active or asset.asset_class not in {AssetClass.EQUITY, AssetClass.CRYPTO}:
+        for asset in self._mapping_assets:
+            if not self.asset_is_mapping_eligible(text, asset):
                 continue
             score = 0
             if explicit_symbol_present(text, asset.symbol):
@@ -861,8 +919,11 @@ class ProviderRegistry:
 
     def resolve_assets(self, query: str) -> list[AssetRef]:
         exact: list[AssetRef] = []
-        for asset in self._assets.values():
-            if query_mentions_asset(query, asset):
+        for asset in self._mapping_assets:
+            if (
+                self.asset_is_mapping_eligible(query, asset)
+                and query_mentions_asset(query, asset)
+            ):
                 exact.append(asset)
         if exact:
             return exact
@@ -889,7 +950,13 @@ class ProviderRegistry:
         # derived issuer identity, but expose only assets explicitly mentioned
         # by this query to the event mapper.
         self._assets.update(discovered)
-        return [asset for asset in discovered.values() if query_mentions_asset(query, asset)]
+        self._rebuild_identity_index()
+        return [
+            asset
+            for asset in discovered.values()
+            if self.asset_is_mapping_eligible(query, asset)
+            and query_mentions_asset(query, asset)
+        ]
 
     def provider_for(self, asset: AssetRef):
         if asset.asset_class is AssetClass.CRYPTO:

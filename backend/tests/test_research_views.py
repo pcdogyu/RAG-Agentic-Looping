@@ -3,7 +3,7 @@ from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
-from backend.app.db import RecommendationRow
+from backend.app.db import AssetRow, RecommendationRow
 from backend.app.domain import (
     AnalysisStep,
     AssetClass,
@@ -30,7 +30,91 @@ from backend.app.storage import (
     save_event_research_run,
     save_recommendation,
     save_run,
+    upsert_asset,
 )
+
+
+def test_current_asset_ratings_include_first_and_latest_active_assets(db):
+    now = utc_now()
+    first_only = asset("FIRST")
+    changing = asset("CHANGING")
+    unchanged = asset("UNCHANGED")
+    inactive = asset("INACTIVE")
+    for target in (first_only, changing, unchanged, inactive):
+        upsert_asset(db, target)
+    inactive_row = db.get(AssetRow, inactive.asset_id)
+    inactive_row.active = False
+    db.add(inactive_row)
+    db.commit()
+
+    records = [
+        recommendation(first_only, rating=Rating.WATCH, score=0, as_of=now),
+        recommendation(
+            changing,
+            rating=Rating.WATCH,
+            score=0,
+            as_of=now - timedelta(minutes=2),
+        ),
+        recommendation(
+            changing,
+            rating=Rating.BULLISH,
+            score=40,
+            as_of=now - timedelta(minutes=1),
+        ),
+        recommendation(
+            unchanged,
+            rating=Rating.BEARISH,
+            score=-40,
+            as_of=now - timedelta(minutes=4),
+        ),
+        recommendation(
+            unchanged,
+            rating=Rating.BEARISH,
+            score=-30,
+            as_of=now - timedelta(minutes=3),
+        ),
+        recommendation(inactive, rating=Rating.BEARISH, score=-40, as_of=now),
+    ]
+    for item, run in records:
+        save_run(db, run)
+        save_recommendation(db, item)
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/v1/target-changes",
+            params={"kind": "asset", "scope": "current", "market": "US"},
+        )
+        filtered = client.get(
+            "/api/v1/target-changes",
+            params={"kind": "asset", "scope": "current", "rating": "bullish"},
+        )
+        first_page = client.get(
+            "/api/v1/target-changes",
+            params={"kind": "asset", "scope": "current", "limit": 2},
+        )
+        second_page = client.get(
+            "/api/v1/target-changes",
+            params={
+                "kind": "asset",
+                "scope": "current",
+                "limit": 2,
+                "cursor": first_page.json()["next_cursor"],
+            },
+        )
+
+    assert response.status_code == 200
+    by_symbol = {item["symbol"]: item for item in response.json()["items"]}
+    assert set(by_symbol) == {"FIRST", "CHANGING", "UNCHANGED"}
+    assert by_symbol["FIRST"]["change_state"] == "first"
+    assert by_symbol["FIRST"]["previous"] is None
+    assert by_symbol["CHANGING"]["change_state"] == "changed"
+    assert by_symbol["CHANGING"]["previous"]["rating"] == "watch"
+    assert by_symbol["UNCHANGED"]["change_state"] == "unchanged"
+    assert [item["symbol"] for item in filtered.json()["items"]] == ["CHANGING"]
+    assert first_page.json()["next_cursor"]
+    assert len(first_page.json()["items"]) == 2
+    assert len(second_page.json()["items"]) == 1
+    assert second_page.json()["next_cursor"] is None
 
 
 def asset(symbol: str, *, asset_class: AssetClass = AssetClass.EQUITY) -> AssetRef:

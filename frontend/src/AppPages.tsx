@@ -1383,12 +1383,14 @@ export type TargetChange = {
   market: string | null;
   target_type: string;
   changed_at: string;
-  previous: { rating: string; direction_score: number | null; rating_confidence: number | null };
+  previous: { rating: string; direction_score: number | null; rating_confidence: number | null } | null;
   current: { rating: string; direction_score: number | null; rating_confidence: number | null };
   latest: { rating: string; direction_score: number | null; rating_confidence: number | null; news_confidence: number | null };
   trend?: TargetTrend;
   latest_detail: { kind: "event" | "asset"; id: string; researched_at: string };
   change_detail_id: string;
+  rated_at?: string;
+  change_state?: "first" | "changed" | "unchanged";
 };
 
 export function changedTargetLatestRecommendationId(item: ChangedTarget) {
@@ -2281,7 +2283,7 @@ export function TargetChangeGrid({
             </button>
           </div>
         </header>
-        <div className="target-change-field changed"><span>{item.latest_detail.kind === "event" ? "最近事件评级变化" : "评级变化"}</span><div className="target-change-rating-row"><strong>{recommendationRatingLabel(item.previous.rating)} → {recommendationRatingLabel(item.current.rating)}</strong><b className={score === null ? "neutral" : score < 0 ? "negative" : score > 0 ? "positive" : "neutral"} title="最新方向分">{score === null ? "—" : `${score > 0 ? "+" : ""}${score}`}</b></div></div>
+        <div className="target-change-field changed"><span>{item.latest_detail.kind === "event" ? "最近事件评级变化" : "评级变化"}</span><div className="target-change-rating-row"><strong>{recommendationRatingLabel(item.previous?.rating || item.current.rating)} → {recommendationRatingLabel(item.current.rating)}</strong><b className={score === null ? "neutral" : score < 0 ? "negative" : score > 0 ? "positive" : "neutral"} title="最新方向分">{score === null ? "—" : `${score > 0 ? "+" : ""}${score}`}</b></div></div>
         {item.trend && <TargetTrendSummary trend={item.trend} />}
         <div className={`target-change-latest${onResearch ? " with-research" : ""}`}>
           <span>新闻可信度<strong>{newsConfidence === null ? "—" : `${Math.round(newsConfidence * 100)}%`}</strong></span>
@@ -2291,6 +2293,78 @@ export function TargetChangeGrid({
       </article>;
     })}
   </div>;
+}
+
+function CurrentRatingsSection({
+  apiBase,
+  onOpen,
+  detailLoadingId,
+  researchStates,
+  onResearch,
+}: {
+  apiBase: string;
+  onOpen: (item: TargetChange) => void;
+  detailLoadingId: string;
+  researchStates: Record<string, ConclusionResearchState>;
+  onResearch: (item: TargetChange) => void;
+}) {
+  const [items, setItems] = useState<TargetChange[]>([]);
+  const [filters, setFilters] = useState({ market: "", rating: "", q: "" });
+  const [cursor, setCursor] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [error, setError] = useState("");
+  const cursorRef = useRef<string | null>(null);
+
+  const load = useCallback(async (append = false, silent = false) => {
+    const params = new URLSearchParams({ kind: "asset", scope: "current", limit: "50" });
+    if (filters.market) params.set("market", filters.market);
+    if (filters.rating) params.set("rating", filters.rating);
+    if (filters.q.trim()) params.set("q", filters.q.trim());
+    if (append && cursorRef.current) params.set("cursor", cursorRef.current);
+    if (append) setLoadingMore(true); else if (!silent) setLoading(true);
+    try {
+      const response = await fetch(`${apiBase}/api/v1/target-changes?${params}`);
+      if (!response.ok) throw new Error("当前评级请求失败");
+      const payload = await response.json() as { items: TargetChange[]; next_cursor: string | null };
+      setItems((current) => append ? [...current, ...payload.items] : payload.items);
+      cursorRef.current = payload.next_cursor;
+      setCursor(payload.next_cursor);
+      setError("");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "当前评级请求失败");
+    } finally {
+      if (append) setLoadingMore(false); else if (!silent) setLoading(false);
+    }
+  }, [apiBase, filters]);
+
+  useEffect(() => {
+    cursorRef.current = null;
+    void load();
+    return subscribeLiveRefresh(() => void load(false, true), researchViewsRefreshIntervalMs);
+  }, [load]);
+
+  return <section className="target-change-section current-ratings">
+    <header><div><p className="eyebrow">CURRENT RATINGS</p><h2>当前资产评级</h2><p>每个有效标的只展示最近一次五级评级，首次评级也会进入列表。</p></div><button type="button" disabled={loading} onClick={() => void load()}>{loading ? "刷新中…" : "刷新"}</button></header>
+    <div className="current-rating-filters">
+      <input aria-label="搜索当前评级" placeholder="代码或名称" value={filters.q} onChange={(event) => setFilters({ ...filters, q: event.target.value })} />
+      <select aria-label="当前评级市场" value={filters.market} onChange={(event) => setFilters({ ...filters, market: event.target.value })}><option value="">全部市场</option><option value="CN">A 股</option><option value="HK">港股</option><option value="US">美股</option><option value="CRYPTO">加密资产</option></select>
+      <select aria-label="当前评级等级" value={filters.rating} onChange={(event) => setFilters({ ...filters, rating: event.target.value })}><option value="">全部评级</option><option value="strongly_bullish">强烈看多</option><option value="bullish">看多</option><option value="watch">观望</option><option value="bearish">看空</option><option value="strongly_bearish">强烈看空</option></select>
+    </div>
+    {error && <div className="page-error target-change-error"><span>{error}</span><button type="button" onClick={() => void load()}>重试</button></div>}
+    {!items.length && !error && (loading ? <div className="page-message">正在加载当前评级…</div> : <div className="page-empty">当前没有已完成评级的有效资产。</div>)}
+    <div className="target-change-grid unified-target-change-grid">
+      {items.map((item) => {
+        const score = item.latest.direction_score;
+        return <article className="target-change-card asset" key={item.key}>
+          <header><span>{item.market} · {new Date(item.rated_at || item.latest_detail.researched_at).toLocaleString("zh-CN")}</span><button type="button" className="target-change-identity" disabled={detailLoadingId === item.key} onClick={() => onOpen(item)}><strong>{item.symbol || item.label}</strong>{item.symbol && <small>{item.label}</small>}</button></header>
+          <div className="target-change-field changed"><span>{item.change_state === "first" ? "首次评级" : item.change_state === "changed" ? "本次评级有变化" : "当前评级"}</span><div className="target-change-rating-row"><strong>{recommendationRatingLabel(item.current.rating)}</strong><b className={score === null ? "neutral" : score < 0 ? "negative" : score > 0 ? "positive" : "neutral"}>{score === null ? "—" : `${score > 0 ? "+" : ""}${score}`}</b></div></div>
+          <div className="target-change-latest with-research"><span>新闻可信度<strong>{item.latest.news_confidence === null ? "—" : `${Math.round(item.latest.news_confidence * 100)}%`}</strong></span><span>评级置信度<strong>{item.latest.rating_confidence === null ? "—" : `${Math.round(item.latest.rating_confidence * 100)}%`}</strong></span><ResearchAgainButton state={researchStates[targetChangeResearchKey(item)]} onResearch={() => onResearch(item)} /></div>
+        </article>;
+      })}
+    </div>
+    {cursor && <button className="load-more" type="button" disabled={loadingMore} onClick={() => void load(true)}>{loadingMore ? "正在加载…" : "加载更多"}</button>}
+  </section>;
 }
 
 export function targetChangeResearchKey(item: TargetChange) {
@@ -2405,12 +2479,13 @@ export function ChangedTargetsPage({ apiBase }: { apiBase: string }) {
   }
 
   return <section className="app-page targets-page">
-    <PageHeading eyebrow="RATING CHANGES" title="标的评级变化" copy="左侧追踪宏观经济、行业及跨资产目标，右侧追踪具体证券与商品价格；仅展示最近一次五级评级变化。" />
+    <PageHeading eyebrow="ASSET RATINGS" title="标的评级与变化" copy="当前评级覆盖 A 股、港股、美股与加密资产；变化栏保留最近一次评级变动，所有卡片均可打开研究证据。" />
     {detailError && <div className="page-error target-detail-error"><span>{detailError}</span></div>}
     <div className="target-change-split">
-      <TargetChangeSection apiBase={apiBase} kind="macro" title="宏观经济与行业变化" copy="经济、行业、汇率、利率、供给、航运与风险资产。" onOpen={(item) => void openLatestResearch(item)} detailLoadingId={detailLoadingId} researchStates={researchStates} onResearch={(item) => void researchAgain(item)} />
+      <CurrentRatingsSection apiBase={apiBase} onOpen={(item) => void openLatestResearch(item)} detailLoadingId={detailLoadingId} researchStates={researchStates} onResearch={(item) => void researchAgain(item)} />
       <TargetChangeSection apiBase={apiBase} kind="asset" title="具体标的变化" copy="股票、加密资产与商品价格的最新五级评级变化及研究结论。" onOpen={(item) => void openLatestResearch(item)} detailLoadingId={detailLoadingId} researchStates={researchStates} onResearch={(item) => void researchAgain(item)} />
     </div>
+    <TargetChangeSection apiBase={apiBase} kind="macro" title="宏观经济与行业变化" copy="经济、行业、汇率、利率、供给、航运与风险资产。" onOpen={(item) => void openLatestResearch(item)} detailLoadingId={detailLoadingId} researchStates={researchStates} onResearch={(item) => void researchAgain(item)} />
     {selectedAsset && <ConclusionDetailModal detail={selectedAsset} onClose={() => setSelectedAsset(null)} />}
     {selectedEvent && <EventConclusionDetailModal detail={selectedEvent} onClose={() => setSelectedEvent(null)} />}
   </section>;
@@ -3184,6 +3259,8 @@ type UniverseAsset = {
   instrument_type: string;
   market_cap: number | null;
   market_cap_rank: number | null;
+  association_tier: "standard" | "exact_only" | "manual_only";
+  association_reason: string;
   active: boolean;
   last_synced_at: string | null;
 };
@@ -3207,6 +3284,7 @@ type UniverseMarketStatus = {
   classification_rate: number;
   last_error: string | null;
   completed_at: string | null;
+  association_tier_counts: Record<string, number>;
 };
 
 const universeMarketLabels: Record<string, string> = {
@@ -3214,6 +3292,15 @@ const universeMarketLabels: Record<string, string> = {
   HK: "港股",
   US: "美股",
   CRYPTO: "加密资产",
+};
+
+const associationReasonLabels: Record<string, string> = {
+  provider_verified: "供应商验证",
+  coingecko_market_cap_top_500: "CoinGecko 市值前 500",
+  coingecko_long_tail_exact_identity: "长尾币种，仅精确身份",
+  stable_or_wrapped_manual_only: "稳定币或封装币，仅手动研究",
+  ambiguous_crypto_identity_manual_only: "代码或名称存在歧义，仅手动研究",
+  manual_override: "人工覆盖",
 };
 
 function universeTime(value: string | null) {
@@ -3229,6 +3316,7 @@ export function AssetUniversePage({ apiBase }: { apiBase: string }) {
   const [query, setQuery] = useState("");
   const [market, setMarket] = useState("");
   const [industryId, setIndustryId] = useState("");
+  const [associationTier, setAssociationTier] = useState("");
   const [offset, setOffset] = useState(0);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -3238,6 +3326,8 @@ export function AssetUniversePage({ apiBase }: { apiBase: string }) {
   const [aliasDraft, setAliasDraft] = useState("");
   const [industryDraft, setIndustryDraft] = useState("");
   const [activeDraft, setActiveDraft] = useState(true);
+  const [tierDraft, setTierDraft] = useState("auto");
+  const [researchingId, setResearchingId] = useState("");
   const limit = 100;
 
   const load = useCallback(async () => {
@@ -3247,6 +3337,7 @@ export function AssetUniversePage({ apiBase }: { apiBase: string }) {
     if (query.trim()) params.set("q", query.trim());
     if (market) params.set("market", market);
     if (industryId) params.set("industry_id", industryId);
+    if (associationTier) params.set("association_tier", associationTier);
     try {
       const [assetResponse, industryResponse, statusResponse] = await Promise.all([
         fetch(`${apiBase}/api/v1/asset-universe?${params}`),
@@ -3271,22 +3362,25 @@ export function AssetUniversePage({ apiBase }: { apiBase: string }) {
     } finally {
       setLoading(false);
     }
-  }, [apiBase, industryId, market, offset, query]);
+  }, [apiBase, associationTier, industryId, market, offset, query]);
 
   useEffect(() => { void load(); }, [load]);
 
-  async function queueAdminAction(path: "refresh" | "backfill") {
+  async function queueAdminAction(path: "refresh" | "backfill", selectedMarket = "") {
     setError("");
     setMessage("");
     try {
-      const response = await fetch(`${apiBase}/api/v1/admin/asset-universe/${path}`, {
+      const params = new URLSearchParams();
+      if (path === "refresh" && selectedMarket) params.set("market", selectedMarket);
+      if (path === "backfill") params.set("days", "30");
+      const response = await fetch(`${apiBase}/api/v1/admin/asset-universe/${path}${params.size ? `?${params}` : ""}`, {
         method: "POST",
         headers: { "X-Admin-Token": token },
       });
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.detail || "任务入队失败");
       setMessage(path === "refresh"
-        ? `全市场同步已进入队列（${payload.task_id}）。`
+        ? `${selectedMarket ? universeMarketLabels[selectedMarket] : "全市场"}同步已进入队列（${payload.task_id}）。`
         : `最近 ${payload.days} 天的低置信度映射已进入回补队列。`);
       window.setTimeout(() => { void load(); }, 1000);
     } catch (reason) {
@@ -3299,6 +3393,7 @@ export function AssetUniversePage({ apiBase }: { apiBase: string }) {
     setAliasDraft(asset.aliases.join("\n"));
     setIndustryDraft(asset.industry_id || "");
     setActiveDraft(asset.active);
+    setTierDraft("auto");
   }
 
   async function saveEdit(event: FormEvent) {
@@ -3312,6 +3407,7 @@ export function AssetUniversePage({ apiBase }: { apiBase: string }) {
         aliases: aliasDraft.split("\n").map((item) => item.trim()).filter(Boolean),
         industry_id: industryDraft,
         active: activeDraft,
+        association_tier: tierDraft,
       }),
     });
     const payload = await response.json();
@@ -3322,6 +3418,25 @@ export function AssetUniversePage({ apiBase }: { apiBase: string }) {
     setEditing(null);
     setMessage(`${payload.symbol} 的主数据修订已保存。`);
     await load();
+  }
+
+  async function researchAsset(asset: UniverseAsset) {
+    setResearchingId(asset.asset_id);
+    setError("");
+    try {
+      const response = await fetch(`${apiBase}/api/v1/research`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ asset_id: asset.asset_id, background: true }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.detail || "研究任务入队失败");
+      setMessage(`${asset.symbol} 研究已进入队列（${payload.run_id}）。完成后将在“标的评级”显示。`);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "研究任务入队失败");
+    } finally {
+      setResearchingId("");
+    }
   }
 
   const statusByMarket = new Map(statuses.map((item) => [item.market, item]));
@@ -3340,14 +3455,16 @@ export function AssetUniversePage({ apiBase }: { apiBase: string }) {
             <span>{label}</span>
             <strong>{(activeCounts[key] || status?.asset_count || 0).toLocaleString()}</strong>
             <small>行业 {(status?.classified_count || 0).toLocaleString()} / {(activeCounts[key] || status?.asset_count || 0).toLocaleString()} · {((status?.classification_rate || 0) * 100).toLocaleString("zh-CN", { maximumFractionDigits: 1 })}%</small>
+            <small>标准 {(status?.association_tier_counts?.standard || 0).toLocaleString()} · 精确 {(status?.association_tier_counts?.exact_only || 0).toLocaleString()} · 手动 {(status?.association_tier_counts?.manual_only || 0).toLocaleString()}</small>
             <small>{status?.status === "failed" ? `失败：${status.last_error}` : universeTime(status?.completed_at || null)}</small>
+            <button type="button" disabled={!token || status?.status === "running"} onClick={() => void queueAdminAction("refresh", key)}>{status?.status === "running" ? "同步中…" : "同步此市场"}</button>
           </article>;
         })}
       </div>
       <AdminUnlock token={token} onToken={setToken} />
       <div className="universe-actions">
         <button type="button" disabled={!token} onClick={() => void queueAdminAction("refresh")}>同步全部市场</button>
-        <button type="button" disabled={!token} onClick={() => void queueAdminAction("backfill")}>回补最近 7 天映射</button>
+        <button type="button" disabled={!token} onClick={() => void queueAdminAction("backfill")}>回补最近 30 天映射</button>
         <span>行业新闻自动关联每市场市值靠前代表股，关系标记为 industry_peer，最多 8 只。</span>
       </div>
       {message && <div className="page-message">{message}</div>}
@@ -3362,20 +3479,22 @@ export function AssetUniversePage({ apiBase }: { apiBase: string }) {
           <option value="">全部行业</option>
           {levelTwoIndustries.map((item) => <option key={item.industry_id} value={item.industry_id}>{item.name_zh}（{item.asset_count}）</option>)}
         </select>
+        <select aria-label="关联层级" value={associationTier} onChange={(event) => { setAssociationTier(event.target.value); setOffset(0); }}><option value="">全部关联层级</option><option value="standard">标准自动关联</option><option value="exact_only">仅精确命中</option><option value="manual_only">仅手动研究</option></select>
         <button type="submit">查询</button>
         <button type="button" onClick={() => void load()}>刷新状态</button>
       </form>
       <div className="universe-table-wrap">
         <table className="universe-table">
-          <thead><tr><th>市场 / 代码</th><th>名称与别名</th><th>统一行业 / 原始行业</th><th>类型</th><th>同步时间</th><th>操作</th></tr></thead>
+          <thead><tr><th>市场 / 代码</th><th>名称与别名</th><th>统一行业 / 原始行业</th><th>关联层级</th><th>类型</th><th>同步时间</th><th>操作</th></tr></thead>
           <tbody>
             {assets.map((asset) => <tr key={asset.asset_id} className={asset.active ? "" : "inactive"}>
               <td><small>{universeMarketLabels[asset.market] || asset.market}</small><strong>{asset.symbol}</strong></td>
               <td><strong>{asset.name}</strong><small>{asset.aliases.slice(0, 3).join(" · ") || "无别名"}</small></td>
               <td><strong>{levelTwoIndustries.find((item) => item.industry_id === asset.industry_id)?.name_zh || "待归类"}</strong><small>{asset.raw_industry ? `原始：${asset.raw_industry}` : "未取得原始行业"}</small></td>
+              <td><strong>{asset.association_tier === "standard" ? "标准" : asset.association_tier === "exact_only" ? "仅精确" : "仅手动"}</strong><small>{associationReasonLabels[asset.association_reason] || asset.association_reason}</small></td>
               <td>{asset.instrument_type || "—"}</td>
               <td>{universeTime(asset.last_synced_at)}</td>
-              <td><button type="button" disabled={!token} onClick={() => beginEdit(asset)}>编辑</button></td>
+              <td><div className="universe-row-actions"><button type="button" disabled={researchingId === asset.asset_id || !asset.active} onClick={() => void researchAsset(asset)}>{researchingId === asset.asset_id ? "入队中…" : "研究"}</button><button type="button" disabled={!token} onClick={() => beginEdit(asset)}>编辑</button></div></td>
             </tr>)}
           </tbody>
         </table>
@@ -3394,6 +3513,7 @@ export function AssetUniversePage({ apiBase }: { apiBase: string }) {
           <label>别名（每行一个）<textarea value={aliasDraft} onChange={(event) => setAliasDraft(event.target.value)} /></label>
           <label>统一行业<select value={industryDraft} onChange={(event) => setIndustryDraft(event.target.value)}><option value="">待归类</option>{levelTwoIndustries.map((item) => <option key={item.industry_id} value={item.industry_id}>{item.name_zh} / {item.name_en}</option>)}</select></label>
           <label className="inline-check"><input type="checkbox" checked={activeDraft} onChange={(event) => setActiveDraft(event.target.checked)} />参与映射</label>
+          <label>关联层级<select value={tierDraft} onChange={(event) => setTierDraft(event.target.value)}><option value="auto">跟随供应商自动分层</option><option value="standard">标准自动关联</option><option value="exact_only">仅精确命中</option><option value="manual_only">仅手动研究</option></select></label>
           <button type="submit">保存修订</button>
         </form>
       </div>}

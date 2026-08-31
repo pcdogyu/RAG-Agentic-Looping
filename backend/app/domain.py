@@ -23,6 +23,12 @@ class AssetClass(StrEnum):
     FX = "fx"
 
 
+class AssociationTier(StrEnum):
+    STANDARD = "standard"
+    EXACT_ONLY = "exact_only"
+    MANUAL_ONLY = "manual_only"
+
+
 class Market(StrEnum):
     US = "US"
     CN = "CN"
@@ -194,6 +200,8 @@ class AssetRef(BaseModel):
     instrument_type: str = ""
     market_cap: float | None = Field(default=None, ge=0)
     market_cap_rank: int | None = Field(default=None, ge=1)
+    association_tier: AssociationTier = AssociationTier.STANDARD
+    association_reason: str = "provider_verified"
     last_synced_at: datetime | None = None
     # Multiple listings/ADRs may point at the same issuer without being treated
     # as interchangeable instruments.  Existing asset payloads remain valid.

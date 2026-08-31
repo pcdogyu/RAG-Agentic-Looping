@@ -6,18 +6,31 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from backend.app.db import AssetRow, AssetUniverseSyncRow, IndustryRow
-from backend.app.domain import AssetRef, Market, utc_now
+from backend.app.domain import AssetRef, AssociationTier, Market, utc_now
 from backend.app.providers.registry import ProviderRegistry
 from backend.app.services.industry_taxonomy import all_industries
 from backend.app.storage import asset_from_row
 
 SYNC_MARKETS = (Market.CN, Market.HK, Market.US, Market.CRYPTO)
+MINIMUM_MARKET_COUNTS = {
+    Market.CN: 5_000,
+    Market.HK: 2_500,
+    Market.US: 5_500,
+    Market.CRYPTO: 15_000,
+}
+ALLOWED_US_EXCHANGES = {"NASDAQ", "NYSE", "AMEX", "OTC"}
 
 
 class AssetUniverseService:
-    def __init__(self, db: Session, registry: ProviderRegistry | None = None) -> None:
+    def __init__(
+        self,
+        db: Session,
+        registry: ProviderRegistry | None = None,
+        minimum_counts: dict[Market, int] | None = None,
+    ) -> None:
         self.db = db
         self.registry = registry or ProviderRegistry()
+        self.minimum_counts = dict(minimum_counts or MINIMUM_MARKET_COUNTS)
 
     def seed_industries(self) -> None:
         for item in all_industries():
@@ -37,7 +50,7 @@ class AssetUniverseService:
         listed: list[AssetRef] | None = None
         results: dict[str, dict[str, object]] = {}
         for market in selected:
-            status = self._start_status(market)
+            self._start_status(market)
             try:
                 if market in {Market.CN, Market.HK}:
                     if listed is None:
@@ -49,10 +62,16 @@ class AssetUniverseService:
                     assets = self.registry.crypto.all_assets()
                 else:
                     assets = []
-                if not assets:
-                    raise RuntimeError(f"{market.value} provider returned an empty universe")
+                self._validate_snapshot(market, assets)
+                status = self.db.get(AssetUniverseSyncRow, market.value)
+                if status is None:
+                    raise RuntimeError(f"{market.value} sync status was not initialized")
                 results[market.value] = self._persist_market(market, assets, status)
             except Exception as exc:
+                self.db.rollback()
+                status = self.db.get(AssetUniverseSyncRow, market.value) or AssetUniverseSyncRow(
+                    market=market.value
+                )
                 status.status = "failed"
                 status.last_error = f"{type(exc).__name__}: {exc}"[:500]
                 status.completed_at = utc_now()
@@ -69,6 +88,50 @@ class AssetUniverseService:
             if any(item["status"] == "failed" for item in results.values())
             else "completed",
         }
+
+    def _validate_snapshot(self, market: Market, assets: list[AssetRef]) -> None:
+        minimum = self.minimum_counts.get(market, 1)
+        if len(assets) < minimum:
+            raise RuntimeError(
+                f"{market.value} provider returned an incomplete universe "
+                f"({len(assets)} < {minimum})"
+            )
+        ids: set[str] = set()
+        for asset in assets:
+            if (
+                not asset.asset_id.strip()
+                or not asset.symbol.strip()
+                or not asset.name.strip()
+                or not asset.exchange_or_provider.strip()
+                or not asset.currency.strip()
+            ):
+                raise RuntimeError(f"{market.value} provider returned an invalid identity")
+            if asset.asset_id in ids:
+                raise RuntimeError(
+                    f"{market.value} provider returned duplicate asset_id {asset.asset_id}"
+                )
+            ids.add(asset.asset_id)
+            if asset.market is not market:
+                raise RuntimeError(
+                    f"{market.value} provider returned cross-market asset {asset.asset_id}"
+                )
+            if market is Market.US:
+                exchange = asset.exchange_or_provider.upper()
+                if exchange not in ALLOWED_US_EXCHANGES:
+                    raise RuntimeError(
+                        f"US provider returned unsupported exchange {exchange}"
+                    )
+                if exchange == "OTC" and asset.instrument_type != "adr":
+                    raise RuntimeError(f"US provider returned non-ADR OTC asset {asset.asset_id}")
+        if market is Market.CRYPTO:
+            ranked = sum(
+                item.market_cap_rank is not None and item.market_cap_rank <= 500
+                for item in assets
+            )
+            if ranked < min(490, len(assets)):
+                raise RuntimeError(
+                    f"CRYPTO ranked universe is incomplete ({ranked} ranked assets)"
+                )
 
     def _start_status(self, market: Market) -> AssetUniverseSyncRow:
         row = self.db.get(AssetUniverseSyncRow, market.value) or AssetUniverseSyncRow(
@@ -138,6 +201,16 @@ class AssetUniverseService:
             row.market_cap_rank = (
                 asset.market_cap_rank if asset.market_cap_rank is not None else row.market_cap_rank
             )
+            row.provider_association_tier = asset.association_tier.value
+            row.provider_association_reason = asset.association_reason
+            row.association_tier = (
+                row.manual_association_tier or row.provider_association_tier
+            )
+            row.association_reason = (
+                "manual_override"
+                if row.manual_association_tier
+                else row.provider_association_reason
+            )
             row.issuer_id = asset.issuer_id or row.issuer_id
             row.primary_listing_asset_id = (
                 asset.primary_listing_asset_id or row.primary_listing_asset_id
@@ -187,6 +260,13 @@ def universe_status(db: Session) -> dict[str, object]:
         )
     }
     counts = {market: count for market, (count, _classified) in classification_counts.items()}
+    tier_counts: dict[str, dict[str, int]] = {}
+    for market, tier, count in db.execute(
+        select(AssetRow.market, AssetRow.association_tier, func.count(AssetRow.id))
+        .where(AssetRow.active.is_(True))
+        .group_by(AssetRow.market, AssetRow.association_tier)
+    ):
+        tier_counts.setdefault(market, {})[tier or AssociationTier.STANDARD.value] = int(count)
     return {
         "markets": [
             {
@@ -209,6 +289,7 @@ def universe_status(db: Session) -> dict[str, object]:
                 )
                 if classification_counts.get(row.market, (0, 0))[0]
                 else 0.0,
+                "association_tier_counts": tier_counts.get(row.market, {}),
                 "last_error": row.last_error,
                 "started_at": row.started_at,
                 "completed_at": row.completed_at,

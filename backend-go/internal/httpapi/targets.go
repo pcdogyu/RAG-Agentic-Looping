@@ -23,6 +23,11 @@ type recommendationChange struct {
 	Latest   recommendationSnapshot
 }
 
+type currentRecommendation struct {
+	Previous *recommendationSnapshot
+	Latest   recommendationSnapshot
+}
+
 func (s *Server) changedTargets(w http.ResponseWriter, r *http.Request) {
 	limit, ok := intQuery(w, r.URL.Query(), "limit", 50, 1, 100)
 	if !ok {
@@ -114,6 +119,85 @@ func (s *Server) latestChangedTargets(r *http.Request) ([]recommendationChange, 
 	return result, nil
 }
 
+func (s *Server) currentAssetRatings(r *http.Request) ([]map[string]any, error) {
+	rows, err := s.db.Query(r.Context(), `SELECT rec.id,rec.asset_id,rec.as_of,rec.payload::jsonb
+		FROM recommendations rec JOIN assets a ON a.id=rec.asset_id
+		WHERE a.active=true AND a.market IN ('CN','HK','US','CRYPTO')
+		ORDER BY rec.asset_id,rec.as_of,rec.id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	current := map[string]currentRecommendation{}
+	for rows.Next() {
+		var item recommendationSnapshot
+		var body []byte
+		if err = rows.Scan(&item.ID, &item.AssetID, &item.AsOf, &body); err != nil {
+			return nil, err
+		}
+		if err = json.Unmarshal(body, &item.Payload); err != nil {
+			return nil, err
+		}
+		entry := current[item.AssetID]
+		if entry.Latest.ID != "" {
+			prior := entry.Latest
+			entry.Previous = &prior
+		}
+		entry.Latest = item
+		current[item.AssetID] = entry
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	market := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("market")))
+	rating := strings.TrimSpace(r.URL.Query().Get("rating"))
+	query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+	items := make([]map[string]any, 0, len(current))
+	for _, entry := range current {
+		normalizeRecommendation(entry.Latest.Payload)
+		asset := objectValue(entry.Latest.Payload["asset"])
+		if asset == nil || (market != "" && strings.ToUpper(stringValue(asset["market"])) != market) || (rating != "" && stringValue(entry.Latest.Payload["rating"]) != rating) {
+			continue
+		}
+		if query != "" {
+			parts := []string{stringValue(asset["symbol"]), stringValue(asset["name"])}
+			for _, alias := range anySlice(asset["aliases"]) {
+				parts = append(parts, stringValue(alias))
+			}
+			if !strings.Contains(strings.ToLower(strings.Join(parts, " ")), query) {
+				continue
+			}
+		}
+		var previous any
+		changeState := "first"
+		if entry.Previous != nil {
+			normalizeRecommendation(entry.Previous.Payload)
+			previous = impactFields(entry.Previous.Payload)
+			changeState = "unchanged"
+			if stringValue(entry.Previous.Payload["rating"]) != stringValue(entry.Latest.Payload["rating"]) {
+				changeState = "changed"
+			}
+		}
+		items = append(items, map[string]any{
+			"kind": "asset", "key": entry.Latest.AssetID, "label": asset["name"], "symbol": asset["symbol"], "market": asset["market"],
+			"target_type": "tradable_asset", "rated_at": jsonTime(entry.Latest.AsOf), "changed_at": jsonTime(entry.Latest.AsOf),
+			"previous": previous, "current": impactFields(entry.Latest.Payload), "change_state": changeState,
+			"latest": map[string]any{"rating": entry.Latest.Payload["rating"], "direction_score": entry.Latest.Payload["direction_score"],
+				"rating_confidence": entry.Latest.Payload["rating_confidence"], "news_confidence": entry.Latest.Payload["news_confidence"]},
+			"latest_detail":    map[string]any{"kind": "asset", "id": entry.Latest.ID, "researched_at": jsonTime(entry.Latest.AsOf)},
+			"change_detail_id": entry.Latest.ID,
+		})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		left, right := parseAnyTime(items[i]["rated_at"]), parseAnyTime(items[j]["rated_at"])
+		if left != nil && right != nil && left.Equal(*right) {
+			return stringValue(items[i]["change_detail_id"]) > stringValue(items[j]["change_detail_id"])
+		}
+		return left != nil && (right == nil || left.After(*right))
+	})
+	return items, nil
+}
+
 type targetObservation struct {
 	OccurredAt             time.Time
 	Score                  float64
@@ -176,9 +260,23 @@ func (s *Server) targetChanges(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	scope := r.URL.Query().Get("scope")
+	if scope == "" {
+		scope = "changed"
+	}
+	if scope != "changed" && scope != "current" {
+		validationError(w, "scope", "Input should be 'current' or 'changed'")
+		return
+	}
+	if scope == "current" && kind != "asset" {
+		validationError(w, "scope", "current scope is only available for asset targets")
+		return
+	}
 	var items []map[string]any
 	var err error
-	if kind == "macro" {
+	if scope == "current" {
+		items, err = s.currentAssetRatings(r)
+	} else if kind == "macro" {
 		items, err = s.macroTargetChanges(r)
 	} else {
 		items, err = s.concreteTargetChanges(r)
@@ -195,7 +293,11 @@ func (s *Server) targetChanges(w http.ResponseWriter, r *http.Request) {
 		}
 		filtered := items[:0]
 		for _, item := range items {
-			changedAt := parseAnyTime(item["changed_at"])
+			stampField := "changed_at"
+			if scope == "current" {
+				stampField = "rated_at"
+			}
+			changedAt := parseAnyTime(item[stampField])
 			itemID := stringValue(item["change_detail_id"])
 			if changedAt != nil && (changedAt.Before(stamp) || (changedAt.Equal(stamp) && itemID < id)) {
 				filtered = append(filtered, item)
@@ -210,7 +312,11 @@ func (s *Server) targetChanges(w http.ResponseWriter, r *http.Request) {
 	var next any
 	if hasMore && len(items) > 0 {
 		last := items[len(items)-1]
-		if stamp := parseAnyTime(last["changed_at"]); stamp != nil {
+		stampField := "changed_at"
+		if scope == "current" {
+			stampField = "rated_at"
+		}
+		if stamp := parseAnyTime(last[stampField]); stamp != nil {
 			next = encodeAssetCursor(*stamp, stringValue(last["change_detail_id"]))
 		}
 	}
@@ -740,7 +846,9 @@ func observationAge(value targetObservation, asOf time.Time) float64 {
 
 func roundPlaces(value float64, places int) float64 {
 	factor := math.Pow10(places)
-	return math.Round(value*factor) / factor
+	// Python's round(), used by the rollback API, applies ties-to-even. Keep the
+	// public trend payload byte-for-byte stable at exact half-way boundaries.
+	return math.RoundToEven(value*factor) / factor
 }
 
 func trendConfidence(values []targetObservation, asOf time.Time, halfLife int) float64 {

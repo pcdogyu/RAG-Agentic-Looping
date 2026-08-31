@@ -289,6 +289,7 @@ func normalizeAsset(asset map[string]any) {
 	defaults := map[string]any{
 		"sector_id": "", "industry_id": "", "raw_sector": "", "raw_industry": "",
 		"instrument_type": "", "market_cap": nil, "market_cap_rank": nil, "last_synced_at": nil,
+		"association_tier": "standard", "association_reason": "provider_verified",
 		"issuer_id": nil, "primary_listing_asset_id": nil, "lot_size": float64(1), "active": true,
 	}
 	for key, value := range defaults {

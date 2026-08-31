@@ -542,7 +542,8 @@ describe("asset universe page", () => {
     expect(markup).toContain("资产与行业主数据");
     expect(markup).toContain("CoinGecko 全量加密资产目录");
     expect(markup).toContain("同步全部市场");
-    expect(markup).toContain("回补最近 7 天映射");
+    expect(markup).toContain("回补最近 30 天映射");
+    expect(markup).toContain("关联层级");
     expect(markup).toContain("industry_peer");
     expect(markup).toContain("加密资产");
     expect(markup).toContain("统一行业用于跨市场比较");
@@ -555,7 +556,8 @@ describe("changed targets page", () => {
   it("labels the page as rating changes", () => {
     const markup = renderToStaticMarkup(createElement(ChangedTargetsPage, { apiBase: "" }));
 
-    expect(markup).toContain("标的评级变化");
+    expect(markup).toContain("标的评级与变化");
+    expect(markup).toContain("当前资产评级");
     expect(markup).toContain("宏观经济与行业变化");
     expect(markup).toContain("具体标的变化");
     expect(markup).toContain("股票、加密资产与商品价格");
