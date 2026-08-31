@@ -966,7 +966,7 @@ func (runtime *ExtractRuntime) selectDownstreamInstance(ctx context.Context, lan
 }
 
 func (runtime *ExtractRuntime) markNewsProcessing(ctx context.Context, newsID uuid.UUID, status, taskID, scanTaskID string, attempt int, errorValue string) error {
-	updated, err := runtime.db.Exec(ctx, `UPDATE news_processing SET status=$2,celery_task_id=$3,scan_task_id=coalesce(nullif($4,''),scan_task_id),attempt_count=greatest(attempt_count,$5),last_error=nullif($6,''),heartbeat_at=now(),updated_at=now(),started_at=CASE WHEN $2='running' THEN coalesce(started_at,now()) ELSE started_at END,completed_at=CASE WHEN $2 IN ('completed','extraction_failed','cancelled') THEN now() ELSE NULL END WHERE news_id=$1`, newsID, status, taskID, scanTaskID, attempt, errorValue)
+	updated, err := runtime.db.Exec(ctx, `UPDATE news_processing SET status=$2::varchar,celery_task_id=$3,scan_task_id=coalesce(nullif($4,''),scan_task_id),attempt_count=greatest(attempt_count,$5),last_error=nullif($6,''),heartbeat_at=now(),updated_at=now(),started_at=CASE WHEN $2::text='running' THEN coalesce(started_at,now()) ELSE started_at END,completed_at=CASE WHEN $2::text IN ('completed','extraction_failed','cancelled') THEN now() ELSE NULL END WHERE news_id=$1`, newsID, status, taskID, scanTaskID, attempt, errorValue)
 	if err == nil && updated.RowsAffected() == 0 {
 		return fmt.Errorf("news processing state is missing for %s", newsID)
 	}
