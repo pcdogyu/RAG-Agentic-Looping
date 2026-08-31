@@ -846,7 +846,9 @@ func observationAge(value targetObservation, asOf time.Time) float64 {
 
 func roundPlaces(value float64, places int) float64 {
 	factor := math.Pow10(places)
-	return math.Round(value*factor) / factor
+	// Python's round(), used by the rollback API, applies ties-to-even. Keep the
+	// public trend payload byte-for-byte stable at exact half-way boundaries.
+	return math.RoundToEven(value*factor) / factor
 }
 
 func trendConfidence(values []targetObservation, asOf time.Time, halfLife int) float64 {
