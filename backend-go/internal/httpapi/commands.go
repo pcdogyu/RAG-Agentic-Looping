@@ -545,7 +545,12 @@ func (s *Server) researchEventConclusionAgain(w http.ResponseWriter, r *http.Req
 		return
 	}
 	s.trackModelTask(r.Context(), "extract", taskID, "event_reextraction", eventID, "事件完整重新研究", "完整重新研究", "manual", instanceID)
-	if err = s.publishCelery(r.Context(), "market_loop.reextract_event", "extract."+instanceID, taskID, []any{eventID, runID}, map[string]any{"model_instance_id": instanceID}, 5); err != nil {
+	if s.goLaneCompleted("extract") {
+		_, err = s.enqueueGoExtract(r.Context(), taskID, "market_loop.reextract_event", []any{eventID, runID}, map[string]any{"model_instance_id": instanceID}, 5, "event-refresh:"+eventID)
+	} else {
+		err = s.publishCelery(r.Context(), "market_loop.reextract_event", "extract."+instanceID, taskID, []any{eventID, runID}, map[string]any{"model_instance_id": instanceID}, 5)
+	}
+	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "event research could not be queued")
 		return
 	}

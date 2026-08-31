@@ -26,8 +26,11 @@ func main() {
 		slog.Error("batch 4 activation", "error", err)
 		os.Exit(1)
 	}
-	handlers := map[string]jobs.Handler{}
-	if err := jobs.ValidateLaneHandlers(lane, handlers); err != nil {
+	handlerManifest := map[string]jobs.Handler{}
+	if lane.ID == "extract" {
+		handlerManifest = jobs.NewExtractHandlers(cfg, nil, nil)
+	}
+	if err := jobs.ValidateLaneHandlers(lane, handlerManifest); err != nil {
 		slog.Error("batch 4 handler gate", "error", err)
 		os.Exit(1)
 	}
@@ -40,6 +43,10 @@ func main() {
 	if err := migrate.Up(ctx, dependencies.DB); err != nil {
 		slog.Error("migrate", "error", err)
 		os.Exit(1)
+	}
+	handlers := handlerManifest
+	if lane.ID == "extract" {
+		handlers = jobs.NewExtractHandlers(cfg, dependencies.DB, dependencies.Redis)
 	}
 	worker := &jobs.Worker{Store: jobs.NewStore(dependencies.DB), ID: cfg.WorkerID, Queues: []string{lane.GoQueue},
 		Lease: cfg.LeaseDuration, PollInterval: cfg.PollInterval, Handlers: handlers}

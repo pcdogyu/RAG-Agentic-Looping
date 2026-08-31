@@ -12,7 +12,7 @@ from celery import Celery, chord
 from celery.exceptions import Ignore, Retry, SoftTimeLimitExceeded
 from celery.signals import task_failure, task_success
 from redis import Redis
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from backend.app.config import get_settings
 from backend.app.db import NewsRow, SessionLocal, init_db
@@ -251,6 +251,74 @@ celery_app.conf.update(
         },
     },
 )
+
+
+def _go_extract_worker_enabled() -> bool:
+    return "extract" in {
+        value.strip()
+        for value in settings.go_worker_completed_lanes.split(",")
+        if value.strip()
+    }
+
+
+def _enqueue_go_extract_job(
+    db,
+    *,
+    task_id: str,
+    task_type: str,
+    args: list[Any],
+    kwargs: dict[str, Any] | None = None,
+    priority: int = DEFAULT_MODEL_TASK_PRIORITY,
+    dedupe_key: str | None = None,
+) -> str:
+    """Publish one extract task to the durable Go queue during lane cutover."""
+
+    payload = json.dumps(
+        {"args": args, "kwargs": kwargs or {}},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    queued_id = db.execute(
+        text(
+            """
+            INSERT INTO go_jobs(
+                id,queue,task_type,payload,status,priority,max_attempts,
+                available_at,dedupe_key,created_at,updated_at
+            ) VALUES(
+                :id,'extract',:task_type,CAST(:payload AS jsonb),'queued',
+                :priority,3,now(),:dedupe_key,now(),now()
+            )
+            ON CONFLICT DO NOTHING
+            RETURNING id
+            """
+        ),
+        {
+            "id": task_id,
+            "task_type": task_type,
+            "payload": payload,
+            "priority": priority,
+            "dedupe_key": dedupe_key,
+        },
+    ).scalar_one_or_none()
+    if queued_id is None:
+        queued_id = db.execute(
+            text(
+                """
+                SELECT id FROM go_jobs
+                WHERE id=:id OR (
+                    queue='extract' AND dedupe_key=:dedupe_key
+                    AND status IN ('queued','running','retrying')
+                )
+                ORDER BY CASE WHEN id=:id THEN 0 ELSE 1 END
+                LIMIT 1
+                """
+            ),
+            {"id": task_id, "dedupe_key": dedupe_key},
+        ).scalar_one_or_none()
+    if queued_id is None:
+        raise RuntimeError("Go extract job could not be inserted")
+    db.commit()
+    return str(queued_id)
 
 
 class ScanLeaseLost(RuntimeError):
@@ -1896,16 +1964,44 @@ def enqueue_news_extraction_retry(
         instance_id=instance.id,
     )
     try:
-        task = retry_news_item.apply_async(
-            args=[str(news.id)],
-            kwargs={
-                "model_instance_id": instance.id,
-                **({"force_asset_mapping": True} if force_asset_mapping else {}),
-            },
-            queue=broker_queue_name("extract", instance.id),
-            task_id=task_id,
-            **({"priority": priority} if priority is not None else {}),
-        )
+        if _go_extract_worker_enabled():
+            with SessionLocal() as db:
+                task_result_id = _enqueue_go_extract_job(
+                    db,
+                    task_id=task_id,
+                    task_type="market_loop.retry_news_item",
+                    args=[str(news.id)],
+                    kwargs={
+                        "model_instance_id": instance.id,
+                        **(
+                            {"force_asset_mapping": True}
+                            if force_asset_mapping
+                            else {}
+                        ),
+                    },
+                    priority=(
+                        DEFAULT_MODEL_TASK_PRIORITY
+                        if priority is None
+                        else priority
+                    ),
+                    dedupe_key=f"news:{news.id}",
+                )
+        else:
+            task = retry_news_item.apply_async(
+                args=[str(news.id)],
+                kwargs={
+                    "model_instance_id": instance.id,
+                    **(
+                        {"force_asset_mapping": True}
+                        if force_asset_mapping
+                        else {}
+                    ),
+                },
+                queue=broker_queue_name("extract", instance.id),
+                task_id=task_id,
+                **({"priority": priority} if priority is not None else {}),
+            )
+            task_result_id = str(task.id)
     except Exception as exc:
         update_model_task(
             "extract",
@@ -1914,7 +2010,7 @@ def enqueue_news_extraction_retry(
             error=f"{type(exc).__name__}: {exc}",
         )
         raise
-    return str(task.id)
+    return task_result_id
 
 
 def dispatch_news_processing_outbox(
@@ -2286,12 +2382,25 @@ def enqueue_full_event_research(
             source="manual",
             instance_id=instance.id,
         )
-        task = reextract_event.apply_async(
-            args=[str(event.id), str(run.id)],
-            kwargs={"model_instance_id": instance.id},
-            queue=broker_queue_name("extract", instance.id),
-            task_id=task_id,
-        )
+        if _go_extract_worker_enabled():
+            task_result_id = _enqueue_go_extract_job(
+                db,
+                task_id=task_id,
+                task_type="market_loop.reextract_event",
+                args=[str(event.id), str(run.id)],
+                kwargs={"model_instance_id": instance.id},
+                dedupe_key=f"event-refresh:{event.id}",
+            )
+            if task_result_id != task_id:
+                raise RuntimeError("full event research is already active")
+        else:
+            task = reextract_event.apply_async(
+                args=[str(event.id), str(run.id)],
+                kwargs={"model_instance_id": instance.id},
+                queue=broker_queue_name("extract", instance.id),
+                task_id=task_id,
+            )
+            task_result_id = str(task.id)
     except Exception as exc:
         update_model_task(
             "extract",
@@ -2308,7 +2417,7 @@ def enqueue_full_event_research(
         )
         save_event_research_run(db, run)
         raise
-    return str(task.id), run
+    return task_result_id, run
 
 
 def enqueue_event_research_refresh(

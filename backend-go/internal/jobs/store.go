@@ -28,6 +28,7 @@ type Job struct {
 }
 
 type EnqueueParams struct {
+	ID          uuid.UUID
 	Queue       string
 	TaskType    string
 	Payload     any
@@ -57,7 +58,10 @@ func (s *Store) Enqueue(ctx context.Context, params EnqueueParams) (uuid.UUID, e
 	if err != nil {
 		return uuid.Nil, err
 	}
-	id := uuid.New()
+	id := params.ID
+	if id == uuid.Nil {
+		id = uuid.New()
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return uuid.Nil, err
@@ -67,23 +71,34 @@ func (s *Store) Enqueue(ctx context.Context, params EnqueueParams) (uuid.UUID, e
 	if params.DedupeKey != "" {
 		dedupe = params.DedupeKey
 	}
-	_, err = tx.Exec(ctx, `
+	var inserted uuid.UUID
+	err = tx.QueryRow(ctx, `
 		INSERT INTO go_jobs
 			(id, queue, task_type, payload, priority, max_attempts, available_at, dedupe_key, parent_job_id)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+		ON CONFLICT DO NOTHING
+		RETURNING id`,
 		id, params.Queue, params.TaskType, payload, params.Priority, params.MaxAttempts,
-		params.AvailableAt, dedupe, params.ParentJobID)
-	if err != nil {
-		if params.DedupeKey != "" {
-			var existing uuid.UUID
-			lookupErr := tx.QueryRow(ctx, `
+		params.AvailableAt, dedupe, params.ParentJobID).Scan(&inserted)
+	if errors.Is(err, pgx.ErrNoRows) {
+		if lookupErr := tx.QueryRow(ctx, `SELECT id FROM go_jobs WHERE id=$1`, id).Scan(&inserted); lookupErr != nil {
+			if params.DedupeKey == "" {
+				return uuid.Nil, lookupErr
+			}
+			lookupErr = tx.QueryRow(ctx, `
 				SELECT id FROM go_jobs
 				WHERE queue=$1 AND dedupe_key=$2 AND status IN ('queued','running','retrying')`,
-				params.Queue, params.DedupeKey).Scan(&existing)
-			if lookupErr == nil {
-				return existing, nil
+				params.Queue, params.DedupeKey).Scan(&inserted)
+			if lookupErr != nil {
+				return uuid.Nil, lookupErr
 			}
 		}
+		if err := tx.Commit(ctx); err != nil {
+			return uuid.Nil, err
+		}
+		return inserted, nil
+	}
+	if err != nil {
 		return uuid.Nil, err
 	}
 	for _, dependency := range params.DependsOn {
@@ -94,7 +109,7 @@ func (s *Store) Enqueue(ctx context.Context, params EnqueueParams) (uuid.UUID, e
 	if err := tx.Commit(ctx); err != nil {
 		return uuid.Nil, err
 	}
-	return id, nil
+	return inserted, nil
 }
 
 func (s *Store) Claim(ctx context.Context, workerID string, queues []string, lease time.Duration) (Job, error) {
@@ -114,7 +129,8 @@ func (s *Store) Claim(ctx context.Context, workerID string, queues []string, lea
 				JOIN go_jobs parent ON parent.id=d.depends_on_job_id
 				WHERE d.job_id=j.id AND parent.status <> 'completed'
 			  )
-			ORDER BY j.priority DESC, j.available_at, j.created_at
+			-- Keep Kombu/Redis semantics: a smaller number is a higher priority.
+			ORDER BY j.priority ASC, j.available_at, j.created_at
 			FOR UPDATE SKIP LOCKED
 			LIMIT 1
 		)
@@ -190,12 +206,37 @@ func (s *Store) Cancel(ctx context.Context, id uuid.UUID) error {
 	return err
 }
 
+func (s *Store) CancelQueue(ctx context.Context, queue string) (int64, error) {
+	result, err := s.pool.Exec(ctx, `
+		UPDATE go_jobs SET cancel_requested_at=now(),updated_at=now(),
+			status=CASE WHEN status IN ('queued','retrying') THEN 'cancelled' ELSE status END,
+			completed_at=CASE WHEN status IN ('queued','retrying') THEN now() ELSE completed_at END
+		WHERE queue=$1 AND status IN ('queued','retrying','running')`, queue)
+	return result.RowsAffected(), err
+}
+
+func (s *Store) CancellationRequested(ctx context.Context, id uuid.UUID) (bool, error) {
+	var cancelled bool
+	err := s.pool.QueryRow(ctx, `SELECT cancel_requested_at IS NOT NULL FROM go_jobs WHERE id=$1`, id).Scan(&cancelled)
+	return cancelled, err
+}
+
+func (s *Store) CompleteCancellation(ctx context.Context, id uuid.UUID, workerID string) error {
+	_, err := s.pool.Exec(ctx, `UPDATE go_jobs SET status='cancelled',completed_at=now(),updated_at=now(),lease_owner=NULL,lease_until=NULL WHERE id=$1 AND lease_owner=$2 AND status='running' AND cancel_requested_at IS NOT NULL`, id, workerID)
+	return err
+}
+
 func (s *Store) ReconcileExpired(ctx context.Context) (int64, error) {
 	result, err := s.pool.Exec(ctx, `
 		UPDATE go_jobs
-		SET status=CASE WHEN attempt >= max_attempts THEN 'failed' ELSE 'retrying' END,
-			error='worker lease expired',available_at=now(),updated_at=now(),
-			completed_at=CASE WHEN attempt >= max_attempts THEN now() ELSE NULL END,
+		SET status=CASE
+				WHEN cancel_requested_at IS NOT NULL THEN 'cancelled'
+				WHEN attempt >= max_attempts THEN 'failed'
+				ELSE 'retrying'
+			END,
+			error=CASE WHEN cancel_requested_at IS NULL THEN 'worker lease expired' ELSE error END,
+			available_at=now(),updated_at=now(),
+			completed_at=CASE WHEN cancel_requested_at IS NOT NULL OR attempt >= max_attempts THEN now() ELSE NULL END,
 			lease_owner=NULL,lease_until=NULL
 		WHERE status='running' AND lease_until < now()`)
 	return result.RowsAffected(), err

@@ -28,6 +28,16 @@ type Config struct {
 	ScanInterval         time.Duration
 	ResearchCooldown     time.Duration
 	ExtractModel         string
+	ExtractURLs          []string
+	AssistURLs           []string
+	ResearchURLs         []string
+	OllamaTimeout        time.Duration
+	OllamaContextLength  int
+	OllamaMaxOutput      int
+	OllamaExtractThreads int
+	OllamaKeepAlive      string
+	EventClusterWindow   time.Duration
+	AutoResearch         bool
 	AssistModel          string
 	ResearchModel        string
 	CodeModel            string
@@ -75,6 +85,16 @@ func Load() (Config, error) {
 		ScanInterval:         time.Duration(envInt("SCAN_INTERVAL_MINUTES", 10)) * time.Minute,
 		ResearchCooldown:     time.Duration(envInt("RESEARCH_ASSET_COOLDOWN_HOURS", 24)) * time.Hour,
 		ExtractModel:         env("OLLAMA_EXTRACT_MODEL", "qwen2.5:3b"),
+		ExtractURLs:          modelURLs("EXTRACT", "http://host.docker.internal:11434"),
+		AssistURLs:           modelURLs("ASSIST", "http://host.docker.internal:11437"),
+		ResearchURLs:         modelURLs("RESEARCH", "http://host.docker.internal:11435"),
+		OllamaTimeout:        time.Duration(envInt("OLLAMA_TIMEOUT_SECONDS", 300)) * time.Second,
+		OllamaContextLength:  envInt("OLLAMA_CONTEXT_LENGTH", 8192),
+		OllamaMaxOutput:      envInt("OLLAMA_MAX_OUTPUT_TOKENS", 4096),
+		OllamaExtractThreads: envInt("OLLAMA_EXTRACT_NUM_THREADS", 4),
+		OllamaKeepAlive:      env("OLLAMA_KEEP_ALIVE", "0"),
+		EventClusterWindow:   time.Duration(envInt("EVENT_CLUSTER_WINDOW_HOURS", 72)) * time.Hour,
+		AutoResearch:         envBool("AUTO_RESEARCH", true),
 		AssistModel:          env("OLLAMA_ASSIST_MODEL", "qwen2.5:7b"),
 		ResearchModel:        env("OLLAMA_RESEARCH_MODEL", "qwen2.5:7b"),
 		CodeModel:            env("OLLAMA_CODE_MODEL", "qwen2.5-coder:7b"),
@@ -104,6 +124,13 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("legacy API proxy is forbidden in production")
 	}
 	return cfg, nil
+}
+
+func modelURLs(lane, fallback string) []string {
+	if values := split(env("OLLAMA_"+lane+"_BASE_URLS", "")); len(values) > 0 {
+		return values
+	}
+	return []string{strings.TrimRight(env("OLLAMA_"+lane+"_BASE_URL", fallback), "/")}
 }
 
 func normalizeDatabaseURL(value string) string {

@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     environment: str = "development"
     database_url: str = "sqlite:///./data/agent.db"
     redis_url: str = "redis://localhost:6379/0"
+    go_worker_completed_lanes: str = ""
 
     ollama_base_url: str = "http://localhost:11434"
     ollama_extract_base_urls: str = ""

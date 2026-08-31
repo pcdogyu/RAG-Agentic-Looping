@@ -87,3 +87,19 @@ The lane task boundary is:
 - `mapping`: event-to-asset resolution.
 - `research`: event research and asset research.
 - `evolution`: outcome evolution, manual evolution, and candidate execution.
+
+### Extract lane cutover
+
+The extract lane has native handlers for all four registered task types. During
+cutover, set both `GO_WORKER_LANE=extract` and
+`GO_WORKER_COMPLETED_LANES=extract`, start `go-worker`, and stop only the Python
+`extract-worker` after its Celery queues have drained. Python IO discovery keeps
+the transactional news outbox, but publishes new extraction jobs to `go_jobs`;
+the Go API does the same for manual news retry and complete event refresh.
+
+The Go worker preserves `news_processing`, event/report payloads, model queue
+tracking, retries, cancellation, and model-call audits. Until the mapping and
+research lanes migrate, it publishes their work to the instance-specific Celery
+queues. Rollback clears `GO_WORKER_COMPLETED_LANES`, stops `go-worker`, and
+restarts the Python `extract-worker`; durable failed work remains available to
+the existing retry API.

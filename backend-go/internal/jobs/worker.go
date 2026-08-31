@@ -85,6 +85,10 @@ func (w *Worker) execute(parent context.Context, job Job) {
 	result, err := handler(ctx, job)
 	cancel()
 	<-done
+	if cancelled, cancelErr := w.Store.CancellationRequested(parent, job.ID); cancelErr == nil && cancelled {
+		_ = w.Store.CompleteCancellation(parent, job.ID, w.ID)
+		return
+	}
 	if err != nil {
 		_ = w.Store.Fail(parent, job, w.ID, err)
 		return

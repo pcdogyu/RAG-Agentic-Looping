@@ -1807,6 +1807,101 @@ def test_standalone_news_retry_is_recorded_and_sent_with_requested_priority(
     ]
 
 
+def test_standalone_news_retry_switches_only_extract_publisher_to_go(monkeypatch):
+    observed = datetime(2026, 8, 22, 12, 0, tzinfo=UTC)
+    news = NewsItem(
+        source="Example",
+        title="Send durable extraction to Go",
+        url="https://example.com/go-extract",
+        published_at=observed,
+        observed_at=observed,
+        as_of=observed,
+        content_hash=sha256(b"go-extract").hexdigest(),
+    )
+    queued = []
+    monkeypatch.setattr(worker, "_go_extract_worker_enabled", lambda: True)
+    monkeypatch.setattr(worker, "record_model_task", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        worker,
+        "_enqueue_go_extract_job",
+        lambda _db, **kwargs: queued.append(kwargs) or kwargs["task_id"],
+    )
+    monkeypatch.setattr(
+        worker.retry_news_item,
+        "apply_async",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("cut-over publisher reached Celery")
+        ),
+    )
+
+    task_id = worker.enqueue_news_extraction_retry(
+        news,
+        priority=1,
+        force_asset_mapping=True,
+    )
+
+    assert queued == [
+        {
+            "task_id": task_id,
+            "task_type": "market_loop.retry_news_item",
+            "args": [str(news.id)],
+            "kwargs": {
+                "model_instance_id": "extract-0",
+                "force_asset_mapping": True,
+            },
+            "priority": 1,
+            "dedupe_key": f"news:{news.id}",
+        }
+    ]
+
+
+def test_full_event_refresh_switches_to_go_without_changing_run(db, monkeypatch):
+    observed = datetime(2026, 8, 22, 12, 0, tzinfo=UTC)
+    event = NewsEvent(
+        news_item_ids=[],
+        headline="Refresh through Go",
+        event_type="other",
+        direct_impact="Refresh the existing event",
+        source_quality=SourceQuality.PROFESSIONAL,
+        published_at=observed,
+        observed_at=observed,
+        as_of=observed,
+    )
+    run = EventResearchRun(event_id=event.id, status=RunStatus.COMPLETED)
+    queued = []
+    monkeypatch.setattr(worker, "_go_extract_worker_enabled", lambda: True)
+    monkeypatch.setattr(worker, "record_model_task", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        worker,
+        "_enqueue_go_extract_job",
+        lambda _db, **kwargs: queued.append(kwargs) or kwargs["task_id"],
+    )
+    monkeypatch.setattr(
+        worker.reextract_event,
+        "apply_async",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("cut-over publisher reached Celery")
+        ),
+    )
+
+    task_id, updated = worker.enqueue_full_event_research(db, event, run)
+
+    assert updated is run
+    assert queued == [
+        {
+            "task_id": task_id,
+            "task_type": "market_loop.reextract_event",
+            "args": [str(event.id), str(run.id)],
+            "kwargs": {"model_instance_id": "extract-0"},
+            "dedupe_key": f"event-refresh:{event.id}",
+        }
+    ]
+    step = latest_full_event_research_step(run)
+    assert step is not None
+    assert step.status == "queued"
+    assert step.metrics["task_id"] == task_id
+
+
 def test_standalone_news_rescan_forces_downstream_7b_mapping(db, monkeypatch):
     observed = datetime(2026, 8, 22, 12, 0, tzinfo=UTC)
     news = NewsItem(

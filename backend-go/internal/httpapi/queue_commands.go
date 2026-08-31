@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/jobs"
 )
 
 var modelQueueNames = map[string]string{"extract": "extract", "research": "research", "assist": "mapping", "code": "evolution"}
@@ -99,6 +100,9 @@ func (s *Server) clearModelQueue(w http.ResponseWriter, r *http.Request) {
 	cancelled := tracked.Cancelled
 	if queueID == "extract" {
 		cancelled += s.clearExtractionQueue(r.Context(), "").Cancelled
+		if s.goLaneCompleted("extract") {
+			_, _ = jobs.NewStore(s.db).CancelQueue(r.Context(), "extract")
+		}
 	}
 	purged := s.purgeCeleryQueue(r.Context(), queueName)
 	_ = s.redis.Del(r.Context(), modelQueueOverviewCacheKey).Err()
@@ -125,9 +129,17 @@ func (s *Server) clearModelInstanceQueue(w http.ResponseWriter, r *http.Request)
 		}
 		cancelled = result["cancelled"].(int)
 	} else {
-		cancelled = s.cancelTrackedTasks(r.Context(), lane, true, instanceID).Cancelled
+		tracked := s.cancelTrackedTasks(r.Context(), lane, true, instanceID)
+		cancelled = tracked.Cancelled
 		if queueID == "extract" {
 			cancelled += s.clearExtractionQueue(r.Context(), instanceID).Cancelled
+			if s.goLaneCompleted("extract") {
+				for _, taskID := range tracked.TaskIDs {
+					if id, err := uuid.Parse(taskID); err == nil {
+						_ = jobs.NewStore(s.db).Cancel(r.Context(), id)
+					}
+				}
+			}
 		}
 	}
 	purged := s.purgeCeleryQueue(r.Context(), modelQueueNames[queueID]+"."+instanceID)
@@ -339,7 +351,12 @@ func (s *Server) queueNewsRetryWithOptions(ctx context.Context, newsID, title, s
 	}
 	taskID := uuid.NewString()
 	s.trackModelTask(ctx, "extract", taskID, "news_extraction", newsID, title, source, "manual", instanceID)
-	if err = s.publishCelery(ctx, "market_loop.retry_news_item", "extract."+instanceID, taskID, []any{newsID}, map[string]any{"model_instance_id": instanceID, "force_asset_mapping": true}, priority); err != nil {
+	if s.goLaneCompleted("extract") {
+		taskID, err = s.enqueueGoExtract(ctx, taskID, "market_loop.retry_news_item", []any{newsID}, map[string]any{"model_instance_id": instanceID, "force_asset_mapping": true}, priority, "news:"+newsID)
+	} else {
+		err = s.publishCelery(ctx, "market_loop.retry_news_item", "extract."+instanceID, taskID, []any{newsID}, map[string]any{"model_instance_id": instanceID, "force_asset_mapping": true}, priority)
+	}
+	if err != nil {
 		_, _ = s.db.Exec(ctx, `UPDATE news_processing_outbox SET dispatch_attempts=dispatch_attempts+1,last_error=$2,available_at=now()+interval '60 seconds',updated_at=now() WHERE news_id=$1`, newsID, err.Error())
 		_, _ = s.db.Exec(ctx, `UPDATE news_processing SET status='dispatch_pending',last_error=$2,updated_at=now() WHERE news_id=$1`, newsID, err.Error())
 		return "", fail(http.StatusServiceUnavailable, "news retry could not be dispatched")

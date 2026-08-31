@@ -198,6 +198,17 @@ services:
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       MARKET_ADAPTER_URL: http://market-adapter:8091
       ML_ADAPTER_URL: http://ml-adapter:8092
+      OLLAMA_EXTRACT_BASE_URLS: ${OLLAMA_EXTRACT_BASE_URLS:-}
+      OLLAMA_EXTRACT_BASE_URL: ${OLLAMA_EXTRACT_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_EXTRACT_MODEL: ${OLLAMA_EXTRACT_MODEL:-qwen2.5:3b}
+      OLLAMA_EXTRACT_NUM_THREADS: ${OLLAMA_EXTRACT_NUM_THREADS:-4}
+      OLLAMA_CONTEXT_LENGTH: ${OLLAMA_CONTEXT_LENGTH:-8192}
+      OLLAMA_MAX_OUTPUT_TOKENS: ${OLLAMA_MAX_OUTPUT_TOKENS:-4096}
+      OLLAMA_TIMEOUT_SECONDS: ${OLLAMA_TIMEOUT_SECONDS:-300}
+      AUTO_RESEARCH: ${AUTO_RESEARCH:-true}
+      EVENT_CLUSTER_WINDOW_HOURS: ${EVENT_CLUSTER_WINDOW_HOURS:-72}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       postgres:
         condition: service_healthy

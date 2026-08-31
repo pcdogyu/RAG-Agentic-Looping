@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/migrate"
 )
@@ -56,5 +57,75 @@ func TestStoreLifecycleAgainstPostgres(t *testing.T) {
 	}
 	if status != "completed" {
 		t.Fatalf("status=%s", status)
+	}
+}
+
+func TestStoreEnqueueReturnsExistingActiveDedupeJob(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL is not set")
+	}
+	dsn = strings.Replace(dsn, "postgresql+psycopg://", "postgresql://", 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err := migrate.Up(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(pool)
+	key := "integration-dedupe-" + time.Now().UTC().Format("20060102150405.000000000")
+	first, err := store.Enqueue(ctx, EnqueueParams{Queue: "extract", TaskType: retryNewsTask, Payload: map[string]any{"args": []any{"one"}}, DedupeKey: key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = pool.Exec(context.Background(), `DELETE FROM go_jobs WHERE id=$1`, first) }()
+	second, err := store.Enqueue(ctx, EnqueueParams{Queue: "extract", TaskType: retryNewsTask, Payload: map[string]any{"args": []any{"two"}}, DedupeKey: key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second != first {
+		t.Fatalf("dedupe returned %s, want %s", second, first)
+	}
+}
+
+func TestStoreClaimsSmallerPriorityFirst(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL is not set")
+	}
+	dsn = strings.Replace(dsn, "postgresql+psycopg://", "postgresql://", 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err := migrate.Up(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(pool)
+	queue := "priority-" + time.Now().UTC().Format("150405.000000000")
+	low, err := store.Enqueue(ctx, EnqueueParams{Queue: queue, TaskType: "contract.low", Payload: map[string]any{}, Priority: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	high, err := store.Enqueue(ctx, EnqueueParams{Queue: queue, TaskType: "contract.high", Payload: map[string]any{}, Priority: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM go_jobs WHERE id=ANY($1)`, []uuid.UUID{low, high})
+	}()
+	job, err := store.Claim(ctx, "priority-worker", []string{queue}, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.ID != high {
+		t.Fatalf("claimed priority %d job %s, want priority 1 job %s", job.Priority, job.ID, high)
 	}
 }
