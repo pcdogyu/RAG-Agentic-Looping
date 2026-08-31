@@ -103,3 +103,17 @@ research lanes migrate, it publishes their work to the instance-specific Celery
 queues. Rollback clears `GO_WORKER_COMPLETED_LANES`, stops `go-worker`, and
 restarts the Python `extract-worker`; durable failed work remains available to
 the existing retry API.
+
+If the legacy Celery lane cannot drain within the maintenance window, stop the
+IO/scheduler publishers and the Python extract worker, then preview and apply
+the idempotent queue bridge:
+
+```text
+python -m backend.app.extract_queue_cutover
+python -m backend.app.extract_queue_cutover --apply
+```
+
+The bridge accepts only `retry_news_item`, verifies every durable
+`news_processing` row, preserves task IDs/priorities, commits every `go_job`
+before moving the Redis list, and keeps the original list under
+`market-loop:archive:extract-cutover:*` for rollback inspection.
