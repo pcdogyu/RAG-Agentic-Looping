@@ -416,6 +416,10 @@ class EventResearchService:
             "不得输出评级、概率、新闻可信度、评级置信度或任何置信因子。"
             "评级和两种置信度全部由程序计算。"
             "asset_id 只能从允许工具中选择；宏观目标没有真实工具时保持空。"
+            "target_type=economy 仅用于 GDP、通胀、就业、消费、投资、贸易等宏观经济指标。"
+            "成交量、交易活跃度、投资者参与度属于驱动因素或传导路径，不是宏观目标，"
+            "不得作为独立 impact。公司名称或公司股价必须使用对应的 tradable_asset 和 asset_id，"
+            "无法绑定允许工具时不得伪装成 economy 或 other。"
             "只能引用给定 evidence_ids 和 actions.id。未知制裁范围、生效日、支付结算、"
             "港口航运、实际供应或市场反应必须写入 missing_information。"
         )

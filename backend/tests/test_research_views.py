@@ -1,7 +1,9 @@
 from datetime import timedelta
+from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
+from backend.app.db import RecommendationRow
 from backend.app.domain import (
     AnalysisStep,
     AssetClass,
@@ -294,6 +296,42 @@ def test_research_conclusions_exclude_retryable_fallbacks(db):
     assert str(asset_item.id) not in conclusion_ids
     assert str(event_item.id) not in conclusion_ids
     assert {str(asset_run.id), str(event_item.id)} <= failure_ids
+
+
+def test_research_conclusions_stop_after_the_requested_page(db, monkeypatch):
+    now = utc_now()
+    for index in range(4):
+        item, run = recommendation(
+            asset(f"PAGE{index}"),
+            rating=Rating.WATCH,
+            score=0,
+            as_of=now - timedelta(minutes=index),
+        )
+        save_run(db, run)
+        save_recommendation(db, item)
+    db.add(
+        RecommendationRow(
+            id=uuid4(),
+            run_id=uuid4(),
+            asset_id="equity:test:BROKEN",
+            score=0,
+            rating=Rating.WATCH.value,
+            confidence=0,
+            as_of=now - timedelta(days=1),
+            payload={"broken": True},
+        )
+    )
+    db.commit()
+    monkeypatch.setattr(
+        "backend.app.api_integrations._CONCLUSION_SCAN_BATCH_SIZE", 2
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/research-conclusions?kind=asset&limit=1")
+
+    assert response.status_code == 200
+    assert len(response.json()["items"]) == 1
+    assert response.json()["next_cursor"] is not None
 
 
 def test_target_changes_split_macro_and_assets_and_link_latest_research(db):

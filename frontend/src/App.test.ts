@@ -47,6 +47,7 @@ import {
   QueueGrid,
   NewsExtractionList,
   queueRefreshIntervalMs,
+  ResearchDetailLoadingModal,
   researchViewsRefreshIntervalMs,
   type ResearchConclusionItem,
   routeFromHash,
@@ -770,6 +771,18 @@ describe("changed targets page", () => {
     expect(describeMissingInformation("政策细则")).toBe(
       "政策细则 / Additional verified information is required for this item",
     );
+  });
+
+  it("shows a bilingual loading modal while a research report is requested", () => {
+    const markup = renderToStaticMarkup(createElement(ResearchDetailLoadingModal, {
+      title: "Robinhood and Interactive Brokers",
+      onClose: () => undefined,
+    }));
+
+    expect(markup).toContain('aria-busy="true"');
+    expect(markup).toContain("正在加载研究报告… / Loading research report…");
+    expect(markup).toContain("Robinhood and Interactive Brokers");
+    expect(markup).toContain('aria-label="关闭研究报告加载提示"');
   });
 
   it("refreshes conclusion and target views every five seconds", () => {

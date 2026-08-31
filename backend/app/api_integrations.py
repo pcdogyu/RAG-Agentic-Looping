@@ -55,6 +55,7 @@ from backend.app.services.fact_sources import (
     set_source_group,
     source_group_id,
 )
+from backend.app.services.macro_impacts import sanitize_published_impacts
 from backend.app.services.mcp_registry import (
     SearchRequest,
     SourceInput,
@@ -844,7 +845,6 @@ _MACRO_TARGET_TYPES = {
     TargetType.SECTOR,
     TargetType.RISK_ASSET,
     TargetType.SHIPPING,
-    TargetType.OTHER,
 }
 _COMMODITY_TARGET_TYPES = {TargetType.COMMODITY_PRICE}
 
@@ -889,6 +889,245 @@ def _representative_event_impact(report: EventReport) -> TargetImpact | None:
     )
 
 
+_CONCLUSION_SCAN_BATCH_SIZE = 50
+
+
+def _is_before_conclusion_cursor(
+    item: dict[str, Any],
+    cursor_key: tuple[datetime, int, int] | None,
+) -> bool:
+    return cursor_key is None or _conclusion_sort_key(item) < cursor_key
+
+
+def _recommendation_conclusion_item(
+    recommendation: Recommendation,
+    run: ResearchRun | None,
+    *,
+    query_text: str,
+    market: str,
+    rating: str,
+    evidence_status: str,
+) -> dict[str, Any] | None:
+    if run is not None and run.retryable_reason is not None:
+        return None
+    asset = recommendation.asset
+    if market and asset.market.value.casefold() != market.casefold():
+        return None
+    if rating and recommendation.rating.value != rating:
+        return None
+    if not _matches_evidence_status(recommendation.evidence_complete, evidence_status):
+        return None
+    searchable = f"{asset.symbol} {asset.name} {recommendation.thesis.summary}".casefold()
+    if query_text and query_text not in searchable:
+        return None
+    return {
+        "kind": "asset",
+        "id": recommendation.id,
+        "occurred_at": as_utc(recommendation.as_of).isoformat(),
+        "status": recommendation.signal_status.value,
+        "evidence_complete": recommendation.evidence_complete,
+        "title": f"{asset.symbol} · {asset.name}",
+        "summary": recommendation.thesis.summary,
+        "asset": asset.model_dump(mode="json"),
+        "event": None,
+        "recommendation": _public_recommendation(recommendation, run),
+        "report": None,
+    }
+
+
+def _event_conclusion_item(
+    row: EventResearchRunRow,
+    run: EventResearchRun,
+    event: dict[str, Any] | None,
+    *,
+    query_text: str,
+    evidence_status: str,
+) -> dict[str, Any] | None:
+    if run.retryable_reason is not None or run.report is None:
+        return None
+    refresh = public_full_event_research(run)
+    if row.status not in _VISIBLE_EVENT_STATUSES and refresh is None:
+        return None
+    report = run.report.model_copy(
+        update={"impacts": sanitize_published_impacts(run.report.impacts)}
+    )
+    if not _matches_evidence_status(report.evidence_complete, evidence_status):
+        return None
+    headline = str((event or {}).get("headline") or report.summary)
+    searchable = " ".join(
+        [headline, report.summary, *report.affected_markets, *report.affected_sectors]
+    ).casefold()
+    if query_text and query_text not in searchable:
+        return None
+    representative_impact = _representative_event_impact(report)
+    return {
+        "kind": "event",
+        "id": run.id,
+        "occurred_at": as_utc(row.updated_at).isoformat(),
+        "status": run.status.value,
+        "evidence_complete": report.evidence_complete,
+        "title": headline,
+        "summary": report.summary,
+        "asset": None,
+        "event": {
+            "id": str(run.event_id),
+            "headline": headline,
+            "event_type": (event or {}).get("event_type", "other"),
+        },
+        "recommendation": None,
+        "refresh": refresh,
+        "report": {
+            "confidence": report.confidence,
+            "news_confidence": report.news_confidence,
+            "direction_score": (
+                representative_impact.direction_score if representative_impact else None
+            ),
+            "rating": (
+                representative_impact.rating.value if representative_impact else None
+            ),
+            "impact_count": len(report.impacts),
+            "affected_markets": report.affected_markets,
+            "affected_sectors": report.affected_sectors,
+            "scoring_version": report.scoring_version,
+        },
+    }
+
+
+def _scan_recommendation_conclusions(
+    db: Session,
+    *,
+    wanted: int,
+    query_text: str,
+    market: str,
+    rating: str,
+    evidence_status: str,
+    cursor_time: datetime | None,
+    cursor_key: tuple[datetime, int, int] | None,
+) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    scan_time: datetime | None = None
+    scan_id: UUID | None = None
+    batch_size = max(_CONCLUSION_SCAN_BATCH_SIZE, wanted * 2)
+    while len(output) < wanted:
+        statement = select(RecommendationRow)
+        if cursor_time is not None:
+            statement = statement.where(RecommendationRow.as_of <= cursor_time)
+        if scan_time is not None and scan_id is not None:
+            statement = statement.where(
+                or_(
+                    RecommendationRow.as_of < scan_time,
+                    and_(
+                        RecommendationRow.as_of == scan_time,
+                        RecommendationRow.id < scan_id,
+                    ),
+                )
+            )
+        rows = list(
+            db.scalars(
+                statement.order_by(
+                    desc(RecommendationRow.as_of), desc(RecommendationRow.id)
+                ).limit(batch_size)
+            ).all()
+        )
+        if not rows:
+            break
+        parsed = [Recommendation.model_validate(row.payload) for row in rows]
+        run_ids = {item.run_id for item in parsed}
+        run_rows = (
+            db.scalars(select(ResearchRunRow).where(ResearchRunRow.id.in_(run_ids))).all()
+            if run_ids
+            else []
+        )
+        runs_by_id = {
+            row.id: ResearchRun.model_validate(row.payload) for row in run_rows
+        }
+        for recommendation in parsed:
+            item = _recommendation_conclusion_item(
+                recommendation,
+                runs_by_id.get(recommendation.run_id),
+                query_text=query_text,
+                market=market,
+                rating=rating,
+                evidence_status=evidence_status,
+            )
+            if item and _is_before_conclusion_cursor(item, cursor_key):
+                output.append(item)
+                if len(output) >= wanted:
+                    break
+        last = rows[-1]
+        scan_time, scan_id = as_utc(last.as_of), last.id
+        if len(rows) < batch_size:
+            break
+    return output
+
+
+def _scan_event_conclusions(
+    db: Session,
+    *,
+    wanted: int,
+    query_text: str,
+    evidence_status: str,
+    cursor_time: datetime | None,
+    cursor_key: tuple[datetime, int, int] | None,
+) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    scan_time: datetime | None = None
+    scan_id: UUID | None = None
+    batch_size = max(_CONCLUSION_SCAN_BATCH_SIZE, wanted * 2)
+    while len(output) < wanted:
+        statement = select(EventResearchRunRow).where(
+            EventResearchRunRow.status.in_(_EVENT_REFRESH_FEED_STATUSES)
+        )
+        if cursor_time is not None:
+            statement = statement.where(EventResearchRunRow.updated_at <= cursor_time)
+        if scan_time is not None and scan_id is not None:
+            statement = statement.where(
+                or_(
+                    EventResearchRunRow.updated_at < scan_time,
+                    and_(
+                        EventResearchRunRow.updated_at == scan_time,
+                        EventResearchRunRow.id < scan_id,
+                    ),
+                )
+            )
+        rows = list(
+            db.scalars(
+                statement.order_by(
+                    desc(EventResearchRunRow.updated_at), desc(EventResearchRunRow.id)
+                ).limit(batch_size)
+            ).all()
+        )
+        if not rows:
+            break
+        parsed = [
+            (row, EventResearchRun.model_validate(row.payload)) for row in rows
+        ]
+        event_ids = {run.event_id for _, run in parsed}
+        event_rows = (
+            db.scalars(select(EventRow).where(EventRow.id.in_(event_ids))).all()
+            if event_ids
+            else []
+        )
+        events_by_id = {row.id: row.payload for row in event_rows}
+        for row, run in parsed:
+            item = _event_conclusion_item(
+                row,
+                run,
+                events_by_id.get(run.event_id),
+                query_text=query_text,
+                evidence_status=evidence_status,
+            )
+            if item and _is_before_conclusion_cursor(item, cursor_key):
+                output.append(item)
+                if len(output) >= wanted:
+                    break
+        last = rows[-1]
+        scan_time, scan_id = as_utc(last.updated_at), last.id
+        if len(rows) < batch_size:
+            break
+    return output
+
+
 @router.get("/api/v1/research-conclusions")
 def list_research_conclusions(
     db: Db,
@@ -902,138 +1141,8 @@ def list_research_conclusions(
 ) -> dict[str, Any]:
     query_text = q.strip().casefold()
     feed: list[dict[str, Any]] = []
-
-    if kind in {"all", "asset"}:
-        recommendation_rows = list(db.scalars(select(RecommendationRow)).all())
-        recommendations = [
-            Recommendation.model_validate(row.payload) for row in recommendation_rows
-        ]
-        run_ids = {item.run_id for item in recommendations}
-        run_rows = (
-            db.scalars(select(ResearchRunRow).where(ResearchRunRow.id.in_(run_ids))).all()
-            if run_ids
-            else []
-        )
-        runs_by_id = {
-            row.id: ResearchRun.model_validate(row.payload) for row in run_rows
-        }
-        for recommendation in recommendations:
-            run = runs_by_id.get(recommendation.run_id)
-            if run is not None and run.retryable_reason is not None:
-                continue
-            asset = recommendation.asset
-            if market and asset.market.value.casefold() != market.casefold():
-                continue
-            if rating and recommendation.rating.value != rating:
-                continue
-            if not _matches_evidence_status(
-                recommendation.evidence_complete, evidence_status
-            ):
-                continue
-            searchable = (
-                f"{asset.symbol} {asset.name} {recommendation.thesis.summary}"
-            ).casefold()
-            if query_text and query_text not in searchable:
-                continue
-            feed.append(
-                {
-                    "kind": "asset",
-                    "id": recommendation.id,
-                    "occurred_at": as_utc(recommendation.as_of).isoformat(),
-                    "status": recommendation.signal_status.value,
-                    "evidence_complete": recommendation.evidence_complete,
-                    "title": f"{asset.symbol} · {asset.name}",
-                    "summary": recommendation.thesis.summary,
-                    "asset": asset.model_dump(mode="json"),
-                    "event": None,
-                    "recommendation": _public_recommendation(
-                        recommendation, run
-                    ),
-                    "report": None,
-                }
-            )
-
-    if kind in {"all", "event"} and not market and not rating:
-        event_rows = list(
-            db.scalars(
-                select(EventResearchRunRow).where(
-                    EventResearchRunRow.status.in_(_EVENT_REFRESH_FEED_STATUSES)
-                )
-            ).all()
-        )
-        event_ids = {row.event_id for row in event_rows}
-        stored_events = (
-            db.scalars(select(EventRow).where(EventRow.id.in_(event_ids))).all()
-            if event_ids
-            else []
-        )
-        events_by_id = {row.id: row.payload for row in stored_events}
-        for row in event_rows:
-            run = EventResearchRun.model_validate(row.payload)
-            if run.retryable_reason is not None:
-                continue
-            report = run.report
-            if report is None:
-                continue
-            refresh = public_full_event_research(run)
-            if row.status not in _VISIBLE_EVENT_STATUSES and refresh is None:
-                continue
-            representative_impact = _representative_event_impact(report)
-            if not _matches_evidence_status(report.evidence_complete, evidence_status):
-                continue
-            event = events_by_id.get(run.event_id)
-            headline = str((event or {}).get("headline") or report.summary)
-            searchable = " ".join(
-                [
-                    headline,
-                    report.summary,
-                    *report.affected_markets,
-                    *report.affected_sectors,
-                ]
-            ).casefold()
-            if query_text and query_text not in searchable:
-                continue
-            feed.append(
-                {
-                    "kind": "event",
-                    "id": run.id,
-                    "occurred_at": as_utc(row.updated_at).isoformat(),
-                    "status": run.status.value,
-                    "evidence_complete": report.evidence_complete,
-                    "title": headline,
-                    "summary": report.summary,
-                    "asset": None,
-                    "event": (
-                        {
-                            "id": str(run.event_id),
-                            "headline": headline,
-                            "event_type": (event or {}).get("event_type", "other"),
-                        }
-                    ),
-                    "recommendation": None,
-                    "refresh": refresh,
-                    "report": {
-                        "confidence": report.confidence,
-                        "news_confidence": report.news_confidence,
-                        "direction_score": (
-                            representative_impact.direction_score
-                            if representative_impact
-                            else None
-                        ),
-                        "rating": (
-                            representative_impact.rating.value
-                            if representative_impact
-                            else None
-                        ),
-                        "impact_count": len(report.impacts),
-                        "affected_markets": report.affected_markets,
-                        "affected_sectors": report.affected_sectors,
-                        "scoring_version": report.scoring_version,
-                    },
-                }
-            )
-
-    feed.sort(key=_conclusion_sort_key, reverse=True)
+    cursor_time: datetime | None = None
+    cursor_key: tuple[datetime, int, int] | None = None
     if cursor:
         cursor_time, cursor_kind, cursor_id = _decode_union_cursor(cursor)
         cursor_key = (
@@ -1041,7 +1150,32 @@ def list_research_conclusions(
             _CONCLUSION_KIND_ORDER[cursor_kind],
             cursor_id.int,
         )
-        feed = [item for item in feed if _conclusion_sort_key(item) < cursor_key]
+    wanted = limit + 1
+    if kind in {"all", "asset"}:
+        feed.extend(
+            _scan_recommendation_conclusions(
+                db,
+                wanted=wanted,
+                query_text=query_text,
+                market=market,
+                rating=rating,
+                evidence_status=evidence_status,
+                cursor_time=cursor_time,
+                cursor_key=cursor_key,
+            )
+        )
+    if kind in {"all", "event"} and not market and not rating:
+        feed.extend(
+            _scan_event_conclusions(
+                db,
+                wanted=wanted,
+                query_text=query_text,
+                evidence_status=evidence_status,
+                cursor_time=cursor_time,
+                cursor_key=cursor_key,
+            )
+        )
+    feed.sort(key=_conclusion_sort_key, reverse=True)
     has_more = len(feed) > limit
     visible = feed[:limit]
     next_cursor = None
@@ -1063,13 +1197,17 @@ def get_event_conclusion(run_id: UUID, db: Db) -> dict[str, Any]:
     run = EventResearchRun.model_validate(row.payload)
     if run.report is None:
         raise HTTPException(status_code=404, detail="event conclusion has no report")
+    public_report = run.report.model_copy(
+        update={"impacts": sanitize_published_impacts(run.report.impacts)}
+    )
+    public_run = run.model_copy(update={"report": public_report})
     event = get_event(db, run.event_id)
     news = [get_news(db, news_id) for news_id in (event.news_item_ids if event else [])]
     return {
-        "run": run.model_dump(mode="json"),
+        "run": public_run.model_dump(mode="json"),
         "refresh": public_full_event_research(run),
         "event": event.model_dump(mode="json") if event else None,
-        "report": run.report.model_dump(mode="json"),
+        "report": public_report.model_dump(mode="json"),
         "news": [item.model_dump(mode="json") for item in news if item],
         "evidence": [item.model_dump(mode="json") for item in run.evidence],
     }
@@ -1228,7 +1366,7 @@ def _event_target_changes(
         ):
             continue
         parsed.append((row, run))
-        for impact in run.report.impacts:
+        for impact in sanitize_published_impacts(run.report.impacts):
             if (
                 impact.target_type in target_types
                 and impact.asset
@@ -1251,7 +1389,7 @@ def _event_target_changes(
         if report is None:
             continue
         grouped_impacts: dict[str, dict[str, Any]] = {}
-        for impact in run.report.impacts if run.report else []:
+        for impact in sanitize_published_impacts(run.report.impacts) if run.report else []:
             if impact.target_type not in target_types or _resembles_security_target(
                 impact, security_names, security_symbols
             ):

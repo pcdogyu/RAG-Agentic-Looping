@@ -17,6 +17,8 @@ from backend.app.domain import (
     NewsEvent,
     Rating,
     SourceQuality,
+    TargetImpact,
+    TargetType,
     TradeStatus,
 )
 from backend.app.providers.fmp import FmpProvider
@@ -32,6 +34,7 @@ from backend.app.services.macro_impacts import (
     TargetImpactDraft,
     finalize_impacts,
     rule_based_event_draft,
+    sanitize_published_impacts,
 )
 
 
@@ -407,6 +410,125 @@ def test_industry_peer_association_cannot_become_an_execution_signal():
     assert impacts[0].trade_status is TradeStatus.UNTRADEABLE
     assert impacts[0].execution_supported is False
     assert "industry_only_mapping" in impacts[0].missing_information
+
+
+def test_market_activity_is_not_a_macro_target_and_stock_price_rebinds_to_asset():
+    hood = AssetRef(
+        asset_id="equity:XNAS:HOOD",
+        asset_class=AssetClass.EQUITY,
+        market=Market.US,
+        symbol="HOOD",
+        name="Robinhood Markets, Inc.",
+        exchange_or_provider="XNAS",
+    )
+    ibkr = AssetRef(
+        asset_id="equity:XNAS:IBKR",
+        asset_class=AssetClass.EQUITY,
+        market=Market.US,
+        symbol="IBKR",
+        name="Interactive Brokers Group, Inc.",
+        exchange_or_provider="XNAS",
+    )
+    event = _event(
+        "Robinhood and Interactive Brokers benefit from retail trading volume",
+        EventAction(
+            actor="CBOE",
+            action_type="market_update",
+            action_stage=ActionStage.REALIZED,
+            action="reported record retail trading volume",
+            object="retail brokerage activity",
+            strength=0.8,
+        ),
+    )
+    event.candidates = [
+        CandidateAsset(
+            asset=hood,
+            relationship="direct",
+            relevance=0.9,
+            mapping_confidence=0.9,
+            rationale="Robinhood is named directly.",
+        ),
+        CandidateAsset(
+            asset=ibkr,
+            relationship="direct",
+            relevance=0.9,
+            mapping_confidence=0.9,
+            rationale="Interactive Brokers is named directly.",
+        ),
+    ]
+    evidence = [_evidence(event.headline)]
+    draft = EventImpactDraft(
+        summary=event.headline,
+        evidence_ids=[str(evidence[0].id)],
+        impacts=[
+            TargetImpactDraft(
+                target_type=TargetType.ECONOMY,
+                target_name="交易量增加",
+                direction_score=80,
+            ),
+            TargetImpactDraft(
+                target_type=TargetType.ECONOMY,
+                target_name="市场活跃度提升",
+                direction_score=75,
+            ),
+            TargetImpactDraft(
+                target_type=TargetType.ECONOMY,
+                target_name="零售交易者参与度提高",
+                direction_score=90,
+            ),
+            TargetImpactDraft(
+                target_type=TargetType.ECONOMY,
+                target_name="Robinhood 股价",
+                direction_score=85,
+                rationale="活跃交易可能增加经纪业务收入。",
+                evidence_ids=[str(evidence[0].id)],
+            ),
+        ],
+    )
+
+    _, impacts, _, _ = finalize_impacts(
+        draft,
+        event=event,
+        evidence=evidence,
+        assets={hood.asset_id: hood, ibkr.asset_id: ibkr},
+    )
+
+    by_asset = {item.asset.asset_id: item for item in impacts if item.asset}
+    assert set(by_asset) == {hood.asset_id, ibkr.asset_id}
+    assert by_asset[hood.asset_id].target_type is TargetType.TRADABLE_ASSET
+    assert by_asset[hood.asset_id].direction_score == 85
+    assert all(
+        item.target_name
+        not in {"交易量增加", "市场活跃度提升", "零售交易者参与度提高"}
+        for item in impacts
+    )
+
+    public_impacts = sanitize_published_impacts(
+        [
+            TargetImpact(
+                target_type=TargetType.TRADABLE_ASSET,
+                target_name=hood.name,
+                asset=hood,
+                direction_score=0,
+            ),
+            TargetImpact(
+                target_type=TargetType.ECONOMY,
+                target_name="交易量增加",
+                direction_score=80,
+            ),
+            TargetImpact(
+                target_type=TargetType.ECONOMY,
+                target_name="Robinhood 股价",
+                direction_score=85,
+                evidence_ids=[evidence[0].id],
+            ),
+        ]
+    )
+
+    assert len(public_impacts) == 1
+    assert public_impacts[0].asset == hood
+    assert public_impacts[0].target_type is TargetType.TRADABLE_ASSET
+    assert public_impacts[0].direction_score == 85
 
 
 def test_fmp_parses_commodity_and_fx_master_lists(monkeypatch):

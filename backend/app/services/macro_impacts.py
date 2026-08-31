@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+import unicodedata
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -188,6 +190,159 @@ def _dedupe_strings(values: Iterable[str]) -> list[str]:
     return result
 
 
+_NON_TARGET_ACTIVITY_PATTERNS = (
+    "成交量",
+    "交易量",
+    "市场活跃度",
+    "交易活跃度",
+    "交易者参与度",
+    "投资者参与度",
+    "trading volume",
+    "market activity",
+    "trading activity",
+    "trader participation",
+    "investor participation",
+)
+_ASSET_NAME_STOP_WORDS = {
+    "company",
+    "corporation",
+    "corp",
+    "group",
+    "holding",
+    "holdings",
+    "inc",
+    "incorporated",
+    "limited",
+    "ltd",
+    "markets",
+    "plc",
+}
+
+
+def _normalized_target_name(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", value).casefold()
+    return re.sub(r"[^a-z0-9\u3400-\u9fff]+", "", normalized)
+
+
+def _asset_match_terms(asset: AssetRef) -> set[str]:
+    terms = {
+        _normalized_target_name(asset.symbol),
+        _normalized_target_name(asset.name),
+        *(_normalized_target_name(alias) for alias in asset.aliases),
+    }
+    for value in [asset.name, *asset.aliases]:
+        terms.update(
+            token.casefold()
+            for token in re.findall(r"[A-Za-z0-9]+", value)
+            if len(token) >= 4 and token.casefold() not in _ASSET_NAME_STOP_WORDS
+        )
+    return {term for term in terms if len(term) >= 3}
+
+
+def _matching_security_asset(
+    target_name: str,
+    assets: Mapping[str, AssetRef],
+) -> AssetRef | None:
+    target = _normalized_target_name(target_name)
+    if not target:
+        return None
+    matches: list[tuple[int, AssetRef]] = []
+    for asset in assets.values():
+        if asset.asset_class not in {AssetClass.EQUITY, AssetClass.CRYPTO}:
+            continue
+        matched_lengths = [
+            len(term) for term in _asset_match_terms(asset) if term and term in target
+        ]
+        if matched_lengths:
+            matches.append((max(matched_lengths), asset))
+    if not matches:
+        return None
+    matches.sort(key=lambda item: item[0], reverse=True)
+    if len(matches) > 1 and matches[0][0] == matches[1][0]:
+        return None
+    return matches[0][1]
+
+
+def _is_non_target_activity(value: str) -> bool:
+    normalized = unicodedata.normalize("NFKC", value).casefold()
+    return any(pattern in normalized for pattern in _NON_TARGET_ACTIVITY_PATTERNS)
+
+
+def _sanitize_target_drafts(
+    drafts: Sequence[TargetImpactDraft],
+    assets: Mapping[str, AssetRef],
+) -> list[TargetImpactDraft]:
+    sanitized: list[TargetImpactDraft] = []
+    for item in drafts:
+        matched_asset = _matching_security_asset(item.target_name, assets)
+        if matched_asset is not None:
+            sanitized.append(
+                item.model_copy(
+                    update={
+                        "target_type": TargetType.TRADABLE_ASSET,
+                        "asset_id": matched_asset.asset_id,
+                        "target_name": matched_asset.name,
+                    }
+                )
+            )
+            continue
+        if _is_non_target_activity(item.target_name):
+            continue
+        sanitized.append(item)
+    return sanitized
+
+
+def sanitize_published_impacts(
+    impacts: Sequence[TargetImpact],
+) -> list[TargetImpact]:
+    """Repair legacy public output without mutating the stored research record."""
+
+    assets = {
+        impact.asset.asset_id: impact.asset for impact in impacts if impact.asset is not None
+    }
+    output: list[TargetImpact] = []
+    positions: dict[tuple[str, str], int] = {}
+    for impact in impacts:
+        matched_asset = _matching_security_asset(impact.target_name, assets)
+        if matched_asset is not None:
+            candidate = impact.model_copy(
+                update={
+                    "target_type": TargetType.TRADABLE_ASSET,
+                    "target_name": matched_asset.name,
+                    "asset": matched_asset,
+                }
+            )
+        elif _is_non_target_activity(impact.target_name):
+            continue
+        else:
+            candidate = impact
+        key = (
+            candidate.target_type.value,
+            candidate.asset.asset_id
+            if candidate.asset is not None
+            else _normalized_target_name(candidate.target_name),
+        )
+        existing_position = positions.get(key)
+        if existing_position is None:
+            positions[key] = len(output)
+            output.append(candidate)
+            continue
+        existing = output[existing_position]
+        candidate_rank = (
+            bool(candidate.evidence_ids),
+            abs(candidate.direction_score or 0),
+            candidate.rating_confidence or 0,
+        )
+        existing_rank = (
+            bool(existing.evidence_ids),
+            abs(existing.direction_score or 0),
+            existing.rating_confidence or 0,
+        )
+        if candidate_rank > existing_rank:
+            output[existing_position] = candidate
+    return output
+
+
 def _action_strength(
     action_id: str | None,
     actions: Mapping[str, EventAction],
@@ -231,7 +386,7 @@ def finalize_impacts(
         candidate.asset.asset_id
         for candidate in event.candidates[:MAX_DIRECT_TARGETS]
     }
-    proposed_drafts = list(draft.impacts)
+    proposed_drafts = _sanitize_target_drafts(draft.impacts, assets)
     proposed_asset_ids = {item.asset_id for item in proposed_drafts if item.asset_id}
     default_action = event.actions[0] if event.actions else None
     for candidate in event.candidates[:MAX_DIRECT_TARGETS]:

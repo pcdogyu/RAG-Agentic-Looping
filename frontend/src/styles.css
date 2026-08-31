@@ -547,6 +547,8 @@ h1 span { color: var(--mint); font-weight: 400; }
 .model-opinion-grid strong { color: var(--cyan); font: 500 14px "DM Mono", monospace; }
 .conclusion-modal { width: min(900px, calc(100vw - 32px)); max-height: calc(100vh - 40px); overflow-y: auto; }
 .event-conclusion-modal { width: min(1100px, calc(100vw - 32px)); }
+.research-detail-loading-modal { width: min(520px, calc(100vw - 32px)); }
+.research-detail-loading-modal .page-message { margin-top: 20px; text-align: center; }
 .event-report-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 14px 0; }
 .event-report-metrics span { display: grid; gap: 5px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; color: var(--muted); font-size: 10px; }
 .event-report-metrics strong { color: var(--mint); font: 500 14px "DM Mono", monospace; }

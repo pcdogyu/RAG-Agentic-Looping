@@ -2151,6 +2151,17 @@ export function ConclusionDetailModal({ detail, onClose }: { detail: ConclusionD
   </div>;
 }
 
+export function ResearchDetailLoadingModal({ title, onClose }: { title: string; onClose: () => void }) {
+  return <div className="modal-backdrop" onClick={onClose}>
+    <article className="modal research-detail-loading-modal" aria-busy="true" aria-live="polite" onClick={(event) => event.stopPropagation()}>
+      <button type="button" className="close" aria-label="关闭研究报告加载提示" onClick={onClose}>×</button>
+      <p className="eyebrow">RESEARCH REPORT</p>
+      <h2>{title}</h2>
+      <div className="page-message">正在加载研究报告… / Loading research report…</div>
+    </article>
+  </div>;
+}
+
 const targetTypeLabels: Record<string, string> = {
   economy: "宏观经济",
   supply_volume: "供给量",
@@ -2411,6 +2422,9 @@ export function ConclusionsPage({ apiBase }: { apiBase: string }) {
   const [cursor, setCursor] = useState<string | null>(null);
   const [selectedAsset, setSelectedAsset] = useState<ConclusionDetail | null>(null);
   const [selectedEvent, setSelectedEvent] = useState<EventConclusionDetail | null>(null);
+  const [detailLoadingId, setDetailLoadingId] = useState("");
+  const [detailLoadingTitle, setDetailLoadingTitle] = useState("");
+  const [detailError, setDetailError] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -2423,15 +2437,21 @@ export function ConclusionsPage({ apiBase }: { apiBase: string }) {
   const [retryMessageError, setRetryMessageError] = useState(false);
   const [researchStates, setResearchStates] = useState<Record<string, ConclusionResearchState>>({});
   const researchInFlight = useRef(new Set<string>());
+  const conclusionsLoadAbort = useRef<AbortController | null>(null);
+  const detailLoadAbort = useRef<AbortController | null>(null);
   const filtersRef = useRef(filters);
   const cursorRef = useRef<string | null>(null);
 
   const load = useCallback(async (append = false, silent = false) => {
+    if (silent && conclusionsLoadAbort.current) return;
+    conclusionsLoadAbort.current?.abort();
+    const controller = new AbortController();
+    conclusionsLoadAbort.current = controller;
     const params = new URLSearchParams({ ...filtersRef.current, limit: "20" });
     if (append && cursorRef.current) params.set("cursor", cursorRef.current);
     if (append) setLoadingMore(true); else if (!silent) setLoading(true);
     try {
-      const response = await fetch(`${apiBase}/api/v1/research-conclusions?${params}`);
+      const response = await fetch(`${apiBase}/api/v1/research-conclusions?${params}`, { signal: controller.signal });
       if (!response.ok) throw new Error("结论请求失败");
       const payload = await response.json() as { items: ResearchConclusionItem[]; next_cursor: string | null };
       setItems((current) => append ? [...current, ...payload.items] : payload.items);
@@ -2448,9 +2468,13 @@ export function ConclusionsPage({ apiBase }: { apiBase: string }) {
       cursorRef.current = payload.next_cursor;
       setCursor(payload.next_cursor); setError("");
     } catch (reason) {
+      if (reason instanceof Error && reason.name === "AbortError") return;
       setError(reason instanceof Error ? reason.message : "结论请求失败");
     } finally {
-      if (append) setLoadingMore(false); else if (!silent) setLoading(false);
+      if (conclusionsLoadAbort.current === controller) {
+        conclusionsLoadAbort.current = null;
+        if (append) setLoadingMore(false); else if (!silent) setLoading(false);
+      }
     }
   }, [apiBase]);
   async function loadFailures() {
@@ -2478,10 +2502,15 @@ export function ConclusionsPage({ apiBase }: { apiBase: string }) {
   useEffect(() => {
     void load();
     void loadFailures();
-    return subscribeLiveRefresh(
+    const unsubscribe = subscribeLiveRefresh(
       () => void load(false, true),
       researchViewsRefreshIntervalMs,
     );
+    return () => {
+      unsubscribe();
+      conclusionsLoadAbort.current?.abort();
+      detailLoadAbort.current?.abort();
+    };
   }, [load]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function retry(item: FailedResearch, instanceId?: string) {
@@ -2514,13 +2543,36 @@ export function ConclusionsPage({ apiBase }: { apiBase: string }) {
   }
 
   async function open(item: ResearchConclusionItem) {
+    if (detailLoadAbort.current) return;
+    const controller = new AbortController();
+    detailLoadAbort.current = controller;
+    setDetailLoadingId(item.id);
+    setDetailLoadingTitle(item.title);
+    setDetailError("");
     const path = item.kind === "event"
       ? `/api/v1/event-conclusions/${item.id}`
       : `/api/v1/conclusions/${item.id}`;
-    const response = await fetch(`${apiBase}${path}`);
-    if (!response.ok) return;
-    if (item.kind === "event") setSelectedEvent(await response.json() as EventConclusionDetail);
-    else setSelectedAsset(await response.json() as ConclusionDetail);
+    try {
+      const response = await fetch(`${apiBase}${path}`, { signal: controller.signal });
+      if (!response.ok) throw new Error("研究报告加载失败");
+      if (item.kind === "event") setSelectedEvent(await response.json() as EventConclusionDetail);
+      else setSelectedAsset(await response.json() as ConclusionDetail);
+    } catch (reason) {
+      if (!(reason instanceof Error && reason.name === "AbortError")) {
+        setDetailError(reason instanceof Error ? reason.message : "研究报告加载失败");
+      }
+    } finally {
+      if (detailLoadAbort.current === controller) {
+        detailLoadAbort.current = null;
+        setDetailLoadingId("");
+      }
+    }
+  }
+
+  function closeDetailLoading() {
+    detailLoadAbort.current?.abort();
+    detailLoadAbort.current = null;
+    setDetailLoadingId("");
   }
 
   async function researchAgain(item: Recommendation) {
@@ -2627,6 +2679,8 @@ export function ConclusionsPage({ apiBase }: { apiBase: string }) {
           </div>
         </section>
       </div>
+      {detailError && <div className="page-error conclusion-detail-error">{detailError}</div>}
+      {detailLoadingId && <ResearchDetailLoadingModal title={detailLoadingTitle || "研究报告"} onClose={closeDetailLoading} />}
       {selectedAsset && <ConclusionDetailModal detail={selectedAsset} onClose={() => setSelectedAsset(null)} />}
       {selectedEvent && <EventConclusionDetailModal detail={selectedEvent} onClose={() => setSelectedEvent(null)} />}
     </section>
