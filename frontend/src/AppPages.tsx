@@ -2164,6 +2164,37 @@ const targetTypeLabels: Record<string, string> = {
   other: "其他",
 };
 
+const missingInformationDescriptions: Record<string, [chinese: string, english: string]> = {
+  target_direction: ["目标影响方向尚未明确", "The target impact direction is not yet established"],
+  transmission_evidence: ["缺少影响传导路径的证据", "Evidence for the impact transmission path is missing"],
+  action_stage: ["事件行动阶段尚未明确", "The event action stage is not yet established"],
+  impact_evidence: ["缺少对目标影响的直接证据", "Direct evidence for the target impact is missing"],
+  evidence_gate: ["证据质量核验尚未通过", "Evidence quality verification has not passed"],
+  industry_only_mapping: ["仅映射到行业，尚未确认具体可交易标的", "Only the industry is mapped; no specific tradable asset is confirmed"],
+  sanction_scope: ["制裁范围尚未明确", "The sanction scope is not yet established"],
+  whether_oil_exports_are_targeted: ["尚未确认制裁是否针对石油出口", "It is not yet confirmed whether oil exports are targeted"],
+  secondary_sanctions: ["二级制裁范围尚未明确", "The scope of secondary sanctions is not yet established"],
+  effective_date: ["生效日期尚未明确", "The effective date is not yet established"],
+  affected_target: ["受影响目标尚未明确", "The affected target is not yet established"],
+  transmission_path: ["影响传导路径尚未明确", "The impact transmission path is not yet established"],
+  tradable_asset_path: ["尚未确认对应的可交易标的", "The corresponding tradable asset has not yet been confirmed"],
+  "实际的制裁范围、生效日、支付结算、港口航运、实际供应或市场反应": [
+    "实际制裁范围、生效日期、支付结算、港口航运、实际供应或市场反应尚待确认",
+    "The actual sanction scope, effective date, payment settlement, port shipping, physical supply, or market reaction remains unconfirmed",
+  ],
+};
+
+export function describeMissingInformation(value: string) {
+  const raw = value.trim();
+  const detail = missingInformationDescriptions[raw] ?? missingInformationDescriptions[raw.toLowerCase()];
+  if (detail) return `${detail[0]} / ${detail[1]}`;
+  if (/\p{Script=Han}/u.test(raw)) {
+    return `${raw || "相关信息尚待确认"} / Additional verified information is required for this item`;
+  }
+  const readable = raw.replace(/[_:]+/g, " ").replace(/\s+/g, " ").trim() || "related information";
+  return `缺少相关信息：${readable} / Missing information: ${readable}`;
+}
+
 export function EventConclusionDetailModal({ detail, onClose }: { detail: EventConclusionDetail; onClose: () => void }) {
   const report = detail.report;
   return <div className="modal-backdrop" onClick={onClose}>
@@ -2190,14 +2221,14 @@ export function EventConclusionDetailModal({ detail, onClose }: { detail: EventC
         <small>未来 {impact.horizon_days} 个自然日</small>
         {impact.rationale && <p>{impact.rationale}</p>}
         {!!impact.transmission_path.length && <ol>{impact.transmission_path.map((step, stepIndex) => <li key={`${step}-${stepIndex}`}>{step}</li>)}</ol>}
-        {!!impact.missing_information.length && <small>缺失：{impact.missing_information.join("、")}</small>}
+        {!!impact.missing_information.length && <small>缺失 / Missing：{impact.missing_information.map(describeMissingInformation).join("；")}</small>}
       </article>)}</div></>}
       {!!report.macro_factors.length && <><h3>宏观因子</h3><div className="macro-factor-list">{report.macro_factors.map((factor) => <article key={factor.id}><strong>{factor.name}</strong><span>{Math.round(factor.strength * 100)}%</span><p>{factor.description}</p></article>)}</div></>}
       {!!report.scenarios.length && <><h3>情景</h3><ul>{report.scenarios.map((item) => <li key={item}>{item}</li>)}</ul></>}
       {!!report.catalysts.length && <><h3>催化剂</h3><ul>{report.catalysts.map((item) => <li key={item}>{item}</li>)}</ul></>}
       {!!report.risks.length && <><h3>风险</h3><ul>{report.risks.map((item) => <li key={item}>{item}</li>)}</ul></>}
       {!!report.unresolved_questions.length && <><h3>待确认问题</h3><ul>{report.unresolved_questions.map((item) => <li key={item}>{item}</li>)}</ul></>}
-      {!!report.missing_information.length && <><h3>缺失信息</h3><ul>{report.missing_information.map((item) => <li key={item}>{item}</li>)}</ul></>}
+      {!!report.missing_information.length && <><h3>缺失信息 / Missing information</h3><ul>{report.missing_information.map((item) => <li key={item}>{describeMissingInformation(item)}</li>)}</ul></>}
       <h3>新闻与证据</h3><div className="evidence-links">{conclusionReferences(detail).map((item) => <a key={`${item.url}-${item.label}`} href={item.url} target="_blank" rel="noreferrer"><strong>{item.label}</strong><span>{item.source}</span></a>)}</div>
     </article>
   </div>;

@@ -24,6 +24,7 @@ import {
   ChangedTargetsContent,
   ChangedTargetsPage,
   ConclusionDetailModal,
+  describeMissingInformation,
   type ConclusionDetail,
   EventConclusionCard,
   EventConclusionDetailModal,
@@ -749,7 +750,26 @@ describe("changed targets page", () => {
     expect(modal).toContain("WTI 原油");
     expect(modal).toContain("供给减少");
     expect(modal).toContain("资料覆盖不足");
+    expect(modal).toContain("缺失 / Missing");
+    expect(modal).toContain("实际减产量 / Additional verified information is required for this item");
+    expect(modal).toContain("缺失信息 / Missing information");
+    expect(modal).toContain("政策细则 / Additional verified information is required for this item");
     expect(modal).toContain("政策新闻");
+  });
+
+  it("describes missing event information in Chinese and English", () => {
+    expect(describeMissingInformation("target_direction")).toBe(
+      "目标影响方向尚未明确 / The target impact direction is not yet established",
+    );
+    expect(describeMissingInformation("impact_evidence")).toBe(
+      "缺少对目标影响的直接证据 / Direct evidence for the target impact is missing",
+    );
+    expect(describeMissingInformation("custom_missing_field")).toBe(
+      "缺少相关信息：custom missing field / Missing information: custom missing field",
+    );
+    expect(describeMissingInformation("政策细则")).toBe(
+      "政策细则 / Additional verified information is required for this item",
+    );
   });
 
   it("refreshes conclusion and target views every five seconds", () => {
