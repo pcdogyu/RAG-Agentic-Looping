@@ -64,6 +64,15 @@ func TestPreferredExtractEndpointHonorsAssignedInstance(t *testing.T) {
 	}
 }
 
+func TestOllamaKeepAlivePreservesNumericJSONType(t *testing.T) {
+	if got := ollamaKeepAliveValue("-1"); got != int64(-1) {
+		t.Fatalf("numeric keep_alive must remain numeric, got %#v", got)
+	}
+	if got := ollamaKeepAliveValue("5m"); got != "5m" {
+		t.Fatalf("duration keep_alive must remain a string, got %#v", got)
+	}
+}
+
 func TestSecuritySymbolAndProductMatchingSafety(t *testing.T) {
 	if explicitSymbol("AI infrastructure spending grows", "AI", false) {
 		t.Fatal("ambiguous short ticker matched ordinary text")

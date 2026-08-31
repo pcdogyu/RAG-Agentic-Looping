@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -546,7 +547,7 @@ func (runtime *ExtractRuntime) generateExtraction(ctx context.Context, news news
 	messages := []map[string]string{{"role": "system", "content": system}, {"role": "user", "content": prompt + "\n\n只返回符合请求中 format JSON Schema 的 JSON。"}}
 	request := map[string]any{
 		"model": runtime.cfg.ExtractModel, "messages": messages, "format": schema, "stream": false,
-		"keep_alive": runtime.cfg.OllamaKeepAlive, "options": map[string]any{"temperature": 0, "num_ctx": runtime.cfg.OllamaContextLength, "num_predict": runtime.cfg.OllamaMaxOutput, "num_thread": runtime.cfg.OllamaExtractThreads},
+		"keep_alive": ollamaKeepAliveValue(runtime.cfg.OllamaKeepAlive), "options": map[string]any{"temperature": 0, "num_ctx": runtime.cfg.OllamaContextLength, "num_predict": runtime.cfg.OllamaMaxOutput, "num_thread": runtime.cfg.OllamaExtractThreads},
 	}
 	logicalID := uuid.New()
 	var lastErr error
@@ -596,6 +597,14 @@ func (runtime *ExtractRuntime) generateExtraction(ctx context.Context, news news
 		lastErr = errors.New("no extract model endpoint configured")
 	}
 	return extractedEvent{}, lastErr
+}
+
+func ollamaKeepAliveValue(value string) any {
+	trimmed := strings.TrimSpace(value)
+	if seconds, err := strconv.ParseInt(trimmed, 10, 64); err == nil {
+		return seconds
+	}
+	return trimmed
 }
 
 func (runtime *ExtractRuntime) persistModelAudit(ctx context.Context, logicalID, newsID uuid.UUID, attempt int, status string, started time.Time, messages any, schema any, raw string, parsed any, errorValue string, promptTokens, completionTokens, endpoint int) {
