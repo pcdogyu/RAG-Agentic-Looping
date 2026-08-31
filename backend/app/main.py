@@ -284,7 +284,7 @@ async def lifespan(app: FastAPI):
     with SessionLocal() as db:
         normalize_legacy_akshare_timestamps(db)
         seed_integrations(db, settings)
-        startup_registry = _provider_registry(db)
+        startup_registry = ProviderRegistry()
         AssetUniverseService(db, startup_registry).seed_industries()
         ensure_assets(db, startup_registry.all_assets(), commit=False)
         db.commit()
