@@ -97,7 +97,10 @@ def migrate_legacy_messages(
     with SessionLocal() as db:
         known_news = set(
             db.execute(
-                text("SELECT news_id::text FROM news_processing WHERE news_id::text = ANY(:ids)"),
+                text(
+                    "SELECT news_id::text FROM news_processing "
+                    "WHERE news_id::text = ANY(CAST(:ids AS text[]))"
+                ),
                 {"ids": list({item.news_id for item in messages})},
             ).scalars()
         )
