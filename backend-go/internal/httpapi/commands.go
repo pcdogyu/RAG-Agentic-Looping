@@ -226,7 +226,7 @@ type queuedResearch struct {
 
 func (s *Server) enqueueAssetResearch(ctx context.Context, assetID, eventID string, options researchOptions) (queuedResearch, error) {
 	var assetBody []byte
-	if err := s.db.QueryRow(ctx, `SELECT `+assetJSON+` FROM assets WHERE asset_id=$1 AND active=true`, assetID).Scan(&assetBody); err != nil {
+	if err := s.db.QueryRow(ctx, `SELECT `+assetJSON+` FROM assets WHERE id=$1 AND active=true`, assetID).Scan(&assetBody); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return queuedResearch{}, fail(http.StatusNotFound, "asset not found")
 		}
