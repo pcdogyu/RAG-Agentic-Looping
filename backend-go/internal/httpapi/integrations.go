@@ -181,7 +181,7 @@ type factGroupMeta struct{ ID, Badge, Name, Description, Tone string }
 var factGroups = []factGroupMeta{
 	{"fmp", "US", "FMP 美股数据", "美股行情、财务报表、估值指标与公司基础数据", "amber"},
 	{"sec", "OFFICIAL", "SEC 官方文件", "SEC EDGAR 监管文件与公司申报记录", "cyan"},
-	{"cn_news", "CN / NEWS", "A股与新闻", "AkShare 主数据、市场新闻、公告与 RSS 事实来源", "amber"},
+	{"cn_news", "CN / NEWS", "A股与新闻", "Go 市场适配器主数据、市场新闻、公告与 RSS 事实来源", "amber"},
 	{"crypto", "CRYPTO", "数字资产", "CoinGecko、DeFiLlama 与 CCXT Kraken 交叉验证", "cyan"},
 	{"search", "WEB / SEARCH", "网络搜索与交叉验证", "跨市场网页搜索、独立来源验证与实时补充证据", "mint"},
 }
@@ -428,7 +428,7 @@ func (s *Server) probeNativeFactGroup(r *http.Request, group string) map[string]
 		target = strings.TrimRight(stringValue(config["coingecko_base_url"]), "/") + "/ping"
 	case "cn_news":
 		if boolValue(config["akshare_asset_master_enabled"]) {
-			return map[string]any{"ok": true, "status": "healthy", "detail": "AkShare 已启用"}
+			return map[string]any{"ok": true, "status": "healthy", "detail": "Go 市场适配器已启用 / Go market adapter enabled"}
 		}
 		return map[string]any{"ok": false, "status": "pending", "detail": "未配置 RSS"}
 	default:

@@ -12,8 +12,6 @@ type Config struct {
 	Address               string
 	DatabaseURL           string
 	RedisURL              string
-	LegacyAPIURL          string
-	AllowLegacyProxy      bool
 	Environment           string
 	WorkerID              string
 	WorkerLane            string
@@ -93,8 +91,6 @@ func Load() (Config, error) {
 		Address:               env("GO_API_ADDRESS", ":8081"),
 		DatabaseURL:           normalizeDatabaseURL(env("DATABASE_URL", "postgresql://agent:agent@postgres:5432/agent")),
 		RedisURL:              env("REDIS_URL", "redis://redis:6379/0"),
-		LegacyAPIURL:          strings.TrimRight(env("LEGACY_API_URL", "http://api:8000"), "/"),
-		AllowLegacyProxy:      envBool("GO_ALLOW_LEGACY_PROXY", false),
 		Environment:           env("APP_ENV", "development"),
 		WorkerID:              env("GO_WORKER_ID", hostname()),
 		WorkerLane:            env("GO_WORKER_LANE", ""),
@@ -167,9 +163,6 @@ func Load() (Config, error) {
 		CoinGeckoURL:          strings.TrimRight(env("COINGECKO_BASE_URL", "https://api.coingecko.com/api/v3"), "/"),
 		DefiLlamaURL:          strings.TrimRight(env("DEFILLAMA_BASE_URL", "https://api.llama.fi"), "/"),
 		WebSearchTimeout:      time.Duration(envInt("WEB_SEARCH_TIMEOUT_SECONDS", 20)) * time.Second,
-	}
-	if cfg.Environment == "production" && cfg.AllowLegacyProxy {
-		return Config{}, fmt.Errorf("legacy API proxy is forbidden in production")
 	}
 	if cfg.WorkerConcurrency < 1 {
 		return Config{}, fmt.Errorf("GO_WORKER_CONCURRENCY must be at least 1")

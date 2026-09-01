@@ -46,7 +46,7 @@ func main() {
 		defer cancel()
 		_ = server.Shutdown(shutdown)
 	}()
-	slog.Info("Go shadow API listening", "address", cfg.Address, "legacy_proxy", cfg.AllowLegacyProxy)
+	slog.Info("Go API listening", "address", cfg.Address)
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		slog.Error("serve", "error", err)
 		os.Exit(1)

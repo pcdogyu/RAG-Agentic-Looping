@@ -11,9 +11,8 @@ COPY src ./src
 RUN npm install && npm run build
 
 FROM nginx:1.27-alpine
-ENV API_UPSTREAM=http://api:8000 \
-    API_BACKEND_NAME=python \
-    GO_API_UPSTREAM=http://go-api:8081
+ENV API_UPSTREAM=http://go-api:8081 \
+    API_BACKEND_NAME=go
 COPY --from=builder /app/dist /usr/share/nginx/html
 COPY nginx.conf /etc/nginx/templates/default.conf.template
 EXPOSE 80

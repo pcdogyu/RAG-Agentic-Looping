@@ -367,7 +367,7 @@ func (runtime *evolutionRuntime) candidateChecks(ctx context.Context) map[string
 		{"dependency_audit", runtime.root, []string{"python", "-m", "pip_audit"}, 15 * time.Minute},
 		{"go_tests", filepath.Join(runtime.root, "backend-go"), []string{"go", "test", "./..."}, 15 * time.Minute},
 		{"go_vet", filepath.Join(runtime.root, "backend-go"), []string{"go", "vet", "./..."}, 15 * time.Minute},
-		{"container_build", runtime.root, []string{"docker", "compose", "build", "api", "web", "go-api", "go-worker", "go-mapping-worker", "go-research-worker", "go-backfill-worker", "go-maintenance-worker"}, 30 * time.Minute},
+		{"container_build", runtime.root, []string{"docker", "compose", "build", "web", "go-api", "market-adapter", "go-worker", "go-mapping-worker", "go-research-worker", "go-backfill-worker", "go-maintenance-worker"}, 30 * time.Minute},
 	}
 	for _, item := range commands {
 		checks[item.name] = runCheck(ctx, item.dir, item.wait, item.args...)
@@ -804,14 +804,14 @@ func runCheck(ctx context.Context, dir string, timeout time.Duration, args ...st
 }
 
 func (runtime *evolutionRuntime) deployAndVerify(ctx context.Context) commandReport {
-	report := runCheck(ctx, runtime.root, 30*time.Minute, "docker", "compose", "--profile", "go-shadow", "up", "-d", "--build", "api", "go-api", "io-worker", "go-worker", "go-mapping-worker", "go-research-worker", "go-evolution-worker", "go-discovery-worker", "go-recovery-worker", "go-outcomes-worker", "go-masterdata-worker", "go-operations-worker", "go-backfill-worker", "go-maintenance-worker", "go-scheduler", "scheduler", "web")
+	report := runCheck(ctx, runtime.root, 30*time.Minute, "docker", "compose", "--profile", "go-shadow", "up", "-d", "--build", "go-api", "market-adapter", "go-worker", "go-mapping-worker", "go-research-worker", "go-evolution-worker", "go-discovery-worker", "go-recovery-worker", "go-outcomes-worker", "go-masterdata-worker", "go-operations-worker", "go-backfill-worker", "go-maintenance-worker", "go-scheduler", "web")
 	if !report.Passed {
 		return report
 	}
 	client := &http.Client{Timeout: 5 * time.Second}
 	for attempt := 0; attempt < 12; attempt++ {
 		apiOK, webOK := false, false
-		for _, target := range []string{"http://api:8000/health", "http://127.0.0.1:8000/health"} {
+		for _, target := range []string{"http://go-api:8081/health", "http://127.0.0.1:8081/health"} {
 			response, err := client.Get(target)
 			if err == nil {
 				var payload map[string]any

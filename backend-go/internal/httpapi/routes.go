@@ -6,7 +6,7 @@ import (
 )
 
 // operation is the single source of truth for native route ownership. A route
-// must not be listed here until its handler no longer calls the legacy API.
+// must not be listed here until its handler is implemented natively in Go.
 type operation struct {
 	ID      string
 	Method  string

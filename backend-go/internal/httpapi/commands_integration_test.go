@@ -69,7 +69,6 @@ func TestBatchThreeCommandsAgainstIsolatedServices(t *testing.T) {
 		EvolutionEnabled:   true,
 		ResearchCooldown:   0,
 		ScanInterval:       10 * time.Minute,
-		AllowLegacyProxy:   false,
 		EvolutionAutoMerge: false,
 	}, pool, redisClient)
 	if err != nil {

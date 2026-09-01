@@ -1,8 +1,9 @@
 # Go backend migration
 
-This module is the contract-preserving Go replacement for the public API and
-business workers. It currently runs only through the `go-shadow` Compose
-profile and is not the web upstream.
+This module is the production implementation of the public API, business
+workers, scheduler, maintenance commands, and market-data adapter. The Web
+container uses Go directly; the Python API and Celery runtime services are no
+longer present in Compose.
 
 ## Migration batches
 
@@ -17,7 +18,7 @@ profile and is not the web upstream.
   admin search, scan/research, and target-change APIs are native Go. Go publishes
   Kombu-compatible Celery messages to the existing Python execution workers, so
   the API cutover does not require an unsafe simultaneous worker rewrite. The
-  Python API remains the rollback target until the upstream is switched.
+  Python API remained the rollback target until the final runtime cutover.
 - Batch 4 migrates Python model workers one lane at a time, in the fixed order
   `extract` -> `mapping` -> `research` -> `evolution`. The aliases are part of
   the contract: mapping is Python model lane/Go queue `assist`, while evolution
@@ -52,43 +53,44 @@ profile and is not the web upstream.
   impact replay, and curated asset seeding. The legacy v2 replay task name is
   retained while completed reports are checked against the current Go scoring
   version.
+- The final runtime cutover removes the Python API rollback service and legacy
+  reverse proxy. `market-adapter` is now a static Go service that preserves the
+  existing HTTP contract while reading CN/HK directories from Sina, adjusted
+  prices from Tencent, and fundamentals/news from Eastmoney.
 
 ## Safety gates
 
 - The frozen contract contains 78 HTTP operations. `/go/migration-status`
   reports native coverage and the exact native operation IDs.
 - `APP_ENV=production` refuses to start until every frozen operation is native.
-- `GO_ALLOW_LEGACY_PROXY=true` is accepted only outside production. It lets
-  differential tests exercise the whole frontend while endpoints are ported.
-- Database migrations are additive so the Python release remains a rollback
-  target during the shadow period.
+- Unknown HTTP routes return 404; there is no fallback proxy to an untracked
+  implementation.
+- Database migrations remain additive so release rollback uses the previous
+  version and images rather than a second live API.
 
 ## Local verification
 
 ```text
-docker compose --profile go-shadow up -d --build go-api
+docker compose up -d --build go-api market-adapter web
 cd backend-go
 go test ./...
-go run ./cmd/contract-diff
 ```
 
 The PostgreSQL-backed job integration test runs when `DATABASE_URL` or
 `TEST_DATABASE_URL` is present. The shadow image normalizes the existing
 SQLAlchemy `postgresql+psycopg://` URL for pgx.
 
-## API cutover and rollback
+## Production runtime
 
-The Web container reads its API upstream when it starts. The Compose default is
-the production-mode Go API; the Python API remains running as the rollback
-target. Switch either direction without restarting an API or worker:
+`go-api`, `market-adapter`, and `web` are default Compose services. The remaining
+Go workers still use the `go-shadow` profile for explicit lane selection:
 
 ```text
-./ops/switch-web-api.sh go
-./ops/switch-web-api.sh python
+docker compose --profile go-shadow up -d go-api market-adapter web go-worker go-scheduler
 ```
 
-The script recreates only `web`, then requires `/health` to succeed and checks
-the `X-API-Backend` response header. It never starts `go-worker`.
+Rollback is release-based: deploy the previous Git commit and its images. There
+is no live Python upstream or API switch script.
 
 ## Worker migration gates
 
@@ -106,8 +108,8 @@ Each lane is replaced using the same sequence:
 3. Drain the Python lane, switch only that publisher/consumer pair to Go, and
    set `GO_WORKER_COMPLETED_LANES` to the completed prefix.
 4. Verify backlog, failure rate, leases, and output parity before moving to the
-   next lane. Roll back by routing that lane to Celery and restarting only its
-   Python worker.
+   next lane. These steps are retained as migration history; runtime rollback
+   now deploys a previous release.
 
 The lane task boundary is:
 
@@ -116,8 +118,8 @@ The lane task boundary is:
 - `mapping`: event-to-asset resolution.
 - `research`: event research and asset research.
 - `evolution`: outcome evolution, manual evolution, and candidate execution.
-- `discovery`: FMP/RSS/MCP/AkShare news scanning and durable extraction-outbox
-  dispatch. AkShare stays behind the narrow Python market-adapter HTTP boundary.
+- `discovery`: FMP/RSS/MCP/China-news scanning and durable extraction-outbox
+  dispatch through the Go market-adapter boundary.
 - `recovery`: orphaned news and downstream follow-up recovery, research/mapping
   lease reconciliation, and model-call audit retention cleanup.
 - `outcomes`: recommendation outcome evaluation and mature event market-factor
@@ -131,9 +133,8 @@ The lane task boundary is:
 
 Set
 `GO_WORKER_COMPLETED_LANES=extract,mapping,research,evolution,discovery,recovery,outcomes,masterdata,operations,backfill,maintenance`
-and start `go-maintenance-worker`. This completes the Python business-task
-migration; `io-worker` and Python Beat may then remain stopped unless the
-Python rollback path is activated.
+and start `go-maintenance-worker`. This completes the business-task migration;
+the Python API, IO worker, and Beat services have been removed from Compose.
 
 Run maintenance work explicitly inside the maintenance container:
 

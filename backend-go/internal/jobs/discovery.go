@@ -413,7 +413,7 @@ func (runtime *discoveryRuntime) discover(ctx context.Context, since time.Time, 
 		batch discoveryBatch
 	}
 	providers := []func(context.Context, time.Time, int) discoveryBatch{
-		runtime.discoverFMP, runtime.discoverRSS, runtime.discoverAkshare, runtime.discoverMCPFeeds,
+		runtime.discoverFMP, runtime.discoverRSS, runtime.discoverMarketAdapter, runtime.discoverMCPFeeds,
 	}
 	results := make(chan outcome, len(providers))
 	for _, provider := range providers {
@@ -520,7 +520,7 @@ func (runtime *discoveryRuntime) providerEnabled(ctx context.Context, name strin
 	return err == nil && enabled
 }
 
-func (runtime *discoveryRuntime) discoverAkshare(ctx context.Context, since time.Time, limit int) discoveryBatch {
+func (runtime *discoveryRuntime) discoverMarketAdapter(ctx context.Context, since time.Time, limit int) discoveryBatch {
 	attempted := time.Now().UTC()
 	if !runtime.cfg.AkshareEnabled || runtime.cfg.MarketAdapterURL == "" {
 		return discoveryBatch{}
@@ -531,7 +531,7 @@ func (runtime *discoveryRuntime) discoverAkshare(ctx context.Context, since time
 	response, err := runtime.client.Do(request)
 	if err != nil {
 		batch := discoveryBatch{}
-		batch.addSourceError("东方财富/AkShare", "akshare", attempted, err)
+		batch.addSourceError("东方财富", "market-adapter", attempted, err)
 		return batch
 	}
 	defer response.Body.Close()
@@ -542,7 +542,7 @@ func (runtime *discoveryRuntime) discoverAkshare(ctx context.Context, since time
 			err = fmt.Errorf("market adapter HTTP %d", response.StatusCode)
 		}
 		batch := discoveryBatch{}
-		batch.addSourceError("东方财富/AkShare", "akshare", attempted, err)
+		batch.addSourceError("东方财富", "market-adapter", attempted, err)
 		return batch
 	}
 	batch := discoveryBatch{}
@@ -552,18 +552,18 @@ func (runtime *discoveryRuntime) discoverAkshare(ctx context.Context, since time
 		if published.IsZero() || published.Before(since) {
 			continue
 		}
-		source := fallbackString(stringValue(raw["source"]), "东方财富/AkShare")
-		item := newDiscoveredNews(source, "akshare", "aggregator", stringValue(raw["title"]), stringValue(raw["summary"]), stringValue(raw["url"]), fallbackString(stringValue(raw["language"]), "zh"), published, nil, map[string]any{"time_normalization": "adapter->UTC:v1"})
+		source := fallbackString(stringValue(raw["source"]), "东方财富")
+		item := newDiscoveredNews(source, "market-adapter", "aggregator", stringValue(raw["title"]), stringValue(raw["summary"]), stringValue(raw["url"]), fallbackString(stringValue(raw["language"]), "zh"), published, nil, map[string]any{"time_normalization": "adapter->UTC:v1", "adapter_implementation": "go"})
 		if item.Title != "" && validDiscoveryURL(item.URL) {
 			batch.Items = append(batch.Items, item)
 			grouped[source] = append(grouped[source], item)
 		}
 	}
 	if len(grouped) == 0 {
-		batch.Reports = append(batch.Reports, healthySourceReport("东方财富/AkShare", "akshare", attempted, nil))
+		batch.Reports = append(batch.Reports, healthySourceReport("东方财富", "market-adapter", attempted, nil))
 	}
 	for source, items := range grouped {
-		batch.Reports = append(batch.Reports, healthySourceReport(source, "akshare", attempted, items))
+		batch.Reports = append(batch.Reports, healthySourceReport(source, "market-adapter", attempted, items))
 	}
 	return batch
 }

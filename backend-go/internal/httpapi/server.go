@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"net/http/httputil"
-	"net/url"
 	"strings"
 	"time"
 
@@ -43,21 +41,9 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) (*Serve
 		r.MethodFunc(item.Method, item.Path, item.Handler)
 	}
 
-	if cfg.AllowLegacyProxy {
-		target, err := url.Parse(cfg.LegacyAPIURL)
-		if err != nil {
-			return nil, err
-		}
-		proxy := httputil.NewSingleHostReverseProxy(target)
-		proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
-			writeError(w, http.StatusBadGateway, "legacy API unavailable: "+err.Error())
-		}
-		r.Handle("/*", proxy)
-	} else {
-		r.HandleFunc("/*", func(w http.ResponseWriter, r *http.Request) {
-			writeError(w, http.StatusNotImplemented, "Go endpoint not migrated: "+r.URL.Path)
-		})
-	}
+	r.HandleFunc("/*", func(w http.ResponseWriter, _ *http.Request) {
+		writeError(w, http.StatusNotFound, "not found")
+	})
 	s.router = r
 	return s, nil
 }
@@ -86,7 +72,7 @@ func (s *Server) goHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status": status, "database": database, "redis": redisOK,
-		"implementation": "go-shadow", "as_of": time.Now().UTC(),
+		"implementation": "go", "as_of": time.Now().UTC(),
 	})
 }
 
