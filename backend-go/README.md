@@ -25,6 +25,10 @@ profile and is not the web upstream.
 - Batch 5 adds `discovery`: Go now schedules and runs news discovery, persists
   provider watermarks and health, stages news and extraction intents in one
   transaction, and dispatches the durable outbox to the Go extract queue.
+- Batch 6 adds `recovery`: Go now schedules and runs orphaned-news/downstream
+  recovery, durable research and mapping lease reconciliation, and model-call
+  audit retention cleanup. Python Beat keeps only the not-yet-migrated universe,
+  outcome, market-factor, evolution-dispatch, and system-monitor schedules.
   `/go/migration-status` exposes the machine-readable lane plan and current
   next lane.
 
@@ -93,6 +97,26 @@ The lane task boundary is:
 - `evolution`: outcome evolution, manual evolution, and candidate execution.
 - `discovery`: FMP/RSS/MCP/AkShare news scanning and durable extraction-outbox
   dispatch. AkShare stays behind the narrow Python market-adapter HTTP boundary.
+- `recovery`: orphaned news and downstream follow-up recovery, research/mapping
+  lease reconciliation, and model-call audit retention cleanup.
+
+### Recovery lane cutover
+
+Set
+`GO_WORKER_COMPLETED_LANES=extract,mapping,research,evolution,discovery,recovery`,
+start `go-recovery-worker`, and recreate `go-scheduler`, the Python `scheduler`,
+and `io-worker`. The completed-lane flag removes only the four migrated recovery
+schedules from Celery Beat; asset-universe refresh, outcome evaluation,
+market-factor refresh, evolution dispatch, and system monitoring remain on
+Python until their later batches.
+
+The Go scheduler uses Redis interval leases, so scheduler restarts do not create
+duplicate recovery jobs. The worker stages recovered news in the existing
+transactional outbox, restores recent events that never received mapping or
+research work, and republishes queued research only when no active durable Go
+job exists. Roll back by removing `recovery` from the completed prefix, stopping
+`go-recovery-worker`, and recreating both schedulers; durable rows and job
+history are retained.
 
 ### Extract lane cutover
 

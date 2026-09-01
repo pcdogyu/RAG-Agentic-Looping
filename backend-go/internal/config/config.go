@@ -31,6 +31,8 @@ type Config struct {
 	NewsDiscoveryLookback time.Duration
 	NewsWatermarkOverlap  time.Duration
 	ResearchCooldown      time.Duration
+	ResearchLease         time.Duration
+	ModelAuditRetention   time.Duration
 	ExtractModel          string
 	ExtractURLs           []string
 	AssistURLs            []string
@@ -107,6 +109,8 @@ func Load() (Config, error) {
 		NewsDiscoveryLookback: time.Duration(envInt("NEWS_DISCOVERY_LOOKBACK_HOURS", 24)) * time.Hour,
 		NewsWatermarkOverlap:  time.Duration(envInt("NEWS_WATERMARK_OVERLAP_MINUTES", 10)) * time.Minute,
 		ResearchCooldown:      time.Duration(envInt("RESEARCH_ASSET_COOLDOWN_HOURS", 24)) * time.Hour,
+		ResearchLease:         time.Duration(envInt("RESEARCH_LEASE_SECONDS", 120)) * time.Second,
+		ModelAuditRetention:   time.Duration(envInt("MODEL_AUDIT_RETENTION_DAYS", 90)) * 24 * time.Hour,
 		ExtractModel:          env("OLLAMA_EXTRACT_MODEL", "qwen2.5:3b"),
 		ExtractURLs:           modelURLs("EXTRACT", "http://host.docker.internal:11434"),
 		AssistURLs:            modelURLs("ASSIST", "http://host.docker.internal:11437"),
@@ -172,6 +176,12 @@ func Load() (Config, error) {
 	}
 	if cfg.ResearchSoftLimit <= 0 || cfg.ResearchHardLimit <= cfg.ResearchSoftLimit {
 		return Config{}, fmt.Errorf("research asset limits must satisfy 0 < soft < hard")
+	}
+	if cfg.ResearchLease < 30*time.Second || cfg.ResearchLease > 10*time.Minute {
+		return Config{}, fmt.Errorf("RESEARCH_LEASE_SECONDS must be between 30 and 600")
+	}
+	if cfg.ModelAuditRetention < 24*time.Hour {
+		return Config{}, fmt.Errorf("MODEL_AUDIT_RETENTION_DAYS must be at least 1")
 	}
 	return cfg, nil
 }

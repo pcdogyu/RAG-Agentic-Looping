@@ -38,6 +38,7 @@ func main() {
 	defer reconcileTicker.Stop()
 	defer discoveryTicker.Stop()
 	discovery := jobs.NewDiscoveryScheduler(cfg, dependencies.DB, dependencies.Redis)
+	recovery := jobs.NewRecoveryScheduler(cfg, dependencies.DB, dependencies.Redis)
 	for {
 		select {
 		case <-ctx.Done():
@@ -46,6 +47,11 @@ func main() {
 			if discovery.Enabled() {
 				if err := discovery.Tick(ctx); err != nil {
 					slog.Error("schedule news discovery", "error", err)
+				}
+			}
+			if recovery.Enabled() {
+				if err := recovery.Tick(ctx); err != nil {
+					slog.Error("schedule recovery maintenance", "error", err)
 				}
 			}
 		case <-reconcileTicker.C:

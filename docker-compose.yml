@@ -347,6 +347,30 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  go-recovery-worker:
+    profiles: ["go-shadow"]
+    build:
+      context: .
+      dockerfile: backend-go/Dockerfile
+    entrypoint: ["/usr/local/bin/worker"]
+    env_file: .env
+    environment:
+      APP_ENV: development
+      GO_WORKER_LANE: recovery
+      GO_WORKER_COMPLETED_LANES: ${GO_WORKER_COMPLETED_LANES:-}
+      GO_WORKER_CONCURRENCY: "1"
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      RESEARCH_LEASE_SECONDS: ${RESEARCH_LEASE_SECONDS:-120}
+      RESEARCH_ASSET_HARD_TIME_LIMIT_SECONDS: ${RESEARCH_ASSET_HARD_TIME_LIMIT_SECONDS:-2100}
+      MODEL_AUDIT_RETENTION_DAYS: ${MODEL_AUDIT_RETENTION_DAYS:-90}
+      AUTO_RESEARCH: ${AUTO_RESEARCH:-true}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
   go-scheduler:
     profiles: ["go-shadow"]
     build:
@@ -359,6 +383,9 @@ services:
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       GO_WORKER_COMPLETED_LANES: ${GO_WORKER_COMPLETED_LANES:-}
       SCAN_INTERVAL_MINUTES: ${SCAN_INTERVAL_MINUTES:-10}
+      RESEARCH_LEASE_SECONDS: ${RESEARCH_LEASE_SECONDS:-120}
+      RESEARCH_ASSET_HARD_TIME_LIMIT_SECONDS: ${RESEARCH_ASSET_HARD_TIME_LIMIT_SECONDS:-2100}
+      MODEL_AUDIT_RETENTION_DAYS: ${MODEL_AUDIT_RETENTION_DAYS:-90}
     depends_on:
       postgres:
         condition: service_healthy

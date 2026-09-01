@@ -316,6 +316,14 @@ def _go_discovery_worker_enabled() -> bool:
     }
 
 
+def _go_recovery_worker_enabled() -> bool:
+    return "recovery" in {
+        value.strip()
+        for value in settings.go_worker_completed_lanes.split(",")
+        if value.strip()
+    }
+
+
 def _enqueue_go_model_job(
     db,
     *,
@@ -400,6 +408,17 @@ if not settings.evolution_enabled:
 
 if _go_discovery_worker_enabled():
     celery_app.conf.beat_schedule.pop("ensure-news-scan-loop", None)
+
+RECOVERY_BEAT_SCHEDULES = (
+    "cleanup-model-audits",
+    "reconcile-research-leases",
+    "reconcile-asset-mapping-leases",
+    "recover-orphaned-news",
+)
+
+if _go_recovery_worker_enabled():
+    for schedule_name in RECOVERY_BEAT_SCHEDULES:
+        celery_app.conf.beat_schedule.pop(schedule_name, None)
 
 
 def model_instance_task(lane: ModelLane):

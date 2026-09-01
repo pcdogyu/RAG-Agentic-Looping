@@ -96,7 +96,7 @@ func TestMigrationStatusIsDerivedFromRegisteredRoutes(t *testing.T) {
 	if len(payload.OperationID) != payload.Native || !sort.StringsAreSorted(payload.OperationID) {
 		t.Fatalf("operation ids are incomplete or unstable")
 	}
-	if payload.Worker.Batch != 5 || payload.Worker.NextLane != "extract" || payload.Worker.CutoverReady || len(payload.Worker.Order) != 5 {
+	if payload.Worker.Batch != 6 || payload.Worker.NextLane != "extract" || payload.Worker.CutoverReady || len(payload.Worker.Order) != 6 {
 		t.Fatalf("unexpected worker migration status: %+v", payload.Worker)
 	}
 }
