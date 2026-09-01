@@ -47,3 +47,33 @@ jobs:
           go run ./cmd/evaluation walk-forward --root ..
           go run ./cmd/evaluation probability-calibration --root ..
           go run ./cmd/evaluation compare-models --root ..
+
+  migration-contract:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: migration_test
+          POSTGRES_PASSWORD: migration_test
+          POSTGRES_DB: migration_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U migration_test -d migration_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    defaults:
+      run:
+        working-directory: backend-go
+    env:
+      TEST_DATABASE_URL: postgresql://migration_test:migration_test@127.0.0.1:5432/migration_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend-go/go.mod
+          cache-dependency-path: backend-go/go.sum
+      - name: Verify fresh and legacy migration contracts
+        run: go test -race ./internal/migrate -run 'TestUp(Create|Upgrade)' -count=1 -v
