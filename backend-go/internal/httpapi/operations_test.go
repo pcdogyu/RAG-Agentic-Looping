@@ -53,6 +53,19 @@ func TestNativeQueueItemReturnsBilingualRedisError(t *testing.T) {
 	}
 }
 
+func TestNativeTaskLeaseCurrentFiltersOnlyStaleRunningTasks(t *testing.T) {
+	now := time.Date(2026, time.September, 1, 8, 0, 0, 0, time.UTC)
+	if nativeTaskLeaseCurrent(map[string]any{"status": "running", "updated_at": now.Add(-181 * time.Second)}, now, 180*time.Second) {
+		t.Fatal("stale running task must be excluded")
+	}
+	if !nativeTaskLeaseCurrent(map[string]any{"status": "running", "updated_at": now.Add(-180 * time.Second)}, now, 180*time.Second) {
+		t.Fatal("task exactly on the lease boundary must remain visible")
+	}
+	if !nativeTaskLeaseCurrent(map[string]any{"status": "failed", "updated_at": now.Add(-time.Hour)}, now, 180*time.Second) {
+		t.Fatal("terminal tasks must not be removed by the running lease filter")
+	}
+}
+
 type contextDeadlineError struct{}
 
 func (contextDeadlineError) Error() string { return "deadline" }

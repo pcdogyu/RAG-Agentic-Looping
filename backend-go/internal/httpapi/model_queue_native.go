@@ -60,6 +60,9 @@ func (s *Server) nativeModelTasks(ctx context.Context, lane string, now time.Tim
 			task["task_id"] = taskID
 		}
 		normalizeNativeModelTask(task, now)
+		if lane == "extract" && !nativeTaskLeaseCurrent(task, now, time.Duration(envIntValue("MODEL_TASK_LEASE_SECONDS", 180))*time.Second) {
+			continue
+		}
 		tasks = append(tasks, task)
 	}
 	sort.SliceStable(tasks, func(i, j int) bool {
@@ -73,6 +76,14 @@ func (s *Server) nativeModelTasks(ctx context.Context, lane string, now time.Tim
 		return stringValue(tasks[i]["queued_at"]) < stringValue(tasks[j]["queued_at"])
 	})
 	return tasks, nil
+}
+
+func nativeTaskLeaseCurrent(task map[string]any, now time.Time, lease time.Duration) bool {
+	if !nativeRunningStatus(stringValue(task["status"])) {
+		return true
+	}
+	updated := parseAnyTime(task["updated_at"])
+	return updated != nil && !updated.Before(now.Add(-lease))
 }
 
 func normalizeNativeModelTask(task map[string]any, now time.Time) {
