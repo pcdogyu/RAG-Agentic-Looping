@@ -13,6 +13,17 @@ import (
 
 type Handler func(context.Context, Job) (any, error)
 
+// continuationError reschedules the same durable job without consuming a
+// retry attempt. It is used by bounded batch handlers that need to yield while
+// preserving their cursor and visible progress.
+type continuationError struct {
+	Payload  any
+	Progress any
+	Delay    time.Duration
+}
+
+func (e *continuationError) Error() string { return "job continuation requested" }
+
 type Worker struct {
 	Store        *Store
 	ID           string
@@ -128,6 +139,13 @@ func (w *Worker) execute(parent context.Context, job Job) {
 		return
 	}
 	if err != nil {
+		var continuation *continuationError
+		if errors.As(err, &continuation) {
+			if continueErr := w.Store.Continue(parent, job.ID, w.ID, continuation.Payload, continuation.Progress, continuation.Delay); continueErr != nil {
+				slog.Error("continue job", "job_id", job.ID, "error", continueErr)
+			}
+			return
+		}
 		_ = w.Store.Fail(parent, job, w.ID, err)
 		var permanent interface{ Permanent() bool }
 		if job.Attempt >= job.MaxAttempts || errors.As(err, &permanent) && permanent.Permanent() {

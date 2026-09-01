@@ -110,6 +110,44 @@ func TestStoreCompletionClearsRetryError(t *testing.T) {
 	}
 }
 
+func TestStoreContinuationPreservesRetryBudgetAndProgress(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL is not set")
+	}
+	dsn = strings.Replace(dsn, "postgresql+psycopg://", "postgresql://", 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err := migrate.Up(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(pool)
+	id, err := store.Enqueue(ctx, EnqueueParams{Queue: "test", TaskType: backfillAssetMappingsTask, Payload: map[string]any{}, MaxAttempts: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = pool.Exec(context.Background(), `DELETE FROM go_jobs WHERE id=$1`, id) }()
+	job, err := store.Claim(ctx, "continuation-worker", []string{"test"}, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Continue(ctx, id, "continuation-worker", map[string]any{"cursor": "next"}, map[string]any{"phase": "dispatching"}, 0); err != nil {
+		t.Fatal(err)
+	}
+	job, err = store.Claim(ctx, "continuation-worker", []string{"test"}, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Attempt != 1 || !strings.Contains(string(job.Payload), "next") {
+		t.Fatalf("continuation consumed retry budget or lost payload: %#v", job)
+	}
+}
+
 func TestStoreEnqueueReturnsExistingActiveDedupeJob(t *testing.T) {
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {

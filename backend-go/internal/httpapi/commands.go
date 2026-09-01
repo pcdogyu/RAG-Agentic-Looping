@@ -119,11 +119,18 @@ func (s *Server) backfillAssetMappings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	taskID := uuid.NewString()
-	if err := s.publishCelery(r.Context(), "market_loop.backfill_asset_mappings", "io", taskID, nil, map[string]any{"days": days}, 5); err != nil {
+	queuedID := taskID
+	var err error
+	if s.goLaneCompleted("backfill") {
+		queuedID, err = s.enqueueGoModelJob(r.Context(), "backfill", taskID, "market_loop.backfill_asset_mappings", nil, map[string]any{"days": days}, 5, "asset-mapping-backfill")
+	} else {
+		err = s.publishCelery(r.Context(), "market_loop.backfill_asset_mappings", "io", taskID, nil, map[string]any{"days": days}, 5)
+	}
+	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "asset mapping backfill could not be queued")
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"task_id": taskID, "status": "queued", "days": days})
+	writeJSON(w, http.StatusAccepted, map[string]any{"task_id": queuedID, "status": "queued", "days": days})
 }
 
 type backgroundInput struct {

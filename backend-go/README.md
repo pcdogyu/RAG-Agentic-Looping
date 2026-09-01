@@ -43,6 +43,10 @@ profile and is not the web upstream.
   evolution job and runs the five-minute health monitor with last-known-good
   rollback and Telegram notification parity. The first cutover seeds the weekly
   timer instead of immediately creating a new evolution run.
+- Batch 10 adds `backfill`: the public asset-mapping history backfill now uses
+  the durable Go queue. It keeps the legacy 10-event cursor, capacity pauses,
+  eligibility checks, forced remapping, and report-refresh behavior without a
+  Celery `io` message.
 
 ## Safety gates
 
@@ -115,6 +119,17 @@ The lane task boundary is:
   research refresh.
 - `masterdata`: equity/crypto universe and commodity/FX identity refresh.
 - `operations`: periodic evolution dispatch and system health rollback gate.
+- `backfill`: bounded recent-event asset-mapping repair and report refresh.
+
+### Backfill lane cutover
+
+Set
+`GO_WORKER_COMPLETED_LANES=extract,mapping,research,evolution,discovery,recovery,outcomes,masterdata,operations,backfill`
+and start `go-backfill-worker`. The admin backfill endpoint then writes one
+deduplicated Go job instead of a Celery `io` message. Each ten-event page yields
+the lease, retains its cursor and progress in the same job ID, and capacity
+pauses do not consume the retry budget. Roll back by removing `backfill` from
+the completed prefix and stopping `go-backfill-worker`.
 
 ### Operations lane cutover
 

@@ -178,6 +178,32 @@ func (s *Store) Complete(ctx context.Context, id uuid.UUID, workerID string, res
 	return nil
 }
 
+func (s *Store) Continue(ctx context.Context, id uuid.UUID, workerID string, payload, progress any, delay time.Duration) error {
+	encodedPayload, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	encodedProgress, err := json.Marshal(progress)
+	if err != nil {
+		return err
+	}
+	if delay < 0 {
+		delay = 0
+	}
+	command, err := s.pool.Exec(ctx, `
+		UPDATE go_jobs SET status='retrying',payload=$3,result=$4,error=NULL,
+			available_at=now()+$5::interval,attempt=greatest(attempt-1,0),updated_at=now(),
+			lease_owner=NULL,lease_until=NULL
+		WHERE id=$1 AND lease_owner=$2 AND status='running'`, id, workerID, encodedPayload, encodedProgress, interval(delay))
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() != 1 {
+		return errors.New("job lease was lost before continuation")
+	}
+	return nil
+}
+
 func (s *Store) Fail(ctx context.Context, job Job, workerID string, cause error) error {
 	status := "retrying"
 	var available time.Time

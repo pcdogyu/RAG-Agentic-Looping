@@ -387,14 +387,22 @@ func sortResearchQueueItems(items []map[string]any, priority map[string]int) {
 func (s *Server) taskStatus(w http.ResponseWriter, r *http.Request) {
 	taskID := chi.URLParam(r, "taskID")
 	if id, err := uuid.Parse(taskID); err == nil {
-		var status string
+		var status, taskType string
 		var result []byte
 		var jobError *string
-		err := s.db.QueryRow(r.Context(), `SELECT status,result,error FROM go_jobs WHERE id=$1`, id).Scan(&status, &result, &jobError)
+		err := s.db.QueryRow(r.Context(), `SELECT status,task_type,result,error FROM go_jobs WHERE id=$1`, id).Scan(&status, &taskType, &result, &jobError)
 		if err == nil {
-			payload := map[string]any{"task_id": taskID, "state": strings.ToUpper(status)}
+			state := strings.ToUpper(status)
+			if taskType == "market_loop.backfill_asset_mappings" && status == "retrying" && len(result) > 0 {
+				state = "PROGRESS"
+			}
+			payload := map[string]any{"task_id": taskID, "state": state}
 			if len(result) > 0 {
-				payload["result"] = decodeDefault(result, map[string]any{})
+				decoded := decodeDefault(result, map[string]any{})
+				payload["result"] = decoded
+				if state == "PROGRESS" {
+					payload["progress"] = decoded
+				}
 			}
 			if jobError != nil {
 				payload["error"] = *jobError
