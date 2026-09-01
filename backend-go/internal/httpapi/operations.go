@@ -393,7 +393,7 @@ func (s *Server) taskStatus(w http.ResponseWriter, r *http.Request) {
 		err := s.db.QueryRow(r.Context(), `SELECT status,task_type,result,error FROM go_jobs WHERE id=$1`, id).Scan(&status, &taskType, &result, &jobError)
 		if err == nil {
 			state := strings.ToUpper(status)
-			if taskType == "market_loop.backfill_asset_mappings" && status == "retrying" && len(result) > 0 {
+			if (taskType == "market_loop.backfill_asset_mappings" || taskType == "market_loop.reprocess_target_impacts_v2") && status == "retrying" && len(result) > 0 {
 				state = "PROGRESS"
 			}
 			payload := map[string]any{"task_id": taskID, "state": state}

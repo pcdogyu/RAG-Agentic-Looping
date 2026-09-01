@@ -489,6 +489,29 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  go-maintenance-worker:
+    profiles: ["go-shadow"]
+    build:
+      context: .
+      dockerfile: backend-go/Dockerfile
+    entrypoint: ["/usr/local/bin/worker"]
+    env_file: .env
+    environment:
+      APP_ENV: development
+      GO_WORKER_LANE: maintenance
+      GO_WORKER_COMPLETED_LANES: ${GO_WORKER_COMPLETED_LANES:-}
+      GO_WORKER_CONCURRENCY: "1"
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      RESEARCH_COALESCE_WINDOW_HOURS: ${RESEARCH_COALESCE_WINDOW_HOURS:-24}
+      OLLAMA_RESEARCH_BASE_URLS: ${OLLAMA_RESEARCH_BASE_URLS:-http://host.docker.internal:11435,http://host.docker.internal:11436,http://host.docker.internal:11439}
+      OLLAMA_RESEARCH_MODEL: ${OLLAMA_RESEARCH_MODEL:-qwen2.5:7b}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
   go-scheduler:
     profiles: ["go-shadow"]
     build:

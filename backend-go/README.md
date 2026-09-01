@@ -47,6 +47,11 @@ profile and is not the web upstream.
   the durable Go queue. It keeps the legacy 10-event cursor, capacity pauses,
   eligibility checks, forced remapping, and report-refresh behavior without a
   Celery `io` message.
+- Batch 11 adds `maintenance`: the three remaining manual Celery tasks now run
+  through one durable Go lane: queued-research compaction, historical target
+  impact replay, and curated asset seeding. The legacy v2 replay task name is
+  retained while completed reports are checked against the current Go scoring
+  version.
 
 ## Safety gates
 
@@ -120,6 +125,28 @@ The lane task boundary is:
 - `masterdata`: equity/crypto universe and commodity/FX identity refresh.
 - `operations`: periodic evolution dispatch and system health rollback gate.
 - `backfill`: bounded recent-event asset-mapping repair and report refresh.
+- `maintenance`: manual backlog compaction, target-impact replay, and seed repair.
+
+### Maintenance lane cutover
+
+Set
+`GO_WORKER_COMPLETED_LANES=extract,mapping,research,evolution,discovery,recovery,outcomes,masterdata,operations,backfill,maintenance`
+and start `go-maintenance-worker`. This completes the Python business-task
+migration; `io-worker` and Python Beat may then remain stopped unless the
+Python rollback path is activated.
+
+Run maintenance work explicitly inside the maintenance container:
+
+```text
+docker compose --profile go-shadow exec go-maintenance-worker maintenance -task compact-research-backlog -dry-run=true
+docker compose --profile go-shadow exec go-maintenance-worker maintenance -task reprocess-target-impacts-v2 -batch-size=25 -max-active=50
+docker compose --profile go-shadow exec go-maintenance-worker maintenance -task seed-assets
+```
+
+The CLI only creates a deduplicated durable job and prints its task ID. Backlog
+compaction defaults to preview mode. Target replay yields between bounded
+batches and capacity waits without consuming its retry budget. Seed repair only
+inserts missing curated identities and never overwrites current master data.
 
 ### Backfill lane cutover
 

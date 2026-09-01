@@ -47,6 +47,8 @@ func main() {
 		handlerManifest = jobs.NewOperationsHandlers(cfg, nil, nil)
 	} else if lane.ID == "backfill" {
 		handlerManifest = jobs.NewBackfillHandlers(cfg, nil, nil)
+	} else if lane.ID == "maintenance" {
+		handlerManifest = jobs.NewMaintenanceHandlers(cfg, nil, nil)
 	}
 	if err := jobs.ValidateLaneHandlers(lane, handlerManifest); err != nil {
 		slog.Error("batch 4 handler gate", "error", err)
@@ -83,6 +85,8 @@ func main() {
 		handlers = jobs.NewOperationsHandlers(cfg, dependencies.DB, dependencies.Redis)
 	} else if lane.ID == "backfill" {
 		handlers = jobs.NewBackfillHandlers(cfg, dependencies.DB, dependencies.Redis)
+	} else if lane.ID == "maintenance" {
+		handlers = jobs.NewMaintenanceHandlers(cfg, dependencies.DB, dependencies.Redis)
 	}
 	worker := &jobs.Worker{Store: jobs.NewStore(dependencies.DB), ID: cfg.WorkerID, Queues: []string{lane.GoQueue},
 		Lease: cfg.LeaseDuration, PollInterval: cfg.PollInterval, Handlers: handlers, Concurrency: cfg.WorkerConcurrency, Redis: dependencies.Redis}
