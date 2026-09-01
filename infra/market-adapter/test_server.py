@@ -68,6 +68,27 @@ class PrimitiveTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "market must be CN or HK"):
             equity_universe({"market": "US"})
 
+    def test_equity_universe_falls_back_to_official_cn_directories(self):
+        def unavailable():
+            raise ConnectionError("Eastmoney unavailable")
+
+        module = SimpleNamespace(
+            stock_info_a_code_name=unavailable,
+            stock_info_sh_name_code=lambda symbol: _Frame(
+                [{"证券代码": "688001" if symbol == "科创板" else "600001", "证券简称": symbol}]
+            ),
+            stock_info_sz_name_code=lambda symbol: _Frame(
+                [{"A股代码": "000001", "A股简称": symbol}]
+            ),
+            stock_info_bj_name_code=lambda: _Frame(
+                [{"证券代码": "430001", "证券简称": "北交所"}]
+            ),
+        )
+        with patch.dict("sys.modules", {"akshare": module}):
+            result = equity_universe({"market": "CN"})
+        self.assertEqual(len(result["items"]), 4)
+        self.assertEqual(result["items"][-1]["asset_id"], "equity:XBEI:430001")
+
 
 if __name__ == "__main__":
     unittest.main()

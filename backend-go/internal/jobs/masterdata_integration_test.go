@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -55,6 +56,14 @@ func TestMasterdataPersistencePreservesOverridesAndDeactivatesMissing(t *testing
 		t.Fatal(err)
 	}
 	runtime := &masterdataRuntime{db: pool}
+	if err := runtime.startMarketSync(ctx, market); err != nil {
+		t.Fatal(err)
+	}
+	runtime.failMarketSync(ctx, market, errors.New("provider unavailable"))
+	var syncStatus string
+	if err := pool.QueryRow(ctx, `SELECT status FROM asset_universe_sync WHERE market=$1`, market).Scan(&syncStatus); err != nil || syncStatus != "failed" {
+		t.Fatalf("provider failure was not persisted: status=%s err=%v", syncStatus, err)
+	}
 	if err := runtime.startMarketSync(ctx, market); err != nil {
 		t.Fatal(err)
 	}

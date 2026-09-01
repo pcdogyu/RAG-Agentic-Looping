@@ -87,9 +87,33 @@ def equity_universe(payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("market must be CN or HK")
     items: list[dict[str, Any]] = []
     if requested in {"", "CN"}:
-        for row in _records(ak.stock_info_a_code_name()):
+        try:
+            cn_rows = _records(ak.stock_info_a_code_name())
+        except Exception:
+            # Eastmoney periodically closes this directory connection. Fall
+            # back to the three official exchange directories so one upstream
+            # outage cannot leave the universe sync permanently running.
+            cn_rows = []
+            for loader in (
+                lambda: ak.stock_info_sh_name_code(symbol="主板A股"),
+                lambda: ak.stock_info_sh_name_code(symbol="科创板"),
+                lambda: ak.stock_info_sz_name_code(symbol="A股列表"),
+                ak.stock_info_bj_name_code,
+            ):
+                try:
+                    cn_rows.extend(_records(loader()))
+                except Exception:
+                    logger.exception("official CN security directory failed")
+        for row in cn_rows:
             raw_code = str(row.get("code") or row.get("代码") or "").strip()
-            name = str(row.get("name") or row.get("名称") or "").strip()
+            raw_code = str(row.get("证券代码") or row.get("A股代码") or raw_code).strip()
+            name = str(
+                row.get("name")
+                or row.get("名称")
+                or row.get("证券简称")
+                or row.get("A股简称")
+                or ""
+            ).strip()
             if not raw_code.isdigit() or not name:
                 continue
             code = raw_code.zfill(6)

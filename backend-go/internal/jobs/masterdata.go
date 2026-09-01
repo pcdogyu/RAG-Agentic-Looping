@@ -208,7 +208,8 @@ func (runtime *masterdataRuntime) startMarketSync(ctx context.Context, market st
 func (runtime *masterdataRuntime) failMarketSync(ctx context.Context, market string, cause error) map[string]any {
 	detail := truncateRunes(fmt.Sprintf("%T: %v", cause, cause), 500)
 	var count int
-	_ = runtime.db.QueryRow(ctx, `INSERT INTO asset_universe_sync(market,status,last_error,completed_at) VALUES($1,'failed',$2,now())
+	_ = runtime.db.QueryRow(ctx, `INSERT INTO asset_universe_sync(market,status,asset_count,industry_count,added_count,updated_count,deactivated_count,last_error,started_at,completed_at)
+		VALUES($1,'failed',0,0,0,0,0,$2,NULL,now())
 		ON CONFLICT(market) DO UPDATE SET status='failed',last_error=$2,completed_at=now() RETURNING asset_count`, market, detail).Scan(&count)
 	return map[string]any{"status": "failed", "error": detail, "assets": count}
 }
