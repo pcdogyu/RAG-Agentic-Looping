@@ -8,10 +8,10 @@ import (
 
 func TestWorkerMigrationOrderAndLaneMappings(t *testing.T) {
 	status := BatchFourMigrationStatus([]string{"extract"})
-	if status.Batch != 7 || status.NextLane != "mapping" || status.CutoverReady {
+	if status.Batch != 8 || status.NextLane != "mapping" || status.CutoverReady {
 		t.Fatalf("unexpected migration status: %+v", status)
 	}
-	wantOrder := []string{"extract", "mapping", "research", "evolution", "discovery", "recovery", "outcomes"}
+	wantOrder := []string{"extract", "mapping", "research", "evolution", "discovery", "recovery", "outcomes", "masterdata"}
 	if strings.Join(status.Order, ",") != strings.Join(wantOrder, ",") {
 		t.Fatalf("unexpected order: %v", status.Order)
 	}
@@ -29,6 +29,9 @@ func TestWorkerMigrationOrderAndLaneMappings(t *testing.T) {
 	}
 	if status.Lanes[6].PythonModelLane != "io" || status.Lanes[6].GoQueue != "outcomes" {
 		t.Fatalf("outcomes queue boundary is not preserved: %+v", status.Lanes[6])
+	}
+	if status.Lanes[7].PythonModelLane != "io" || status.Lanes[7].GoQueue != "masterdata" {
+		t.Fatalf("masterdata queue boundary is not preserved: %+v", status.Lanes[7])
 	}
 }
 
@@ -50,6 +53,13 @@ func TestCompletedRecoveryAdvancesToOutcomes(t *testing.T) {
 	status := BatchFourMigrationStatus([]string{"extract", "mapping", "research", "evolution", "discovery", "recovery"})
 	if status.NextLane != "outcomes" || status.CutoverReady {
 		t.Fatalf("unexpected pre-outcomes status: %+v", status)
+	}
+}
+
+func TestCompletedOutcomesAdvancesToMasterdata(t *testing.T) {
+	status := BatchFourMigrationStatus([]string{"extract", "mapping", "research", "evolution", "discovery", "recovery", "outcomes"})
+	if status.NextLane != "masterdata" || status.CutoverReady {
+		t.Fatalf("unexpected pre-masterdata status: %+v", status)
 	}
 }
 

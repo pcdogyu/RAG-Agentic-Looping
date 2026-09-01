@@ -332,6 +332,14 @@ def _go_outcomes_worker_enabled() -> bool:
     }
 
 
+def _go_masterdata_worker_enabled() -> bool:
+    return "masterdata" in {
+        value.strip()
+        for value in settings.go_worker_completed_lanes.split(",")
+        if value.strip()
+    }
+
+
 def _enqueue_go_model_job(
     db,
     *,
@@ -435,6 +443,16 @@ OUTCOME_BEAT_SCHEDULES = (
 
 if _go_outcomes_worker_enabled():
     for schedule_name in OUTCOME_BEAT_SCHEDULES:
+        celery_app.conf.beat_schedule.pop(schedule_name, None)
+
+MASTERDATA_BEAT_SCHEDULES = (
+    "refresh-crypto-universe",
+    "refresh-equity-universe",
+    "refresh-macro-universe",
+)
+
+if _go_masterdata_worker_enabled():
+    for schedule_name in MASTERDATA_BEAT_SCHEDULES:
         celery_app.conf.beat_schedule.pop(schedule_name, None)
 
 

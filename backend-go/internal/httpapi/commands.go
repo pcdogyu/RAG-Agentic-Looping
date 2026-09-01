@@ -95,11 +95,19 @@ func (s *Server) refreshAssetUniverse(w http.ResponseWriter, r *http.Request) {
 		markets = []string{market}
 		kwargs = map[string]any{"markets": markets}
 	}
-	if err := s.publishCelery(r.Context(), "market_loop.refresh_asset_universe", "io", taskID, nil, kwargs, 5); err != nil {
+	queuedID := taskID
+	var err error
+	if s.goLaneCompleted("masterdata") {
+		key := "asset-universe:" + strings.Join(markets, ",")
+		queuedID, err = s.enqueueGoModelJob(r.Context(), "masterdata", taskID, "market_loop.refresh_asset_universe", nil, kwargs, 5, key)
+	} else {
+		err = s.publishCelery(r.Context(), "market_loop.refresh_asset_universe", "io", taskID, nil, kwargs, 5)
+	}
+	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "asset universe refresh could not be queued")
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"task_id": taskID, "status": "queued", "markets": markets})
+	writeJSON(w, http.StatusAccepted, map[string]any{"task_id": queuedID, "status": "queued", "markets": markets})
 }
 
 func (s *Server) backfillAssetMappings(w http.ResponseWriter, r *http.Request) {

@@ -73,6 +73,79 @@ def resolve_assets(payload: dict[str, Any]) -> dict[str, Any]:
     return {"items": matches}
 
 
+def equity_universe(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return raw CN/HK security identities for the Go master-data worker.
+
+    Provider-specific dataframe handling remains isolated in this adapter.  The
+    Go worker owns snapshot validation, taxonomy mapping and persistence.
+    """
+
+    import akshare as ak
+
+    requested = str(payload.get("market") or "").strip().upper()
+    if requested not in {"", "CN", "HK"}:
+        raise ValueError("market must be CN or HK")
+    items: list[dict[str, Any]] = []
+    if requested in {"", "CN"}:
+        for row in _records(ak.stock_info_a_code_name()):
+            raw_code = str(row.get("code") or row.get("代码") or "").strip()
+            name = str(row.get("name") or row.get("名称") or "").strip()
+            if not raw_code.isdigit() or not name:
+                continue
+            code = raw_code.zfill(6)
+            exchange = "XSHG" if code.startswith("6") else "XBEI" if code[0] in "489" else "XSHE"
+            raw_industry = str(row.get("所属行业") or row.get("行业") or "").strip()
+            items.append({
+                "asset_id": f"equity:{exchange}:{code}",
+                "asset_class": "equity",
+                "market": "CN",
+                "symbol": code,
+                "name": name,
+                "exchange_or_provider": exchange,
+                "currency": "CNY",
+                "aliases": [],
+                "raw_sector": raw_industry,
+                "raw_industry": raw_industry,
+                "instrument_type": "common_stock",
+                "lot_size": 100,
+                "active": True,
+            })
+    if requested in {"", "HK"}:
+        try:
+            frame = ak.stock_hk_spot_em()
+        except Exception:
+            frame = ak.stock_hk_spot()
+        for row in _records(frame):
+            raw_code = str(row.get("代码") or row.get("code") or "").strip()
+            name = str(
+                row.get("名称")
+                or row.get("中文名称")
+                or row.get("英文名称")
+                or row.get("name")
+                or ""
+            ).strip()
+            if not raw_code.isdigit() or not name:
+                continue
+            code = raw_code.zfill(5)
+            raw_industry = str(row.get("所属行业") or row.get("行业") or "").strip()
+            items.append({
+                "asset_id": f"equity:XHKG:{code}",
+                "asset_class": "equity",
+                "market": "HK",
+                "symbol": code,
+                "name": name,
+                "exchange_or_provider": "XHKG",
+                "currency": "HKD",
+                "aliases": [],
+                "raw_sector": raw_industry,
+                "raw_industry": raw_industry,
+                "instrument_type": "common_stock",
+                "lot_size": 100,
+                "active": True,
+            })
+    return {"items": items}
+
+
 def prices(payload: dict[str, Any]) -> dict[str, Any]:
     import akshare as ak
 
@@ -138,6 +211,7 @@ def discover_news(payload: dict[str, Any]) -> dict[str, Any]:
 
 ROUTES: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "/v1/assets/resolve": resolve_assets,
+    "/v1/assets/universe": equity_universe,
     "/v1/prices": prices,
     "/v1/fundamentals": fundamentals,
     "/v1/news": discover_news,

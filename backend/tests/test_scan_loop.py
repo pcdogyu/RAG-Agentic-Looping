@@ -123,6 +123,25 @@ def test_outcomes_cutover_removes_only_native_outcome_schedules(monkeypatch):
     assert worker._go_outcomes_worker_enabled() is False
 
 
+def test_masterdata_cutover_removes_only_native_universe_schedules(monkeypatch):
+    monkeypatch.setattr(
+        worker.settings,
+        "go_worker_completed_lanes",
+        "extract,mapping,research,evolution,discovery,recovery,outcomes,masterdata",
+    )
+    assert worker._go_masterdata_worker_enabled() is True
+    assert set(worker.MASTERDATA_BEAT_SCHEDULES) == {
+        "refresh-crypto-universe",
+        "refresh-equity-universe",
+        "refresh-macro-universe",
+    }
+    assert "evaluate-outcomes" not in worker.MASTERDATA_BEAT_SCHEDULES
+    assert "evolve-from-failures" not in worker.MASTERDATA_BEAT_SCHEDULES
+
+    monkeypatch.setattr(worker.settings, "go_worker_completed_lanes", "")
+    assert worker._go_masterdata_worker_enabled() is False
+
+
 def test_scan_gate_lease_is_renewed_only_by_its_owner():
     redis = FakeRedis()
     redis.set(worker.SCAN_GATE_KEY, "scan-task")

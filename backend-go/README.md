@@ -35,6 +35,10 @@ profile and is not the web upstream.
   schedules the bounded 1/5/20-session market-factor research refresh. Python
   Beat keeps asset-universe refresh, evolution dispatch, and system monitoring
   until their later batches.
+- Batch 8 adds `masterdata`: Go now refreshes the CN/HK/US/crypto asset universe
+  and FMP commodity/FX identities, applies the existing snapshot quality gates,
+  preserves manual overrides, and transactionally deactivates missing listings.
+  AkShare dataframe access remains isolated behind `market-adapter`.
 
 ## Safety gates
 
@@ -105,6 +109,24 @@ The lane task boundary is:
   lease reconciliation, and model-call audit retention cleanup.
 - `outcomes`: recommendation outcome evaluation and mature event market-factor
   research refresh.
+- `masterdata`: equity/crypto universe and commodity/FX identity refresh.
+
+### Master-data lane cutover
+
+Set
+`GO_WORKER_COMPLETED_LANES=extract,mapping,research,evolution,discovery,recovery,outcomes,masterdata`,
+start `go-masterdata-worker`, rebuild `market-adapter`, and recreate
+`go-scheduler`, the Python `scheduler`, and `io-worker`. The completed-lane flag
+removes only the three universe schedules from Celery Beat; evolution dispatch
+and system monitoring remain on Python.
+
+The Go worker retains the CN/HK/US/crypto minimum snapshot counts, the top-500
+crypto rank check, US exchange and OTC-ADR filters, per-market failure
+isolation, manual industry/active/association overrides, curated issuer
+protection, and atomic per-market persistence. The public admin refresh API
+publishes directly to the durable Go queue after cutover. Roll back by removing
+`masterdata` from the completed prefix and restarting the two schedulers; stored
+master data and job history remain durable.
 
 ### Outcomes lane cutover
 

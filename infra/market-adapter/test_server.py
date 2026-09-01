@@ -3,7 +3,7 @@ from datetime import date
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from server import _primitive, discover_news
+from server import _primitive, discover_news, equity_universe
 
 
 class _Frame:
@@ -48,6 +48,25 @@ class PrimitiveTests(unittest.TestCase):
         self.assertEqual(len(result["items"]), 1)
         self.assertEqual(result["items"][0]["source"], "东方财富")
         self.assertEqual(result["items"][0]["published_at"], "2026-09-01T00:00:00+00:00")
+
+    def test_equity_universe_normalizes_cn_hk_and_beijing_exchanges(self):
+        module = SimpleNamespace(
+            stock_info_a_code_name=lambda: _Frame([
+                {"code": "600000", "name": "沪市公司"},
+                {"code": "430001", "name": "北交所公司"},
+            ]),
+            stock_hk_spot_em=lambda: _Frame([{"代码": "9988", "名称": "阿里巴巴"}]),
+        )
+        with patch.dict("sys.modules", {"akshare": module}):
+            result = equity_universe({})
+        self.assertEqual(
+            [item["asset_id"] for item in result["items"]],
+            ["equity:XSHG:600000", "equity:XBEI:430001", "equity:XHKG:09988"],
+        )
+
+    def test_equity_universe_rejects_unsupported_market(self):
+        with self.assertRaisesRegex(ValueError, "market must be CN or HK"):
+            equity_universe({"market": "US"})
 
 
 if __name__ == "__main__":
