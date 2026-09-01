@@ -308,6 +308,14 @@ def _go_evolution_worker_enabled() -> bool:
     }
 
 
+def _go_discovery_worker_enabled() -> bool:
+    return "discovery" in {
+        value.strip()
+        for value in settings.go_worker_completed_lanes.split(",")
+        if value.strip()
+    }
+
+
 def _enqueue_go_model_job(
     db,
     *,
@@ -389,6 +397,9 @@ class ScanLeaseLost(RuntimeError):
 if not settings.evolution_enabled:
     celery_app.conf.beat_schedule.pop("evolve-from-failures", None)
     celery_app.conf.beat_schedule.pop("system-monitor", None)
+
+if _go_discovery_worker_enabled():
+    celery_app.conf.beat_schedule.pop("ensure-news-scan-loop", None)
 
 
 def model_instance_task(lane: ModelLane):
@@ -2284,7 +2295,11 @@ def recover_orphaned_news() -> dict[str, Any]:
                 "followup_failed": 0,
             }
         )
-    dispatch = dispatch_news_processing_outbox(limit=50)
+    dispatch = (
+        {"claimed": 0, "queued": [], "failed": 0}
+        if _go_discovery_worker_enabled()
+        else dispatch_news_processing_outbox(limit=50)
+    )
     return {**recovery, **followups, **dispatch}
 
 

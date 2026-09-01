@@ -71,6 +71,22 @@ class FakeRedis:
         return key in self.data
 
 
+def test_discovery_cutover_flag_is_independent_from_model_lanes(monkeypatch):
+    monkeypatch.setattr(
+        worker.settings,
+        "go_worker_completed_lanes",
+        "extract,mapping,research,evolution,discovery",
+    )
+    assert worker._go_discovery_worker_enabled() is True
+
+    monkeypatch.setattr(
+        worker.settings,
+        "go_worker_completed_lanes",
+        "extract,mapping,research,evolution",
+    )
+    assert worker._go_discovery_worker_enabled() is False
+
+
 def test_scan_gate_lease_is_renewed_only_by_its_owner():
     redis = FakeRedis()
     redis.set(worker.SCAN_GATE_KEY, "scan-task")

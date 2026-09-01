@@ -27,6 +27,9 @@ type Config struct {
 	MCPSecretKey          string
 	WeknoraURL            string
 	ScanInterval          time.Duration
+	ScanBatchSize         int
+	NewsDiscoveryLookback time.Duration
+	NewsWatermarkOverlap  time.Duration
 	ResearchCooldown      time.Duration
 	ExtractModel          string
 	ExtractURLs           []string
@@ -100,6 +103,9 @@ func Load() (Config, error) {
 		MCPSecretKey:          env("MCP_SECRET_KEY", ""),
 		WeknoraURL:            env("WEKNORA_DEFAULT_URL", "http://10.15.0.28/"),
 		ScanInterval:          time.Duration(envInt("SCAN_INTERVAL_MINUTES", 10)) * time.Minute,
+		ScanBatchSize:         envInt("SCAN_BATCH_SIZE", 40),
+		NewsDiscoveryLookback: time.Duration(envInt("NEWS_DISCOVERY_LOOKBACK_HOURS", 24)) * time.Hour,
+		NewsWatermarkOverlap:  time.Duration(envInt("NEWS_WATERMARK_OVERLAP_MINUTES", 10)) * time.Minute,
 		ResearchCooldown:      time.Duration(envInt("RESEARCH_ASSET_COOLDOWN_HOURS", 24)) * time.Hour,
 		ExtractModel:          env("OLLAMA_EXTRACT_MODEL", "qwen2.5:3b"),
 		ExtractURLs:           modelURLs("EXTRACT", "http://host.docker.internal:11434"),
@@ -157,6 +163,9 @@ func Load() (Config, error) {
 	}
 	if cfg.WorkerConcurrency < 1 {
 		return Config{}, fmt.Errorf("GO_WORKER_CONCURRENCY must be at least 1")
+	}
+	if cfg.ScanBatchSize < 1 || cfg.ScanBatchSize > 200 {
+		return Config{}, fmt.Errorf("SCAN_BATCH_SIZE must be between 1 and 200")
 	}
 	if cfg.WorkerLane == "research" && cfg.WorkerConcurrency > len(cfg.ResearchURLs) {
 		return Config{}, fmt.Errorf("research worker concurrency %d exceeds configured model capacity %d", cfg.WorkerConcurrency, len(cfg.ResearchURLs))

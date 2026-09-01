@@ -1,0 +1,97 @@
+package jobs
+
+import (
+	"encoding/xml"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/config"
+)
+
+func TestDiscoveryHandlersCoverMigrationManifest(t *testing.T) {
+	handlers := NewDiscoveryHandlers(config.Config{}, nil, nil)
+	lane, err := ValidateBatchFourActivation("discovery", []string{"extract", "mapping", "research", "evolution"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateLaneHandlers(lane, handlers); err != nil {
+		t.Fatalf("discovery handlers are incomplete: %v", err)
+	}
+}
+
+func TestDiscoveryRSSDocumentParsesRSSAndAtomDates(t *testing.T) {
+	for _, fixture := range []struct {
+		body string
+		date func(rssDocument) string
+	}{
+		{`<rss><channel><title>Example RSS</title><item><title>One</title><link>https://example.com/one</link><description>Summary</description><pubDate>Mon, 01 Sep 2026 01:02:03 GMT</pubDate></item></channel></rss>`, func(value rssDocument) string { return value.Channel.Items[0].PubDate }},
+		{`<feed xmlns="http://www.w3.org/2005/Atom"><title>Example Atom</title><entry><title>Two</title><summary>Summary</summary><updated>2026-09-01T01:02:03Z</updated><link href="https://example.com/two"/></entry></feed>`, func(value rssDocument) string { return value.Entries[0].Updated }},
+	} {
+		var document rssDocument
+		if err := xml.NewDecoder(strings.NewReader(fixture.body)).Decode(&document); err != nil {
+			t.Fatal(err)
+		}
+		if discoveryTime(fixture.date(document)).IsZero() {
+			t.Fatalf("feed date was not decoded: %#v", document)
+		}
+	}
+}
+
+func TestDiscoveryIntAcceptsJSONNumbers(t *testing.T) {
+	if actual := discoveryInt(float64(24)); actual != 24 {
+		t.Fatalf("discoveryInt=%d want 24", actual)
+	}
+}
+
+func TestDiscoveryTitleFilterMatchesPythonSemantics(t *testing.T) {
+	cfg := sourceFilterConfig{Enabled: true, Whitelist: []string{"英伟达"}, Blacklist: []string{"天气"}}
+	if allowed, keyword := evaluateDiscoveryTitle("英伟达发布新产品", cfg); !allowed || keyword != "英伟达" {
+		t.Fatalf("whitelist was not accepted: allowed=%v keyword=%q", allowed, keyword)
+	}
+	if allowed, keyword := evaluateDiscoveryTitle("英伟达天气影响", cfg); allowed || keyword != "天气" {
+		t.Fatalf("blacklist must override whitelist: allowed=%v keyword=%q", allowed, keyword)
+	}
+	if allowed, keyword := evaluateDiscoveryTitle("其他公司新闻", cfg); allowed || keyword != "未命中白名单" {
+		t.Fatalf("whitelist miss was not recorded: allowed=%v keyword=%q", allowed, keyword)
+	}
+	if allowed, _ := evaluateDiscoveryTitle("ＮＶＩＤＩＡ", sourceFilterConfig{Enabled: true, Whitelist: []string{"nvidia"}}); !allowed {
+		t.Fatal("NFKC and case-fold matching must be preserved")
+	}
+}
+
+func TestDiscoveryWatermarkUsesPerSourceOverlap(t *testing.T) {
+	base := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	items := []discoveredNews{
+		{Source: "one", PublishedAt: base.Add(51 * time.Minute)},
+		{Source: "one", PublishedAt: base.Add(49 * time.Minute)},
+		{Source: "two", PublishedAt: base.Add(time.Minute)},
+	}
+	actual := filterBySourceWatermark(items, map[string]time.Time{"one": base.Add(time.Hour)}, base, 10*time.Minute)
+	if len(actual) != 2 || actual[0].Source != "one" || actual[1].Source != "two" {
+		t.Fatalf("unexpected watermark result: %#v", actual)
+	}
+}
+
+func TestNormalizeMCPNewsStopsAtBoundaryAndBuildsHeadline(t *testing.T) {
+	since := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	payload := map[string]any{"data": map[string]any{"has_more": true, "next_cursor": "next", "items": []any{
+		map[string]any{"content": "黄金ETF持仓下降。后续内容", "time": "2026-09-01T01:00:00Z", "url": "https://example.com/a?utm_source=x"},
+		map[string]any{"content": "旧消息", "time": "2026-08-31T23:00:00Z", "url": "https://example.com/b"},
+	}}}
+	items, next, more, reached := normalizeMCPNews(payload, "金十", "jin10_flash_v1", since)
+	if len(items) != 1 || items[0].Title != "黄金ETF持仓下降。" || items[0].URL != "https://example.com/a" || next != "next" || !more || !reached {
+		t.Fatalf("unexpected MCP normalization: items=%#v next=%q more=%v reached=%v", items, next, more, reached)
+	}
+}
+
+func TestDiscoverySchedulerOnlyEnablesAfterCutover(t *testing.T) {
+	before := NewDiscoveryScheduler(config.Config{WorkerCompletedLanes: []string{"extract", "mapping", "research", "evolution"}}, nil, nil)
+	if before.Enabled() {
+		t.Fatal("discovery scheduler enabled before lane cutover")
+	}
+	after := NewDiscoveryScheduler(config.Config{WorkerCompletedLanes: []string{"extract", "mapping", "research", "evolution", "discovery"}}, nil, nil)
+	if !after.Enabled() {
+		t.Fatal("discovery scheduler did not enable after cutover")
+	}
+}

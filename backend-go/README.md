@@ -21,8 +21,12 @@ profile and is not the web upstream.
 - Batch 4 migrates Python model workers one lane at a time, in the fixed order
   `extract` -> `mapping` -> `research` -> `evolution`. The aliases are part of
   the contract: mapping is Python model lane/Go queue `assist`, while evolution
-  is Python model lane/Go queue `code`. `/go/migration-status` exposes the
-  machine-readable lane plan and current next lane.
+  is Python model lane/Go queue `code`.
+- Batch 5 adds `discovery`: Go now schedules and runs news discovery, persists
+  provider watermarks and health, stages news and extraction intents in one
+  transaction, and dispatches the durable outbox to the Go extract queue.
+  `/go/migration-status` exposes the machine-readable lane plan and current
+  next lane.
 
 ## Safety gates
 
@@ -61,7 +65,7 @@ target. Switch either direction without restarting an API or worker:
 The script recreates only `web`, then requires `/health` to succeed and checks
 the `X-API-Backend` response header. It never starts `go-worker`.
 
-## Batch 4 worker gates
+## Worker migration gates
 
 `go-worker` is intentionally fail-closed. It requires one explicit
 `GO_WORKER_LANE`, refuses a lane that skips the fixed order, and will not open a
@@ -87,6 +91,8 @@ The lane task boundary is:
 - `mapping`: event-to-asset resolution.
 - `research`: event research and asset research.
 - `evolution`: outcome evolution, manual evolution, and candidate execution.
+- `discovery`: FMP/RSS/MCP/AkShare news scanning and durable extraction-outbox
+  dispatch. AkShare stays behind the narrow Python market-adapter HTTP boundary.
 
 ### Extract lane cutover
 
@@ -198,3 +204,22 @@ The bridge accepts only the three registered evolution task types, validates
 candidate IDs for execution jobs, preserves task IDs, kwargs, and priorities,
 persists each Go job before archiving the original Redis lists under
 `market-loop:archive:evolution-cutover:*`.
+
+### Discovery lane cutover
+
+The discovery lane owns `market_loop.scan_news` and
+`market_loop.dispatch_news_processing_outbox`. It preserves the Redis singleton
+scan gate and pause state, per-source overlap watermarks, source filter log,
+provider health, transactional `news_processing`/outbox staging, deterministic
+extraction IDs, and retry backoff. Database-backed FMP, China-news, RSS, search,
+and MCP source settings are reloaded for every scan.
+
+Set
+`GO_WORKER_COMPLETED_LANES=extract,mapping,research,evolution,discovery`, start
+`market-adapter` and `go-discovery-worker`, and recreate `go-scheduler` and the
+Python `scheduler`/`io-worker`. The completed-lane flag disables the Python
+scan beat and Python recovery outbox publisher; unrelated Python IO tasks remain
+available. An already queued legacy scan may finish once, while the shared scan
+gate prevents overlapping Go work. Rollback removes only `discovery` from the
+completed prefix, stops `go-discovery-worker`, and recreates the two Python
+services so Celery resumes scheduling and outbox dispatch.

@@ -4,9 +4,10 @@ import json
 import logging
 import os
 from collections.abc import Callable
-from datetime import date
+from datetime import UTC, date, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
+from zoneinfo import ZoneInfo
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("market-adapter")
@@ -100,10 +101,46 @@ def fundamentals(payload: dict[str, Any]) -> dict[str, Any]:
     return {"items": _records(ak.stock_financial_analysis_indicator(symbol=symbol))}
 
 
+def discover_news(payload: dict[str, Any]) -> dict[str, Any]:
+    import akshare as ak
+
+    limit = max(1, min(int(payload.get("limit") or 40), 200))
+    since_value = str(payload.get("since") or "")
+    since = datetime.fromisoformat(since_value.replace("Z", "+00:00")) if since_value else None
+    frame = ak.stock_info_global_em()
+    items: list[dict[str, Any]] = []
+    for row in _records(frame)[: limit * 3]:
+        title = str(row.get("标题") or row.get("title") or "").strip()
+        url = str(row.get("链接") or row.get("url") or "").strip()
+        raw_time = row.get("发布时间") or row.get("时间") or row.get("date")
+        if not title or not url:
+            continue
+        try:
+            published = datetime.fromisoformat(str(raw_time).replace("Z", "+00:00"))
+            if published.tzinfo is None:
+                published = published.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+        except ValueError:
+            published = datetime.now(UTC)
+        if since is not None and published < since:
+            continue
+        items.append({
+            "source": str(row.get("来源") or "东方财富/AkShare"),
+            "title": title,
+            "summary": str(row.get("摘要") or row.get("内容") or ""),
+            "url": url,
+            "published_at": published.astimezone(UTC).isoformat(),
+            "language": "zh",
+        })
+        if len(items) >= limit:
+            break
+    return {"items": items}
+
+
 ROUTES: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "/v1/assets/resolve": resolve_assets,
     "/v1/prices": prices,
     "/v1/fundamentals": fundamentals,
+    "/v1/news": discover_news,
 }
 
 

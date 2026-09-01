@@ -35,6 +35,8 @@ func main() {
 		handlerManifest = jobs.NewResearchHandlers(cfg, nil, nil)
 	} else if lane.ID == "evolution" {
 		handlerManifest = jobs.NewEvolutionHandlers(cfg, nil, nil)
+	} else if lane.ID == "discovery" {
+		handlerManifest = jobs.NewDiscoveryHandlers(cfg, nil, nil)
 	}
 	if err := jobs.ValidateLaneHandlers(lane, handlerManifest); err != nil {
 		slog.Error("batch 4 handler gate", "error", err)
@@ -59,6 +61,8 @@ func main() {
 		handlers = jobs.NewResearchHandlers(cfg, dependencies.DB, dependencies.Redis)
 	} else if lane.ID == "evolution" {
 		handlers = jobs.NewEvolutionHandlers(cfg, dependencies.DB, dependencies.Redis)
+	} else if lane.ID == "discovery" {
+		handlers = jobs.NewDiscoveryHandlers(cfg, dependencies.DB, dependencies.Redis)
 	}
 	worker := &jobs.Worker{Store: jobs.NewStore(dependencies.DB), ID: cfg.WorkerID, Queues: []string{lane.GoQueue},
 		Lease: cfg.LeaseDuration, PollInterval: cfg.PollInterval, Handlers: handlers, Concurrency: cfg.WorkerConcurrency}

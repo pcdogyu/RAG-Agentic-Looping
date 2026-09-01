@@ -6,12 +6,12 @@ import (
 	"testing"
 )
 
-func TestBatchFourMigrationOrderAndLaneMappings(t *testing.T) {
+func TestWorkerMigrationOrderAndLaneMappings(t *testing.T) {
 	status := BatchFourMigrationStatus([]string{"extract"})
-	if status.Batch != 4 || status.NextLane != "mapping" || status.CutoverReady {
+	if status.Batch != 5 || status.NextLane != "mapping" || status.CutoverReady {
 		t.Fatalf("unexpected migration status: %+v", status)
 	}
-	wantOrder := []string{"extract", "mapping", "research", "evolution"}
+	wantOrder := []string{"extract", "mapping", "research", "evolution", "discovery"}
 	if strings.Join(status.Order, ",") != strings.Join(wantOrder, ",") {
 		t.Fatalf("unexpected order: %v", status.Order)
 	}
@@ -20,6 +20,16 @@ func TestBatchFourMigrationOrderAndLaneMappings(t *testing.T) {
 	}
 	if status.Lanes[3].PythonModelLane != "code" || status.Lanes[3].CeleryQueuePrefix != "evolution" || status.Lanes[3].GoQueue != "code" {
 		t.Fatalf("evolution aliases are not preserved: %+v", status.Lanes[3])
+	}
+	if status.Lanes[4].PythonModelLane != "io" || status.Lanes[4].GoQueue != "io" {
+		t.Fatalf("discovery queue boundary is not preserved: %+v", status.Lanes[4])
+	}
+}
+
+func TestCompletedEvolutionAdvancesToDiscovery(t *testing.T) {
+	status := BatchFourMigrationStatus([]string{"extract", "mapping", "research", "evolution"})
+	if status.NextLane != "discovery" || status.CutoverReady {
+		t.Fatalf("unexpected pre-discovery status: %+v", status)
 	}
 }
 

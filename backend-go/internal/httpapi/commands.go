@@ -134,6 +134,7 @@ func (s *Server) startScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	taskID := uuid.NewString()
+	claimedTaskID := taskID
 	claimed, err := s.redis.SetNX(r.Context(), scanGateKey, taskID, 12*time.Hour).Result()
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "scan state unavailable")
@@ -150,10 +151,25 @@ func (s *Server) startScan(w http.ResponseWriter, r *http.Request) {
 		status[key] = value
 	}
 	if err = s.writeRedisJSON(r.Context(), scanStatusKey, status, 0); err == nil {
-		err = s.publishCelery(r.Context(), "market_loop.scan_news", "io", taskID, nil, nil, 5)
+		if s.goLaneCompleted("discovery") {
+			var actualID uuid.UUID
+			actualID, err = jobs.NewStore(s.db).Enqueue(r.Context(), jobs.EnqueueParams{
+				ID: uuid.MustParse(taskID), Queue: "io", TaskType: jobs.ScanNewsTask,
+				Payload:  map[string]any{"args": []any(nil), "kwargs": map[string]any(nil)},
+				Priority: 5, MaxAttempts: 4, DedupeKey: "news-scan",
+			})
+			actual := actualID.String()
+			if err == nil && actual != taskID {
+				_, _ = s.redis.Eval(r.Context(), `if redis.call('get',KEYS[1])==ARGV[1] then redis.call('set',KEYS[1],ARGV[2],'EX',ARGV[3]); return 1 end return 0`, []string{scanGateKey}, taskID, actual, fmt.Sprint(int((12 * time.Hour).Seconds()))).Result()
+				taskID, status["task_id"] = actual, actual
+				err = s.writeRedisJSON(r.Context(), scanStatusKey, status, 0)
+			}
+		} else {
+			err = s.publishCelery(r.Context(), "market_loop.scan_news", "io", taskID, nil, nil, 5)
+		}
 	}
 	if err != nil {
-		_ = s.redis.Del(r.Context(), scanGateKey).Err()
+		_, _ = s.redis.Eval(r.Context(), `if redis.call('get',KEYS[1])==ARGV[1] then return redis.call('del',KEYS[1]) end return 0`, []string{scanGateKey}, claimedTaskID).Result()
 		writeError(w, http.StatusServiceUnavailable, "scan could not be queued")
 		return
 	}
@@ -161,7 +177,13 @@ func (s *Server) startScan(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"task_id": taskID, "status": "queued", "scan": s.scanStatusPayload(r.Context())})
 		return
 	}
-	result, waitErr := s.waitCelery(r.Context(), taskID, 30*time.Minute)
+	var result any
+	var waitErr error
+	if s.goLaneCompleted("discovery") {
+		result, waitErr = s.waitGoJob(r.Context(), taskID, 30*time.Minute)
+	} else {
+		result, waitErr = s.waitCelery(r.Context(), taskID, 30*time.Minute)
+	}
 	if waitErr != nil {
 		writeError(w, http.StatusGatewayTimeout, waitErr.Error())
 		return

@@ -311,6 +311,42 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  go-discovery-worker:
+    profiles: ["go-shadow"]
+    build:
+      context: .
+      dockerfile: backend-go/Dockerfile
+    entrypoint: ["/usr/local/bin/worker"]
+    env_file: .env
+    environment:
+      APP_ENV: development
+      GO_WORKER_LANE: discovery
+      GO_WORKER_COMPLETED_LANES: ${GO_WORKER_COMPLETED_LANES:-}
+      GO_WORKER_CONCURRENCY: "1"
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      MARKET_ADAPTER_URL: http://market-adapter:8091
+      FMP_BASE_URL: ${FMP_BASE_URL:-https://financialmodelingprep.com/stable}
+      FMP_ACCESS_TOKEN: ${FMP_ACCESS_TOKEN:-}
+      FMP_NEWS_LOOKBACK_HOURS: ${FMP_NEWS_LOOKBACK_HOURS:-12}
+      RSS_FEED_URLS: ${RSS_FEED_URLS:-}
+      OFFICIAL_RSS_FEED_URLS: ${OFFICIAL_RSS_FEED_URLS:-}
+      SCAN_INTERVAL_MINUTES: ${SCAN_INTERVAL_MINUTES:-10}
+      SCAN_BATCH_SIZE: ${SCAN_BATCH_SIZE:-40}
+      NEWS_DISCOVERY_LOOKBACK_HOURS: ${NEWS_DISCOVERY_LOOKBACK_HOURS:-24}
+      NEWS_WATERMARK_OVERLAP_MINUTES: ${NEWS_WATERMARK_OVERLAP_MINUTES:-10}
+      MCP_SECRET_KEY: ${MCP_SECRET_KEY:-}
+      WEB_SEARCH_TIMEOUT_SECONDS: ${WEB_SEARCH_TIMEOUT_SECONDS:-20}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      market-adapter:
+        condition: service_healthy
+    restart: unless-stopped
+
   go-scheduler:
     profiles: ["go-shadow"]
     build:
@@ -321,6 +357,8 @@ services:
     environment:
       APP_ENV: development
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      GO_WORKER_COMPLETED_LANES: ${GO_WORKER_COMPLETED_LANES:-}
+      SCAN_INTERVAL_MINUTES: ${SCAN_INTERVAL_MINUTES:-10}
     depends_on:
       postgres:
         condition: service_healthy
@@ -335,6 +373,11 @@ services:
       - "8091"
     environment:
       ADAPTER_PORT: "8091"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8091/health', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
     restart: unless-stopped
 
   ml-adapter:

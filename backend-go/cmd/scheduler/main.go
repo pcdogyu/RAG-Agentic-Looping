@@ -33,13 +33,22 @@ func main() {
 		os.Exit(1)
 	}
 	store := jobs.NewStore(dependencies.DB)
-	ticker := time.NewTicker(time.Minute)
-	defer ticker.Stop()
+	reconcileTicker := time.NewTicker(time.Minute)
+	discoveryTicker := time.NewTicker(5 * time.Second)
+	defer reconcileTicker.Stop()
+	defer discoveryTicker.Stop()
+	discovery := jobs.NewDiscoveryScheduler(cfg, dependencies.DB, dependencies.Redis)
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-discoveryTicker.C:
+			if discovery.Enabled() {
+				if err := discovery.Tick(ctx); err != nil {
+					slog.Error("schedule news discovery", "error", err)
+				}
+			}
+		case <-reconcileTicker.C:
 			count, err := store.ReconcileExpired(ctx)
 			if err != nil {
 				slog.Error("reconcile expired leases", "error", err)
