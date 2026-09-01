@@ -228,7 +228,7 @@ func shouldRecoverNews(state orphanNewsState, staleCutoff time.Time) (recover, s
 func (runtime *recoveryRuntime) recoverOrphanedNews(ctx context.Context, _ Job) (any, error) {
 	now := time.Now().UTC()
 	rows, err := runtime.db.Query(ctx, `SELECT n.id,
-		EXISTS(SELECT 1 FROM news_events e WHERE (e.payload->'news_item_ids') ? n.id::text),
+		EXISTS(SELECT 1 FROM news_events e WHERE (e.payload::jsonb->'news_item_ids') ? n.id::text),
 		p.status,p.heartbeat_at,p.updated_at,p.created_at,o.status
 		FROM news_items n
 		LEFT JOIN news_processing p ON p.news_id=n.id
