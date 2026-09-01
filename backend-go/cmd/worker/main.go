@@ -43,6 +43,8 @@ func main() {
 		handlerManifest = jobs.NewOutcomeHandlers(cfg, nil, nil)
 	} else if lane.ID == "masterdata" {
 		handlerManifest = jobs.NewMasterdataHandlers(cfg, nil, nil)
+	} else if lane.ID == "operations" {
+		handlerManifest = jobs.NewOperationsHandlers(cfg, nil, nil)
 	}
 	if err := jobs.ValidateLaneHandlers(lane, handlerManifest); err != nil {
 		slog.Error("batch 4 handler gate", "error", err)
@@ -75,9 +77,11 @@ func main() {
 		handlers = jobs.NewOutcomeHandlers(cfg, dependencies.DB, dependencies.Redis)
 	} else if lane.ID == "masterdata" {
 		handlers = jobs.NewMasterdataHandlers(cfg, dependencies.DB, dependencies.Redis)
+	} else if lane.ID == "operations" {
+		handlers = jobs.NewOperationsHandlers(cfg, dependencies.DB, dependencies.Redis)
 	}
 	worker := &jobs.Worker{Store: jobs.NewStore(dependencies.DB), ID: cfg.WorkerID, Queues: []string{lane.GoQueue},
-		Lease: cfg.LeaseDuration, PollInterval: cfg.PollInterval, Handlers: handlers, Concurrency: cfg.WorkerConcurrency}
+		Lease: cfg.LeaseDuration, PollInterval: cfg.PollInterval, Handlers: handlers, Concurrency: cfg.WorkerConcurrency, Redis: dependencies.Redis}
 	if err := worker.Run(ctx); err != nil && ctx.Err() == nil {
 		slog.Error("worker stopped", "error", err)
 		os.Exit(1)

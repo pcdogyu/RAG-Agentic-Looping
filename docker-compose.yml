@@ -429,6 +429,40 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  go-operations-worker:
+    profiles: ["go-shadow"]
+    build:
+      context: .
+      dockerfile: backend-go/Dockerfile.evolution
+    entrypoint: ["/usr/local/bin/worker"]
+    env_file: .env
+    environment:
+      APP_ENV: development
+      GO_WORKER_LANE: operations
+      GO_WORKER_COMPLETED_LANES: ${GO_WORKER_COMPLETED_LANES:-}
+      GO_WORKER_CONCURRENCY: "1"
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      SCAN_INTERVAL_MINUTES: ${SCAN_INTERVAL_MINUTES:-10}
+      OLLAMA_CODE_BASE_URLS: ${OLLAMA_CODE_BASE_URLS:-}
+      OLLAMA_CODE_BASE_URL: ${OLLAMA_CODE_BASE_URL:-http://host.docker.internal:11438}
+      EVOLUTION_ENABLED: ${EVOLUTION_ENABLED:-false}
+      EVOLUTION_AUTO_MERGE: ${EVOLUTION_AUTO_MERGE:-false}
+      EVOLUTION_ROOT: /app
+      EVOLUTION_BASE_BRANCH: ${EVOLUTION_BASE_BRANCH:-golang}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+    volumes:
+      - .:/app
+      - /var/run/docker.sock:/var/run/docker.sock
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
   go-scheduler:
     profiles: ["go-shadow"]
     build:
@@ -444,6 +478,7 @@ services:
       RESEARCH_LEASE_SECONDS: ${RESEARCH_LEASE_SECONDS:-120}
       RESEARCH_ASSET_HARD_TIME_LIMIT_SECONDS: ${RESEARCH_ASSET_HARD_TIME_LIMIT_SECONDS:-2100}
       MODEL_AUDIT_RETENTION_DAYS: ${MODEL_AUDIT_RETENTION_DAYS:-90}
+      EVOLUTION_ENABLED: ${EVOLUTION_ENABLED:-false}
     depends_on:
       postgres:
         condition: service_healthy

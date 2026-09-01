@@ -7,6 +7,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 )
 
 type Handler func(context.Context, Job) (any, error)
@@ -19,6 +21,7 @@ type Worker struct {
 	PollInterval time.Duration
 	Handlers     map[string]Handler
 	Concurrency  int
+	Redis        *redis.Client
 	active       atomic.Int64
 }
 
@@ -92,7 +95,9 @@ func (w *Worker) claimLoop(ctx context.Context) {
 func (w *Worker) execute(parent context.Context, job Job) {
 	handler := w.Handlers[job.TaskType]
 	if handler == nil {
-		_ = w.Store.Fail(parent, job, w.ID, errors.New("unregistered Go task type: "+job.TaskType))
+		cause := permanentJobError{errors.New("unregistered Go task type: " + job.TaskType)}
+		_ = w.Store.Fail(parent, job, w.ID, cause)
+		w.recordResult(parent, "failure")
 		return
 	}
 	ctx, cancel := context.WithCancel(parent)
@@ -124,9 +129,21 @@ func (w *Worker) execute(parent context.Context, job Job) {
 	}
 	if err != nil {
 		_ = w.Store.Fail(parent, job, w.ID, err)
+		var permanent interface{ Permanent() bool }
+		if job.Attempt >= job.MaxAttempts || errors.As(err, &permanent) && permanent.Permanent() {
+			w.recordResult(parent, "failure")
+		}
 		return
 	}
 	if err := w.Store.Complete(parent, job.ID, w.ID, result); err != nil {
 		slog.Error("complete job", "job_id", job.ID, "error", err)
+	} else {
+		w.recordResult(parent, "success")
+	}
+}
+
+func (w *Worker) recordResult(ctx context.Context, result string) {
+	if w.Redis != nil {
+		_ = w.Redis.Incr(ctx, "market-loop:tasks:"+result).Err()
 	}
 }

@@ -340,6 +340,14 @@ def _go_masterdata_worker_enabled() -> bool:
     }
 
 
+def _go_operations_worker_enabled() -> bool:
+    return "operations" in {
+        value.strip()
+        for value in settings.go_worker_completed_lanes.split(",")
+        if value.strip()
+    }
+
+
 def _enqueue_go_model_job(
     db,
     *,
@@ -453,6 +461,15 @@ MASTERDATA_BEAT_SCHEDULES = (
 
 if _go_masterdata_worker_enabled():
     for schedule_name in MASTERDATA_BEAT_SCHEDULES:
+        celery_app.conf.beat_schedule.pop(schedule_name, None)
+
+OPERATIONS_BEAT_SCHEDULES = (
+    "evolve-from-failures",
+    "system-monitor",
+)
+
+if _go_operations_worker_enabled():
+    for schedule_name in OPERATIONS_BEAT_SCHEDULES:
         celery_app.conf.beat_schedule.pop(schedule_name, None)
 
 

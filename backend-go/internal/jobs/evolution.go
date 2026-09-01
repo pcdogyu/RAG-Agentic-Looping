@@ -612,6 +612,27 @@ func (runtime *evolutionRuntime) rollbackCandidate(ctx context.Context, candidat
 	return cause
 }
 
+func rollbackLastKnownGood(ctx context.Context, cfg config.Config, redisClient *redis.Client) error {
+	if !cfg.EvolutionEnabled {
+		return errors.New("EVOLUTION_ENABLED is false")
+	}
+	runtime := &evolutionRuntime{cfg: cfg, redis: redisClient, root: cfg.EvolutionRoot}
+	if output, err := runtime.run(ctx, 120*time.Second, "git", "status", "--porcelain"); err != nil || strings.TrimSpace(output) != "" {
+		return errors.New("rollback refused because the worktree is not clean")
+	}
+	if _, err := runtime.run(ctx, 30*time.Second, "git", "rev-parse", "--verify", "last-known-good"); err != nil {
+		return errors.New("last-known-good tag does not exist")
+	}
+	if _, err := runtime.run(ctx, 60*time.Second, "git", "reset", "--hard", "last-known-good"); err != nil {
+		return err
+	}
+	deployment := runtime.deployAndVerify(ctx)
+	if !deployment.Passed {
+		return errors.New("rollback deployment failed: " + deployment.Output)
+	}
+	return nil
+}
+
 func (runtime *evolutionRuntime) evaluationScores(targetMetric string) (float64, float64, bool) {
 	baseline := readMetricFile(filepath.Join(runtime.root, "evals", "baseline.json"))
 	candidate := readMetricFile(filepath.Join(runtime.root, "evals", "candidate.json"))
@@ -783,7 +804,7 @@ func runCheck(ctx context.Context, dir string, timeout time.Duration, args ...st
 }
 
 func (runtime *evolutionRuntime) deployAndVerify(ctx context.Context) commandReport {
-	report := runCheck(ctx, runtime.root, 30*time.Minute, "docker", "compose", "up", "-d", "--build", "api", "go-api", "io-worker", "go-worker", "go-mapping-worker", "go-research-worker", "go-scheduler", "scheduler", "web")
+	report := runCheck(ctx, runtime.root, 30*time.Minute, "docker", "compose", "--profile", "go-shadow", "up", "-d", "--build", "api", "go-api", "io-worker", "go-worker", "go-mapping-worker", "go-research-worker", "go-evolution-worker", "go-discovery-worker", "go-recovery-worker", "go-outcomes-worker", "go-masterdata-worker", "go-operations-worker", "go-scheduler", "scheduler", "web")
 	if !report.Passed {
 		return report
 	}

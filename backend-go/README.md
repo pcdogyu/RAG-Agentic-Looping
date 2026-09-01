@@ -39,6 +39,10 @@ profile and is not the web upstream.
   and FMP commodity/FX identities, applies the existing snapshot quality gates,
   preserves manual overrides, and transactionally deactivates missing listings.
   AkShare dataframe access remains isolated behind `market-adapter`.
+- Batch 9 adds `operations`: Go now dispatches the weekly failure-driven code
+  evolution job and runs the five-minute health monitor with last-known-good
+  rollback and Telegram notification parity. The first cutover seeds the weekly
+  timer instead of immediately creating a new evolution run.
 
 ## Safety gates
 
@@ -110,6 +114,23 @@ The lane task boundary is:
 - `outcomes`: recommendation outcome evaluation and mature event market-factor
   research refresh.
 - `masterdata`: equity/crypto universe and commodity/FX identity refresh.
+- `operations`: periodic evolution dispatch and system health rollback gate.
+
+### Operations lane cutover
+
+Set
+`GO_WORKER_COMPLETED_LANES=extract,mapping,research,evolution,discovery,recovery,outcomes,masterdata,operations`,
+start `go-operations-worker`, and recreate both schedulers. Python Beat then
+owns no remaining periodic business task. The Go worker records successful and
+terminal failed jobs in the shared health counters, probes the configured code
+model before dispatch, and preserves the legacy ten-sample/ten-percent failure
+gate plus the three-scan-interval news freshness gate.
+
+The health monitor starts immediately. Weekly evolution deliberately starts
+after one complete seven-day interval so deployment cannot create an
+unrequested code candidate. Roll back by removing `operations` from the
+completed prefix, stopping `go-operations-worker`, and recreating both
+schedulers.
 
 ### Master-data lane cutover
 

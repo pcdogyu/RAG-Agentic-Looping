@@ -64,6 +64,8 @@ type Config struct {
 	EvolutionAutoMerge    bool
 	EvolutionRoot         string
 	EvolutionBaseBranch   string
+	TelegramBotToken      string
+	TelegramChatID        string
 	InitialCash           float64
 	MaxEquityWeight       float64
 	MaxCryptoWeight       float64
@@ -142,6 +144,8 @@ func Load() (Config, error) {
 		EvolutionAutoMerge:    envBool("EVOLUTION_AUTO_MERGE", false),
 		EvolutionRoot:         env("EVOLUTION_ROOT", "/app"),
 		EvolutionBaseBranch:   env("EVOLUTION_BASE_BRANCH", "golang"),
+		TelegramBotToken:      env("TELEGRAM_BOT_TOKEN", ""),
+		TelegramChatID:        env("TELEGRAM_CHAT_ID", ""),
 		InitialCash:           envFloat("INITIAL_CASH", 100000),
 		MaxEquityWeight:       envFloat("MAX_EQUITY_WEIGHT", 0.08),
 		MaxCryptoWeight:       envFloat("MAX_CRYPTO_WEIGHT", 0.05),
