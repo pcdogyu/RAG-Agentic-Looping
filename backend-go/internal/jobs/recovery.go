@@ -227,14 +227,21 @@ func shouldRecoverNews(state orphanNewsState, staleCutoff time.Time) (recover, s
 
 func (runtime *recoveryRuntime) recoverOrphanedNews(ctx context.Context, _ Job) (any, error) {
 	now := time.Now().UTC()
-	rows, err := runtime.db.Query(ctx, `SELECT n.id,
-		EXISTS(SELECT 1 FROM news_events e WHERE (e.payload::jsonb->'news_item_ids') ? n.id::text),
+	rows, err := runtime.db.Query(ctx, `WITH processed AS MATERIALIZED (
+		SELECT DISTINCT jsonb_array_elements_text(coalesce(payload::jsonb->'news_item_ids','[]'::jsonb)) AS news_id
+		FROM news_events
+	), candidates AS MATERIALIZED (
+		SELECT id,observed_at FROM news_items
+		WHERE observed_at >= $1 AND observed_at <= $2
+		ORDER BY observed_at,id LIMIT $3
+	)
+		SELECT n.id,processed.news_id IS NOT NULL,
 		p.status,p.heartbeat_at,p.updated_at,p.created_at,o.status
-		FROM news_items n
+		FROM candidates n
+		LEFT JOIN processed ON processed.news_id=n.id::text
 		LEFT JOIN news_processing p ON p.news_id=n.id
 		LEFT JOIN news_processing_outbox o ON o.news_id=n.id
-		WHERE n.observed_at >= $1 AND n.observed_at <= $2
-		ORDER BY n.observed_at,n.id LIMIT $3`, now.Add(-recoveryRetention), now.Add(-recoveryNewsGrace), recoveryNewsLimit*5)
+		ORDER BY n.observed_at,n.id`, now.Add(-recoveryRetention), now.Add(-recoveryNewsGrace), recoveryNewsLimit*5)
 	if err != nil {
 		return nil, err
 	}
