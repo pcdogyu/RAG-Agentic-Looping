@@ -44,6 +44,15 @@ func TestFallbackExtractionMatchesPythonGoldenRules(t *testing.T) {
 	}
 }
 
+func TestFallbackExtractionUsesDeterministicRulePrecedence(t *testing.T) {
+	news := newsRecord{Title: "机器人（300024）发布年度业绩预告", Symbols: []string{"300024"}}
+	for attempt := 0; attempt < 100; attempt++ {
+		if got := fallbackExtraction(news).EventType; got != "earnings" {
+			t.Fatalf("multi-keyword event type=%q want earnings", got)
+		}
+	}
+}
+
 func TestEventHorizonIgnoresModelSuppliedHorizon(t *testing.T) {
 	tests := map[string]int{"earnings": 30, "security": 30, "m_and_a": 180, "product": 90, "macro": 90, "other": 90}
 	for eventType, want := range tests {
@@ -85,6 +94,9 @@ func TestSecuritySymbolAndProductMatchingSafety(t *testing.T) {
 	}
 	if meaningfulProduct("云服务") || !meaningfulProduct("阿里云") {
 		t.Fatal("generic and branded products were not distinguished")
+	}
+	if meaningfulIssuerTerm("机器人") || !meaningfulIssuerTerm("沈阳新松机器人自动化股份有限公司") {
+		t.Fatal("generic and explicit issuer names were not distinguished")
 	}
 }
 

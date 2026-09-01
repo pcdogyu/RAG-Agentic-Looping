@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	pathpkg "path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -34,13 +35,12 @@ var (
 		regexp.MustCompile(`(?i)\b[0-9a-f]{32}\b`),
 	}
 	evolutionProtectedPaths = map[string]bool{
-		".env.example": true, ".github/workflows/ci.yml": true, ".gitignore": true,
-		"backend/app/evaluation.py": true, "backend/app/services/evolution.py": true,
-		"backend/Dockerfile": true, "backend/Dockerfile.evolution": true,
-		"backend-go/Dockerfile.evolution": true, "backend-go/internal/jobs/evolution.go": true,
-		"backend/tests/conftest.py": true, "docker-compose.yml": true,
-		"evals/baseline.json": true, "evals/golden_events.json": true,
-		"evals/golden_predictions.json": true, "pyproject.toml": true,
+		"backend-go/Dockerfile.evolution":             true,
+		"backend-go/cmd/evaluation/main.go":           true,
+		"backend-go/internal/jobs/evaluation.go":      true,
+		"backend-go/internal/jobs/evaluation_test.go": true,
+		"backend-go/internal/jobs/evolution.go":       true,
+		"backend-go/internal/jobs/evolution_test.go":  true,
 	}
 )
 
@@ -64,6 +64,13 @@ type commandReport struct {
 	Passed     bool   `json:"passed"`
 	ReturnCode int    `json:"returncode"`
 	Output     string `json:"output"`
+}
+
+type candidateCommandSpec struct {
+	name string
+	dir  string
+	args []string
+	wait time.Duration
 }
 
 func NewEvolutionHandlers(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) map[string]Handler {
@@ -200,7 +207,7 @@ func (runtime *evolutionRuntime) propose(ctx context.Context, failures []any, in
 
 func (runtime *evolutionRuntime) callCodeModel(ctx context.Context, prompt string, schema map[string]any, instanceID string, target any) error {
 	messages := []map[string]string{
-		{"role": "system", "content": "你是代码演进代理。输出最小 unified diff，不读取或生成密钥，不添加实盘交易。修改必须对应一个可测量失败模式。"},
+		{"role": "system", "content": "你是 Go 代码演进代理。只允许修改 backend-go/ 下的 Go 实现与 Go 测试；输出最小 unified diff，不读取或生成密钥，不添加实盘交易。修改必须对应一个可测量失败模式。"},
 		{"role": "user", "content": prompt + "\n\n只返回符合format JSON Schema的JSON。"},
 	}
 	request := map[string]any{
@@ -351,29 +358,37 @@ func (runtime *evolutionRuntime) executeCandidate(ctx context.Context, candidate
 }
 
 func (runtime *evolutionRuntime) candidateChecks(ctx context.Context) map[string]commandReport {
-	checks := map[string]commandReport{}
-	commands := []struct {
-		name string
-		dir  string
-		args []string
-		wait time.Duration
-	}{
-		{"compile", runtime.root, []string{"python", "-m", "compileall", "-q", "backend"}, 15 * time.Minute},
-		{"tests", runtime.root, []string{"python", "-m", "pytest", "-q"}, 30 * time.Minute},
-		{"time_travel", runtime.root, []string{"python", "-m", "pytest", "-q", "backend/tests/test_storage_time.py", "backend/tests/test_retrieval.py"}, 15 * time.Minute},
-		{"lint", runtime.root, []string{"python", "-m", "ruff", "check", "."}, 15 * time.Minute},
-		{"fixed_evidence", runtime.root, []string{"python", "-m", "backend.app.evaluation", "fixed-evidence"}, 15 * time.Minute},
-		{"walk_forward", runtime.root, []string{"python", "-m", "backend.app.evaluation", "walk-forward"}, 15 * time.Minute},
-		{"dependency_audit", runtime.root, []string{"python", "-m", "pip_audit"}, 15 * time.Minute},
-		{"go_tests", filepath.Join(runtime.root, "backend-go"), []string{"go", "test", "./..."}, 15 * time.Minute},
-		{"go_vet", filepath.Join(runtime.root, "backend-go"), []string{"go", "vet", "./..."}, 15 * time.Minute},
-		{"container_build", runtime.root, []string{"docker", "compose", "build", "web", "go-api", "market-adapter", "go-worker", "go-mapping-worker", "go-research-worker", "go-backfill-worker", "go-maintenance-worker"}, 30 * time.Minute},
+	checks := map[string]commandReport{
+		"go_format": goFormatCheck(ctx, filepath.Join(runtime.root, "backend-go")),
 	}
-	for _, item := range commands {
+	for _, item := range candidateCommandSpecs(runtime.root) {
 		checks[item.name] = runCheck(ctx, item.dir, item.wait, item.args...)
 	}
 	checks["secret_scan"] = runtime.repositorySecretCheck(ctx)
 	return checks
+}
+
+func candidateCommandSpecs(root string) []candidateCommandSpec {
+	goRoot := filepath.Join(root, "backend-go")
+	return []candidateCommandSpec{
+		{"go_tests", goRoot, []string{"go", "test", "./..."}, 15 * time.Minute},
+		{"go_vet", goRoot, []string{"go", "vet", "./..."}, 15 * time.Minute},
+		{"fixed_evidence", goRoot, []string{"go", "run", "./cmd/evaluation", "fixed-evidence", "--root", root}, 15 * time.Minute},
+		{"walk_forward", goRoot, []string{"go", "run", "./cmd/evaluation", "walk-forward", "--root", root}, 15 * time.Minute},
+		{"probability_calibration", goRoot, []string{"go", "run", "./cmd/evaluation", "probability-calibration", "--root", root}, 15 * time.Minute},
+		{"dependency_verify", goRoot, []string{"go", "mod", "verify"}, 5 * time.Minute},
+		{"container_build", root, []string{"docker", "compose", "--profile", "go-shadow", "build", "go-api", "go-evolution-worker", "go-operations-worker"}, 30 * time.Minute},
+	}
+}
+
+func goFormatCheck(ctx context.Context, goRoot string) commandReport {
+	report := runCheck(ctx, goRoot, 5*time.Minute, "gofmt", "-l", ".")
+	if report.Passed && strings.TrimSpace(report.Output) != "" {
+		report.Passed = false
+		report.ReturnCode = 1
+		report.Output = "files require gofmt:\n" + report.Output
+	}
+	return report
 }
 
 func (runtime *evolutionRuntime) failureCases(ctx context.Context) ([]any, error) {
@@ -561,8 +576,13 @@ func evolutionCandidatePaths(patch string) (map[string]bool, error) {
 		if len(parts) != 4 || !strings.HasPrefix(parts[2], "a/") || !strings.HasPrefix(parts[3], "b/") || strings.ContainsAny(parts[2]+parts[3], `"'`) {
 			return nil, errors.New("candidate patch contains an unsupported path header")
 		}
-		paths[strings.TrimPrefix(parts[2], "a/")] = true
-		paths[strings.TrimPrefix(parts[3], "b/")] = true
+		for _, raw := range parts[2:] {
+			candidatePath := raw[2:]
+			if pathpkg.Clean(candidatePath) != candidatePath || !strings.HasPrefix(candidatePath, "backend-go/") {
+				return nil, fmt.Errorf("candidate patch path must stay under backend-go/: %s", candidatePath)
+			}
+			paths[candidatePath] = true
+		}
 	}
 	if strings.TrimSpace(patch) != "" && len(paths) == 0 {
 		return nil, errors.New("candidate patch does not declare any repository paths")

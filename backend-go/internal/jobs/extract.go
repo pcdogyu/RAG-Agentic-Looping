@@ -631,18 +631,24 @@ func (runtime *ExtractRuntime) persistModelAudit(ctx context.Context, logicalID,
 func fallbackExtraction(news newsRecord) extractedEvent {
 	text := strings.ToLower(news.Title + " " + news.Summary)
 	typeValue := "other"
-	for eventType, keywords := range map[string][]string{
-		"earnings":     {"earnings", "revenue", "profit", "业绩", "营收", "利润", "财报"},
-		"regulation":   {"regulation", "regulator", "ban", "监管", "处罚", "禁令"},
-		"product":      {"launch", "product", "release", "upgrade", "发布", "产品", "获批", "升级"},
-		"m_and_a":      {"acquisition", "merger", "takeover", "收购", "合并", "并购"},
-		"security":     {"hack", "breach", "exploit", "攻击", "漏洞", "被盗"},
-		"tokenomics":   {"unlock", "airdrop", "token", "解锁", "空投", "代币"},
-		"supply_chain": {"supplier", "shortage", "supply chain", "供应商", "短缺", "供应链"},
-	} {
-		for _, keyword := range keywords {
+	// Rule order is part of the contract. A map would make multi-keyword
+	// headlines alternate between event types across worker processes.
+	rules := []struct {
+		eventType string
+		keywords  []string
+	}{
+		{"earnings", []string{"earnings", "revenue", "profit", "业绩", "营收", "利润", "财报"}},
+		{"regulation", []string{"regulation", "regulator", "ban", "监管", "处罚", "禁令"}},
+		{"product", []string{"launch", "product", "release", "upgrade", "发布", "产品", "获批", "升级"}},
+		{"m_and_a", []string{"acquisition", "merger", "takeover", "收购", "合并", "并购"}},
+		{"security", []string{"hack", "breach", "exploit", "攻击", "漏洞", "被盗"}},
+		{"tokenomics", []string{"unlock", "airdrop", "token", "解锁", "空投", "代币"}},
+		{"supply_chain", []string{"supplier", "shortage", "supply chain", "供应商", "短缺", "供应链"}},
+	}
+	for _, rule := range rules {
+		for _, keyword := range rule.keywords {
 			if strings.Contains(text, keyword) {
-				typeValue = eventType
+				typeValue = rule.eventType
 				break
 			}
 		}
@@ -793,7 +799,7 @@ func (runtime *ExtractRuntime) matchAssets(ctx context.Context, news newsRecord,
 		_ = json.Unmarshal(productsJSON, &products)
 		_ = json.Unmarshal(competitorsJSON, &competitors)
 		direct := containsStringFold(news.Symbols, symbol) || explicitSymbol(text, symbol, false)
-		issuerMatch := explicitTerm(text, name)
+		issuerMatch := meaningfulIssuerTerm(name) && explicitTerm(text, name)
 		if !issuerMatch {
 			for _, alias := range aliases {
 				if meaningfulTerm(alias) && explicitTerm(text, alias) {
@@ -1296,6 +1302,12 @@ func meaningfulTerm(value string) bool {
 		return len([]rune(compact)) >= 2
 	}
 	return len(compact) >= 3 && !map[string]bool{"inc": true, "ltd": true, "group": true, "market": true, "services": true}[compact]
+}
+func meaningfulIssuerTerm(value string) bool {
+	if !meaningfulTerm(value) {
+		return false
+	}
+	return !map[string]bool{"机器人": true}[normalizedText(value)]
 }
 func meaningfulProduct(value string) bool {
 	if !meaningfulTerm(value) {
