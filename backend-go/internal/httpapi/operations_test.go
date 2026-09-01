@@ -1,71 +1,73 @@
 package httpapi
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
 
-func TestNativeQueueItemUsesTrackedTasksAndInferenceCapacity(t *testing.T) {
+func TestNativeModelQueueItemUsesDurableJobCountsAndInstances(t *testing.T) {
 	now := time.Date(2026, time.September, 1, 8, 0, 0, 0, time.UTC)
-	tasks := []map[string]any{
-		{"task_id": "running", "status": "running", "queued_at": now.Add(-2 * time.Minute), "started_at": now.Add(-time.Minute), "updated_at": now, "task_count": 1, "metrics": map[string]any{}},
-		{"task_id": "failed", "status": "failed", "queued_at": now.Add(-4 * time.Minute), "started_at": now.Add(-3 * time.Minute), "completed_at": now.Add(-2 * time.Minute), "updated_at": now.Add(-2 * time.Minute), "task_count": 1, "metrics": map[string]any{}},
-		{"task_id": "completed", "status": "completed", "queued_at": now.Add(-6 * time.Minute), "started_at": now.Add(-5 * time.Minute), "completed_at": now.Add(-4 * time.Minute), "updated_at": now.Add(-4 * time.Minute), "task_count": 1, "metrics": map[string]any{}},
-	}
-	for _, task := range tasks {
-		normalizeNativeModelTask(task, now)
+	jobs := []nativeModelJob{
+		{ID: "running", Status: "running", CreatedAt: now.Add(-2 * time.Minute), UpdatedAt: now, Kind: "event_research", EntityID: "event-1", Title: "真实新闻标题"},
+		{ID: "failed", Status: "failed", CreatedAt: now.Add(-4 * time.Minute), UpdatedAt: now.Add(-2 * time.Minute), Kind: "event_research", EntityID: "event-2", Title: "另一条新闻", Error: "timeout"},
+		{ID: "completed", Status: "completed", CreatedAt: now.Add(-6 * time.Minute), UpdatedAt: now.Add(-4 * time.Minute), Kind: "event_research", EntityID: "event-3", Title: "已完成新闻"},
 	}
 	inference := map[string]any{
 		"capacity": 3, "available": 2, "running": 1, "queued": 2, "observable": true, "per_instance_concurrency": 3,
 		"instances": []map[string]any{{"id": "research-0", "healthy": true, "model_available": true, "capacity": 3, "available": 2, "running": 1, "queued": 2, "observable": true}},
 	}
-	queue := nativeQueueItem(nativeQueueSpec{lane: "research", model: "qwen2.5:7b", purpose: "标的研究", binding: "研究", enabled: true}, inference, tasks, nil, now, 50)
-	counts := queue["counts"].(map[string]int)
+	queue := nativeModelQueueItem(nativeModelQueueSpec{id: "research", model: "qwen2.5:7b", purpose: "标的研究", binding: "研究", enabled: true}, inference, jobs, 50, now, nil)
+	counts := queue["counts"].(map[string]int64)
 	if counts["running"] != 1 || counts["failed"] != 1 || counts["completed"] != 1 || counts["waiting_for_model"] != 2 {
 		t.Fatalf("unexpected counts: %#v", counts)
 	}
-	if queue["state"] != "running" || queue["instance_count"] != 1 || queue["total_tasks"] != 3 {
+	if queue["state"] != "running" || queue["instance_count"] != 1 || queue["total_tasks"] != int64(3) {
 		t.Fatalf("unexpected queue summary: %#v", queue)
 	}
 	visible := queue["tasks"].([]any)
 	if len(visible) != 2 {
 		t.Fatalf("visible tasks = %d, want 2", len(visible))
 	}
-	if stringValue(visible[0].(map[string]any)["instance_id"]) != "research-0" {
-		t.Fatalf("task was not assigned to the native instance: %#v", visible[0])
+	first := visible[0].(map[string]any)
+	if stringValue(first["title"]) != "真实新闻标题" || stringValue(first["instance_id"]) != "research-0" {
+		t.Fatalf("headline or instance assignment lost: %#v", first)
 	}
 }
 
-func TestNativeQueueItemReturnsBilingualRedisError(t *testing.T) {
-	queue := nativeQueueItem(
-		nativeQueueSpec{lane: "assist", enabled: true},
-		map[string]any{"capacity": 1, "available": 0, "observable": false, "instances": []map[string]any{}},
-		nil,
-		contextDeadlineError{},
-		time.Now().UTC(),
-		50,
-	)
-	if queue["state"] != "unavailable" {
-		t.Fatalf("state = %v, want unavailable", queue["state"])
+func TestNativeResearchVisibleTasksDeduplicatesActiveAndFailedSubject(t *testing.T) {
+	now := time.Date(2026, time.September, 1, 8, 0, 0, 0, time.UTC)
+	jobs := []nativeModelJob{
+		{ID: "active", Status: "queued", Kind: "event_research", EntityID: "event-1", Title: "同一新闻标题", CreatedAt: now, UpdatedAt: now},
+		{ID: "failed", Status: "failed", Kind: "event_research", EntityID: "event-1", Title: "同一新闻标题", CreatedAt: now.Add(-time.Hour), UpdatedAt: now.Add(-time.Hour)},
 	}
-	if queue["error"] != "Redis 任务状态暂时不可用。 / Redis task state is temporarily unavailable." {
+	visible := nativeVisibleTasks("research", jobs, now)
+	if len(visible) != 1 || visible[0].ID != "active" {
+		t.Fatalf("active task should win research deduplication: %#v", visible)
+	}
+}
+
+func TestNativeModelQueueItemReturnsDatabaseError(t *testing.T) {
+	queue := nativeModelQueueItem(
+		nativeModelQueueSpec{id: "assist", enabled: true},
+		map[string]any{"capacity": 1, "available": 0, "observable": true, "instances": []map[string]any{}},
+		nil,
+		50,
+		time.Now().UTC(),
+		errors.New("database unavailable"),
+	)
+	if queue["error"] != "模型队列任务状态暂时不可用。" {
 		t.Fatalf("unexpected error: %v", queue["error"])
 	}
 }
 
-func TestNativeTaskLeaseCurrentFiltersOnlyStaleRunningTasks(t *testing.T) {
-	now := time.Date(2026, time.September, 1, 8, 0, 0, 0, time.UTC)
-	if nativeTaskLeaseCurrent(map[string]any{"status": "running", "updated_at": now.Add(-181 * time.Second)}, now, 180*time.Second) {
-		t.Fatal("stale running task must be excluded")
+func TestNativeQueueState(t *testing.T) {
+	counts := nativeQueueCounts(nil)
+	if state := nativeQueueState(counts, false, true); state != "disabled" {
+		t.Fatalf("disabled state = %s", state)
 	}
-	if !nativeTaskLeaseCurrent(map[string]any{"status": "running", "updated_at": now.Add(-180 * time.Second)}, now, 180*time.Second) {
-		t.Fatal("task exactly on the lease boundary must remain visible")
-	}
-	if !nativeTaskLeaseCurrent(map[string]any{"status": "failed", "updated_at": now.Add(-time.Hour)}, now, 180*time.Second) {
-		t.Fatal("terminal tasks must not be removed by the running lease filter")
+	counts["queued"] = 1
+	if state := nativeQueueState(counts, true, true); state != "queued" {
+		t.Fatalf("queued state = %s", state)
 	}
 }
-
-type contextDeadlineError struct{}
-
-func (contextDeadlineError) Error() string { return "deadline" }

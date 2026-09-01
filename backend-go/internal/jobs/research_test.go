@@ -16,6 +16,16 @@ func TestResearchHandlersCoverLaneManifest(t *testing.T) {
 	}
 }
 
+func TestEventResearchTrackingLabelsPreserveNewsHeadline(t *testing.T) {
+	title, subtitle := eventResearchTrackingLabels(map[string]any{
+		"headline":   "美国防部与通用动力和洛克希德达成七年期协议",
+		"event_type": "security",
+	})
+	if title != "美国防部与通用动力和洛克希德达成七年期协议" || subtitle != "security" {
+		t.Fatalf("unexpected research tracking labels: %q / %q", title, subtitle)
+	}
+}
+
 func TestRatingForScoreUsesFiveStableBands(t *testing.T) {
 	cases := map[int]string{-100: "strongly_bearish", -70: "strongly_bearish", -69: "bearish", -30: "bearish", -29: "watch", 29: "watch", 30: "bullish", 69: "bullish", 70: "strongly_bullish", 100: "strongly_bullish"}
 	for score, expected := range cases {

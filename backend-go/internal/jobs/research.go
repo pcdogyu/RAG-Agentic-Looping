@@ -139,7 +139,7 @@ func (runtime *researchRuntime) researchEvent(ctx context.Context, job Job) (any
 	run["status"], run["error"], run["updated_at"] = "running", nil, iso(time.Now())
 	evidence, err := runtime.eventEvidence(ctx, runID, event, boolValue(run["historical_replay"]))
 	if err != nil {
-		return nil, runtime.failEventResearch(ctx, job, run, err)
+		return nil, runtime.failEventResearch(ctx, job, run, event, err)
 	}
 	run["evidence"] = evidencePayload(evidence, runID)
 	appendAnalysisStep(run, analysisStep("event_evidence_gathering", "completed", "go-worker", fmt.Sprintf("已从事件关联新闻收集 %d 条证据，覆盖 %d 个独立来源。", len(evidence), independentGroupCount(evidence)), map[string]any{"evidence_count": len(evidence), "independent_sources": independentGroupCount(evidence)}))
@@ -147,11 +147,11 @@ func (runtime *researchRuntime) researchEvent(ctx context.Context, job Job) (any
 		if errors.Is(err, errResearchInactive) {
 			return map[string]any{"status": "superseded", "event_research_run_id": runID}, nil
 		}
-		return nil, runtime.failEventResearch(ctx, job, run, err)
+		return nil, runtime.failEventResearch(ctx, job, run, event, err)
 	}
 	draft, err := runtime.generateEventDraft(ctx, runID, event, evidence, instanceID)
 	if err != nil {
-		return nil, runtime.failEventResearch(ctx, job, run, err)
+		return nil, runtime.failEventResearch(ctx, job, run, event, err)
 	}
 	appendAnalysisStep(run, analysisStep("event_report_drafting", "completed", "ollama", fmt.Sprintf("已生成逐目标事件研报草稿，包含 %d 个目标，引用 %d 条证据。", len(draft.Impacts), len(draft.EvidenceIDs)), map[string]any{"direction_scores": impactScores(draft.Impacts), "citation_count": len(draft.EvidenceIDs)}))
 	run["status"] = "verifying"
@@ -159,7 +159,7 @@ func (runtime *researchRuntime) researchEvent(ctx context.Context, job Job) (any
 		if errors.Is(err, errResearchInactive) {
 			return map[string]any{"status": "superseded", "event_research_run_id": runID}, nil
 		}
-		return nil, runtime.failEventResearch(ctx, job, run, err)
+		return nil, runtime.failEventResearch(ctx, job, run, event, err)
 	}
 	complete, missing, contradictions := verifyEventDraft(draft, evidence, parseTime(run["as_of"]))
 	run["verification_round"], run["missing_requirements"], run["contradictions"] = 1, missing, contradictions
@@ -177,7 +177,7 @@ func (runtime *researchRuntime) researchEvent(ctx context.Context, job Job) (any
 		if errors.Is(err, errResearchInactive) {
 			return map[string]any{"status": "superseded", "event_research_run_id": runID}, nil
 		}
-		return nil, runtime.failEventResearch(ctx, job, run, err)
+		return nil, runtime.failEventResearch(ctx, job, run, event, err)
 	}
 	queued, err := runtime.enqueueTargetResearches(ctx, event, report, 3)
 	if err != nil {
@@ -994,7 +994,7 @@ func (runtime *researchRuntime) enqueueAssetResearch(ctx context.Context, event,
 	return true, nil
 }
 
-func (runtime *researchRuntime) failEventResearch(ctx context.Context, job Job, run map[string]any, cause error) error {
+func (runtime *researchRuntime) failEventResearch(ctx context.Context, job Job, run, event map[string]any, cause error) error {
 	clean := context.WithoutCancel(ctx)
 	status := "queued"
 	if job.Attempt >= job.MaxAttempts {
@@ -1006,8 +1006,17 @@ func (runtime *researchRuntime) failEventResearch(ctx context.Context, job Job, 
 	}
 	appendAnalysisStep(run, analysisStep("event_research_failed", ternaryString(status == "failed", "failed", "retrying"), "go-worker", fmt.Sprintf("逐目标事件研报%s（%s）。", ternaryString(status == "failed", "最终失败", "暂时失败，等待重试"), errorKind(cause)), map[string]any{}))
 	_ = runtime.saveEventResearch(clean, run, payloadEvidence(anySlice(run["evidence"])))
-	runtime.finishResearchTracking(clean, job.ID.String(), ternaryString(status == "failed", "failed", "retrying"), job.Attempt, stringValue(run["event_id"]), "事件研究", "", cause.Error(), nil)
+	title, subtitle := eventResearchTrackingLabels(event)
+	runtime.finishResearchTracking(clean, job.ID.String(), ternaryString(status == "failed", "failed", "retrying"), job.Attempt, stringValue(run["event_id"]), title, subtitle, cause.Error(), nil)
 	return cause
+}
+
+func eventResearchTrackingLabels(event map[string]any) (string, string) {
+	title := stringValue(event["headline"])
+	if title == "" {
+		title = "事件研究"
+	}
+	return title, stringValue(event["event_type"])
 }
 
 func (runtime *researchRuntime) handleAssetError(ctx context.Context, job Job, run map[string]any, cause error) error {
