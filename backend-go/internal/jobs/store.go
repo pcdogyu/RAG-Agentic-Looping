@@ -193,8 +193,8 @@ func (s *Store) Fail(ctx context.Context, job Job, workerID string, cause error)
 		available = time.Now().UTC().Add(time.Duration(seconds) * time.Second)
 	}
 	_, err := s.pool.Exec(ctx, `
-		UPDATE go_jobs SET status=$3,error=$4,available_at=$5,updated_at=now(),
-			completed_at=CASE WHEN $3='failed' THEN now() ELSE NULL END,
+		UPDATE go_jobs SET status=$3::varchar,error=$4,available_at=$5,updated_at=now(),
+			completed_at=CASE WHEN $3::text='failed' THEN now() ELSE NULL END,
 			lease_owner=NULL,lease_until=NULL
 		WHERE id=$1 AND lease_owner=$2 AND status='running'`,
 		job.ID, workerID, status, cause.Error(), available)
