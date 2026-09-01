@@ -8,8 +8,7 @@ import (
 )
 
 func TestOperationsHandlersCoverLane(t *testing.T) {
-	completed := []string{"extract", "mapping", "research", "evolution", "discovery", "recovery", "outcomes", "masterdata"}
-	lane, err := ValidateBatchFourActivation("operations", completed)
+	lane, err := RequireWorkerLane("operations")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -18,17 +17,12 @@ func TestOperationsHandlersCoverLane(t *testing.T) {
 	}
 }
 
-func TestOperationsSchedulerRequiresCutoverAndEvolution(t *testing.T) {
-	completed := []string{"extract", "mapping", "research", "evolution", "discovery", "recovery", "outcomes", "masterdata"}
-	if NewOperationsScheduler(config.Config{EvolutionEnabled: true, WorkerCompletedLanes: completed}, nil, nil).Enabled() {
-		t.Fatal("operations scheduler enabled before lane cutover")
-	}
-	completed = append(completed, "operations")
-	if NewOperationsScheduler(config.Config{WorkerCompletedLanes: completed}, nil, nil).Enabled() {
+func TestOperationsSchedulerRequiresEvolution(t *testing.T) {
+	if NewOperationsScheduler(config.Config{}, nil, nil).Enabled() {
 		t.Fatal("operations scheduler enabled while evolution is disabled")
 	}
-	if !NewOperationsScheduler(config.Config{EvolutionEnabled: true, WorkerCompletedLanes: completed}, nil, nil).Enabled() {
-		t.Fatal("operations scheduler did not enable after cutover")
+	if !NewOperationsScheduler(config.Config{EvolutionEnabled: true}, nil, nil).Enabled() {
+		t.Fatal("operations scheduler did not enable with evolution")
 	}
 }
 

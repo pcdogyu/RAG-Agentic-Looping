@@ -8,20 +8,6 @@ import (
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/config"
 )
 
-func TestCeleryQueueKeyUsesKombuPrioritySteps(t *testing.T) {
-	tests := map[int]string{
-		-1: "research", 0: "research", 1: "research", 2: "research",
-		3: "research" + celeryPrioritySeparator + "3", 5: "research" + celeryPrioritySeparator + "3",
-		6: "research" + celeryPrioritySeparator + "6", 8: "research" + celeryPrioritySeparator + "6",
-		9: "research" + celeryPrioritySeparator + "9", 99: "research" + celeryPrioritySeparator + "9",
-	}
-	for priority, expected := range tests {
-		if actual := celeryQueueKey("research", priority); actual != expected {
-			t.Fatalf("priority %d: got %q, want %q", priority, actual, expected)
-		}
-	}
-}
-
 func TestBatchThreeCanonicalTargetAndDualHorizonTrend(t *testing.T) {
 	canonical := canonicalizeGoTarget("Global Cryptocurrency Market Sentiment", "economy", nil, nil)
 	if canonical.Key != "sector:digital_assets" || canonical.Label != "数字资产" || canonical.TargetType != "sector" {
@@ -48,7 +34,7 @@ func TestBatchThreeCanonicalTargetAndDualHorizonTrend(t *testing.T) {
 	}
 }
 
-func TestRoundPlacesMatchesPythonTiesToEven(t *testing.T) {
+func TestRoundPlacesUsesTiesToEven(t *testing.T) {
 	if got, want := roundPlaces(0.44325, 4), 0.4432; got != want {
 		t.Fatalf("roundPlaces ties-to-even = %v, want %v", got, want)
 	}
@@ -118,7 +104,7 @@ func TestNormalizeEventRestoresLegacyAssetDefaults(t *testing.T) {
 	}
 }
 
-func TestNormalizeRunTimestampsMatchesPythonMicrosecondPrecision(t *testing.T) {
+func TestNormalizeRunTimestampsUsesMicrosecondPrecision(t *testing.T) {
 	run := map[string]any{
 		"as_of":      "2026-08-31T07:00:26.528478612Z",
 		"created_at": "2026-08-31T07:00:48.439129883Z",
@@ -144,7 +130,7 @@ func TestNormalizeRunTimestampsMatchesPythonMicrosecondPrecision(t *testing.T) {
 	}
 }
 
-func TestNormalizeNewsExtractionItemMatchesPythonResponseModel(t *testing.T) {
+func TestNormalizeNewsExtractionItemMatchesAPIResponse(t *testing.T) {
 	item := map[string]any{
 		"instance_id": "extract-0",
 		"queued_at":   "2026-08-31T01:16:10.031826+00:00",
@@ -152,14 +138,14 @@ func TestNormalizeNewsExtractionItemMatchesPythonResponseModel(t *testing.T) {
 	}
 	normalized := normalizeNewsExtractionItem(item)
 	if _, ok := normalized["instance_id"]; ok {
-		t.Fatal("instance_id must be excluded by the Python response model")
+		t.Fatal("instance_id must be excluded by the API response")
 	}
 	if normalized["queued_at"] != "2026-08-31T01:16:10.031826Z" || normalized["updated_at"] != "2026-08-31T01:21:06.032377Z" {
 		t.Fatalf("timestamps were not normalized: %+v", normalized)
 	}
 }
 
-func TestResearchQueueOrderingMatchesPython(t *testing.T) {
+func TestResearchQueueOrderingIsStable(t *testing.T) {
 	items := []map[string]any{
 		{"asset_id": "queued-new", "status": "queued", "queued_at": "2026-08-31T02:00:00Z", "updated_at": "2026-08-31T02:00:00Z"},
 		{"asset_id": "running", "status": "running", "queued_at": "2026-08-31T00:00:00Z", "updated_at": "2026-08-31T03:00:00Z"},

@@ -387,7 +387,7 @@ func NewRecoveryScheduler(cfg config.Config, db *pgxpool.Pool, redisClient *redi
 }
 
 func (scheduler *RecoveryScheduler) Enabled() bool {
-	return completedWorkerLane(scheduler.cfg, "recovery")
+	return true
 }
 
 func (scheduler *RecoveryScheduler) Tick(ctx context.Context) error {

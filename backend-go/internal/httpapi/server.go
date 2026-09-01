@@ -55,7 +55,7 @@ func (s *Server) migrationStatus(w http.ResponseWriter, _ *http.Request) {
 		"remaining_operations": totalContractOperations - native,
 		"cutover_ready":        native == totalContractOperations,
 		"native_operation_ids": operationIDs(s.nativeOperations),
-		"worker_migration":     jobs.BatchFourMigrationStatus(s.cfg.WorkerCompletedLanes),
+		"worker_runtime":       jobs.RuntimeStatus(),
 	})
 }
 

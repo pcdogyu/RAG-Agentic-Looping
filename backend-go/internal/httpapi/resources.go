@@ -300,13 +300,26 @@ func (s *Server) newsForEvent(r *http.Request, event map[string]any) ([]any, err
 	ids, _ := event["news_item_ids"].([]any)
 	result := make([]any, 0, len(ids))
 	for _, raw := range ids {
-		var body []byte
-		if err := s.db.QueryRow(r.Context(), `SELECT payload::jsonb FROM news_items WHERE id=$1`, fmt.Sprint(raw)).Scan(&body); err == nil {
-			var item any
-			if json.Unmarshal(body, &item) == nil {
-				result = append(result, item)
-			}
+		var id, source, quality, title, summary, urlValue, language, hash string
+		var published, observed, stamp time.Time
+		var symbolsBody, metadataBody []byte
+		err := s.db.QueryRow(r.Context(), `SELECT id,source,source_quality,title,summary,url,language,published_at,observed_at,as_of,content_hash,symbols::jsonb,raw_metadata::jsonb FROM news_items WHERE id=$1`, fmt.Sprint(raw)).Scan(
+			&id, &source, &quality, &title, &summary, &urlValue, &language, &published, &observed, &stamp, &hash, &symbolsBody, &metadataBody,
+		)
+		if errors.Is(err, pgx.ErrNoRows) {
+			continue
 		}
+		if err != nil {
+			return nil, err
+		}
+		var symbols, metadata any
+		_ = json.Unmarshal(symbolsBody, &symbols)
+		_ = json.Unmarshal(metadataBody, &metadata)
+		result = append(result, map[string]any{
+			"id": id, "source": source, "source_quality": quality, "title": title, "summary": summary,
+			"url": urlValue, "language": language, "published_at": jsonTime(published), "observed_at": jsonTime(observed),
+			"as_of": jsonTime(stamp), "content_hash": hash, "symbols": symbols, "raw_metadata": metadata,
+		})
 	}
 	return result, nil
 }
@@ -404,29 +417,29 @@ func (s *Server) writeMappedPayloadByID(w http.ResponseWriter, r *http.Request, 
 }
 
 func normalizeRunTimestamps(item map[string]any) {
-	normalizePythonTimestamps(item)
+	normalizeAPITimestamps(item)
 }
 
-func normalizePythonTimestamps(value any) {
+func normalizeAPITimestamps(value any) {
 	switch current := value.(type) {
 	case map[string]any:
 		for key, child := range current {
-			if pythonDatetimeField(key) {
+			if apiDatetimeField(key) {
 				if stamp := parseAnyTime(child); stamp != nil {
 					current[key] = jsonTime(*stamp)
 					continue
 				}
 			}
-			normalizePythonTimestamps(child)
+			normalizeAPITimestamps(child)
 		}
 	case []any:
 		for _, child := range current {
-			normalizePythonTimestamps(child)
+			normalizeAPITimestamps(child)
 		}
 	}
 }
 
-func pythonDatetimeField(key string) bool {
+func apiDatetimeField(key string) bool {
 	switch key {
 	case "as_of", "created_at", "started_at", "completed_at", "updated_at", "occurred_at",
 		"published_at", "observed_at", "generated_at", "executed_at", "last_synced_at":
@@ -471,4 +484,4 @@ func encodeAssetCursor(stamp time.Time, id string) string {
 	return base64.RawURLEncoding.EncodeToString([]byte(iso(stamp) + "|" + id))
 }
 
-func jsonTime(value time.Time) string { return pythonTimestamp(value, "Z") }
+func jsonTime(value time.Time) string { return canonicalTimestamp(value, "Z") }

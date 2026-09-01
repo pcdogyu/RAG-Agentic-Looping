@@ -187,7 +187,7 @@ func NewOperationsScheduler(cfg config.Config, db *pgxpool.Pool, redisClient *re
 }
 
 func (scheduler *OperationsScheduler) Enabled() bool {
-	return completedWorkerLane(scheduler.cfg, "operations") && scheduler.cfg.EvolutionEnabled
+	return scheduler.cfg.EvolutionEnabled
 }
 
 func (scheduler *OperationsScheduler) Tick(ctx context.Context) error {

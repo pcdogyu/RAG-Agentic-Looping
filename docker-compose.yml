@@ -56,20 +56,20 @@ services:
 
   search-mcp:
     build:
-      context: ./infra/search-mcp
+      context: .
+      dockerfile: backend-go/Dockerfile
+    entrypoint: ["/usr/local/bin/search-mcp"]
     environment:
       SEARXNG_URL: http://searxng:8080
+      SEARCH_MCP_ADDRESS: 0.0.0.0:8080
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/search-mcp", "-healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
     depends_on:
       searxng:
         condition: service_healthy
-    restart: unless-stopped
-
-  duckduckgo-mcp:
-    build:
-      context: ./infra/duckduckgo-mcp
-    environment:
-      DUCKDUCKGO_TIMEOUT_SECONDS: 15
-      DUCKDUCKGO_MIN_INTERVAL_SECONDS: 2
     restart: unless-stopped
 
   fmp-mcp:
@@ -93,12 +93,10 @@ services:
     environment:
       APP_ENV: production
       GO_API_ADDRESS: ":8081"
-      GO_WORKER_COMPLETED_LANES: ${GO_WORKER_COMPLETED_LANES:-}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       OLLAMA_ASSIST_NUM_THREADS: ${OLLAMA_ASSIST_NUM_THREADS:-8}
       OLLAMA_CODE_NUM_THREADS: ${OLLAMA_CODE_NUM_THREADS:-4}
       MARKET_ADAPTER_URL: http://market-adapter:8091
-      ML_ADAPTER_URL: http://ml-adapter:8092
     ports:
       - "8081:8081"
     extra_hosts:
@@ -120,10 +118,8 @@ services:
     environment:
       APP_ENV: development
       GO_WORKER_LANE: extract
-      GO_WORKER_COMPLETED_LANES: ${GO_WORKER_COMPLETED_LANES:-}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       MARKET_ADAPTER_URL: http://market-adapter:8091
-      ML_ADAPTER_URL: http://ml-adapter:8092
       OLLAMA_EXTRACT_BASE_URLS: ${OLLAMA_EXTRACT_BASE_URLS:-}
       OLLAMA_EXTRACT_BASE_URL: ${OLLAMA_EXTRACT_BASE_URL:-http://host.docker.internal:11434}
       OLLAMA_EXTRACT_MODEL: ${OLLAMA_EXTRACT_MODEL:-qwen2.5:3b}
@@ -152,7 +148,6 @@ services:
     environment:
       APP_ENV: development
       GO_WORKER_LANE: mapping
-      GO_WORKER_COMPLETED_LANES: ${GO_WORKER_COMPLETED_LANES:-}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       OLLAMA_ASSIST_BASE_URLS: ${OLLAMA_ASSIST_BASE_URLS:-}
       OLLAMA_ASSIST_BASE_URL: ${OLLAMA_ASSIST_BASE_URL:-http://host.docker.internal:11437}
@@ -180,7 +175,6 @@ services:
     environment:
       APP_ENV: development
       GO_WORKER_LANE: research
-      GO_WORKER_COMPLETED_LANES: ${GO_WORKER_COMPLETED_LANES:-}
       GO_WORKER_CONCURRENCY: ${RESEARCH_PIPELINE_CONCURRENCY:-3}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       OLLAMA_RESEARCH_BASE_URLS: ${OLLAMA_RESEARCH_BASE_URLS:-http://host.docker.internal:11435,http://host.docker.internal:11436,http://host.docker.internal:11439}
@@ -211,7 +205,6 @@ services:
     environment:
       APP_ENV: development
       GO_WORKER_LANE: evolution
-      GO_WORKER_COMPLETED_LANES: ${GO_WORKER_COMPLETED_LANES:-}
       GO_WORKER_CONCURRENCY: ${OLLAMA_CODE_MAX_CONCURRENCY:-1}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       OLLAMA_CODE_BASE_URLS: ${OLLAMA_CODE_BASE_URLS:-}
@@ -247,7 +240,6 @@ services:
     environment:
       APP_ENV: development
       GO_WORKER_LANE: discovery
-      GO_WORKER_COMPLETED_LANES: ${GO_WORKER_COMPLETED_LANES:-}
       GO_WORKER_CONCURRENCY: "1"
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       MARKET_ADAPTER_URL: http://market-adapter:8091
@@ -283,7 +275,6 @@ services:
     environment:
       APP_ENV: development
       GO_WORKER_LANE: recovery
-      GO_WORKER_COMPLETED_LANES: ${GO_WORKER_COMPLETED_LANES:-}
       GO_WORKER_CONCURRENCY: "1"
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       RESEARCH_LEASE_SECONDS: ${RESEARCH_LEASE_SECONDS:-120}
@@ -307,7 +298,6 @@ services:
     environment:
       APP_ENV: development
       GO_WORKER_LANE: outcomes
-      GO_WORKER_COMPLETED_LANES: ${GO_WORKER_COMPLETED_LANES:-}
       GO_WORKER_CONCURRENCY: "1"
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       MARKET_ADAPTER_URL: http://market-adapter:8091
@@ -338,7 +328,6 @@ services:
     environment:
       APP_ENV: development
       GO_WORKER_LANE: masterdata
-      GO_WORKER_COMPLETED_LANES: ${GO_WORKER_COMPLETED_LANES:-}
       GO_WORKER_CONCURRENCY: "1"
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       MARKET_ADAPTER_URL: http://market-adapter:8091
@@ -365,7 +354,6 @@ services:
     environment:
       APP_ENV: development
       GO_WORKER_LANE: operations
-      GO_WORKER_COMPLETED_LANES: ${GO_WORKER_COMPLETED_LANES:-}
       GO_WORKER_CONCURRENCY: "1"
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       SCAN_INTERVAL_MINUTES: ${SCAN_INTERVAL_MINUTES:-10}
@@ -399,7 +387,6 @@ services:
     environment:
       APP_ENV: development
       GO_WORKER_LANE: backfill
-      GO_WORKER_COMPLETED_LANES: ${GO_WORKER_COMPLETED_LANES:-}
       GO_WORKER_CONCURRENCY: "1"
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       OLLAMA_ASSIST_BASE_URLS: ${OLLAMA_ASSIST_BASE_URLS:-}
@@ -425,7 +412,6 @@ services:
     environment:
       APP_ENV: development
       GO_WORKER_LANE: maintenance
-      GO_WORKER_COMPLETED_LANES: ${GO_WORKER_COMPLETED_LANES:-}
       GO_WORKER_CONCURRENCY: "1"
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       RESEARCH_COALESCE_WINDOW_HOURS: ${RESEARCH_COALESCE_WINDOW_HOURS:-24}
@@ -448,7 +434,6 @@ services:
     environment:
       APP_ENV: development
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
-      GO_WORKER_COMPLETED_LANES: ${GO_WORKER_COMPLETED_LANES:-}
       SCAN_INTERVAL_MINUTES: ${SCAN_INTERVAL_MINUTES:-10}
       RESEARCH_LEASE_SECONDS: ${RESEARCH_LEASE_SECONDS:-120}
       RESEARCH_ASSET_HARD_TIME_LIMIT_SECONDS: ${RESEARCH_ASSET_HARD_TIME_LIMIT_SECONDS:-2100}
@@ -476,16 +461,6 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
-    restart: unless-stopped
-
-  ml-adapter:
-    profiles: ["go-shadow"]
-    build: ./infra/ml-adapter
-    expose:
-      - "8092"
-    environment:
-      ADAPTER_PORT: "8092"
-      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-intfloat/multilingual-e5-small}
     restart: unless-stopped
 
   web:

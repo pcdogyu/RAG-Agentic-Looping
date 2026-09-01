@@ -33,26 +33,7 @@ func (e *apiFailure) Error() string { return e.Detail }
 
 func fail(status int, detail string) error { return &apiFailure{Status: status, Detail: detail} }
 
-func ternaryString(condition bool, yes, no string) string {
-	if condition {
-		return yes
-	}
-	return no
-}
-
-func (s *Server) researchGoEnabled() bool {
-	for _, lane := range s.cfg.WorkerCompletedLanes {
-		if strings.TrimSpace(lane) == "research" {
-			return true
-		}
-	}
-	return false
-}
-
 func (s *Server) publishResearch(ctx context.Context, task, taskID string, args []any, kwargs map[string]any, priority int, runID string) error {
-	if !s.researchGoEnabled() {
-		return s.publishCelery(ctx, task, "research."+stringValue(kwargs["model_instance_id"]), taskID, args, kwargs, priority)
-	}
 	id, err := uuid.Parse(taskID)
 	if err != nil {
 		return err
@@ -62,9 +43,6 @@ func (s *Server) publishResearch(ctx context.Context, task, taskID string, args 
 }
 
 func (s *Server) publishEvolution(ctx context.Context, task, taskID string, args []any, kwargs map[string]any, priority int, dedupeKey string) error {
-	if !s.goLaneCompleted("evolution") {
-		return s.publishCelery(ctx, task, "evolution."+stringValue(kwargs["model_instance_id"]), taskID, args, kwargs, priority)
-	}
 	_, err := s.enqueueGoModelJob(ctx, "code", taskID, task, args, kwargs, priority, dedupeKey)
 	return err
 }
@@ -95,14 +73,8 @@ func (s *Server) refreshAssetUniverse(w http.ResponseWriter, r *http.Request) {
 		markets = []string{market}
 		kwargs = map[string]any{"markets": markets}
 	}
-	queuedID := taskID
-	var err error
-	if s.goLaneCompleted("masterdata") {
-		key := "asset-universe:" + strings.Join(markets, ",")
-		queuedID, err = s.enqueueGoModelJob(r.Context(), "masterdata", taskID, "market_loop.refresh_asset_universe", nil, kwargs, 5, key)
-	} else {
-		err = s.publishCelery(r.Context(), "market_loop.refresh_asset_universe", "io", taskID, nil, kwargs, 5)
-	}
+	key := "asset-universe:" + strings.Join(markets, ",")
+	queuedID, err := s.enqueueGoModelJob(r.Context(), "masterdata", taskID, "market_loop.refresh_asset_universe", nil, kwargs, 5, key)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "asset universe refresh could not be queued")
 		return
@@ -119,13 +91,7 @@ func (s *Server) backfillAssetMappings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	taskID := uuid.NewString()
-	queuedID := taskID
-	var err error
-	if s.goLaneCompleted("backfill") {
-		queuedID, err = s.enqueueGoModelJob(r.Context(), "backfill", taskID, "market_loop.backfill_asset_mappings", nil, map[string]any{"days": days}, 5, "asset-mapping-backfill")
-	} else {
-		err = s.publishCelery(r.Context(), "market_loop.backfill_asset_mappings", "io", taskID, nil, map[string]any{"days": days}, 5)
-	}
+	queuedID, err := s.enqueueGoModelJob(r.Context(), "backfill", taskID, "market_loop.backfill_asset_mappings", nil, map[string]any{"days": days}, 5, "asset-mapping-backfill")
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "asset mapping backfill could not be queued")
 		return
@@ -166,21 +132,17 @@ func (s *Server) startScan(w http.ResponseWriter, r *http.Request) {
 		status[key] = value
 	}
 	if err = s.writeRedisJSON(r.Context(), scanStatusKey, status, 0); err == nil {
-		if s.goLaneCompleted("discovery") {
-			var actualID uuid.UUID
-			actualID, err = jobs.NewStore(s.db).Enqueue(r.Context(), jobs.EnqueueParams{
-				ID: uuid.MustParse(taskID), Queue: "io", TaskType: jobs.ScanNewsTask,
-				Payload:  map[string]any{"args": []any(nil), "kwargs": map[string]any(nil)},
-				Priority: 5, MaxAttempts: 4, DedupeKey: "news-scan",
-			})
-			actual := actualID.String()
-			if err == nil && actual != taskID {
-				_, _ = s.redis.Eval(r.Context(), `if redis.call('get',KEYS[1])==ARGV[1] then redis.call('set',KEYS[1],ARGV[2],'EX',ARGV[3]); return 1 end return 0`, []string{scanGateKey}, taskID, actual, fmt.Sprint(int((12 * time.Hour).Seconds()))).Result()
-				taskID, status["task_id"] = actual, actual
-				err = s.writeRedisJSON(r.Context(), scanStatusKey, status, 0)
-			}
-		} else {
-			err = s.publishCelery(r.Context(), "market_loop.scan_news", "io", taskID, nil, nil, 5)
+		var actualID uuid.UUID
+		actualID, err = jobs.NewStore(s.db).Enqueue(r.Context(), jobs.EnqueueParams{
+			ID: uuid.MustParse(taskID), Queue: "io", TaskType: jobs.ScanNewsTask,
+			Payload:  map[string]any{"args": []any(nil), "kwargs": map[string]any(nil)},
+			Priority: 5, MaxAttempts: 4, DedupeKey: "news-scan",
+		})
+		actual := actualID.String()
+		if err == nil && actual != taskID {
+			_, _ = s.redis.Eval(r.Context(), `if redis.call('get',KEYS[1])==ARGV[1] then redis.call('set',KEYS[1],ARGV[2],'EX',ARGV[3]); return 1 end return 0`, []string{scanGateKey}, taskID, actual, fmt.Sprint(int((12 * time.Hour).Seconds()))).Result()
+			taskID, status["task_id"] = actual, actual
+			err = s.writeRedisJSON(r.Context(), scanStatusKey, status, 0)
 		}
 	}
 	if err != nil {
@@ -192,13 +154,7 @@ func (s *Server) startScan(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"task_id": taskID, "status": "queued", "scan": s.scanStatusPayload(r.Context())})
 		return
 	}
-	var result any
-	var waitErr error
-	if s.goLaneCompleted("discovery") {
-		result, waitErr = s.waitGoJob(r.Context(), taskID, 30*time.Minute)
-	} else {
-		result, waitErr = s.waitCelery(r.Context(), taskID, 30*time.Minute)
-	}
+	result, waitErr := s.waitGoJob(r.Context(), taskID, 30*time.Minute)
 	if waitErr != nil {
 		writeError(w, http.StatusGatewayTimeout, waitErr.Error())
 		return
@@ -296,7 +252,7 @@ func (s *Server) startResearch(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"task_id": result.TaskID, "run_id": result.RunID, "status": "queued"})
 		return
 	}
-	value, waitErr := s.waitCelery(r.Context(), result.TaskID, 45*time.Minute)
+	value, waitErr := s.waitGoJob(r.Context(), result.TaskID, 45*time.Minute)
 	if waitErr != nil {
 		writeError(w, http.StatusGatewayTimeout, waitErr.Error())
 		return
@@ -388,7 +344,7 @@ func (s *Server) enqueueAssetResearch(ctx context.Context, assetID, eventID stri
 	if options.RetryOf != "" {
 		metrics["retry_of_run_id"], metrics["retry_attempt"] = options.RetryOf, options.RetryAttempt
 	}
-	steps = append(steps, analysisStep(phase, "queued", ternaryString(s.researchGoEnabled(), "go-worker", "celery"), "已创建深度研究任务。", metrics))
+	steps = append(steps, analysisStep(phase, "queued", "go-worker", "已创建深度研究任务。", metrics))
 	run := map[string]any{
 		"id": runID, "event_id": nil, "trigger_event_ids": []any{}, "asset": asset, "status": "queued", "as_of": jsonTime(stamp),
 		"historical_replay": options.Historical, "retry_of_run_id": nil, "retry_attempt": options.RetryAttempt,
@@ -504,7 +460,7 @@ func (s *Server) retryEventResearch(ctx context.Context, runID, preferred string
 	run["status"], run["as_of"], run["verification_round"], run["retry_count"] = "queued", jsonTime(time.Now()), 0, retryCount
 	run["missing_requirements"], run["contradictions"], run["evidence"], run["report"] = []any{}, []any{}, []any{}, nil
 	run["error"], run["retryable_reason"], run["celery_task_id"], run["model_instance_id"] = nil, nil, taskID, instanceID
-	run["analysis_steps"] = append(anySlice(run["analysis_steps"]), analysisStep("event_research_retry_queue", "queued", ternaryString(s.researchGoEnabled(), "go-worker", "celery"), "已创建事件研报重新执行任务。", map[string]any{"retry_count": retryCount, "instance_id": instanceID, "priority": 1}))
+	run["analysis_steps"] = append(anySlice(run["analysis_steps"]), analysisStep("event_research_retry_queue", "queued", "go-worker", "已创建事件研报重新执行任务。", map[string]any{"retry_count": retryCount, "instance_id": instanceID, "priority": 1}))
 	run["updated_at"] = jsonTime(time.Now())
 	updated, _ := json.Marshal(run)
 	if _, err = s.db.Exec(ctx, `UPDATE event_research_runs SET status='queued',payload=$2,updated_at=now() WHERE id=$1`, runID, updated); err != nil {
@@ -621,7 +577,7 @@ func (s *Server) researchEventConclusionAgain(w http.ResponseWriter, r *http.Req
 		return
 	}
 	taskID := uuid.NewString()
-	run["analysis_steps"] = append(anySlice(run["analysis_steps"]), analysisStep("full_event_research", "queued", "celery", "已创建事件抽取、股票映射、深度研究与联网搜索的完整重跑任务。", map[string]any{"stage": "event_extraction", "task_id": taskID}))
+	run["analysis_steps"] = append(anySlice(run["analysis_steps"]), analysisStep("full_event_research", "queued", "go-worker", "已创建事件抽取、股票映射、深度研究与联网搜索的完整重跑任务。", map[string]any{"stage": "event_extraction", "task_id": taskID}))
 	run["updated_at"] = jsonTime(time.Now())
 	updated, _ := json.Marshal(run)
 	if _, err = s.db.Exec(r.Context(), `UPDATE event_research_runs SET payload=$2,updated_at=now() WHERE id=$1`, runID, updated); err != nil {
@@ -629,11 +585,7 @@ func (s *Server) researchEventConclusionAgain(w http.ResponseWriter, r *http.Req
 		return
 	}
 	s.trackModelTask(r.Context(), "extract", taskID, "event_reextraction", eventID, "事件完整重新研究", "完整重新研究", "manual", instanceID)
-	if s.goLaneCompleted("extract") {
-		_, err = s.enqueueGoExtract(r.Context(), taskID, "market_loop.reextract_event", []any{eventID, runID}, map[string]any{"model_instance_id": instanceID}, 5, "event-refresh:"+eventID)
-	} else {
-		err = s.publishCelery(r.Context(), "market_loop.reextract_event", "extract."+instanceID, taskID, []any{eventID, runID}, map[string]any{"model_instance_id": instanceID}, 5)
-	}
+	_, err = s.enqueueGoExtract(r.Context(), taskID, "market_loop.reextract_event", []any{eventID, runID}, map[string]any{"model_instance_id": instanceID}, 5, "event-refresh:"+eventID)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "event research could not be queued")
 		return
@@ -675,13 +627,7 @@ func (s *Server) proposeEvolution(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"task_id": taskID, "status": "queued"})
 		return
 	}
-	var value any
-	var waitErr error
-	if s.goLaneCompleted("evolution") {
-		value, waitErr = s.waitGoJob(r.Context(), taskID, 30*time.Minute)
-	} else {
-		value, waitErr = s.waitCelery(r.Context(), taskID, 30*time.Minute)
-	}
+	value, waitErr := s.waitGoJob(r.Context(), taskID, 30*time.Minute)
 	if waitErr != nil {
 		writeError(w, http.StatusGatewayTimeout, waitErr.Error())
 		return
@@ -725,13 +671,7 @@ func (s *Server) executeEvolution(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"task_id": taskID, "status": "queued"})
 		return
 	}
-	var value any
-	var waitErr error
-	if s.goLaneCompleted("evolution") {
-		value, waitErr = s.waitGoJob(r.Context(), taskID, 30*time.Minute)
-	} else {
-		value, waitErr = s.waitCelery(r.Context(), taskID, 30*time.Minute)
-	}
+	value, waitErr := s.waitGoJob(r.Context(), taskID, 30*time.Minute)
 	if waitErr != nil {
 		writeError(w, http.StatusGatewayTimeout, waitErr.Error())
 		return

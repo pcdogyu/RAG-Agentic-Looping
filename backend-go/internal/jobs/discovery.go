@@ -327,8 +327,8 @@ func (runtime *discoveryRuntime) compareDelete(ctx context.Context, key, expecte
 	_, _ = runtime.redis.Eval(ctx, `if redis.call('get',KEYS[1])==ARGV[1] then return redis.call('del',KEYS[1]) end return 0`, []string{key}, expected).Result()
 }
 
-// DiscoveryScheduler replaces the five-second Celery ensure loop and also
-// guarantees that durable outbox rows continue moving during a quiet scan.
+// DiscoveryScheduler guarantees that durable outbox rows continue moving
+// during a quiet scan as well as after each scheduled discovery pass.
 type DiscoveryScheduler struct {
 	cfg     config.Config
 	db      *pgxpool.Pool
@@ -342,7 +342,7 @@ func NewDiscoveryScheduler(cfg config.Config, db *pgxpool.Pool, redisClient *red
 }
 
 func (scheduler *DiscoveryScheduler) Enabled() bool {
-	return completedWorkerLane(scheduler.cfg, "discovery")
+	return true
 }
 
 func (scheduler *DiscoveryScheduler) Tick(ctx context.Context) error {

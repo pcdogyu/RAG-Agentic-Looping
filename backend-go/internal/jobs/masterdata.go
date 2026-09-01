@@ -760,7 +760,7 @@ func NewMasterdataScheduler(cfg config.Config, db *pgxpool.Pool, redisClient *re
 }
 
 func (scheduler *MasterdataScheduler) Enabled() bool {
-	return completedWorkerLane(scheduler.cfg, "masterdata")
+	return true
 }
 
 func (scheduler *MasterdataScheduler) Tick(ctx context.Context) error {

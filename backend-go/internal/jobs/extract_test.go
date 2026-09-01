@@ -8,7 +8,7 @@ import (
 )
 
 func TestExtractLaneRegistersEveryRequiredHandler(t *testing.T) {
-	lane, err := ValidateBatchFourActivation("extract", nil)
+	lane, err := RequireWorkerLane("extract")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -17,7 +17,7 @@ func TestExtractLaneRegistersEveryRequiredHandler(t *testing.T) {
 	}
 }
 
-func TestDecodeTaskEnvelopeUsesCeleryCompatibleShape(t *testing.T) {
+func TestDecodeTaskEnvelopeUsesPersistentJobShape(t *testing.T) {
 	payload := json.RawMessage(`{"args":["news-1"],"kwargs":{"force_asset_mapping":true}}`)
 	value, err := decodeTaskEnvelope(payload)
 	if err != nil {
@@ -28,7 +28,7 @@ func TestDecodeTaskEnvelopeUsesCeleryCompatibleShape(t *testing.T) {
 	}
 }
 
-func TestFallbackExtractionMatchesPythonGoldenRules(t *testing.T) {
+func TestFallbackExtractionMatchesGoldenRules(t *testing.T) {
 	news := newsRecord{Title: "Company reports quarterly earnings", Summary: "Revenue and profit increased", Symbols: []string{"TEST"}}
 	value := fallbackExtraction(news)
 	if value.EventType != "earnings" || value.HorizonDays != 30 || value.Novelty != .4 || value.Priority != .45 {
@@ -97,15 +97,6 @@ func TestSecuritySymbolAndProductMatchingSafety(t *testing.T) {
 	}
 	if meaningfulIssuerTerm("机器人") || !meaningfulIssuerTerm("沈阳新松机器人自动化股份有限公司") {
 		t.Fatal("generic and explicit issuer names were not distinguished")
-	}
-}
-
-func TestCeleryPriorityQueueKeyMatchesKombu(t *testing.T) {
-	if got := celeryQueueKey("research.research-0", 1); got != "research.research-0" {
-		t.Fatalf("priority 1 queue=%q", got)
-	}
-	if got := celeryQueueKey("mapping.assist-0", 5); got != "mapping.assist-0"+celeryPrioritySeparator+"3" {
-		t.Fatalf("priority 5 queue=%q", got)
 	}
 }
 

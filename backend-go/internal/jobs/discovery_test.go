@@ -11,7 +11,7 @@ import (
 
 func TestDiscoveryHandlersCoverMigrationManifest(t *testing.T) {
 	handlers := NewDiscoveryHandlers(config.Config{}, nil, nil)
-	lane, err := ValidateBatchFourActivation("discovery", []string{"extract", "mapping", "research", "evolution"})
+	lane, err := RequireWorkerLane("discovery")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +44,7 @@ func TestDiscoveryIntAcceptsJSONNumbers(t *testing.T) {
 	}
 }
 
-func TestDiscoveryTitleFilterMatchesPythonSemantics(t *testing.T) {
+func TestDiscoveryTitleFilterSemantics(t *testing.T) {
 	cfg := sourceFilterConfig{Enabled: true, Whitelist: []string{"英伟达"}, Blacklist: []string{"天气"}}
 	if allowed, keyword := evaluateDiscoveryTitle("英伟达发布新产品", cfg); !allowed || keyword != "英伟达" {
 		t.Fatalf("whitelist was not accepted: allowed=%v keyword=%q", allowed, keyword)
@@ -85,13 +85,8 @@ func TestNormalizeMCPNewsStopsAtBoundaryAndBuildsHeadline(t *testing.T) {
 	}
 }
 
-func TestDiscoverySchedulerOnlyEnablesAfterCutover(t *testing.T) {
-	before := NewDiscoveryScheduler(config.Config{WorkerCompletedLanes: []string{"extract", "mapping", "research", "evolution"}}, nil, nil)
-	if before.Enabled() {
-		t.Fatal("discovery scheduler enabled before lane cutover")
-	}
-	after := NewDiscoveryScheduler(config.Config{WorkerCompletedLanes: []string{"extract", "mapping", "research", "evolution", "discovery"}}, nil, nil)
-	if !after.Enabled() {
-		t.Fatal("discovery scheduler did not enable after cutover")
+func TestDiscoverySchedulerIsEnabledForGoRuntime(t *testing.T) {
+	if !NewDiscoveryScheduler(config.Config{}, nil, nil).Enabled() {
+		t.Fatal("discovery scheduler must be enabled for the Go runtime")
 	}
 }

@@ -1,1 +1,0 @@
-"""Cross-market research agent."""

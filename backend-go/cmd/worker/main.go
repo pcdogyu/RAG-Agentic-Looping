@@ -21,9 +21,9 @@ func main() {
 		slog.Error("configuration", "error", err)
 		os.Exit(1)
 	}
-	lane, err := jobs.ValidateBatchFourActivation(cfg.WorkerLane, cfg.WorkerCompletedLanes)
+	lane, err := jobs.RequireWorkerLane(cfg.WorkerLane)
 	if err != nil {
-		slog.Error("batch 4 activation", "error", err)
+		slog.Error("Go worker lane", "error", err)
 		os.Exit(1)
 	}
 	handlerManifest := map[string]jobs.Handler{}
@@ -51,7 +51,7 @@ func main() {
 		handlerManifest = jobs.NewMaintenanceHandlers(cfg, nil, nil)
 	}
 	if err := jobs.ValidateLaneHandlers(lane, handlerManifest); err != nil {
-		slog.Error("batch 4 handler gate", "error", err)
+		slog.Error("Go worker handler gate", "error", err)
 		os.Exit(1)
 	}
 	dependencies, err := platform.Open(ctx, cfg)

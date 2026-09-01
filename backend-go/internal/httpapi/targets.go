@@ -869,7 +869,7 @@ func observationAge(value targetObservation, asOf time.Time) float64 {
 
 func roundPlaces(value float64, places int) float64 {
 	factor := math.Pow10(places)
-	// Python's round(), used by the rollback API, applies ties-to-even. Keep the
+	// The rollback API contract applies ties-to-even. Keep the
 	// public trend payload byte-for-byte stable at exact half-way boundaries.
 	return math.RoundToEven(value*factor) / factor
 }

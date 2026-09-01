@@ -8,8 +8,7 @@ import (
 )
 
 func TestBackfillHandlersCoverLane(t *testing.T) {
-	completed := []string{"extract", "mapping", "research", "evolution", "discovery", "recovery", "outcomes", "masterdata", "operations"}
-	lane, err := ValidateBatchFourActivation("backfill", completed)
+	lane, err := RequireWorkerLane("backfill")
 	if err != nil {
 		t.Fatal(err)
 	}

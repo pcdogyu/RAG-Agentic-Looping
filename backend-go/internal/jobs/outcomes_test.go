@@ -14,8 +14,7 @@ import (
 )
 
 func TestOutcomeHandlersCoverMigrationManifest(t *testing.T) {
-	completed := []string{"extract", "mapping", "research", "evolution", "discovery", "recovery"}
-	lane, err := ValidateBatchFourActivation("outcomes", completed)
+	lane, err := RequireWorkerLane("outcomes")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -24,15 +23,9 @@ func TestOutcomeHandlersCoverMigrationManifest(t *testing.T) {
 	}
 }
 
-func TestOutcomeSchedulerFollowsLaneCutover(t *testing.T) {
-	completed := []string{"extract", "mapping", "research", "evolution", "discovery", "recovery"}
-	before := NewOutcomeScheduler(config.Config{WorkerCompletedLanes: completed}, nil, nil)
-	if before.Enabled() {
-		t.Fatal("outcome scheduler enabled before lane cutover")
-	}
-	after := NewOutcomeScheduler(config.Config{WorkerCompletedLanes: append(completed, "outcomes")}, nil, nil)
-	if !after.Enabled() {
-		t.Fatal("outcome scheduler did not enable after lane cutover")
+func TestOutcomeSchedulerIsEnabledForGoRuntime(t *testing.T) {
+	if !NewOutcomeScheduler(config.Config{}, nil, nil).Enabled() {
+		t.Fatal("outcome scheduler must be enabled for the Go runtime")
 	}
 }
 
@@ -112,7 +105,7 @@ func TestOutcomeSignalStatusPreservesNewAndLegacyRules(t *testing.T) {
 	}
 }
 
-func TestEvaluateRecommendationMatchesPythonOutcomeMath(t *testing.T) {
+func TestEvaluateRecommendationOutcomeMath(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {

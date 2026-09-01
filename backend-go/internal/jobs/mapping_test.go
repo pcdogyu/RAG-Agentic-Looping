@@ -7,7 +7,7 @@ import (
 )
 
 func TestMappingLaneRegistersRequiredHandler(t *testing.T) {
-	lane, err := ValidateBatchFourActivation("mapping", []string{"extract"})
+	lane, err := RequireWorkerLane("mapping")
 	if err != nil {
 		t.Fatal(err)
 	}

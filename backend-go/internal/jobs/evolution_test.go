@@ -10,7 +10,7 @@ import (
 
 func TestEvolutionHandlersCoverMigrationManifest(t *testing.T) {
 	handlers := NewEvolutionHandlers(config.Config{}, nil, nil)
-	lane, err := ValidateBatchFourActivation("evolution", []string{"extract", "mapping", "research"})
+	lane, err := RequireWorkerLane("evolution")
 	if err != nil {
 		t.Fatal(err)
 	}

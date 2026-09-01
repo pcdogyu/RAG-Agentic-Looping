@@ -908,9 +908,7 @@ func (runtime *ExtractRuntime) enqueueMapping(ctx context.Context, event map[str
 	}
 	taskID := uuid.NewString()
 	instanceID := runtime.selectDownstreamInstance(ctx, "assist", len(runtime.cfg.AssistURLs))
-	useGoWorker := completedWorkerLane(runtime.cfg, "mapping")
-	executor := ternary(useGoWorker, "go-worker", "celery")
-	step := analysisStep("asset_mapping_queue", "queued", executor, fmt.Sprintf("确定性映射未找到标的，已创建 %s 二次标的发现任务。", runtime.cfg.AssistModel), map[string]any{"instance_id": instanceID})
+	step := analysisStep("asset_mapping_queue", "queued", "go-worker", fmt.Sprintf("确定性映射未找到标的，已创建 %s 二次标的发现任务。", runtime.cfg.AssistModel), map[string]any{"instance_id": instanceID})
 	replaceAnalysisStep(event, step)
 	if err := runtime.saveEvent(ctx, event); err != nil {
 		return false, err
@@ -925,19 +923,13 @@ func (runtime *ExtractRuntime) enqueueMapping(ctx context.Context, event map[str
 	if forceWebSearch {
 		kwargs["force_web_search"] = true
 	}
-	var err error
-	if useGoWorker {
-		var queuedID uuid.UUID
-		queuedID, err = NewStore(runtime.db).Enqueue(ctx, EnqueueParams{
-			ID: uuid.MustParse(taskID), Queue: "assist", TaskType: mappingTask,
-			Payload:  taskEnvelope{Args: []any{stringValue(event["id"])}, Kwargs: kwargs},
-			Priority: 5, MaxAttempts: 3, DedupeKey: "mapping:" + stringValue(event["id"]),
-		})
-		if err == nil {
-			taskID = queuedID.String()
-		}
-	} else {
-		err = publishCelery(ctx, runtime.redis, mappingTask, "mapping."+instanceID, taskID, []any{stringValue(event["id"])}, kwargs, 5)
+	queuedID, err := NewStore(runtime.db).Enqueue(ctx, EnqueueParams{
+		ID: uuid.MustParse(taskID), Queue: "assist", TaskType: mappingTask,
+		Payload:  taskEnvelope{Args: []any{stringValue(event["id"])}, Kwargs: kwargs},
+		Priority: 5, MaxAttempts: 3, DedupeKey: "mapping:" + stringValue(event["id"]),
+	})
+	if err == nil {
+		taskID = queuedID.String()
 	}
 	if err != nil {
 		step["status"] = "failed"
@@ -951,15 +943,6 @@ func (runtime *ExtractRuntime) enqueueMapping(ctx context.Context, event map[str
 	return true, nil
 }
 
-func completedWorkerLane(cfg config.Config, lane string) bool {
-	for _, value := range cfg.WorkerCompletedLanes {
-		if strings.TrimSpace(value) == lane {
-			return true
-		}
-	}
-	return false
-}
-
 func (runtime *ExtractRuntime) enqueueEventResearch(ctx context.Context, event map[string]any) (bool, error) {
 	var existing uuid.UUID
 	if err := runtime.db.QueryRow(ctx, `SELECT id FROM event_research_runs WHERE event_id=$1`, event["id"]).Scan(&existing); err == nil {
@@ -970,7 +953,7 @@ func (runtime *ExtractRuntime) enqueueEventResearch(ctx context.Context, event m
 	runID, taskID := uuid.New(), uuid.NewString()
 	instanceID := runtime.selectDownstreamInstance(ctx, "research", len(runtime.cfg.ResearchURLs))
 	steps := append([]any{}, anySlice(event["analysis_steps"])...)
-	steps = append(steps, analysisStep("event_research_queue", "queued", "celery", "已创建事实框架与逐目标宏观传导研报任务。", map[string]any{"instance_id": instanceID, "priority": 1}))
+	steps = append(steps, analysisStep("event_research_queue", "queued", "go-worker", "已创建事实框架与逐目标宏观传导研报任务。", map[string]any{"instance_id": instanceID, "priority": 1}))
 	now := time.Now().UTC()
 	asOf := parseTime(event["as_of"])
 	if observed := parseTime(event["observed_at"]); observed.After(asOf) {
@@ -986,12 +969,7 @@ func (runtime *ExtractRuntime) enqueueEventResearch(ctx context.Context, event m
 		return false, nil
 	}
 	kwargs := map[string]any{"model_instance_id": instanceID}
-	var queueErr error
-	if completedWorkerLane(runtime.cfg, "research") {
-		_, queueErr = NewStore(runtime.db).Enqueue(ctx, EnqueueParams{ID: uuid.MustParse(taskID), Queue: "research", TaskType: researchEventTask, Payload: map[string]any{"args": []any{stringValue(event["id"]), runID.String()}, "kwargs": kwargs}, Priority: 1, MaxAttempts: 3, DedupeKey: "research-run:" + runID.String()})
-	} else {
-		queueErr = publishCelery(ctx, runtime.redis, researchEventTask, "research."+instanceID, taskID, []any{stringValue(event["id"]), runID.String()}, kwargs, 1)
-	}
+	_, queueErr := NewStore(runtime.db).Enqueue(ctx, EnqueueParams{ID: uuid.MustParse(taskID), Queue: "research", TaskType: researchEventTask, Payload: map[string]any{"args": []any{stringValue(event["id"]), runID.String()}, "kwargs": kwargs}, Priority: 1, MaxAttempts: 3, DedupeKey: "research-run:" + runID.String()})
 	if queueErr != nil {
 		payload["status"], payload["error"] = "failed", "event research queue failed"
 		failed, _ := json.Marshal(payload)

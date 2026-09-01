@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -13,7 +12,7 @@ import (
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/jobs"
 )
 
-var modelQueueNames = map[string]string{"extract": "extract", "research": "research", "assist": "mapping", "code": "evolution"}
+var modelQueueNames = map[string]string{"extract": "extract", "research": "research", "assist": "assist", "code": "code"}
 
 type cancellationInput struct {
 	TaskID   string  `json:"task_id"`
@@ -79,7 +78,9 @@ func (s *Server) clearResearchTasks(w http.ResponseWriter, r *http.Request) {
 		writeAPIFailure(w, err)
 		return
 	}
-	result["purged"] = s.purgeResearchQueues(r.Context(), "")
+	tracked := s.cancelTrackedTasks(r.Context(), "research", true, "")
+	result["purged"] = s.cancelGoQueue(r.Context(), "research")
+	result["tracked"] = tracked.Cancelled
 	result["revoked"] = 0
 	_ = s.redis.Del(r.Context(), modelQueueOverviewCacheKey).Err()
 	writeJSON(w, http.StatusAccepted, result)
@@ -100,11 +101,8 @@ func (s *Server) clearModelQueue(w http.ResponseWriter, r *http.Request) {
 	cancelled := tracked.Cancelled
 	if queueID == "extract" {
 		cancelled += s.clearExtractionQueue(r.Context(), "").Cancelled
-		if s.goLaneCompleted("extract") {
-			_, _ = jobs.NewStore(s.db).CancelQueue(r.Context(), "extract")
-		}
 	}
-	purged := s.purgeCeleryQueue(r.Context(), queueName)
+	purged := s.cancelGoQueue(r.Context(), queueName)
 	_ = s.redis.Del(r.Context(), modelQueueOverviewCacheKey).Err()
 	writeJSON(w, http.StatusAccepted, map[string]any{"queue_id": queueID, "cancelled": cancelled, "purged": purged, "revoked": 0})
 }
@@ -120,8 +118,10 @@ func (s *Server) clearModelInstanceQueue(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusNotFound, "model instance queue not found")
 		return
 	}
-	cancelled := 0
+	cancelled, purged := 0, int64(0)
 	if queueID == "research" {
+		tracked := s.cancelTrackedTasks(r.Context(), "research", true, instanceID)
+		purged = s.cancelGoTaskIDs(r.Context(), tracked.TaskIDs)
 		result, err := s.cancelResearch(r.Context(), "", "", "", true, instanceID)
 		if err != nil {
 			writeAPIFailure(w, err)
@@ -131,18 +131,11 @@ func (s *Server) clearModelInstanceQueue(w http.ResponseWriter, r *http.Request)
 	} else {
 		tracked := s.cancelTrackedTasks(r.Context(), lane, true, instanceID)
 		cancelled = tracked.Cancelled
+		purged = s.cancelGoTaskIDs(r.Context(), tracked.TaskIDs)
 		if queueID == "extract" {
 			cancelled += s.clearExtractionQueue(r.Context(), instanceID).Cancelled
-			if s.goLaneCompleted("extract") {
-				for _, taskID := range tracked.TaskIDs {
-					if id, err := uuid.Parse(taskID); err == nil {
-						_ = jobs.NewStore(s.db).Cancel(r.Context(), id)
-					}
-				}
-			}
 		}
 	}
-	purged := s.purgeCeleryQueue(r.Context(), modelQueueNames[queueID]+"."+instanceID)
 	_ = s.redis.Del(r.Context(), modelQueueOverviewCacheKey).Err()
 	writeJSON(w, http.StatusAccepted, map[string]any{"queue_id": queueID, "instance_id": instanceID, "cancelled": cancelled, "purged": purged, "revoked": 0})
 }
@@ -287,7 +280,7 @@ func (s *Server) retryModelTask(ctx context.Context, queueID string, task map[st
 		}
 		taskID := uuid.NewString()
 		s.trackModelTask(ctx, "assist", taskID, "asset_mapping", entityID, headline, "股票映射", "manual", instanceID)
-		if err = s.publishCelery(ctx, "market_loop.resolve_event_assets", "mapping."+instanceID, taskID, []any{entityID}, map[string]any{"force": true, "model_instance_id": instanceID}, priority); err != nil {
+		if _, err = s.enqueueGoModelJob(ctx, "assist", taskID, "market_loop.resolve_event_assets", []any{entityID}, map[string]any{"force": true, "model_instance_id": instanceID}, priority, "mapping:"+entityID); err != nil {
 			return "", fail(http.StatusServiceUnavailable, "asset mapping retry could not be queued")
 		}
 		_ = s.cancelTrackedTask(ctx, "assist", oldTaskID)
@@ -355,11 +348,7 @@ func (s *Server) queueNewsRetryWithOptions(ctx context.Context, newsID, title, s
 	}
 	taskID := uuid.NewString()
 	s.trackModelTask(ctx, "extract", taskID, "news_extraction", newsID, title, source, "manual", instanceID)
-	if s.goLaneCompleted("extract") {
-		taskID, err = s.enqueueGoExtract(ctx, taskID, "market_loop.retry_news_item", []any{newsID}, map[string]any{"model_instance_id": instanceID, "force_asset_mapping": true}, priority, "news:"+newsID)
-	} else {
-		err = s.publishCelery(ctx, "market_loop.retry_news_item", "extract."+instanceID, taskID, []any{newsID}, map[string]any{"model_instance_id": instanceID, "force_asset_mapping": true}, priority)
-	}
+	taskID, err = s.enqueueGoExtract(ctx, taskID, "market_loop.retry_news_item", []any{newsID}, map[string]any{"model_instance_id": instanceID, "force_asset_mapping": true}, priority, "news:"+newsID)
 	if err != nil {
 		_, _ = s.db.Exec(ctx, `UPDATE news_processing_outbox SET dispatch_attempts=dispatch_attempts+1,last_error=$2,available_at=now()+interval '60 seconds',updated_at=now() WHERE news_id=$1`, newsID, err.Error())
 		_, _ = s.db.Exec(ctx, `UPDATE news_processing SET status='dispatch_pending',last_error=$2,updated_at=now() WHERE news_id=$1`, newsID, err.Error())
@@ -549,13 +538,21 @@ func cancelResearchPayload(payload map[string]any, previous string) {
 	payload["analysis_steps"] = append(anySlice(payload["analysis_steps"]), analysisStep("research_cancelled", "cancelled", "admin-api", "用户取消了当前研究任务。", map[string]any{"previous_status": previous}))
 }
 
-func (s *Server) purgeResearchQueues(ctx context.Context, instanceID string) int64 {
-	if instanceID != "" {
-		return s.purgeCeleryQueue(ctx, "research."+instanceID)
-	}
-	count := s.purgeCeleryQueue(ctx, "research")
-	for index := range modelURLs("research") {
-		count += s.purgeCeleryQueue(ctx, "research.research-"+strconv.Itoa(index))
+func (s *Server) cancelGoQueue(ctx context.Context, queue string) int64 {
+	count, _ := jobs.NewStore(s.db).CancelQueue(ctx, queue)
+	return count
+}
+
+func (s *Server) cancelGoTaskIDs(ctx context.Context, taskIDs []string) int64 {
+	var count int64
+	for _, taskID := range taskIDs {
+		id, err := uuid.Parse(taskID)
+		if err != nil {
+			continue
+		}
+		if jobs.NewStore(s.db).Cancel(ctx, id) == nil {
+			count++
+		}
 	}
 	return count
 }

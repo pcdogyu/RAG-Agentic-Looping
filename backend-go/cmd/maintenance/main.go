@@ -43,7 +43,7 @@ func main() {
 		slog.Error("configuration", "error", err)
 		os.Exit(1)
 	}
-	if _, err := jobs.ValidateBatchFourActivation("maintenance", cfg.WorkerCompletedLanes); err != nil {
+	if _, err := jobs.RequireWorkerLane("maintenance"); err != nil {
 		slog.Error("maintenance lane", "error", err)
 		os.Exit(1)
 	}

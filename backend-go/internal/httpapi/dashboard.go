@@ -355,8 +355,8 @@ func (s *Server) buildAnalysisLogs(r *http.Request, limit int) ([]map[string]any
 }
 
 func (s *Server) analysisEntry(r *http.Request, event, run map[string]any, eventRun bool) map[string]any {
-	normalizePythonTimestamps(event)
-	normalizePythonTimestamps(run)
+	normalizeAPITimestamps(event)
+	normalizeAPITimestamps(run)
 	steps := anySlice(valueFrom(run, "analysis_steps"))
 	if len(steps) == 0 {
 		steps = anySlice(valueFrom(event, "analysis_steps"))

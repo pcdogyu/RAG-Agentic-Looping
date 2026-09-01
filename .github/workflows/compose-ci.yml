@@ -7,14 +7,12 @@ on:
       - "docker-compose.yml"
       - ".env.example"
       - "**/Dockerfile*"
-      - "pyproject.toml"
       - ".github/workflows/compose-ci.yml"
   pull_request:
     paths:
       - "docker-compose.yml"
       - ".env.example"
       - "**/Dockerfile*"
-      - "pyproject.toml"
       - ".github/workflows/compose-ci.yml"
 
 permissions:
@@ -32,4 +30,4 @@ jobs:
       - run: cp .env.example .env
       - run: docker compose config --quiet
       - run: docker compose build go-api web
-      - run: docker compose --profile go-shadow build go-evolution-worker market-adapter ml-adapter
+      - run: docker compose --profile go-shadow build go-evolution-worker market-adapter search-mcp

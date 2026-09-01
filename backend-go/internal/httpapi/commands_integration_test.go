@@ -113,7 +113,6 @@ func TestBatchThreeCommandsAgainstIsolatedServices(t *testing.T) {
 
 	assertStatus(http.StatusAccepted, http.MethodPost, "/api/v1/admin/asset-universe/refresh", `{}`, true)
 	assertStatus(http.StatusAccepted, http.MethodPost, "/api/v1/admin/asset-universe/backfill?days=3", `{}`, true)
-	server.cfg.WorkerCompletedLanes = []string{"extract", "mapping", "research", "evolution", "discovery", "recovery", "outcomes", "masterdata", "operations", "backfill"}
 	goBackfill := assertStatus(http.StatusAccepted, http.MethodPost, "/api/v1/admin/asset-universe/backfill?days=4", `{}`, true)
 	var backfillQueue, backfillType string
 	if err = pool.QueryRow(ctx, `SELECT queue,task_type FROM go_jobs WHERE id=$1`, stringValue(goBackfill["task_id"])).Scan(&backfillQueue, &backfillType); err != nil {
@@ -122,7 +121,6 @@ func TestBatchThreeCommandsAgainstIsolatedServices(t *testing.T) {
 	if backfillQueue != "backfill" || backfillType != "market_loop.backfill_asset_mappings" {
 		t.Fatalf("backfill was not routed to Go: queue=%s type=%s", backfillQueue, backfillType)
 	}
-	server.cfg.WorkerCompletedLanes = nil
 	assertStatus(http.StatusOK, http.MethodPost, "/api/v1/scan", `{"background":true}`, false)
 	assertStatus(http.StatusOK, http.MethodPost, "/api/v1/scan/pause", `{}`, false)
 	assertStatus(http.StatusOK, http.MethodPost, "/api/v1/scan/resume", `{}`, false)

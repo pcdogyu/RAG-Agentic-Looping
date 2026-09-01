@@ -307,9 +307,9 @@ func supersededOrTerminal(run map[string]any, taskID string) bool {
 }
 
 // nextResearchInstance assigns each concurrent claim to a different model
-// endpoint. Legacy Celery queues were sharded by instance, but the durable Go
-// queue is shared; trusting a migrated instance hint would therefore let all
-// worker slots drain one legacy shard into the same model.
+// endpoint. The durable Go queue stores the selected instance in the payload,
+// but the queue is shared; trusting an old instance hint would therefore let
+// all worker slots drain one former shard into the same model.
 func (runtime *researchRuntime) nextResearchInstance(fallback string) string {
 	capacity := len(runtime.cfg.ResearchURLs)
 	if capacity == 0 {

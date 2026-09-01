@@ -8,8 +8,7 @@ import (
 )
 
 func TestMasterdataHandlersCoverMigrationManifest(t *testing.T) {
-	completed := []string{"extract", "mapping", "research", "evolution", "discovery", "recovery", "outcomes"}
-	lane, err := ValidateBatchFourActivation("masterdata", completed)
+	lane, err := RequireWorkerLane("masterdata")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -18,13 +17,9 @@ func TestMasterdataHandlersCoverMigrationManifest(t *testing.T) {
 	}
 }
 
-func TestMasterdataSchedulerFollowsLaneCutover(t *testing.T) {
-	completed := []string{"extract", "mapping", "research", "evolution", "discovery", "recovery", "outcomes"}
-	if NewMasterdataScheduler(config.Config{WorkerCompletedLanes: completed}, nil, nil).Enabled() {
-		t.Fatal("masterdata scheduler enabled before lane cutover")
-	}
-	if !NewMasterdataScheduler(config.Config{WorkerCompletedLanes: append(completed, "masterdata")}, nil, nil).Enabled() {
-		t.Fatal("masterdata scheduler did not enable after lane cutover")
+func TestMasterdataSchedulerIsEnabledForGoRuntime(t *testing.T) {
+	if !NewMasterdataScheduler(config.Config{}, nil, nil).Enabled() {
+		t.Fatal("masterdata scheduler must be enabled for the Go runtime")
 	}
 }
 

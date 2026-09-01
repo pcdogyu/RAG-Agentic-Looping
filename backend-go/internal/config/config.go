@@ -15,12 +15,10 @@ type Config struct {
 	Environment           string
 	WorkerID              string
 	WorkerLane            string
-	WorkerCompletedLanes  []string
 	WorkerConcurrency     int
 	LeaseDuration         time.Duration
 	PollInterval          time.Duration
 	MarketAdapterURL      string
-	MLAdapterURL          string
 	AdminAPIToken         string
 	MCPSecretKey          string
 	WeknoraURL            string
@@ -94,12 +92,10 @@ func Load() (Config, error) {
 		Environment:           env("APP_ENV", "development"),
 		WorkerID:              env("GO_WORKER_ID", hostname()),
 		WorkerLane:            env("GO_WORKER_LANE", ""),
-		WorkerCompletedLanes:  split(env("GO_WORKER_COMPLETED_LANES", "")),
 		WorkerConcurrency:     envInt("GO_WORKER_CONCURRENCY", 1),
 		LeaseDuration:         envDuration("GO_JOB_LEASE", 3*time.Minute),
 		PollInterval:          envDuration("GO_JOB_POLL_INTERVAL", time.Second),
 		MarketAdapterURL:      strings.TrimRight(env("MARKET_ADAPTER_URL", "http://market-adapter:8091"), "/"),
-		MLAdapterURL:          strings.TrimRight(env("ML_ADAPTER_URL", "http://ml-adapter:8092"), "/"),
 		AdminAPIToken:         env("ADMIN_API_TOKEN", ""),
 		MCPSecretKey:          env("MCP_SECRET_KEY", ""),
 		WeknoraURL:            env("WEKNORA_DEFAULT_URL", "http://10.15.0.28/"),
@@ -193,9 +189,8 @@ func modelURLs(lane, fallback string) []string {
 }
 
 func normalizeDatabaseURL(value string) string {
-	// SQLAlchemy uses a driver-qualified URL; pgx consumes the same DSN without
-	// the Python driver suffix. Keeping one environment variable prevents a
-	// credential fork during the shadow migration.
+	// Accept historical driver-qualified DSNs while installations move to the
+	// standard PostgreSQL URL used by pgx.
 	return strings.Replace(value, "postgresql+psycopg://", "postgresql://", 1)
 }
 

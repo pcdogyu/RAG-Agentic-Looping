@@ -378,10 +378,10 @@ func defaultAny(value, fallback any) any {
 func stringValue(value any) string { result, _ := value.(string); return result }
 func boolValue(value any) bool     { result, _ := value.(bool); return result }
 func iso(value time.Time) string {
-	return pythonTimestamp(value, "+00:00")
+	return canonicalTimestamp(value, "+00:00")
 }
 
-func pythonTimestamp(value time.Time, suffix string) string {
+func canonicalTimestamp(value time.Time, suffix string) string {
 	value = value.UTC()
 	if value.Nanosecond() == 0 {
 		return value.Format("2006-01-02T15:04:05") + suffix

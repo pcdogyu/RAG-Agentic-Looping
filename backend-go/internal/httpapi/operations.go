@@ -414,28 +414,7 @@ func (s *Server) taskStatus(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	raw, err := s.redis.Get(r.Context(), "celery-task-meta-"+taskID).Bytes()
-	if err != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"task_id": taskID, "state": "PENDING"})
-		return
-	}
-	var stored map[string]any
-	if json.Unmarshal(raw, &stored) != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"task_id": taskID, "state": "PENDING"})
-		return
-	}
-	state := defaultValue(stringValue(stored["status"]), "PENDING")
-	payload := map[string]any{"task_id": taskID, "state": state}
-	if state == "SUCCESS" {
-		payload["result"] = stored["result"]
-	}
-	if state == "FAILURE" {
-		payload["error"] = stringValue(stored["exc_type"])
-	}
-	if state == "PROGRESS" {
-		payload["progress"] = stored["result"]
-	}
-	writeJSON(w, http.StatusOK, payload)
+	writeJSON(w, http.StatusOK, map[string]any{"task_id": taskID, "state": "PENDING"})
 }
 
 func (s *Server) modelInferenceQueues(w http.ResponseWriter, r *http.Request) {

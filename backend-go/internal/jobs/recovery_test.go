@@ -11,14 +11,9 @@ func stringPointer(value string) *string { return &value }
 
 func timePointer(value time.Time) *time.Time { return &value }
 
-func TestRecoverySchedulerFollowsLaneCutover(t *testing.T) {
-	before := NewRecoveryScheduler(config.Config{WorkerCompletedLanes: []string{"extract", "mapping", "research", "evolution", "discovery"}}, nil, nil)
-	if before.Enabled() {
-		t.Fatal("recovery scheduler enabled before lane cutover")
-	}
-	after := NewRecoveryScheduler(config.Config{WorkerCompletedLanes: []string{"extract", "mapping", "research", "evolution", "discovery", "recovery"}}, nil, nil)
-	if !after.Enabled() {
-		t.Fatal("recovery scheduler did not enable after lane cutover")
+func TestRecoverySchedulerIsEnabledForGoRuntime(t *testing.T) {
+	if !NewRecoveryScheduler(config.Config{}, nil, nil).Enabled() {
+		t.Fatal("recovery scheduler must be enabled for the Go runtime")
 	}
 }
 

@@ -129,7 +129,7 @@ func (s *Store) Claim(ctx context.Context, workerID string, queues []string, lea
 				JOIN go_jobs parent ON parent.id=d.depends_on_job_id
 				WHERE d.job_id=j.id AND parent.status <> 'completed'
 			  )
-			-- Keep Kombu/Redis semantics: a smaller number is a higher priority.
+			-- A smaller number is a higher priority throughout the Go queues.
 			ORDER BY j.priority ASC, j.available_at, j.created_at
 			FOR UPDATE SKIP LOCKED
 			LIMIT 1

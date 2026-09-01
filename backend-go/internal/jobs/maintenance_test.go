@@ -7,8 +7,7 @@ import (
 )
 
 func TestMaintenanceHandlersCoverLane(t *testing.T) {
-	completed := []string{"extract", "mapping", "research", "evolution", "discovery", "recovery", "outcomes", "masterdata", "operations", "backfill"}
-	lane, err := ValidateBatchFourActivation("maintenance", completed)
+	lane, err := RequireWorkerLane("maintenance")
 	if err != nil {
 		t.Fatal(err)
 	}

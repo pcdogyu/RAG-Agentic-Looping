@@ -781,7 +781,7 @@ func NewOutcomeScheduler(cfg config.Config, db *pgxpool.Pool, redisClient *redis
 }
 
 func (scheduler *OutcomeScheduler) Enabled() bool {
-	return completedWorkerLane(scheduler.cfg, "outcomes")
+	return true
 }
 
 func (scheduler *OutcomeScheduler) Tick(ctx context.Context) error {
