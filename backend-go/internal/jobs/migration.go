@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-const WorkerMigrationBatch = 6
+const WorkerMigrationBatch = 7
 
 type MigrationLane struct {
 	ID                string   `json:"id"`
@@ -53,6 +53,9 @@ var batchFourLaneDefinitions = []MigrationLane{
 	{ID: "recovery", Order: 6, PythonModelLane: "io", CeleryQueuePrefix: "io", GoQueue: "recovery", TaskTypes: []string{
 		"market_loop.cleanup_model_audits", "market_loop.reconcile_research_leases",
 		"market_loop.reconcile_asset_mapping_leases", "market_loop.recover_orphaned_news",
+	}},
+	{ID: "outcomes", Order: 7, PythonModelLane: "io", CeleryQueuePrefix: "io", GoQueue: "outcomes", TaskTypes: []string{
+		"market_loop.evaluate_outcomes", "market_loop.refresh_event_market_factors",
 	}},
 }
 

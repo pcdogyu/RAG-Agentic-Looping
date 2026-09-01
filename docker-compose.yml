@@ -371,6 +371,37 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  go-outcomes-worker:
+    profiles: ["go-shadow"]
+    build:
+      context: .
+      dockerfile: backend-go/Dockerfile
+    entrypoint: ["/usr/local/bin/worker"]
+    env_file: .env
+    environment:
+      APP_ENV: development
+      GO_WORKER_LANE: outcomes
+      GO_WORKER_COMPLETED_LANES: ${GO_WORKER_COMPLETED_LANES:-}
+      GO_WORKER_CONCURRENCY: "1"
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      MARKET_ADAPTER_URL: http://market-adapter:8091
+      FMP_BASE_URL: ${FMP_BASE_URL:-https://financialmodelingprep.com/stable}
+      FMP_ACCESS_TOKEN: ${FMP_ACCESS_TOKEN:-}
+      FMP_RATE_LIMIT_PER_MINUTE: ${FMP_RATE_LIMIT_PER_MINUTE:-55}
+      COINGECKO_BASE_URL: ${COINGECKO_BASE_URL:-https://api.coingecko.com/api/v3}
+      RESEARCH_ASSET_COOLDOWN_HOURS: ${RESEARCH_ASSET_COOLDOWN_HOURS:-24}
+      OLLAMA_RESEARCH_BASE_URLS: ${OLLAMA_RESEARCH_BASE_URLS:-http://host.docker.internal:11435,http://host.docker.internal:11436,http://host.docker.internal:11439}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      market-adapter:
+        condition: service_healthy
+    restart: unless-stopped
+
   go-scheduler:
     profiles: ["go-shadow"]
     build:

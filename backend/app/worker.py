@@ -324,6 +324,14 @@ def _go_recovery_worker_enabled() -> bool:
     }
 
 
+def _go_outcomes_worker_enabled() -> bool:
+    return "outcomes" in {
+        value.strip()
+        for value in settings.go_worker_completed_lanes.split(",")
+        if value.strip()
+    }
+
+
 def _enqueue_go_model_job(
     db,
     *,
@@ -418,6 +426,15 @@ RECOVERY_BEAT_SCHEDULES = (
 
 if _go_recovery_worker_enabled():
     for schedule_name in RECOVERY_BEAT_SCHEDULES:
+        celery_app.conf.beat_schedule.pop(schedule_name, None)
+
+OUTCOME_BEAT_SCHEDULES = (
+    "evaluate-outcomes",
+    "refresh-event-market-factors",
+)
+
+if _go_outcomes_worker_enabled():
+    for schedule_name in OUTCOME_BEAT_SCHEDULES:
         celery_app.conf.beat_schedule.pop(schedule_name, None)
 
 

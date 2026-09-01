@@ -105,6 +105,24 @@ def test_recovery_cutover_removes_only_native_maintenance_schedules(monkeypatch)
     assert worker._go_recovery_worker_enabled() is False
 
 
+def test_outcomes_cutover_removes_only_native_outcome_schedules(monkeypatch):
+    monkeypatch.setattr(
+        worker.settings,
+        "go_worker_completed_lanes",
+        "extract,mapping,research,evolution,discovery,recovery,outcomes",
+    )
+    assert worker._go_outcomes_worker_enabled() is True
+    assert set(worker.OUTCOME_BEAT_SCHEDULES) == {
+        "evaluate-outcomes",
+        "refresh-event-market-factors",
+    }
+    assert "refresh-equity-universe" not in worker.OUTCOME_BEAT_SCHEDULES
+    assert "evolve-from-failures" not in worker.OUTCOME_BEAT_SCHEDULES
+
+    monkeypatch.setattr(worker.settings, "go_worker_completed_lanes", "")
+    assert worker._go_outcomes_worker_enabled() is False
+
+
 def test_scan_gate_lease_is_renewed_only_by_its_owner():
     redis = FakeRedis()
     redis.set(worker.SCAN_GATE_KEY, "scan-task")

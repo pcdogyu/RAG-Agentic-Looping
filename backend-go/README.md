@@ -31,6 +31,10 @@ profile and is not the web upstream.
   outcome, market-factor, evolution-dispatch, and system-monitor schedules.
   `/go/migration-status` exposes the machine-readable lane plan and current
   next lane.
+- Batch 7 adds `outcomes`: Go now evaluates matured recommendation returns and
+  schedules the bounded 1/5/20-session market-factor research refresh. Python
+  Beat keeps asset-universe refresh, evolution dispatch, and system monitoring
+  until their later batches.
 
 ## Safety gates
 
@@ -99,6 +103,25 @@ The lane task boundary is:
   dispatch. AkShare stays behind the narrow Python market-adapter HTTP boundary.
 - `recovery`: orphaned news and downstream follow-up recovery, research/mapping
   lease reconciliation, and model-call audit retention cleanup.
+- `outcomes`: recommendation outcome evaluation and mature event market-factor
+  research refresh.
+
+### Outcomes lane cutover
+
+Set
+`GO_WORKER_COMPLETED_LANES=extract,mapping,research,evolution,discovery,recovery,outcomes`,
+start `go-outcomes-worker`, and recreate `go-scheduler`, the Python `scheduler`,
+and `io-worker`. The completed-lane flag removes only `evaluate-outcomes` and
+`refresh-event-market-factors` from Celery Beat.
+
+The Go evaluator preserves legacy calendar-day windows and the new
+trading-session window, writes the same raw return, benchmark, alpha, Brier,
+direction-correctness, and maximum-drawdown fields, and isolates provider
+failures per recommendation. Market-factor refresh retains the 1/5/20-session
+maturity thresholds, 20-item bound, asset transaction lock, active-run guard,
+and 24-hour cooldown. Roll back by removing `outcomes` from the completed
+prefix, stopping `go-outcomes-worker`, and recreating both schedulers; existing
+outcomes and queued research remain durable.
 
 ### Recovery lane cutover
 
@@ -106,9 +129,8 @@ Set
 `GO_WORKER_COMPLETED_LANES=extract,mapping,research,evolution,discovery,recovery`,
 start `go-recovery-worker`, and recreate `go-scheduler`, the Python `scheduler`,
 and `io-worker`. The completed-lane flag removes only the four migrated recovery
-schedules from Celery Beat; asset-universe refresh, outcome evaluation,
-market-factor refresh, evolution dispatch, and system monitoring remain on
-Python until their later batches.
+schedules from Celery Beat; asset-universe refresh, evolution dispatch, and
+system monitoring remain on Python until their later batches.
 
 The Go scheduler uses Redis interval leases, so scheduler restarts do not create
 duplicate recovery jobs. The worker stages recovered news in the existing
