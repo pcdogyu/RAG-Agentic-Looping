@@ -167,7 +167,7 @@ func (s *Store) Complete(ctx context.Context, id uuid.UUID, workerID string, res
 	}
 	command, err := s.pool.Exec(ctx, `
 		UPDATE go_jobs SET status='completed',result=$3,completed_at=now(),updated_at=now(),
-			lease_owner=NULL,lease_until=NULL
+			error=NULL,lease_owner=NULL,lease_until=NULL
 		WHERE id=$1 AND lease_owner=$2 AND status='running'`, id, workerID, encoded)
 	if err != nil {
 		return err

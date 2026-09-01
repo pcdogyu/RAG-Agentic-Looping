@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -57,6 +58,55 @@ func TestStoreLifecycleAgainstPostgres(t *testing.T) {
 	}
 	if status != "completed" {
 		t.Fatalf("status=%s", status)
+	}
+}
+
+func TestStoreCompletionClearsRetryError(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL is not set")
+	}
+	dsn = strings.Replace(dsn, "postgresql+psycopg://", "postgresql://", 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err := migrate.Up(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(pool)
+	id, err := store.Enqueue(ctx, EnqueueParams{Queue: "test", TaskType: "contract.retry", Payload: map[string]any{}, MaxAttempts: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = pool.Exec(context.Background(), `DELETE FROM go_jobs WHERE id=$1`, id) }()
+	job, err := store.Claim(ctx, "retry-worker", []string{"test"}, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Fail(ctx, job, "retry-worker", errors.New("temporary failure")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE go_jobs SET available_at=now() WHERE id=$1`, id); err != nil {
+		t.Fatal(err)
+	}
+	job, err = store.Claim(ctx, "retry-worker", []string{"test"}, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Complete(ctx, id, "retry-worker", map[string]any{"done": true}); err != nil {
+		t.Fatal(err)
+	}
+	var status string
+	var errorValue *string
+	if err := pool.QueryRow(ctx, `SELECT status,error FROM go_jobs WHERE id=$1`, id).Scan(&status, &errorValue); err != nil {
+		t.Fatal(err)
+	}
+	if status != "completed" || errorValue != nil {
+		t.Fatalf("status=%s error=%v", status, errorValue)
 	}
 }
 
