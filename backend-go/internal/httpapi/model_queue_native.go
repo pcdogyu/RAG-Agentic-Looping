@@ -3,12 +3,16 @@ package httpapi
 import (
 	"context"
 	"log/slog"
+	"math"
 	"sort"
 	"strings"
 	"time"
 )
 
-const modelQueueTaskRetention = 24 * time.Hour
+const (
+	modelQueueTaskRetention       = 24 * time.Hour
+	modelQueueRecentExecutionTime = 4 * time.Hour
+)
 
 type nativeModelQueueSpec struct {
 	id      string
@@ -26,7 +30,10 @@ type nativeModelJob struct {
 	Error       string
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
+	StartedAt   *time.Time
+	AttemptAt   *time.Time
 	CompletedAt *time.Time
+	ExecutionMS int64
 	Kind        string
 	EntityID    string
 	Title       string
@@ -73,7 +80,8 @@ func (s *Server) buildNativeModelQueueOverview(ctx context.Context, limit int) m
 func (s *Server) loadNativeModelJobs(ctx context.Context, queue string, cutoff time.Time) ([]nativeModelJob, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT j.id::text,j.task_type,j.status,j.attempt,
-		       coalesce(j.error,''),j.created_at,j.updated_at,j.completed_at,
+		       coalesce(j.error,''),j.created_at,j.updated_at,j.started_at,j.attempt_started_at,
+		       j.completed_at,j.execution_duration_ms,
 		       CASE
 		         WHEN j.task_type='market_loop.research_event' THEN 'event_research'
 		         WHEN j.task_type='market_loop.research_asset' THEN 'asset_research'
@@ -139,7 +147,8 @@ func (s *Server) loadNativeModelJobs(ctx context.Context, queue string, cutoff t
 		var entityID, title, subtitle, source, instanceID *string
 		if err := rows.Scan(
 			&job.ID, &job.TaskType, &job.Status, &job.Attempt, &job.Error,
-			&job.CreatedAt, &job.UpdatedAt, &job.CompletedAt, &job.Kind,
+			&job.CreatedAt, &job.UpdatedAt, &job.StartedAt, &job.AttemptAt,
+			&job.CompletedAt, &job.ExecutionMS, &job.Kind,
 			&entityID, &title, &subtitle, &source, &instanceID,
 		); err != nil {
 			return nil, err
@@ -327,13 +336,21 @@ func nativeTaskValues(jobs []nativeModelJob, now time.Time) []any {
 			}
 			errorValue = trimmed
 		}
+		var startedAt any
+		if job.StartedAt != nil {
+			startedAt = job.StartedAt.UTC()
+		}
+		var executionDuration any
+		if job.StartedAt != nil {
+			executionDuration = nativeExecutionDuration(job, now)
+		}
 		values = append(values, map[string]any{
 			"task_id": job.ID, "instance_id": nilIfEmpty(job.InstanceID), "kind": job.Kind,
 			"entity_id": nilIfEmpty(job.EntityID), "title": job.Title, "subtitle": job.Subtitle,
 			"source": nilIfEmpty(job.Source), "status": job.Status, "attempt": max(1, job.Attempt), "task_count": 1,
-			"queued_at": job.CreatedAt.UTC(), "started_at": nil, "completed_at": completedAt,
+			"queued_at": job.CreatedAt.UTC(), "started_at": startedAt, "completed_at": completedAt,
 			"updated_at": job.UpdatedAt.UTC(), "queue_duration_ms": queueDuration,
-			"execution_duration_ms": nil, "error": errorValue, "metrics": map[string]any{},
+			"execution_duration_ms": executionDuration, "error": errorValue, "metrics": map[string]any{},
 		})
 	}
 	return values
@@ -342,27 +359,80 @@ func nativeTaskValues(jobs []nativeModelJob, now time.Time) []any {
 func nativeQueueMetrics(jobs []nativeModelJob, counts map[string]int64, now time.Time) map[string]any {
 	metrics := emptyQueueMetrics()
 	waits := make([]int64, 0)
+	executionDurations := make([]int64, 0)
+	completedTimes := make([]time.Time, 0)
+	var singleCompletedExecution int64
+	recentCutoff := now.Add(-modelQueueRecentExecutionTime)
 	var longest int64
 	for _, job := range jobs {
-		if job.Status != "queued" && job.Status != "retrying" {
-			continue
+		if job.Status == "queued" || job.Status == "retrying" {
+			wait := max(int64(0), now.Sub(job.CreatedAt).Milliseconds())
+			waits = append(waits, wait)
+			longest = max(longest, wait)
 		}
-		wait := max(int64(0), now.Sub(job.CreatedAt).Milliseconds())
-		waits = append(waits, wait)
-		longest = max(longest, wait)
+		terminalAt := job.CompletedAt
+		if terminalAt == nil {
+			terminalAt = &job.UpdatedAt
+		}
+		if job.StartedAt != nil && nativeTerminalStatus(job.Status) && !terminalAt.Before(recentCutoff) {
+			executionDurations = append(executionDurations, nativeExecutionDuration(job, now))
+		}
+		if nativeCompletedStatus(job.Status) && job.CompletedAt != nil && !job.CompletedAt.Before(recentCutoff) {
+			completedTimes = append(completedTimes, job.CompletedAt.UTC())
+			singleCompletedExecution = nativeExecutionDuration(job, now)
+		}
 	}
 	if len(waits) > 0 {
 		metrics["average_queue_duration_ms"] = averageInt64(waits)
 		metrics["longest_wait_ms"] = longest
 		metrics["queue_duration_sample_count"] = len(waits)
 	}
-	if average, ok := metrics["average_execution_duration_ms"].(int64); ok && average > 0 {
-		capacity := counts["running"]
-		if capacity > 0 {
-			metrics["estimated_clear_ms"] = (counts["queued"] + counts["retrying"]) * average / capacity
+	if len(executionDurations) > 0 {
+		sort.Slice(executionDurations, func(i, j int) bool { return executionDurations[i] < executionDurations[j] })
+		metrics["average_execution_duration_ms"] = averageInt64(executionDurations)
+		metrics["execution_duration_sample_count"] = len(executionDurations)
+		metrics["execution_p50_ms"] = nativePercentile(executionDurations, 0.5)
+		metrics["execution_p90_ms"] = nativePercentile(executionDurations, 0.9)
+	}
+	sort.Slice(completedTimes, func(i, j int) bool { return completedTimes[i].Before(completedTimes[j]) })
+	var throughput float64
+	if len(completedTimes) >= 2 {
+		elapsedHours := completedTimes[len(completedTimes)-1].Sub(completedTimes[0]).Hours()
+		if elapsedHours > 0 {
+			throughput = float64(len(completedTimes)-1) / elapsedHours
+		}
+	} else if len(completedTimes) == 1 && singleCompletedExecution > 0 {
+		throughput = float64(time.Hour.Milliseconds()) / float64(singleCompletedExecution)
+	}
+	if throughput > 0 {
+		metrics["throughput_per_hour"] = throughput
+		work := counts["queued"] + counts["retrying"] + counts["running"] + counts["verifying"]
+		if work > 0 {
+			metrics["estimated_clear_ms"] = int64(math.Ceil(float64(work) / throughput * float64(time.Hour.Milliseconds())))
 		}
 	}
 	return metrics
+}
+
+func nativeExecutionDuration(job nativeModelJob, now time.Time) int64 {
+	duration := max(int64(0), job.ExecutionMS)
+	if job.Status == "running" && job.AttemptAt != nil {
+		duration += max(int64(0), now.Sub(*job.AttemptAt).Milliseconds())
+	}
+	return duration
+}
+
+func nativePercentile(ordered []int64, ratio float64) int64 {
+	index := int(math.Ceil(float64(len(ordered))*ratio)) - 1
+	return ordered[max(0, min(index, len(ordered)-1))]
+}
+
+func nativeCompletedStatus(status string) bool {
+	return status == "completed" || status == "merged" || status == "unmapped" || status == "insufficient_evidence"
+}
+
+func nativeTerminalStatus(status string) bool {
+	return nativeCompletedStatus(status) || nativeFailedStatus(status)
 }
 
 func nativeJobsForInstance(jobs []nativeModelJob, instanceID string) []nativeModelJob {

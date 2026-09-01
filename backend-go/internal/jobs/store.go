@@ -136,7 +136,8 @@ func (s *Store) Claim(ctx context.Context, workerID string, queues []string, lea
 		)
 		UPDATE go_jobs j
 		SET status='running', lease_owner=$2, lease_until=now()+$3::interval,
-			heartbeat_at=now(), attempt=j.attempt+1, updated_at=now()
+			heartbeat_at=now(), attempt=j.attempt+1, updated_at=now(),
+			started_at=coalesce(j.started_at,now()),attempt_started_at=now()
 		FROM candidate
 		WHERE j.id=candidate.id
 		RETURNING j.id,j.queue,j.task_type,j.payload,j.status,j.priority,j.attempt,
@@ -167,7 +168,12 @@ func (s *Store) Complete(ctx context.Context, id uuid.UUID, workerID string, res
 	}
 	command, err := s.pool.Exec(ctx, `
 		UPDATE go_jobs SET status='completed',result=$3,completed_at=now(),updated_at=now(),
-			error=NULL,lease_owner=NULL,lease_until=NULL
+			error=NULL,lease_owner=NULL,lease_until=NULL,
+			execution_duration_ms=execution_duration_ms+CASE
+				WHEN attempt_started_at IS NULL THEN 0
+				ELSE greatest(0::bigint,floor(extract(epoch FROM (now()-attempt_started_at))*1000)::bigint)
+			END,
+			attempt_started_at=NULL
 		WHERE id=$1 AND lease_owner=$2 AND status='running'`, id, workerID, encoded)
 	if err != nil {
 		return err
@@ -193,7 +199,12 @@ func (s *Store) Continue(ctx context.Context, id uuid.UUID, workerID string, pay
 	command, err := s.pool.Exec(ctx, `
 		UPDATE go_jobs SET status='retrying',payload=$3,result=$4,error=NULL,
 			available_at=now()+$5::interval,attempt=greatest(attempt-1,0),updated_at=now(),
-			lease_owner=NULL,lease_until=NULL
+			lease_owner=NULL,lease_until=NULL,
+			execution_duration_ms=execution_duration_ms+CASE
+				WHEN attempt_started_at IS NULL THEN 0
+				ELSE greatest(0::bigint,floor(extract(epoch FROM (now()-attempt_started_at))*1000)::bigint)
+			END,
+			attempt_started_at=NULL
 		WHERE id=$1 AND lease_owner=$2 AND status='running'`, id, workerID, encodedPayload, encodedProgress, interval(delay))
 	if err != nil {
 		return err
@@ -221,7 +232,12 @@ func (s *Store) Fail(ctx context.Context, job Job, workerID string, cause error)
 	_, err := s.pool.Exec(ctx, `
 		UPDATE go_jobs SET status=$3::varchar,error=$4,available_at=$5,updated_at=now(),
 			completed_at=CASE WHEN $3::text='failed' THEN now() ELSE NULL END,
-			lease_owner=NULL,lease_until=NULL
+			lease_owner=NULL,lease_until=NULL,
+			execution_duration_ms=execution_duration_ms+CASE
+				WHEN attempt_started_at IS NULL THEN 0
+				ELSE greatest(0::bigint,floor(extract(epoch FROM (now()-attempt_started_at))*1000)::bigint)
+			END,
+			attempt_started_at=NULL
 		WHERE id=$1 AND lease_owner=$2 AND status='running'`,
 		job.ID, workerID, status, cause.Error(), available)
 	return err
@@ -252,7 +268,14 @@ func (s *Store) CancellationRequested(ctx context.Context, id uuid.UUID) (bool, 
 }
 
 func (s *Store) CompleteCancellation(ctx context.Context, id uuid.UUID, workerID string) error {
-	_, err := s.pool.Exec(ctx, `UPDATE go_jobs SET status='cancelled',completed_at=now(),updated_at=now(),lease_owner=NULL,lease_until=NULL WHERE id=$1 AND lease_owner=$2 AND status='running' AND cancel_requested_at IS NOT NULL`, id, workerID)
+	_, err := s.pool.Exec(ctx, `
+		UPDATE go_jobs SET status='cancelled',completed_at=now(),updated_at=now(),lease_owner=NULL,lease_until=NULL,
+			execution_duration_ms=execution_duration_ms+CASE
+				WHEN attempt_started_at IS NULL THEN 0
+				ELSE greatest(0::bigint,floor(extract(epoch FROM (now()-attempt_started_at))*1000)::bigint)
+			END,
+			attempt_started_at=NULL
+		WHERE id=$1 AND lease_owner=$2 AND status='running' AND cancel_requested_at IS NOT NULL`, id, workerID)
 	return err
 }
 
@@ -267,7 +290,12 @@ func (s *Store) ReconcileExpired(ctx context.Context) (int64, error) {
 			error=CASE WHEN cancel_requested_at IS NULL THEN 'worker lease expired' ELSE error END,
 			available_at=now(),updated_at=now(),
 			completed_at=CASE WHEN cancel_requested_at IS NOT NULL OR attempt >= max_attempts THEN now() ELSE NULL END,
-			lease_owner=NULL,lease_until=NULL
+			lease_owner=NULL,
+			execution_duration_ms=execution_duration_ms+CASE
+				WHEN attempt_started_at IS NULL THEN 0
+				ELSE greatest(0::bigint,floor(extract(epoch FROM (least(now(),lease_until)-attempt_started_at))*1000)::bigint)
+			END,
+			attempt_started_at=NULL,lease_until=NULL
 		WHERE status='running' AND lease_until < now()`)
 	return result.RowsAffected(), err
 }

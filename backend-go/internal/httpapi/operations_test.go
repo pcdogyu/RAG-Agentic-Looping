@@ -71,3 +71,44 @@ func TestNativeQueueState(t *testing.T) {
 		t.Fatalf("queued state = %s", state)
 	}
 }
+
+func TestNativeQueueMetricsUsesRecentExecutionSamples(t *testing.T) {
+	now := time.Date(2026, time.September, 1, 8, 0, 0, 0, time.UTC)
+	started := now.Add(-6 * time.Hour)
+	recentOne := now.Add(-3 * time.Hour)
+	recentTwo := now.Add(-time.Hour)
+	recentFailure := now.Add(-30 * time.Minute)
+	old := now.Add(-5 * time.Hour)
+	jobs := []nativeModelJob{
+		{ID: "one", Status: "completed", StartedAt: &started, CompletedAt: &recentOne, UpdatedAt: recentOne, ExecutionMS: 1000},
+		{ID: "two", Status: "completed", StartedAt: &started, CompletedAt: &recentTwo, UpdatedAt: recentTwo, ExecutionMS: 3000},
+		{ID: "failure", Status: "failed", StartedAt: &started, CompletedAt: &recentFailure, UpdatedAt: recentFailure, ExecutionMS: 5000},
+		{ID: "old", Status: "completed", StartedAt: &started, CompletedAt: &old, UpdatedAt: old, ExecutionMS: 9000},
+	}
+	counts := nativeQueueCounts(jobs)
+	counts["queued"] = 2
+	metrics := nativeQueueMetrics(jobs, counts, now)
+	if metrics["average_execution_duration_ms"] != int64(3000) || metrics["execution_duration_sample_count"] != 3 {
+		t.Fatalf("unexpected average execution metrics: %#v", metrics)
+	}
+	if metrics["execution_p50_ms"] != int64(3000) || metrics["execution_p90_ms"] != int64(5000) {
+		t.Fatalf("unexpected execution percentiles: %#v", metrics)
+	}
+	if metrics["throughput_per_hour"] != float64(0.5) {
+		t.Fatalf("unexpected throughput: %#v", metrics)
+	}
+}
+
+func TestNativeTaskValuesIncludesLiveExecutionDuration(t *testing.T) {
+	now := time.Date(2026, time.September, 1, 8, 0, 0, 0, time.UTC)
+	started := now.Add(-time.Minute)
+	attempt := now.Add(-2 * time.Second)
+	values := nativeTaskValues([]nativeModelJob{{
+		ID: "running", Status: "running", Attempt: 1, CreatedAt: started, UpdatedAt: now,
+		StartedAt: &started, AttemptAt: &attempt, ExecutionMS: 500,
+	}}, now)
+	task := values[0].(map[string]any)
+	if task["started_at"] == nil || task["execution_duration_ms"] != int64(2500) {
+		t.Fatalf("missing live execution timing: %#v", task)
+	}
+}

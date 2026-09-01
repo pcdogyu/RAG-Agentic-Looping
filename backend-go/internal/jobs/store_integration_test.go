@@ -45,6 +45,7 @@ func TestStoreLifecycleAgainstPostgres(t *testing.T) {
 	if job.ID != id || job.Attempt != 1 {
 		t.Fatalf("unexpected claimed job: %#v", job)
 	}
+	time.Sleep(5 * time.Millisecond)
 	alive, err := store.Heartbeat(ctx, id, "test-worker", time.Minute)
 	if err != nil || !alive {
 		t.Fatalf("heartbeat alive=%v err=%v", alive, err)
@@ -53,11 +54,13 @@ func TestStoreLifecycleAgainstPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	var status string
-	if err := pool.QueryRow(ctx, `SELECT status FROM go_jobs WHERE id=$1`, id).Scan(&status); err != nil {
+	var startedAt *time.Time
+	var executionDuration int64
+	if err := pool.QueryRow(ctx, `SELECT status,started_at,execution_duration_ms FROM go_jobs WHERE id=$1`, id).Scan(&status, &startedAt, &executionDuration); err != nil {
 		t.Fatal(err)
 	}
-	if status != "completed" {
-		t.Fatalf("status=%s", status)
+	if status != "completed" || startedAt == nil || executionDuration <= 0 {
+		t.Fatalf("status=%s started_at=%v execution_duration_ms=%d", status, startedAt, executionDuration)
 	}
 }
 
