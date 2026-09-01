@@ -1,0 +1,41 @@
+name: Go CI
+
+on:
+  push:
+    branches: [main, golang]
+    paths:
+      - "backend-go/**"
+      - ".github/workflows/go-ci.yml"
+  pull_request:
+    paths:
+      - "backend-go/**"
+      - ".github/workflows/go-ci.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: go-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend-go
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend-go/go.mod
+          cache-dependency-path: backend-go/go.sum
+      - name: Check formatting
+        run: |
+          files="$(gofmt -l .)"
+          if [ -n "$files" ]; then
+            echo "$files"
+            exit 1
+          fi
+      - run: go vet ./...
+      - run: go test -race ./...

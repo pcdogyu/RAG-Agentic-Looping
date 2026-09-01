@@ -1,0 +1,35 @@
+name: Compose CI
+
+on:
+  push:
+    branches: [main, golang]
+    paths:
+      - "docker-compose.yml"
+      - ".env.example"
+      - "**/Dockerfile*"
+      - "pyproject.toml"
+      - ".github/workflows/compose-ci.yml"
+  pull_request:
+    paths:
+      - "docker-compose.yml"
+      - ".env.example"
+      - "**/Dockerfile*"
+      - "pyproject.toml"
+      - ".github/workflows/compose-ci.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: compose-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cp .env.example .env
+      - run: docker compose config --quiet
+      - run: docker compose build go-api web
+      - run: docker compose --profile go-shadow build go-evolution-worker market-adapter ml-adapter
