@@ -2,6 +2,33 @@ package httpapi
 
 import "testing"
 
+func TestFilterTargetChangesMatchesVisibleIdentityFields(t *testing.T) {
+	items := []map[string]any{
+		{"label": "能源行业", "symbol": nil, "market": nil, "target_type": "sector"},
+		{"label": "Target Corporation", "symbol": "TGT", "market": "US", "target_type": "tradable_asset"},
+		{"label": "WTI 原油", "symbol": "CLUSD", "market": "COMMODITY", "target_type": "commodity_price"},
+		{"label": "Bitcoin", "symbol": "BTC", "market": "CRYPTO", "target_type": "tradable_asset"},
+	}
+	tests := []struct {
+		query string
+		want  int
+	}{
+		{query: "能源", want: 1},
+		{query: "tgt", want: 1},
+		{query: "crypto", want: 1},
+		{query: "COMMODITY_PRICE", want: 1},
+		{query: "missing", want: 0},
+		{query: "  ", want: 4},
+	}
+	for _, test := range tests {
+		t.Run(test.query, func(t *testing.T) {
+			if got := len(filterTargetChanges(items, test.query)); got != test.want {
+				t.Fatalf("query %q returned %d items, want %d", test.query, got, test.want)
+			}
+		})
+	}
+}
+
 func TestRepresentativeImpactUsesStrongestAbsoluteScoreAndKeepsFirstTie(t *testing.T) {
 	tests := []struct {
 		name    string

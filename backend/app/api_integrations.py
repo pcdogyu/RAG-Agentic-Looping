@@ -1682,6 +1682,21 @@ def _concrete_target_changes(db: Session) -> list[dict[str, Any]]:
     )
 
 
+def _filter_target_changes(
+    changes: list[dict[str, Any]], query: str
+) -> list[dict[str, Any]]:
+    needle = query.strip().casefold()
+    if not needle:
+        return changes
+    fields = ("label", "symbol", "market", "target_type")
+    return [
+        item
+        for item in changes
+        if needle
+        in " ".join(str(item.get(field) or "") for field in fields).casefold()
+    ]
+
+
 @router.get("/api/v1/target-changes")
 def list_target_changes(
     db: Db,
@@ -1701,6 +1716,8 @@ def list_target_changes(
         changes = _macro_target_changes(db)
     else:
         changes = _concrete_target_changes(db)
+    if scope == "changed":
+        changes = _filter_target_changes(changes, q)
     if cursor:
         cursor_time, cursor_id = _decode_cursor(cursor)
         changes = [

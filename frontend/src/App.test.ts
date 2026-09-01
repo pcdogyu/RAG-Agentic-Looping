@@ -23,6 +23,7 @@ import {
   ChangedTargetGrid,
   ChangedTargetsContent,
   ChangedTargetsPage,
+  buildTargetChangeQuery,
   ConclusionDetailModal,
   describeMissingInformation,
   type ConclusionDetail,
@@ -53,6 +54,7 @@ import {
   routeFromHash,
   TargetChangeGrid,
   targetChangeResearchKey,
+  targetChangeSearchDebounceMs,
   type TargetChange,
   TopNavigation,
   UnifiedModelQueuePanel,
@@ -561,11 +563,20 @@ describe("changed targets page", () => {
     expect(markup).not.toContain("正在加载当前评级");
     expect(markup).toContain("宏观经济与行业变化");
     expect(markup).toContain("具体标的变化");
+    expect(markup).toContain('role="search"');
+    expect(markup).toContain('aria-label="搜索评级变化"');
+    expect(markup).toContain('placeholder="搜索宏观、行业、代码或标的名称"');
     expect(markup).toContain("股票、加密资产与商品价格");
     expect(markup).not.toContain("经济、行业、商品、汇率");
     expect(markup).toContain("正在加载宏观经济与行业变化");
     expect(markup).toContain("正在加载具体标的变化");
     expect(markup.indexOf("宏观经济与行业变化")).toBeLessThan(markup.indexOf("具体标的变化"));
+  });
+
+  it("builds trimmed server-side search and cursor parameters", () => {
+    expect(targetChangeSearchDebounceMs).toBe(300);
+    expect(buildTargetChangeQuery("asset", "  tgt  ")).toBe("kind=asset&limit=50&q=tgt");
+    expect(buildTargetChangeQuery("macro", "", "next-page")).toBe("kind=macro&limit=50&cursor=next-page");
   });
 
   it("keeps legacy target cards compatible with the new four-column grid", () => {

@@ -285,6 +285,9 @@ func (s *Server) targetChanges(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "target change query failed")
 		return
 	}
+	if scope == "changed" {
+		items = filterTargetChanges(items, r.URL.Query().Get("q"))
+	}
 	if raw := r.URL.Query().Get("cursor"); raw != "" {
 		stamp, id, decodeErr := decodeAssetCursor(raw)
 		if decodeErr != nil {
@@ -321,6 +324,26 @@ func (s *Server) targetChanges(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "next_cursor": next})
+}
+
+func filterTargetChanges(items []map[string]any, query string) []map[string]any {
+	needle := strings.ToLower(strings.TrimSpace(query))
+	if needle == "" {
+		return items
+	}
+	filtered := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		haystack := strings.ToLower(strings.Join([]string{
+			stringValue(item["label"]),
+			stringValue(item["symbol"]),
+			stringValue(item["market"]),
+			stringValue(item["target_type"]),
+		}, " "))
+		if strings.Contains(haystack, needle) {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered
 }
 
 func (s *Server) assetTargetChanges(r *http.Request) ([]map[string]any, error) {

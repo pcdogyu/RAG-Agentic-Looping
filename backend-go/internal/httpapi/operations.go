@@ -21,11 +21,6 @@ const (
 	scanStatusKey              = "market-loop:scan:status"
 	newsExtractionQueueKey     = "market-loop:scan:news-extraction-queue"
 	modelQueueOverviewCacheKey = "market-loop:model-queue-overview:snapshot:v3"
-	// Rebuilding the durable queue view can take over a minute while the
-	// research backlog is large. Keep a bounded two-minute snapshot available
-	// instead of replacing the real queue with an all-zero inference fallback.
-	modelQueueSnapshotMaxAge     = 2 * time.Minute
-	modelQueueSnapshotFutureSkew = 30 * time.Second
 )
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
@@ -512,44 +507,12 @@ func (s *Server) modelQueueOverview(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if raw, err := s.redis.Get(r.Context(), modelQueueOverviewCacheKey).Bytes(); err == nil {
-		var payload map[string]any
-		if json.Unmarshal(raw, &payload) == nil && modelQueueSnapshotFresh(payload, time.Now()) {
-			truncateQueueSnapshot(payload, limit)
-			writeJSON(w, http.StatusOK, payload)
-			return
-		}
-		_ = s.redis.Del(r.Context(), modelQueueOverviewCacheKey).Err()
+	payload := s.buildNativeModelQueueOverview(r.Context(), 500)
+	if encoded, err := json.Marshal(payload); err == nil {
+		_ = s.redis.Set(r.Context(), modelQueueOverviewCacheKey, encoded, 5*time.Minute).Err()
 	}
-	queues := make([]map[string]any, 0, 4)
-	for _, spec := range []struct {
-		lane, model, purpose, binding string
-		enabled                       bool
-	}{
-		{"extract", s.cfg.ExtractModel, "新闻抽取", "新闻事件结构化抽取", true},
-		{"research", s.cfg.ResearchModel, "标的研究", "工具深度研究与逐目标事件研报", true},
-		{"assist", s.cfg.AssistModel, "股票映射", "新闻事件二次股票映射", true},
-		{"code", s.cfg.CodeModel, "代码演进", evolutionBinding(s.cfg.EvolutionAutoMerge), s.cfg.EvolutionEnabled},
-	} {
-		status := s.inferenceQueue(r.Context(), spec.lane, spec.model, spec.purpose, spec.binding, spec.enabled)
-		counts := map[string]int{"queued": int(int64Value(status["queued"])), "running": int(int64Value(status["running"])), "retrying": 0, "verifying": 0, "waiting_for_model": 0, "completed": 0, "failed": 0}
-		queues = append(queues, map[string]any{
-			"id": spec.lane, "model": spec.model, "purpose": spec.purpose, "binding": spec.binding, "enabled": spec.enabled,
-			"state": status["state"], "threads": status["threads"], "capacity": status["capacity"], "available": status["available"],
-			"instance_count": 0, "per_instance_concurrency": status["capacity"], "observable": status["observable"], "instances": []any{},
-			"counts": counts, "metrics": emptyQueueMetrics(), "total_tasks": counts["queued"] + counts["running"], "truncated": false, "tasks": []any{}, "error": nil,
-		})
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"generated_at": time.Now().UTC(), "queues": queues})
-}
-
-func modelQueueSnapshotFresh(payload map[string]any, now time.Time) bool {
-	generatedAt := parseAnyTime(payload["generated_at"])
-	if generatedAt == nil {
-		return false
-	}
-	age := now.Sub(*generatedAt)
-	return age >= -modelQueueSnapshotFutureSkew && age <= modelQueueSnapshotMaxAge
+	truncateQueueSnapshot(payload, limit)
+	writeJSON(w, http.StatusOK, payload)
 }
 
 func truncateQueueSnapshot(payload map[string]any, limit int) {

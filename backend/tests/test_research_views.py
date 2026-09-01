@@ -548,6 +548,74 @@ def test_target_changes_split_macro_and_assets_and_link_latest_research(db):
     assert commodity_item["trend"]["algorithm_version"] == "dual-horizon-v1"
 
 
+def test_changed_target_search_filters_before_pagination_for_both_columns(db):
+    now = utc_now()
+    for symbol, offset in (("RECENT", 0), ("MATCHME", 10)):
+        target = asset(symbol)
+        for item, run in (
+            recommendation(
+                target,
+                rating=Rating.WATCH,
+                score=0,
+                as_of=now - timedelta(minutes=offset + 2),
+            ),
+            recommendation(
+                target,
+                rating=Rating.BULLISH,
+                score=45,
+                as_of=now - timedelta(minutes=offset + 1),
+            ),
+        ):
+            save_run(db, run)
+            save_recommendation(db, item)
+
+    for name, rating, score in (
+        ("能源行业", Rating.WATCH, 0),
+        ("能源行业", Rating.BEARISH, -45),
+    ):
+        event_run(
+            db,
+            f"{name}-{rating.value}",
+            status=RunStatus.COMPLETED,
+            impacts=[
+                impact(
+                    name,
+                    target_type=TargetType.SECTOR,
+                    rating=rating,
+                    score=score,
+                )
+            ],
+        )
+
+    with TestClient(app) as client:
+        asset_response = client.get(
+            "/api/v1/target-changes",
+            params={"kind": "asset", "q": "matchme", "limit": 1},
+        )
+        market_response = client.get(
+            "/api/v1/target-changes",
+            params={"kind": "asset", "q": "us", "limit": 50},
+        )
+        macro_response = client.get(
+            "/api/v1/target-changes",
+            params={"kind": "macro", "q": "能源", "limit": 50},
+        )
+        missing_response = client.get(
+            "/api/v1/target-changes",
+            params={"kind": "macro", "q": "不存在", "limit": 50},
+        )
+
+    assert asset_response.status_code == 200
+    assert [item["symbol"] for item in asset_response.json()["items"]] == ["MATCHME"]
+    assert asset_response.json()["next_cursor"] is None
+    assert {item["symbol"] for item in market_response.json()["items"]} == {
+        "RECENT",
+        "MATCHME",
+    }
+    assert [item["label"] for item in macro_response.json()["items"]] == ["能源"]
+    assert missing_response.json() == {"items": [], "next_cursor": None}
+
+
 def test_macro_change_keeps_published_report_visible_during_refresh(db):
     event_run(
         db,

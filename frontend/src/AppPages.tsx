@@ -2301,6 +2301,20 @@ export function targetChangeResearchKey(item: TargetChange) {
     : `asset:${item.key}`;
 }
 
+export const targetChangeSearchDebounceMs = 300;
+
+export function buildTargetChangeQuery(
+  kind: "macro" | "asset",
+  query: string,
+  cursor: string | null = null,
+) {
+  const params = new URLSearchParams({ kind, limit: "50" });
+  const normalizedQuery = query.trim();
+  if (normalizedQuery) params.set("q", normalizedQuery);
+  if (cursor) params.set("cursor", cursor);
+  return params.toString();
+}
+
 function TargetChangeSection({
   apiBase,
   kind,
@@ -2310,6 +2324,7 @@ function TargetChangeSection({
   detailLoadingId,
   researchStates,
   onResearch,
+  query,
 }: {
   apiBase: string;
   kind: "macro" | "asset";
@@ -2319,6 +2334,7 @@ function TargetChangeSection({
   detailLoadingId: string;
   researchStates: Record<string, ConclusionResearchState>;
   onResearch?: (item: TargetChange) => void;
+  query: string;
 }) {
   const [items, setItems] = useState<TargetChange[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
@@ -2326,27 +2342,41 @@ function TargetChangeSection({
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState("");
   const cursorRef = useRef<string | null>(null);
+  const requestIdRef = useRef(0);
 
   const load = useCallback(async (append = false, silent = false) => {
-    const params = new URLSearchParams({ kind, limit: "50" });
-    if (append && cursorRef.current) params.set("cursor", cursorRef.current);
-    if (append) setLoadingMore(true); else if (!silent) setLoading(true);
+    const requestId = ++requestIdRef.current;
+    const params = buildTargetChangeQuery(kind, query, append ? cursorRef.current : null);
+    if (append) setLoadingMore(true);
+    else {
+      setLoadingMore(false);
+      if (!silent) setLoading(true);
+    }
     try {
       const response = await fetch(`${apiBase}/api/v1/target-changes?${params}`);
       if (!response.ok) throw new Error(`${title}请求失败`);
       const payload = await response.json() as { items: TargetChange[]; next_cursor: string | null };
+      if (requestId !== requestIdRef.current) return;
       setItems((current) => append ? [...current, ...payload.items] : payload.items);
       cursorRef.current = payload.next_cursor;
       setCursor(payload.next_cursor);
       setError("");
     } catch (reason) {
+      if (requestId !== requestIdRef.current) return;
       setError(reason instanceof Error ? reason.message : `${title}请求失败`);
     } finally {
-      if (append) setLoadingMore(false); else if (!silent) setLoading(false);
+      if (requestId === requestIdRef.current) {
+        if (append) setLoadingMore(false); else if (!silent) setLoading(false);
+      }
     }
-  }, [apiBase, kind, title]);
+  }, [apiBase, kind, query, title]);
 
   useEffect(() => {
+    cursorRef.current = null;
+    setCursor(null);
+    setItems([]);
+    setError("");
+    setLoadingMore(false);
     void load();
     return subscribeLiveRefresh(
       () => void load(false, true),
@@ -2357,19 +2387,29 @@ function TargetChangeSection({
   return <section className={`target-change-section ${kind}`}>
     <header><div><p className="eyebrow">{kind === "macro" ? "MACRO / SECTOR" : "INSTRUMENT TARGETS"}</p><h2>{title}</h2><p>{copy}</p></div><button type="button" disabled={loading} onClick={() => void load()}>{loading ? "刷新中…" : "刷新"}</button></header>
     {error && <div className="page-error target-change-error"><span>{error}</span><button type="button" onClick={() => void load()}>重试</button></div>}
-    {!items.length && !error && (loading ? <div className="page-message">正在加载{title}…</div> : <div className="page-empty">当前没有最近评级变化。</div>)}
+    {!items.length && !error && (loading ? <div className="page-message">正在加载{title}…</div> : <div className="page-empty">{query ? `未找到与“${query}”匹配的评级变化。` : "当前没有最近评级变化。"}</div>)}
     {!!items.length && <TargetChangeGrid items={items} onOpen={onOpen} detailLoadingId={detailLoadingId} researchStates={researchStates} onResearch={onResearch} />}
     {cursor && <button className="load-more" type="button" disabled={loadingMore} onClick={() => void load(true)}>{loadingMore ? "正在加载…" : "加载更多"}</button>}
   </section>;
 }
 
 export function ChangedTargetsPage({ apiBase }: { apiBase: string }) {
+  const [searchQuery, setSearchQuery] = useState("");
+  const [debouncedQuery, setDebouncedQuery] = useState("");
   const [detailLoadingId, setDetailLoadingId] = useState("");
   const [detailError, setDetailError] = useState("");
   const [selectedAsset, setSelectedAsset] = useState<ConclusionDetail | null>(null);
   const [selectedEvent, setSelectedEvent] = useState<EventConclusionDetail | null>(null);
   const [researchStates, setResearchStates] = useState<Record<string, ConclusionResearchState>>({});
   const researchInFlight = useRef(new Set<string>());
+
+  useEffect(() => {
+    const timer = window.setTimeout(
+      () => setDebouncedQuery(searchQuery.trim()),
+      targetChangeSearchDebounceMs,
+    );
+    return () => window.clearTimeout(timer);
+  }, [searchQuery]);
 
   async function openLatestResearch(item: TargetChange) {
     if (detailLoadingId) return;
@@ -2409,9 +2449,13 @@ export function ChangedTargetsPage({ apiBase }: { apiBase: string }) {
   return <section className="app-page targets-page">
     <PageHeading eyebrow="RATING CHANGES" title="标的评级变化" copy="左侧追踪宏观经济、行业及跨资产目标，右侧追踪具体证券与商品价格；仅展示最近一次五级评级变化。" />
     {detailError && <div className="page-error target-detail-error"><span>{detailError}</span></div>}
+    <form className="page-filters target-search" role="search" onSubmit={(event) => { event.preventDefault(); setDebouncedQuery(searchQuery.trim()); }}>
+      <input type="search" aria-label="搜索评级变化" placeholder="搜索宏观、行业、代码或标的名称" value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} />
+      {searchQuery && <button type="button" onClick={() => { setSearchQuery(""); setDebouncedQuery(""); }}>清除</button>}
+    </form>
     <div className="target-change-split">
-      <TargetChangeSection apiBase={apiBase} kind="macro" title="宏观经济与行业变化" copy="经济、行业、汇率、利率、供给、航运与风险资产。" onOpen={(item) => void openLatestResearch(item)} detailLoadingId={detailLoadingId} researchStates={researchStates} onResearch={(item) => void researchAgain(item)} />
-      <TargetChangeSection apiBase={apiBase} kind="asset" title="具体标的变化" copy="股票、加密资产与商品价格的最新五级评级变化及研究结论。" onOpen={(item) => void openLatestResearch(item)} detailLoadingId={detailLoadingId} researchStates={researchStates} onResearch={(item) => void researchAgain(item)} />
+      <TargetChangeSection apiBase={apiBase} kind="macro" title="宏观经济与行业变化" copy="经济、行业、汇率、利率、供给、航运与风险资产。" query={debouncedQuery} onOpen={(item) => void openLatestResearch(item)} detailLoadingId={detailLoadingId} researchStates={researchStates} onResearch={(item) => void researchAgain(item)} />
+      <TargetChangeSection apiBase={apiBase} kind="asset" title="具体标的变化" copy="股票、加密资产与商品价格的最新五级评级变化及研究结论。" query={debouncedQuery} onOpen={(item) => void openLatestResearch(item)} detailLoadingId={detailLoadingId} researchStates={researchStates} onResearch={(item) => void researchAgain(item)} />
     </div>
     {selectedAsset && <ConclusionDetailModal detail={selectedAsset} onClose={() => setSelectedAsset(null)} />}
     {selectedEvent && <EventConclusionDetailModal detail={selectedEvent} onClose={() => setSelectedEvent(null)} />}
