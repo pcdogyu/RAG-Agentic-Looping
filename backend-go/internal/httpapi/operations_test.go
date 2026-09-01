@@ -13,7 +13,8 @@ func TestModelQueueSnapshotFresh(t *testing.T) {
 		want      bool
 	}{
 		{name: "fresh", generated: now.Add(-5 * time.Second).Format(time.RFC3339Nano), want: true},
-		{name: "stale", generated: now.Add(-time.Minute).Format(time.RFC3339Nano), want: false},
+		{name: "slow publisher refresh", generated: now.Add(-90 * time.Second).Format(time.RFC3339Nano), want: true},
+		{name: "stale", generated: now.Add(-3 * time.Minute).Format(time.RFC3339Nano), want: false},
 		{name: "implausibly future", generated: now.Add(time.Minute).Format(time.RFC3339Nano), want: false},
 		{name: "missing", generated: nil, want: false},
 	}

@@ -21,7 +21,11 @@ const (
 	scanStatusKey              = "market-loop:scan:status"
 	newsExtractionQueueKey     = "market-loop:scan:news-extraction-queue"
 	modelQueueOverviewCacheKey = "market-loop:model-queue-overview:snapshot:v3"
-	modelQueueSnapshotMaxAge   = 30 * time.Second
+	// Rebuilding the durable queue view can take over a minute while the
+	// research backlog is large. Keep a bounded two-minute snapshot available
+	// instead of replacing the real queue with an all-zero inference fallback.
+	modelQueueSnapshotMaxAge     = 2 * time.Minute
+	modelQueueSnapshotFutureSkew = 30 * time.Second
 )
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
@@ -545,7 +549,7 @@ func modelQueueSnapshotFresh(payload map[string]any, now time.Time) bool {
 		return false
 	}
 	age := now.Sub(*generatedAt)
-	return age >= -modelQueueSnapshotMaxAge && age <= modelQueueSnapshotMaxAge
+	return age >= -modelQueueSnapshotFutureSkew && age <= modelQueueSnapshotMaxAge
 }
 
 func truncateQueueSnapshot(payload map[string]any, limit int) {
