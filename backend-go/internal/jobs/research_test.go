@@ -170,8 +170,8 @@ func TestResearchModelDoesNotRetryAfterTimeout(t *testing.T) {
 		"research-0",
 		&result,
 	)
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("expected deadline exceeded, got %v", err)
+	if !isResearchRequestTimeoutOrCancellation(err) {
+		t.Fatalf("expected timeout or cancellation, got %v", err)
 	}
 	if actual := requests.Load(); actual != 1 {
 		t.Fatalf("expected one timed-out request without retry, got %d", actual)

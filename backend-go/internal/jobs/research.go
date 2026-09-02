@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -554,7 +555,7 @@ func (runtime *researchRuntime) callResearchModel(ctx context.Context, entityID 
 			if err != nil {
 				lastErr = err
 				runtime.persistResearchAudit(context.WithoutCancel(ctx), logicalID, entityID, entityType, operation, attempt, "failed", started, messages, schema, "", nil, err.Error(), 0, 0, endpoint)
-				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+				if isResearchRequestTimeoutOrCancellation(err) {
 					return err
 				}
 				continue
@@ -591,6 +592,14 @@ func (runtime *researchRuntime) callResearchModel(ctx context.Context, entityID 
 		lastErr = errors.New("no research model endpoint configured")
 	}
 	return lastErr
+}
+
+func isResearchRequestTimeoutOrCancellation(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
 func researchEndpointIndex(values []string, selected string) int {
