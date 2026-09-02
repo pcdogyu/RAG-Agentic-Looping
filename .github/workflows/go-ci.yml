@@ -77,3 +77,7 @@ jobs:
           cache-dependency-path: backend-go/go.sum
       - name: Verify fresh and legacy migration contracts
         run: go test -race ./internal/migrate -run 'TestUp(Create|Upgrade)' -count=1 -v
+      - name: Verify recent research filtering against PostgreSQL
+        env:
+          MAPPING_TEST_ISOLATED: "1"
+        run: go test -race ./internal/jobs -run '^TestRecentResearchFilterAgainstPostgres$' -count=1 -v
