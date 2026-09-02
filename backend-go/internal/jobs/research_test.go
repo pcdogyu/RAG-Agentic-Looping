@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -100,6 +101,42 @@ func TestResearchModelRequestEnablesThinking(t *testing.T) {
 	}
 	if thinking, ok := request["think"].(bool); !ok || !thinking {
 		t.Fatalf("expected think=true, got %#v", request["think"])
+	}
+}
+
+func TestResearchModelDoesNotRetryAfterTimeout(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		time.Sleep(100 * time.Millisecond)
+		_, _ = w.Write([]byte(`{"message":{"content":"{}"}}`))
+	}))
+	defer server.Close()
+
+	runtime := &researchRuntime{
+		cfg: config.Config{
+			ResearchModel: "qwen3:4b-thinking",
+			ResearchURLs:  []string{server.URL},
+		},
+		client: &http.Client{Timeout: 10 * time.Millisecond},
+	}
+	var result map[string]any
+	err := runtime.callResearchModel(
+		context.Background(),
+		[16]byte{},
+		"research_run",
+		"report_drafting",
+		"system",
+		"prompt",
+		map[string]any{"type": "object"},
+		"research-0",
+		&result,
+	)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected deadline exceeded, got %v", err)
+	}
+	if actual := requests.Load(); actual != 1 {
+		t.Fatalf("expected one timed-out request without retry, got %d", actual)
 	}
 }
 

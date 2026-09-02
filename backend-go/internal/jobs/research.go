@@ -554,6 +554,9 @@ func (runtime *researchRuntime) callResearchModel(ctx context.Context, entityID 
 			if err != nil {
 				lastErr = err
 				runtime.persistResearchAudit(context.WithoutCancel(ctx), logicalID, entityID, entityType, operation, attempt, "failed", started, messages, schema, "", nil, err.Error(), 0, 0, endpoint)
+				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+					return err
+				}
 				continue
 			}
 			payload, readErr := io.ReadAll(io.LimitReader(response.Body, 12<<20))

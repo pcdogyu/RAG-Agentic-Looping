@@ -113,7 +113,7 @@ func Load() (Config, error) {
 		ResearchURLs:          modelURLs("RESEARCH", "http://host.docker.internal:11435"),
 		CodeURLs:              modelURLs("CODE", "http://host.docker.internal:11438"),
 		OllamaTimeout:         time.Duration(envInt("OLLAMA_TIMEOUT_SECONDS", 300)) * time.Second,
-		ResearchTimeout:       time.Duration(envInt("OLLAMA_RESEARCH_TIMEOUT_SECONDS", 900)) * time.Second,
+		ResearchTimeout:       time.Duration(envInt("OLLAMA_RESEARCH_TIMEOUT_SECONDS", 1800)) * time.Second,
 		ResearchSoftLimit:     time.Duration(envInt("RESEARCH_ASSET_SOFT_TIME_LIMIT_SECONDS", 2040)) * time.Second,
 		ResearchHardLimit:     time.Duration(envInt("RESEARCH_ASSET_HARD_TIME_LIMIT_SECONDS", 2100)) * time.Second,
 		OllamaContextLength:   envInt("OLLAMA_CONTEXT_LENGTH", 8192),
