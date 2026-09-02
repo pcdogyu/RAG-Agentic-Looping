@@ -47,6 +47,11 @@ type nativeModelQueueResult struct {
 	queue map[string]any
 }
 
+type nativeExecutionSamples struct {
+	all        []int64
+	byInstance map[string][]int64
+}
+
 func (s *Server) buildNativeModelQueueOverview(ctx context.Context, limit int) map[string]any {
 	now := time.Now().UTC()
 	specs := []nativeModelQueueSpec{
@@ -63,7 +68,11 @@ func (s *Server) buildNativeModelQueueOverview(ctx context.Context, limit int) m
 			if err != nil {
 				slog.Error("native model queue query failed", "queue", spec.id, "error", err)
 			}
-			results <- nativeModelQueueResult{index: index, queue: nativeModelQueueItem(spec, inference, jobs, limit, now, err)}
+			executionSamples, auditErr := s.loadRecentModelExecutionSamples(ctx, spec.id, now.Add(-modelQueueRecentExecutionTime))
+			if auditErr != nil {
+				slog.Error("native model execution metrics query failed", "queue", spec.id, "error", auditErr)
+			}
+			results <- nativeModelQueueResult{index: index, queue: nativeModelQueueItem(spec, inference, jobs, executionSamples, limit, now, err)}
 		}(index, spec)
 	}
 	queues := make([]any, len(specs))
@@ -72,6 +81,37 @@ func (s *Server) buildNativeModelQueueOverview(ctx context.Context, limit int) m
 		queues[result.index] = result.queue
 	}
 	return map[string]any{"generated_at": now, "producer": "go-api", "queues": queues}
+}
+
+// loadRecentModelExecutionSamples uses the model audit log as the authority for
+// actual inference time. Some queue jobs are lifecycle wrappers and can finish
+// without a meaningful started_at/execution_duration_ms value.
+func (s *Server) loadRecentModelExecutionSamples(ctx context.Context, queue string, cutoff time.Time) (nativeExecutionSamples, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT coalesce(nullif(metrics->>'endpoint',''),$1||'-0'),duration_ms
+		FROM model_call_audits
+		WHERE provider='ollama'
+		  AND metrics->>'lane'=$1
+		  AND status IN ('completed','failed')
+		  AND completed_at >= $2
+		  AND duration_ms IS NOT NULL
+		ORDER BY completed_at`, queue, cutoff)
+	if err != nil {
+		return nativeExecutionSamples{}, err
+	}
+	defer rows.Close()
+	samples := nativeExecutionSamples{byInstance: map[string][]int64{}}
+	for rows.Next() {
+		var instanceID string
+		var duration int64
+		if err := rows.Scan(&instanceID, &duration); err != nil {
+			return nativeExecutionSamples{}, err
+		}
+		duration = max(int64(0), duration)
+		samples.all = append(samples.all, duration)
+		samples.byInstance[instanceID] = append(samples.byInstance[instanceID], duration)
+	}
+	return samples, rows.Err()
 }
 
 // loadNativeModelJobs uses go_jobs as the lifecycle authority. The joins are
@@ -163,7 +203,7 @@ func (s *Server) loadNativeModelJobs(ctx context.Context, queue string, cutoff t
 	return jobs, rows.Err()
 }
 
-func nativeModelQueueItem(spec nativeModelQueueSpec, inference map[string]any, jobs []nativeModelJob, limit int, now time.Time, queryErr error) map[string]any {
+func nativeModelQueueItem(spec nativeModelQueueSpec, inference map[string]any, jobs []nativeModelJob, executionSamples nativeExecutionSamples, limit int, now time.Time, queryErr error) map[string]any {
 	rawInstances := nativeInferenceInstances(inference["instances"])
 	instanceIDs := make([]string, 0, len(rawInstances))
 	for _, raw := range rawInstances {
@@ -192,11 +232,13 @@ func nativeModelQueueItem(spec nativeModelQueueSpec, inference map[string]any, j
 		observable := boolValue(base["observable"])
 		healthy := boolValue(base["healthy"])
 		modelAvailable := boolValue(base["model_available"])
+		metrics := nativeQueueMetrics(instanceJobs, instanceCounts, now)
+		nativeApplyExecutionSamples(metrics, executionSamples.byInstance[instanceID])
 		instances = append(instances, map[string]any{
 			"id": instanceID, "healthy": healthy, "model_available": modelAvailable,
 			"state":    nativeQueueState(instanceCounts, spec.enabled, observable && healthy && modelAvailable),
 			"capacity": int64Value(base["capacity"]), "available": available, "observable": observable,
-			"counts": instanceCounts, "metrics": nativeQueueMetrics(instanceJobs, instanceCounts, now),
+			"counts": instanceCounts, "metrics": metrics,
 			"total_tasks": nativeCountedTasks(instanceCounts), "truncated": len(instanceVisible) > limit,
 			"tasks": nativeTaskValues(instanceVisible[:instanceLimit], now),
 		})
@@ -223,15 +265,29 @@ func nativeModelQueueItem(spec nativeModelQueueSpec, inference map[string]any, j
 	if queryErr != nil {
 		errorValue = "模型队列任务状态暂时不可用。"
 	}
+	metrics := nativeQueueMetrics(jobs, counts, now)
+	nativeApplyExecutionSamples(metrics, executionSamples.all)
 	return map[string]any{
 		"id": spec.id, "model": spec.model, "purpose": spec.purpose, "binding": spec.binding,
 		"enabled": spec.enabled, "state": nativeQueueState(counts, spec.enabled, boolValue(inference["observable"])),
 		"threads": modelThreads(spec.id), "capacity": int64Value(inference["capacity"]), "available": available,
 		"instance_count": len(instanceIDs), "per_instance_concurrency": int64Value(inference["per_instance_concurrency"]),
 		"observable": boolValue(inference["observable"]), "instances": instances,
-		"counts": counts, "metrics": nativeQueueMetrics(jobs, counts, now), "total_tasks": nativeCountedTasks(counts),
+		"counts": counts, "metrics": metrics, "total_tasks": nativeCountedTasks(counts),
 		"truncated": len(visible) > limit, "tasks": nativeTaskValues(visible[:visibleLimit], now), "error": errorValue,
 	}
+}
+
+func nativeApplyExecutionSamples(metrics map[string]any, samples []int64) {
+	if len(samples) == 0 {
+		return
+	}
+	ordered := append([]int64(nil), samples...)
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i] < ordered[j] })
+	metrics["average_execution_duration_ms"] = averageInt64(ordered)
+	metrics["execution_duration_sample_count"] = len(ordered)
+	metrics["execution_p50_ms"] = nativePercentile(ordered, 0.5)
+	metrics["execution_p90_ms"] = nativePercentile(ordered, 0.9)
 }
 
 func nativeInferenceInstances(value any) []any {

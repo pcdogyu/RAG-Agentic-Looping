@@ -17,7 +17,7 @@ func TestNativeModelQueueItemUsesDurableJobCountsAndInstances(t *testing.T) {
 		"capacity": 3, "available": 2, "running": 1, "queued": 2, "observable": true, "per_instance_concurrency": 3,
 		"instances": []map[string]any{{"id": "research-0", "healthy": true, "model_available": true, "capacity": 3, "available": 2, "running": 1, "queued": 2, "observable": true}},
 	}
-	queue := nativeModelQueueItem(nativeModelQueueSpec{id: "research", model: "qwen2.5:7b", purpose: "标的研究", binding: "研究", enabled: true}, inference, jobs, 50, now, nil)
+	queue := nativeModelQueueItem(nativeModelQueueSpec{id: "research", model: "qwen2.5:7b", purpose: "标的研究", binding: "研究", enabled: true}, inference, jobs, nativeExecutionSamples{}, 50, now, nil)
 	counts := queue["counts"].(map[string]int64)
 	if counts["running"] != 1 || counts["failed"] != 1 || counts["completed"] != 1 || counts["waiting_for_model"] != 2 {
 		t.Fatalf("unexpected counts: %#v", counts)
@@ -52,12 +52,42 @@ func TestNativeModelQueueItemReturnsDatabaseError(t *testing.T) {
 		nativeModelQueueSpec{id: "assist", enabled: true},
 		map[string]any{"capacity": 1, "available": 0, "observable": true, "instances": []map[string]any{}},
 		nil,
+		nativeExecutionSamples{},
 		50,
 		time.Now().UTC(),
 		errors.New("database unavailable"),
 	)
 	if queue["error"] != "模型队列任务状态暂时不可用。" {
 		t.Fatalf("unexpected error: %v", queue["error"])
+	}
+}
+
+func TestNativeModelQueueItemPrefersAuditExecutionSamples(t *testing.T) {
+	now := time.Date(2026, time.September, 2, 8, 0, 0, 0, time.UTC)
+	completed := now.Add(-time.Hour)
+	started := completed.Add(-time.Millisecond)
+	jobs := []nativeModelJob{{
+		ID: "wrapper", Status: "completed", CreatedAt: started, UpdatedAt: completed,
+		StartedAt: &started, CompletedAt: &completed, ExecutionMS: 1, InstanceID: "extract-0",
+	}}
+	inference := map[string]any{
+		"capacity": 1, "observable": true, "per_instance_concurrency": 1,
+		"instances": []map[string]any{{"id": "extract-0", "healthy": true, "model_available": true, "capacity": 1, "observable": true}},
+	}
+	samples := nativeExecutionSamples{
+		all:        []int64{20_000, 40_000, 60_000},
+		byInstance: map[string][]int64{"extract-0": {20_000, 40_000, 60_000}},
+	}
+	queue := nativeModelQueueItem(nativeModelQueueSpec{id: "extract", enabled: true}, inference, jobs, samples, 50, now, nil)
+	metrics := queue["metrics"].(map[string]any)
+	instanceMetrics := queue["instances"].([]any)[0].(map[string]any)["metrics"].(map[string]any)
+	for label, values := range map[string]map[string]any{"queue": metrics, "instance": instanceMetrics} {
+		if values["average_execution_duration_ms"] != int64(40_000) || values["execution_duration_sample_count"] != 3 {
+			t.Fatalf("%s metrics did not use audit samples: %#v", label, values)
+		}
+		if values["execution_p50_ms"] != int64(40_000) || values["execution_p90_ms"] != int64(60_000) {
+			t.Fatalf("%s percentiles did not use audit samples: %#v", label, values)
+		}
 	}
 }
 
