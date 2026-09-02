@@ -58,8 +58,11 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	if total := failures + successes; total > 0 {
 		failureRate = float64(failures) / float64(total)
 	}
-	instances, models := probeOllama(ctx)
-	ollama := len(instances) > 0 && boolValue(instances[0]["healthy"])
+	instances, models, modelStatuses := probeOllama(ctx)
+	ollama := false
+	for _, instance := range instances {
+		ollama = ollama || boolValue(instance["healthy"])
+	}
 	status := "degraded"
 	if database && redisOK && ollama && dataFresh {
 		status = "ok"
@@ -67,6 +70,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status": status, "database": database, "redis": redisOK,
 		"task_failure_rate": failureRate, "ollama": ollama, "models": models,
+		"model_statuses":   modelStatuses,
 		"ollama_instances": instances, "fmp_configured": s.cfg.FMPAccessToken != "",
 		"fmp_mcp_configured": os.Getenv("FMP_MCP_URL") != "",
 		"latest_news_at":     timeOrNil(latestNews), "latest_news_discovery_at": timeOrNil(latestDiscovery),
@@ -77,30 +81,51 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func probeOllama(ctx context.Context) ([]map[string]any, []string) {
-	type lane struct{ name, model string }
-	lanes := []lane{{"extract", envValue("OLLAMA_EXTRACT_MODEL", "qwen2.5:3b")}, {"assist", envValue("OLLAMA_ASSIST_MODEL", "qwen2.5:7b")}, {"research", envValue("OLLAMA_RESEARCH_MODEL", "qwen3:4b-thinking")}, {"code", envValue("OLLAMA_CODE_MODEL", "qwen2.5-coder:7b")}}
+func probeOllama(ctx context.Context) ([]map[string]any, []string, map[string]map[string]bool) {
+	type lane struct{ name, model, fallbackURL string }
+	lanes := []lane{
+		{"extract", envValue("OLLAMA_EXTRACT_MODEL", "qwen2.5:3b"), "http://host.docker.internal:11434"},
+		{"assist", envValue("OLLAMA_ASSIST_MODEL", "qwen2.5:7b"), "http://host.docker.internal:11437"},
+		{"research", envValue("OLLAMA_RESEARCH_MODEL", "qwen3:4b-thinking"), "http://host.docker.internal:11435"},
+		{"code", envValue("OLLAMA_CODE_MODEL", "qwen2.5-coder:7b"), "http://host.docker.internal:11438"},
+	}
 	client := &http.Client{Timeout: 2 * time.Second}
-	seenURLs := map[string]struct{}{}
 	seenModels := map[string]struct{}{}
+	availableByURL := map[string][]string{}
+	loadedByURL := map[string][]string{}
 	instances := make([]map[string]any, 0)
+	modelStatuses := make(map[string]map[string]bool, len(lanes))
 	for _, item := range lanes {
 		urls := splitEnvURLs("OLLAMA_" + strings.ToUpper(item.name) + "_BASE_URLS")
 		if len(urls) == 0 {
-			urls = splitEnvURLs("OLLAMA_" + strings.ToUpper(item.name) + "_BASE_URL")
+			urls = []string{envValue("OLLAMA_"+strings.ToUpper(item.name)+"_BASE_URL", item.fallbackURL)}
 		}
 		for index, base := range urls {
-			if _, ok := seenURLs[base]; ok {
-				continue
+			base = strings.TrimRight(base, "/")
+			available, probed := availableByURL[base]
+			if !probed {
+				available = fetchOllamaModels(ctx, client, base)
+				availableByURL[base] = available
+				loadedByURL[base] = fetchOllamaLoadedModels(ctx, client, base)
 			}
-			seenURLs[base] = struct{}{}
-			available := fetchOllamaModels(ctx, client, strings.TrimRight(base, "/"))
+			loaded := loadedByURL[base]
 			for _, model := range available {
 				seenModels[model] = struct{}{}
 			}
+			healthy := available != nil
+			modelAvailable := healthy && contains(available, item.model)
+			modelLoaded := loaded != nil && contains(loaded, item.model)
+			status := modelStatuses[item.model]
+			if status == nil {
+				status = map[string]bool{}
+				modelStatuses[item.model] = status
+			}
+			status["healthy"] = status["healthy"] || healthy
+			status["model_available"] = status["model_available"] || modelAvailable
+			status["model_loaded"] = status["model_loaded"] || modelLoaded
 			instances = append(instances, map[string]any{
 				"id": fmt.Sprintf("%s-%d", item.name, index+1), "healthy": available != nil,
-				"model_available": contains(available, item.model), "model_loaded": false,
+				"model": item.model, "model_available": modelAvailable, "model_loaded": modelLoaded,
 			})
 		}
 	}
@@ -109,11 +134,19 @@ func probeOllama(ctx context.Context) ([]map[string]any, []string) {
 		models = append(models, model)
 	}
 	sort.Strings(models)
-	return instances, models
+	return instances, models, modelStatuses
 }
 
 func fetchOllamaModels(ctx context.Context, client *http.Client, base string) []string {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/api/tags", nil)
+	return fetchOllamaModelNames(ctx, client, base+"/api/tags")
+}
+
+func fetchOllamaLoadedModels(ctx context.Context, client *http.Client, base string) []string {
+	return fetchOllamaModelNames(ctx, client, base+"/api/ps")
+}
+
+func fetchOllamaModelNames(ctx context.Context, client *http.Client, endpoint string) []string {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil
 	}

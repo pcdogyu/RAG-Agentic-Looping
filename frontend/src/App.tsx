@@ -86,6 +86,11 @@ type ScanStatus = {
 export type HealthStatus = {
   ollama: boolean;
   models: string[];
+  model_statuses?: Record<string, {
+    healthy: boolean;
+    model_available: boolean;
+    model_loaded: boolean;
+  }>;
 };
 
 export type ModelConnectionState = "checking" | "offline" | "available" | "missing";
@@ -101,7 +106,7 @@ export type HealthTrackingState = {
   models: Record<string, TrackedConnection>;
 };
 
-const ollamaModels = ["qwen2.5:3b", "qwen2.5:7b", "qwen2.5-coder:7b"] as const;
+const ollamaModels = ["qwen2.5:3b", "qwen2.5:7b", "qwen2.5-coder:7b", "qwen3:4b-thinking"] as const;
 const healthFailureThreshold = 3;
 const themeStorageKey = "market-loop-theme";
 
@@ -139,16 +144,22 @@ export function updateHealthTracking(
   const installedModels = new Set(
     ollamaAvailable ? health.models.map((name) => name.toLocaleLowerCase()) : [],
   );
+  const modelStatuses = new Map(
+    Object.entries(health?.model_statuses ?? {}).map(([name, status]) => [name.toLocaleLowerCase(), status]),
+  );
   return {
     ollama: advanceConnection(current.ollama, ollamaAvailable, "offline"),
     models: Object.fromEntries(ollamaModels.map((model) => {
-      const available = ollamaAvailable && installedModels.has(model.toLocaleLowerCase());
+      const status = modelStatuses.get(model.toLocaleLowerCase());
+      const available = ollamaAvailable && (status
+        ? status.healthy && status.model_available
+        : installedModels.has(model.toLocaleLowerCase()));
       return [
         model,
         advanceConnection(
           current.models[model],
           available,
-          ollamaAvailable ? "missing" : "offline",
+          ollamaAvailable && status?.healthy !== false ? "missing" : "offline",
         ),
       ];
     })),
@@ -160,7 +171,9 @@ function isHealthStatus(value: unknown): value is HealthStatus {
   const candidate = value as Partial<HealthStatus>;
   return typeof candidate.ollama === "boolean"
     && Array.isArray(candidate.models)
-    && candidate.models.every((model) => typeof model === "string");
+    && candidate.models.every((model) => typeof model === "string")
+    && (candidate.model_statuses === undefined
+      || (typeof candidate.model_statuses === "object" && candidate.model_statuses !== null));
 }
 
 type DashboardSnapshot = Snapshot & { analysis_logs: AnalysisLog[] };

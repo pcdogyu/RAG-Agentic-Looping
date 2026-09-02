@@ -139,12 +139,31 @@ describe("Ollama model availability", () => {
 
     tracking = updateHealthTracking(tracking, {
       ollama: true,
-      models: ["qwen2.5:3b", "qwen2.5:7b", "qwen2.5-coder:7b"],
+      models: ["qwen2.5:3b", "qwen2.5:7b", "qwen2.5-coder:7b", "qwen3:4b-thinking"],
     });
 
     expect(tracking.ollama).toEqual({ failures: 0, state: "available" });
     expect(tracking.models["qwen2.5:7b"]).toEqual({ failures: 0, state: "available" });
     expect(tracking.models["qwen2.5-coder:7b"]).toEqual({ failures: 0, state: "available" });
+    expect(tracking.models["qwen3:4b-thinking"]).toEqual({ failures: 0, state: "available" });
+  });
+
+  it("uses lane-specific model status when an installed model instance is offline", () => {
+    let tracking = createInitialHealthTracking();
+    const health = {
+      ollama: true,
+      models: ["qwen2.5-coder:7b", "qwen3:4b-thinking"],
+      model_statuses: {
+        "qwen2.5-coder:7b": { healthy: false, model_available: false, model_loaded: false },
+        "qwen3:4b-thinking": { healthy: true, model_available: true, model_loaded: true },
+      },
+    };
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      tracking = updateHealthTracking(tracking, health);
+    }
+
+    expect(tracking.models["qwen2.5-coder:7b"].state).toBe("offline");
+    expect(tracking.models["qwen3:4b-thinking"].state).toBe("available");
   });
 
   it("tracks missing models independently from Ollama and installed models", () => {
