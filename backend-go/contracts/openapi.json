@@ -1603,6 +1603,11 @@
             ],
             "title": "Entity Id"
           },
+          "filter_recent_research": {
+            "default": true,
+            "title": "Filter Recent Research",
+            "type": "boolean"
+          },
           "instance_id": {
             "anyOf": [
               {
@@ -1628,6 +1633,17 @@
           "kind"
         ],
         "title": "ModelTaskRetryRequest",
+        "type": "object"
+      },
+      "ModelQueueRetryRequest": {
+        "properties": {
+          "filter_recent_research": {
+            "default": true,
+            "title": "Filter Recent Research",
+            "type": "boolean"
+          }
+        },
+        "title": "ModelQueueRetryRequest",
         "type": "object"
       },
       "NewsBoardAsset": {
@@ -6155,6 +6171,16 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelQueueRetryRequest"
+              }
+            }
+          },
+          "required": false
+        },
         "responses": {
           "202": {
             "content": {
@@ -6192,6 +6218,16 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelQueueRetryRequest"
+              }
+            }
+          },
+          "required": false
+        },
         "responses": {
           "202": {
             "content": {

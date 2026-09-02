@@ -271,6 +271,9 @@ h1 span { color: var(--mint); font-weight: 400; }
 .model-queue-retry { padding: 4px 8px; border: 1px solid rgba(99,242,186,.36); border-radius: 5px; color: var(--mint); background: transparent; font: 400 9px "DM Mono", monospace; cursor: pointer; }
 .model-queue-retry:hover { border-color: var(--mint); background: rgba(99,242,186,.08); }
 .model-queue-retry:disabled { opacity: .4; cursor: default; }
+.model-queue-filter-toggle { display: flex; align-items: center; gap: 5px; color: var(--muted); font: 400 9px "DM Mono", monospace; white-space: nowrap; cursor: pointer; }
+.model-queue-filter-toggle input { width: 13px; height: 13px; margin: 0; accent-color: var(--mint); cursor: pointer; }
+.model-queue-filter-toggle:has(input:checked) { color: var(--mint); }
 .model-queue-runtime { display: grid; gap: 7px; margin: 0 0 12px; }
 .model-queue-runtime.standard { grid-template-columns: repeat(6, minmax(0, 1fr)); }
 .model-queue-runtime.research { grid-template-columns: repeat(9, minmax(0, 1fr)); }

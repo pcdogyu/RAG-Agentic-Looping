@@ -34,8 +34,10 @@ import {
   factSourceGroupDefinitions,
   formatQueueDuration,
   ModelInferenceQueuePanel,
+  modelQueueRetryRequest,
   modelQueuePanelColumns,
   modelQueueInstances,
+  modelTaskRetryRequest,
   ModelQueueTaskGrid,
   type ModelQueueOverviewItem,
   type ModelQueueTask,
@@ -1264,6 +1266,38 @@ describe("research queue page", () => {
     }));
     expect(assistMarkup).toContain("assist-0</h3>");
     expect(assistMarkup).toContain("实例可用");
+  });
+
+  it("shows the default-on 48h retry filter only for assist and sends its value", () => {
+    const assist = overviewQueue({ id: "assist", purpose: "股票映射" });
+    const research = overviewQueue({ id: "research", purpose: "标的研究" });
+    const assistMarkup = renderToStaticMarkup(createElement(UnifiedModelQueuePanel, { queue: assist }));
+    const disabledMarkup = renderToStaticMarkup(createElement(UnifiedModelQueuePanel, {
+      queue: assist,
+      filterRecentResearch: false,
+    }));
+    const researchMarkup = renderToStaticMarkup(createElement(UnifiedModelQueuePanel, { queue: research }));
+
+    expect(assistMarkup).toContain("过滤 48h 已研究");
+    expect(assistMarkup).toContain('type="checkbox" checked=""');
+    expect(disabledMarkup).toContain('type="checkbox"');
+    expect(disabledMarkup).not.toContain('checked=""');
+    expect(researchMarkup).not.toContain("过滤 48h 已研究");
+
+    const task = {
+      task_id: "mapping-1", kind: "asset_mapping", entity_id: "event-1", instance_id: "assist-0",
+    } as Pick<ModelQueueTask, "task_id" | "kind" | "entity_id" | "instance_id">;
+    expect(JSON.parse(String(modelTaskRetryRequest(assist, task, true).body))).toMatchObject({
+      filter_recent_research: true,
+    });
+    expect(JSON.parse(String(modelTaskRetryRequest(assist, task, false).body))).toMatchObject({
+      filter_recent_research: false,
+    });
+    expect(JSON.parse(String(modelQueueRetryRequest(assist, false).body))).toEqual({
+      filter_recent_research: false,
+    });
+    expect(JSON.parse(String(modelTaskRetryRequest(research, task, true).body))).not.toHaveProperty("filter_recent_research");
+    expect(modelQueueRetryRequest(research, true).body).toBeUndefined();
   });
 
   it("keeps extract and mapping instances left, then research and code instances right", () => {

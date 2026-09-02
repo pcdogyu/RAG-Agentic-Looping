@@ -326,7 +326,7 @@ func (runtime *recoveryRuntime) recoverStrandedEvents(ctx context.Context, now t
 		}
 		var queued bool
 		if recoveryMappingTerminal(event) {
-			queued, err = runtime.shared.enqueueEventResearch(ctx, event)
+			queued, err = runtime.shared.enqueueEventResearch(ctx, event, true)
 			result["event_research_queued"] += boolInt(queued)
 		} else {
 			force := latestAnalysisStep(event, "asset_mapping_queue") != nil

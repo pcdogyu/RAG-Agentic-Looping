@@ -42,30 +42,33 @@ type mappingOutput struct {
 }
 
 type mappingAsset struct {
-	Data          map[string]any
-	ID            string
-	Class         string
-	Market        string
-	Symbol        string
-	Name          string
-	Aliases       []string
-	Products      []string
-	IndustryID    string
-	Instrument    string
-	MarketCap     float64
-	IssuerID      string
-	PrimaryID     string
-	ShortlistRank int
+	Data            map[string]any
+	ID              string
+	Class           string
+	Market          string
+	Symbol          string
+	Name            string
+	Aliases         []string
+	Products        []string
+	IndustryID      string
+	Instrument      string
+	MarketCap       float64
+	IssuerID        string
+	PrimaryID       string
+	AssociationTier string
+	ShortlistRank   int
 }
 
 type mappingResult struct {
-	Candidates         []any
-	IndustryIDs        []string
-	ProposedCount      int
-	MasterDerivedCount int
-	RejectedCount      int
-	NoAssetReason      string
-	TechnicalWarning   string
+	Candidates            []any
+	IndustryIDs           []string
+	ProposedCount         int
+	MasterDerivedCount    int
+	RejectedCount         int
+	FilteredAssetCount    int
+	FilteredIndustryCount int
+	NoAssetReason         string
+	TechnicalWarning      string
 }
 
 func NewMappingHandlers(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) map[string]Handler {
@@ -98,6 +101,11 @@ func (runtime *ExtractRuntime) resolveEventAssets(ctx context.Context, job Job) 
 	forceMapping := boolValue(envelope.Kwargs["force_mapping"])
 	refreshReport := boolValue(envelope.Kwargs["refresh_event_report"])
 	forceWebSearch := boolValue(envelope.Kwargs["force_web_search"])
+	filterRecentResearch := true
+	if value, found := envelope.Kwargs["filter_recent_research"]; found {
+		filterRecentResearch = boolValue(value)
+	}
+	event["filter_recent_research"] = filterRecentResearch
 	instanceID := stringValue(envelope.Kwargs["model_instance_id"])
 	result := mappingResult{Candidates: anySlice(event["candidates"]), IndustryIDs: stringSlice(event["industry_ids"])}
 	if forceMapping || len(result.Candidates) == 0 {
@@ -131,13 +139,18 @@ func (runtime *ExtractRuntime) resolveEventAssets(ctx context.Context, job Job) 
 			return nil, runtime.mappingFailure(ctx, job, event, refreshReport, forceWebSearch, err)
 		}
 	}
-	researchTaskID, runID, err := runtime.enqueueResearchAfterMapping(ctx, event, refreshReport, forceWebSearch)
+	researchTaskID, runID, err := runtime.enqueueResearchAfterMapping(ctx, event, refreshReport, forceWebSearch, filterRecentResearch)
 	if err != nil {
 		return nil, runtime.mappingFailure(ctx, job, event, refreshReport, forceWebSearch, err)
 	}
-	metrics := map[string]any{"proposed_count": result.ProposedCount, "verified_count": len(result.Candidates), "rejected_count": result.RejectedCount}
+	filterMetrics := objectValue(event["recent_research_filter"])
+	metrics := map[string]any{
+		"proposed_count": result.ProposedCount, "verified_count": len(anySlice(event["candidates"])), "rejected_count": result.RejectedCount,
+		"filtered_recent_asset_count":    len(anySlice(filterMetrics["excluded_asset_ids"])),
+		"filtered_recent_industry_count": len(anySlice(filterMetrics["excluded_industry_ids"])),
+	}
 	runtime.updateTrackedTask(ctx, "assist", taskID, "completed", job.Attempt, eventID.String(), stringValue(event["headline"]), stringValue(event["event_type"]), "", metrics)
-	return map[string]any{"status": "event_research_queued", "event_id": eventID, "event_research_run_id": runID, "task_id": researchTaskID, "verified_assets": len(result.Candidates)}, nil
+	return map[string]any{"status": "event_research_queued", "event_id": eventID, "event_research_run_id": runID, "task_id": researchTaskID, "verified_assets": len(anySlice(event["candidates"])), "filter_recent_research": filterRecentResearch}, nil
 }
 
 func (runtime *ExtractRuntime) mappingFailure(ctx context.Context, job Job, event map[string]any, refreshReport, forceWebSearch bool, cause error) error {
@@ -149,7 +162,11 @@ func (runtime *ExtractRuntime) mappingFailure(ctx context.Context, job Job, even
 	_ = runtime.saveEvent(ctx, event)
 	runtime.updateTrackedTask(ctx, "assist", job.ID.String(), status, job.Attempt, stringValue(event["id"]), stringValue(event["headline"]), stringValue(event["event_type"]), cause.Error(), nil)
 	if job.Attempt >= job.MaxAttempts {
-		_, _, queueErr := runtime.enqueueResearchAfterMapping(ctx, event, refreshReport, forceWebSearch)
+		filterRecentResearch := true
+		if value, found := event["filter_recent_research"]; found {
+			filterRecentResearch = boolValue(value)
+		}
+		_, _, queueErr := runtime.enqueueResearchAfterMapping(ctx, event, refreshReport, forceWebSearch, filterRecentResearch)
 		if queueErr != nil {
 			return fmt.Errorf("asset mapping failed: %w; research queue failed: %v", cause, queueErr)
 		}
@@ -328,14 +345,14 @@ func (runtime *ExtractRuntime) persistMappingAudit(ctx context.Context, logicalI
 }
 
 func (runtime *ExtractRuntime) loadMappingAssets(ctx context.Context) ([]mappingAsset, error) {
-	rows, err := runtime.db.Query(ctx, `SELECT id,asset_class,market,symbol,name,exchange_or_provider,currency,aliases::jsonb,products::jsonb,competitors::jsonb,sector_id,industry_id,raw_sector,raw_industry,instrument_type,market_cap,market_cap_rank,last_synced_at,issuer_id,primary_listing_asset_id,lot_size,active FROM assets WHERE active=true`)
+	rows, err := runtime.db.Query(ctx, `SELECT id,asset_class,market,symbol,name,exchange_or_provider,currency,aliases::jsonb,products::jsonb,competitors::jsonb,sector_id,industry_id,raw_sector,raw_industry,instrument_type,association_tier,market_cap,market_cap_rank,last_synced_at,issuer_id,primary_listing_asset_id,lot_size,active FROM assets WHERE active=true`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	assets := make([]mappingAsset, 0)
 	for rows.Next() {
-		var id, class, market, symbol, name, exchange, currency, sector, industry, rawSector, rawIndustry, instrument string
+		var id, class, market, symbol, name, exchange, currency, sector, industry, rawSector, rawIndustry, instrument, associationTier string
 		var aliasesJSON, productsJSON, competitorsJSON []byte
 		var marketCap *float64
 		var marketRank *int
@@ -343,18 +360,18 @@ func (runtime *ExtractRuntime) loadMappingAssets(ctx context.Context) ([]mapping
 		var issuer, primary *string
 		var lot int
 		var active bool
-		if err := rows.Scan(&id, &class, &market, &symbol, &name, &exchange, &currency, &aliasesJSON, &productsJSON, &competitorsJSON, &sector, &industry, &rawSector, &rawIndustry, &instrument, &marketCap, &marketRank, &synced, &issuer, &primary, &lot, &active); err != nil {
+		if err := rows.Scan(&id, &class, &market, &symbol, &name, &exchange, &currency, &aliasesJSON, &productsJSON, &competitorsJSON, &sector, &industry, &rawSector, &rawIndustry, &instrument, &associationTier, &marketCap, &marketRank, &synced, &issuer, &primary, &lot, &active); err != nil {
 			return nil, err
 		}
 		aliases, products, competitors := []string{}, []string{}, []string{}
 		_ = json.Unmarshal(aliasesJSON, &aliases)
 		_ = json.Unmarshal(productsJSON, &products)
 		_ = json.Unmarshal(competitorsJSON, &competitors)
-		asset := mappingAsset{ID: id, Class: class, Market: market, Symbol: symbol, Name: name, Aliases: aliases, Products: products, IndustryID: industry, Instrument: instrument, IssuerID: pointerString(issuer), PrimaryID: pointerString(primary)}
+		asset := mappingAsset{ID: id, Class: class, Market: market, Symbol: symbol, Name: name, Aliases: aliases, Products: products, IndustryID: industry, Instrument: instrument, IssuerID: pointerString(issuer), PrimaryID: pointerString(primary), AssociationTier: associationTier}
 		if marketCap != nil {
 			asset.MarketCap = *marketCap
 		}
-		asset.Data = map[string]any{"asset_id": id, "asset_class": class, "market": market, "symbol": symbol, "name": name, "exchange_or_provider": exchange, "currency": currency, "aliases": aliases, "products": products, "competitors": competitors, "sector_id": sector, "industry_id": industry, "raw_sector": rawSector, "raw_industry": rawIndustry, "instrument_type": instrument, "market_cap": marketCap, "market_cap_rank": marketRank, "last_synced_at": synced, "issuer_id": issuer, "primary_listing_asset_id": primary, "lot_size": max(1, lot), "active": active}
+		asset.Data = map[string]any{"asset_id": id, "asset_class": class, "market": market, "symbol": symbol, "name": name, "exchange_or_provider": exchange, "currency": currency, "aliases": aliases, "products": products, "competitors": competitors, "sector_id": sector, "industry_id": industry, "raw_sector": rawSector, "raw_industry": rawIndustry, "instrument_type": instrument, "association_tier": associationTier, "market_cap": marketCap, "market_cap_rank": marketRank, "last_synced_at": synced, "issuer_id": issuer, "primary_listing_asset_id": primary, "lot_size": max(1, lot), "active": active}
 		assets = append(assets, asset)
 	}
 	return assets, rows.Err()
@@ -363,6 +380,9 @@ func (runtime *ExtractRuntime) loadMappingAssets(ctx context.Context) ([]mapping
 func shortlistMappingAssets(source string, assets []mappingAsset, limit int) []mappingAsset {
 	values := make([]mappingAsset, 0)
 	for _, asset := range assets {
+		if !preferredMappingAssetAllowed(source, asset) || !automaticMappingAssetAllowed(source, asset) || exactOnlyAssetShadowedByStandard(source, asset, assets) {
+			continue
+		}
 		score := 0
 		if explicitSymbol(source, asset.Symbol, false) {
 			score = 100
@@ -397,15 +417,76 @@ func shortlistMappingAssets(source string, assets []mappingAsset, limit int) []m
 	return values
 }
 
+func preferredMappingAssetAllowed(source string, asset mappingAsset) bool {
+	preferences := []struct {
+		terms   []string
+		assetID string
+	}{
+		{terms: []string{"NVIDIA", "英伟达", "NVDA"}, assetID: "equity:NASDAQ:NVDA"},
+		{terms: []string{"SpaceX", "SPACEX"}, assetID: "crypto:coingecko:spacex-prestocks-2"},
+	}
+	for _, preference := range preferences {
+		mentioned := false
+		for _, term := range preference.terms {
+			mentioned = mentioned || explicitTerm(source, term)
+		}
+		if !mentioned || asset.ID == preference.assetID {
+			continue
+		}
+		if explicitTerm(source, asset.Name) {
+			genericName := false
+			for _, term := range preference.terms {
+				genericName = genericName || normalizedText(asset.Name) == normalizedText(term)
+			}
+			if !genericName {
+				return true
+			}
+		}
+		for _, identity := range append([]string{asset.Symbol, asset.Name}, asset.Aliases...) {
+			for _, term := range preference.terms {
+				if normalizedText(identity) == normalizedText(term) || strings.Contains(normalizedText(identity), normalizedText(term)) {
+					return false
+				}
+			}
+		}
+	}
+	return true
+}
+
+func exactOnlyAssetShadowedByStandard(source string, asset mappingAsset, assets []mappingAsset) bool {
+	if asset.AssociationTier != "exact_only" || explicitTerm(source, asset.Name) {
+		return false
+	}
+	symbol := normalizedText(asset.Symbol)
+	if symbol == "" {
+		return false
+	}
+	for _, candidate := range assets {
+		if candidate.AssociationTier != "standard" {
+			continue
+		}
+		terms := append([]string{candidate.Symbol, candidate.Name}, candidate.Aliases...)
+		for _, term := range terms {
+			if normalizedText(term) == symbol && explicitTerm(source, term) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func productOwnerCandidates(source string, assets []mappingAsset) map[string]any {
 	result := map[string]any{}
 	for _, owner := range assets {
+		if !automaticMappingAssetAllowed(source, owner) {
+			continue
+		}
 		for _, product := range owner.Products {
 			if !meaningfulProduct(product) || !explicitTerm(source, product) {
 				continue
 			}
 			for _, sibling := range assets {
-				if sameMappingIssuer(owner, sibling) {
+				if sameMappingIssuer(owner, sibling) && automaticMappingAssetAllowed(source, sibling) {
 					result[sibling.ID] = mappingCandidate(sibling, "product_owner", .85, .99, fmt.Sprintf("主数据确认新闻中的 %s 归属于 %s", product, sibling.Name), []string{"source_product", "product_owner_master", product})
 				}
 			}
@@ -463,10 +544,13 @@ func validateMappingHint(hint mappingHint, source string, newsItems []newsRecord
 func mapProductHint(hint mappingHint, assets []mappingAsset) []any {
 	result := make([]any, 0)
 	for _, owner := range assets {
+		if owner.AssociationTier == "manual_only" {
+			continue
+		}
 		for _, product := range owner.Products {
 			if meaningfulProduct(product) && explicitTerm(hint.SourceMention, product) {
 				for _, sibling := range assets {
-					if sameMappingIssuer(owner, sibling) && (hint.AssetClass == "" || hint.AssetClass == sibling.Class) {
+					if sameMappingIssuer(owner, sibling) && sibling.AssociationTier != "manual_only" && (hint.AssetClass == "" || hint.AssetClass == sibling.Class) {
 						result = append(result, mappingCandidate(sibling, "product_owner", hint.Confidence, hint.Confidence, hint.Rationale, []string{"llm_source_mention", "product_owner_master", product}))
 					}
 				}
@@ -513,7 +597,7 @@ func industryRepresentatives(assets []mappingAsset, industryIDs []string, limit 
 	}
 	values := make([]mappingAsset, 0)
 	for _, asset := range assets {
-		if allowed[asset.IndustryID] && asset.Class == "equity" && asset.Instrument != "shell_company" && (asset.Market == "CN" || asset.Market == "HK" || asset.Market == "US") {
+		if allowed[asset.IndustryID] && asset.AssociationTier == "standard" && asset.Class == "equity" && asset.Instrument != "shell_company" && (asset.Market == "CN" || asset.Market == "HK" || asset.Market == "US") {
 			values = append(values, asset)
 		}
 	}
@@ -524,12 +608,208 @@ func industryRepresentatives(assets []mappingAsset, industryIDs []string, limit 
 	return values
 }
 
-func (runtime *ExtractRuntime) enqueueResearchAfterMapping(ctx context.Context, event map[string]any, refresh, forceWebSearch bool) (string, string, error) {
+func automaticMappingAssetAllowed(source string, asset mappingAsset) bool {
+	if asset.AssociationTier == "manual_only" {
+		return false
+	}
+	if asset.AssociationTier != "exact_only" {
+		return true
+	}
+	if explicitSymbol(source, asset.Symbol, false) || explicitTerm(source, asset.Name) {
+		return true
+	}
+	for _, alias := range asset.Aliases {
+		if meaningfulTerm(alias) && explicitTerm(source, alias) {
+			return true
+		}
+	}
+	return false
+}
+
+func (runtime *ExtractRuntime) applyRecentResearchFilter(ctx context.Context, event map[string]any, enabled bool) error {
+	window := runtime.cfg.RecentResearchFilter
+	hours := int(window.Hours())
+	metadata := map[string]any{
+		"enabled": enabled && window > 0, "hours": hours, "checked_at": iso(time.Now()),
+		"excluded_asset_ids": []any{}, "excluded_asset_terms": []any{},
+		"excluded_industry_ids": []any{}, "excluded_industry_terms": []any{},
+	}
+	if !enabled || window <= 0 {
+		event["recent_research_filter"] = metadata
+		replaceAnalysisStep(event, analysisStep("recent_research_filter", "bypassed", "go-worker", "本次手动映射重试未启用近期研究过滤。", map[string]any{"enabled": false, "hours": hours}))
+		return runtime.saveEvent(ctx, event)
+	}
+
+	cutoff := time.Now().UTC().Add(-window)
+	recentAssets := map[string]bool{}
+	assetRows, err := runtime.db.Query(ctx, `SELECT DISTINCT asset_id FROM research_runs
+		WHERE status IN ('completed','insufficient_evidence')
+		  AND coalesce((payload->>'historical_replay')::boolean,false)=false
+		  AND coalesce(nullif(payload->>'completed_at','')::timestamptz,updated_at) > $1`, cutoff)
+	if err != nil {
+		return err
+	}
+	for assetRows.Next() {
+		var assetID string
+		if assetRows.Scan(&assetID) == nil {
+			recentAssets[assetID] = true
+		}
+	}
+	err = assetRows.Err()
+	assetRows.Close()
+	if err != nil {
+		return err
+	}
+
+	industryAliases, industryTerms, err := runtime.industryResearchAliases(ctx)
+	if err != nil {
+		return err
+	}
+	recentIndustries := map[string]bool{}
+	runRows, err := runtime.db.Query(ctx, `SELECT payload::jsonb FROM event_research_runs
+		WHERE status IN ('completed','insufficient_evidence')
+		  AND coalesce((payload->>'historical_replay')::boolean,false)=false
+		  AND updated_at > $1`, cutoff)
+	if err != nil {
+		return err
+	}
+	for runRows.Next() {
+		var body []byte
+		if runRows.Scan(&body) != nil {
+			continue
+		}
+		var run map[string]any
+		if json.Unmarshal(body, &run) != nil {
+			continue
+		}
+		for _, raw := range anySlice(objectValue(run["report"])["impacts"]) {
+			impact := objectValue(raw)
+			if stringValue(impact["target_type"]) != "sector" {
+				continue
+			}
+			if industryID := industryAliases[normalizedText(stringValue(impact["target_name"]))]; industryID != "" {
+				recentIndustries[industryID] = true
+			}
+		}
+	}
+	err = runRows.Err()
+	runRows.Close()
+	if err != nil {
+		return err
+	}
+
+	excludedAssetIDs, excludedAssetTerms := []any{}, []any{}
+	eligibleCandidates := make([]any, 0, len(anySlice(event["candidates"])))
+	for _, raw := range anySlice(event["candidates"]) {
+		candidate := objectValue(raw)
+		asset := objectValue(candidate["asset"])
+		assetID := stringValue(asset["asset_id"])
+		industryID := stringValue(asset["industry_id"])
+		exclude := recentAssets[assetID] || (stringValue(candidate["relationship"]) == "industry_peer" && recentIndustries[industryID])
+		if !exclude {
+			eligibleCandidates = append(eligibleCandidates, raw)
+			continue
+		}
+		excludedAssetIDs = appendUniqueAny(excludedAssetIDs, assetID)
+		for _, term := range assetIdentityTerms(asset) {
+			excludedAssetTerms = appendUniqueAny(excludedAssetTerms, term)
+		}
+	}
+
+	excludedIndustryIDs, excludedIndustryTerms := []any{}, []any{}
+	eligibleIndustries := make([]string, 0, len(stringSlice(event["industry_ids"])))
+	for _, industryID := range stringSlice(event["industry_ids"]) {
+		if !recentIndustries[industryID] {
+			eligibleIndustries = append(eligibleIndustries, industryID)
+			continue
+		}
+		excludedIndustryIDs = appendUniqueAny(excludedIndustryIDs, industryID)
+		for _, term := range industryTerms[industryID] {
+			excludedIndustryTerms = appendUniqueAny(excludedIndustryTerms, term)
+		}
+	}
+
+	event["candidates"], event["industry_ids"] = eligibleCandidates, eligibleIndustries
+	metadata["excluded_asset_ids"], metadata["excluded_asset_terms"] = excludedAssetIDs, excludedAssetTerms
+	metadata["excluded_industry_ids"], metadata["excluded_industry_terms"] = excludedIndustryIDs, excludedIndustryTerms
+	event["recent_research_filter"] = metadata
+	replaceAnalysisStep(event, analysisStep(
+		"recent_research_filter", "completed", "go-worker",
+		fmt.Sprintf("已过滤过去 %d 小时内研究过的 %d 个标的和 %d 个行业。", hours, len(excludedAssetIDs), len(excludedIndustryIDs)),
+		map[string]any{"enabled": true, "hours": hours, "excluded_asset_ids": excludedAssetIDs, "excluded_industry_ids": excludedIndustryIDs},
+	))
+	return runtime.saveEvent(ctx, event)
+}
+
+func (runtime *ExtractRuntime) industryResearchAliases(ctx context.Context) (map[string]string, map[string][]string, error) {
+	rows, err := runtime.db.Query(ctx, `SELECT id,name_zh,name_en,aliases::jsonb FROM industries WHERE active=true`)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	aliases := map[string]string{}
+	termsByID := map[string][]string{}
+	for rows.Next() {
+		var id, nameZH, nameEN string
+		var body []byte
+		if err := rows.Scan(&id, &nameZH, &nameEN, &body); err != nil {
+			return nil, nil, err
+		}
+		terms := []string{id, nameZH, nameEN}
+		var stored []string
+		_ = json.Unmarshal(body, &stored)
+		terms = append(terms, stored...)
+		for _, term := range terms {
+			normalized := normalizedText(term)
+			if normalized == "" {
+				continue
+			}
+			aliases[normalized] = id
+			termsByID[id] = appendUniqueString(termsByID[id], term)
+		}
+	}
+	return aliases, termsByID, rows.Err()
+}
+
+func assetIdentityTerms(asset map[string]any) []string {
+	terms := []string{stringValue(asset["name"]), stringValue(asset["symbol"])}
+	for _, raw := range anySlice(asset["aliases"]) {
+		terms = append(terms, stringValue(raw))
+	}
+	result := make([]string, 0, len(terms))
+	for _, term := range terms {
+		if term != "" {
+			result = appendUniqueString(result, term)
+		}
+	}
+	return result
+}
+
+func appendUniqueAny(values []any, value string) []any {
+	if value == "" {
+		return values
+	}
+	for _, current := range values {
+		if stringValue(current) == value {
+			return values
+		}
+	}
+	return append(values, value)
+}
+
+func appendUniqueString(values []string, value string) []string {
+	if value == "" || containsString(values, value) {
+		return values
+	}
+	return append(values, value)
+}
+
+func (runtime *ExtractRuntime) enqueueResearchAfterMapping(ctx context.Context, event map[string]any, refresh, forceWebSearch, filterRecentResearch bool) (string, string, error) {
 	var runID uuid.UUID
 	var body []byte
 	err := runtime.db.QueryRow(ctx, `SELECT id,payload::jsonb FROM event_research_runs WHERE event_id=$1`, event["id"]).Scan(&runID, &body)
 	if errors.Is(err, pgx.ErrNoRows) {
-		queued, err := runtime.enqueueEventResearch(ctx, event)
+		queued, err := runtime.enqueueEventResearch(ctx, event, filterRecentResearch)
 		if err != nil {
 			return "", "", err
 		}
@@ -553,6 +833,9 @@ func (runtime *ExtractRuntime) enqueueResearchAfterMapping(ctx context.Context, 
 	if !refresh {
 		return "", runID.String(), nil
 	}
+	if err := runtime.applyRecentResearchFilter(ctx, event, filterRecentResearch); err != nil {
+		return "", "", err
+	}
 	previousStatus, previousTask := stringValue(run["status"]), stringValue(run["celery_task_id"])
 	if report := run["report"]; report != nil {
 		history := anySlice(run["report_history"])
@@ -563,6 +846,7 @@ func (runtime *ExtractRuntime) enqueueResearchAfterMapping(ctx context.Context, 
 	taskID := uuid.NewString()
 	instanceID := runtime.selectDownstreamInstance(ctx, "research", len(runtime.cfg.ResearchURLs))
 	run["status"], run["as_of"], run["verification_round"] = "queued", iso(time.Now()), 0
+	run["filter_recent_research"] = filterRecentResearch
 	run["missing_requirements"], run["contradictions"], run["error"], run["retryable_reason"] = []any{}, []any{}, nil, nil
 	run["celery_task_id"], run["model_instance_id"], run["updated_at"] = taskID, instanceID, iso(time.Now())
 	appendAnalysisStep(run, analysisStep("forced_event_research_queue", "queued", "go-worker", "已保留当前事件研报，并创建完整事件重新调研任务。", map[string]any{"instance_id": instanceID, "priority": 1, "previous_status": previousStatus, "archived_report_count": len(anySlice(run["report_history"]))}))
@@ -570,7 +854,7 @@ func (runtime *ExtractRuntime) enqueueResearchAfterMapping(ctx context.Context, 
 	if _, err := runtime.db.Exec(ctx, `UPDATE event_research_runs SET status='queued',payload=$2,updated_at=now() WHERE id=$1`, runID, encoded); err != nil {
 		return "", "", err
 	}
-	kwargs := map[string]any{"model_instance_id": instanceID}
+	kwargs := map[string]any{"model_instance_id": instanceID, "filter_recent_research": filterRecentResearch}
 	if forceWebSearch {
 		kwargs["force_web_search"] = true
 	}

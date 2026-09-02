@@ -540,6 +540,8 @@ export function ModelQueueTaskGrid({
 export function UnifiedModelQueuePanel({
   queue,
   instance,
+  filterRecentResearch = true,
+  onFilterRecentResearchChange,
   onCancelTask,
   onRetryTask,
   onRetryAll,
@@ -551,6 +553,8 @@ export function UnifiedModelQueuePanel({
 }: {
   queue: ModelQueueOverviewItem;
   instance?: ModelQueueInstanceItem;
+  filterRecentResearch?: boolean;
+  onFilterRecentResearchChange?: (value: boolean) => void;
   onCancelTask?: (task: ModelQueueTask) => void;
   onRetryTask?: (task: ModelQueueTask) => void;
   onRetryAll?: () => void;
@@ -575,6 +579,14 @@ export function UnifiedModelQueuePanel({
         <small>{queue.binding} · {ready ? "实例可用" : (activeInstance.healthy ? "模型缺失" : "实例离线")}</small>
       </div>
       <div className="model-queue-header-actions">
+        {queue.id === "assist" && <label className="model-queue-filter-toggle" title="手动重试时过滤过去 48 小时已经研究过的行业和标的">
+          <input
+            type="checkbox"
+            checked={filterRecentResearch}
+            onChange={(event) => onFilterRecentResearchChange?.(event.target.checked)}
+          />
+          <span>过滤 48h 已研究</span>
+        </label>}
         <button
           type="button"
           className="model-queue-retry"
@@ -729,6 +741,36 @@ export function applyCancelledTaskTombstone(
   return { overview: { ...current, queues }, settled: false };
 }
 
+export function modelTaskRetryRequest(
+  queue: Pick<ModelQueueOverviewItem, "id">,
+  task: Pick<ModelQueueTask, "task_id" | "kind" | "entity_id" | "instance_id">,
+  filterRecentResearch: boolean,
+): RequestInit {
+  return {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      task_id: task.task_id,
+      kind: task.kind,
+      entity_id: task.entity_id,
+      instance_id: task.instance_id,
+      ...(queue.id === "assist" ? { filter_recent_research: filterRecentResearch } : {}),
+    }),
+  };
+}
+
+export function modelQueueRetryRequest(
+  queue: Pick<ModelQueueOverviewItem, "id">,
+  filterRecentResearch: boolean,
+): RequestInit {
+  if (queue.id !== "assist") return { method: "POST" };
+  return {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ filter_recent_research: filterRecentResearch }),
+  };
+}
+
 export function QueuePage({ apiBase }: { apiBase: string }) {
   const [overview, setOverview] = useState<ModelQueueOverviewResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -738,6 +780,7 @@ export function QueuePage({ apiBase }: { apiBase: string }) {
   const [retryingTaskId, setRetryingTaskId] = useState<string | null>(null);
   const [retryingQueueId, setRetryingQueueId] = useState<string | null>(null);
   const [clearingQueueId, setClearingQueueId] = useState<string | null>(null);
+  const [filterRecentResearch, setFilterRecentResearch] = useState(true);
   const requestInFlight = useRef(false);
   const cancelledTaskIds = useRef(new Map<string, CancelledTaskTombstone>());
 
@@ -846,11 +889,11 @@ export function QueuePage({ apiBase }: { apiBase: string }) {
     setActionMessage("");
     setError("");
     try {
-      const response = await fetch(`${apiBase}/api/v1/model-queues/${queue.id}/tasks/retry`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ task_id: task.task_id, kind: task.kind, entity_id: task.entity_id, instance_id: task.instance_id }),
-      });
+      const response = await fetch(`${apiBase}/api/v1/model-queues/${queue.id}/tasks/retry`, modelTaskRetryRequest(
+        queue,
+        task,
+        filterRecentResearch,
+      ));
       if (!response.ok) throw new Error(`手动重试失败（HTTP ${response.status}）`);
       setActionMessage(`已将“${task.title}”插入 ${queue.model} 队列最前方重试。`);
       await loadQueues();
@@ -859,7 +902,7 @@ export function QueuePage({ apiBase }: { apiBase: string }) {
     } finally {
       setRetryingTaskId(null);
     }
-  }, [apiBase, loadQueues]);
+  }, [apiBase, filterRecentResearch, loadQueues]);
 
   const retryModelQueue = useCallback(async (
     queue: ModelQueueOverviewItem,
@@ -874,9 +917,10 @@ export function QueuePage({ apiBase }: { apiBase: string }) {
     setActionMessage("");
     setError("");
     try {
-      const response = await fetch(`${apiBase}/api/v1/model-queues/${queue.id}/instances/${instance.id}/retry`, {
-        method: "POST",
-      });
+      const response = await fetch(
+        `${apiBase}/api/v1/model-queues/${queue.id}/instances/${instance.id}/retry`,
+        modelQueueRetryRequest(queue, filterRecentResearch),
+      );
       if (!response.ok) throw new Error(`批量重试失败（HTTP ${response.status}）`);
       const result = await response.json() as { retried: number; skipped: number };
       setActionMessage(
@@ -888,7 +932,7 @@ export function QueuePage({ apiBase }: { apiBase: string }) {
     } finally {
       setRetryingQueueId(null);
     }
-  }, [apiBase, loadQueues]);
+  }, [apiBase, filterRecentResearch, loadQueues]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -930,6 +974,8 @@ export function QueuePage({ apiBase }: { apiBase: string }) {
             return <UnifiedModelQueuePanel
               queue={queue}
               instance={instance}
+              filterRecentResearch={filterRecentResearch}
+              onFilterRecentResearchChange={setFilterRecentResearch}
               key={actionId}
               onCancelTask={(task) => void cancelModelTask(queue, task)}
               onRetryTask={(task) => void retryModelTask(queue, task)}

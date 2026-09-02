@@ -375,11 +375,15 @@ func impactFields(value map[string]any) map[string]any {
 }
 
 func (s *Server) macroTargetChanges(r *http.Request) ([]map[string]any, error) {
-	return s.eventTargetChanges(r, macroTargetTypes, "macro")
+	return s.eventTargetChanges(r, macroTargetTypes, "macro", false)
 }
 
 func (s *Server) commodityTargetChanges(r *http.Request) ([]map[string]any, error) {
-	return s.eventTargetChanges(r, commodityTargetTypes, "asset")
+	return s.eventTargetChanges(r, commodityTargetTypes, "asset", false)
+}
+
+func (s *Server) securityTargetChanges(r *http.Request) ([]map[string]any, error) {
+	return s.eventTargetChanges(r, map[string]bool{"tradable_asset": true}, "asset", true)
 }
 
 func (s *Server) concreteTargetChanges(r *http.Request) ([]map[string]any, error) {
@@ -391,7 +395,11 @@ func (s *Server) concreteTargetChanges(r *http.Request) ([]map[string]any, error
 	if err != nil {
 		return nil, err
 	}
-	return mergeConcreteTargetChanges(assetChanges, commodityChanges), nil
+	securityChanges, err := s.securityTargetChanges(r)
+	if err != nil {
+		return nil, err
+	}
+	return mergeConcreteTargetChanges(assetChanges, commodityChanges, securityChanges), nil
 }
 
 func mergeConcreteTargetChanges(groups ...[]map[string]any) []map[string]any {
@@ -425,15 +433,16 @@ func targetChangeAfter(left, right map[string]any) bool {
 	return leftTime != nil && (rightTime == nil || leftTime.After(*rightTime))
 }
 
-func (s *Server) eventTargetChanges(r *http.Request, targetTypes map[string]bool, kind string) ([]map[string]any, error) {
+func (s *Server) eventTargetChanges(r *http.Request, targetTypes map[string]bool, kind string, includeSecurities bool) ([]map[string]any, error) {
 	taxonomy, err := s.targetTaxonomy(r)
 	if err != nil {
 		return nil, err
 	}
-	securityNames, securitySymbols, err := s.securityAliases(r)
+	masterAssets, err := s.activeSecurityAssets(r)
 	if err != nil {
 		return nil, err
 	}
+	securityNames, securitySymbols := securityAssetAliases(masterAssets)
 	rows, err := s.db.Query(r.Context(), `SELECT er.id,er.status,er.updated_at,er.payload::jsonb,e.published_at
 		FROM event_research_runs er LEFT JOIN news_events e ON e.id=er.event_id ORDER BY er.updated_at,er.id`)
 	if err != nil {
@@ -462,6 +471,7 @@ func (s *Server) eventTargetChanges(r *http.Request, targetTypes map[string]bool
 			continue
 		}
 		normalizeEventReport(report)
+		report["impacts"] = resolvePublishedSecurityImpacts(report["impacts"], masterAssets)
 		runs = append(runs, run)
 		for _, raw := range anySlice(report["impacts"]) {
 			impact := objectValue(raw)
@@ -489,13 +499,17 @@ func (s *Server) eventTargetChanges(r *http.Request, targetTypes map[string]bool
 		groupOrder := make([]string, 0)
 		for _, raw := range anySlice(report["impacts"]) {
 			impact := objectValue(raw)
-			targetType := stringValue(impact["target_type"])
-			if impact == nil || !targetTypes[targetType] || resemblesSecurity(impact, securityNames, securitySymbols) {
+			if impact == nil {
 				continue
 			}
+			targetType := stringValue(impact["target_type"])
 			asset := objectValue(impact["asset"])
-			if asset != nil && securityAsset(asset) {
-				asset = nil
+			isSecurity := securityAsset(asset) || resemblesSecurity(impact, securityNames, securitySymbols)
+			if targetType == "economy" && unitedStatesEconomyAlias(stringValue(impact["target_name"])) {
+				isSecurity = false
+			}
+			if !targetTypes[targetType] || (includeSecurities && !isSecurity) || (!includeSecurities && isSecurity) {
+				continue
 			}
 			if asset == nil {
 				asset = aliases[targetType+"|"+macroTargetBase(stringValue(impact["target_name"]))]
@@ -613,29 +627,167 @@ func (s *Server) targetTaxonomy(r *http.Request) (map[string]canonicalTarget, er
 	return result, rows.Err()
 }
 
-func (s *Server) securityAliases(r *http.Request) (map[string]bool, map[string]bool, error) {
-	rows, err := s.db.Query(r.Context(), `SELECT payload::jsonb FROM recommendations`)
+func (s *Server) activeSecurityAssets(r *http.Request) ([]map[string]any, error) {
+	rows, err := s.db.Query(r.Context(), `SELECT `+assetJSON+` FROM assets
+		WHERE active=true AND asset_class IN ('equity','crypto') ORDER BY id`)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	defer rows.Close()
-	names, symbols := map[string]bool{}, map[string]bool{}
+	assets := make([]map[string]any, 0)
 	for rows.Next() {
 		var body []byte
 		if err = rows.Scan(&body); err != nil {
-			return nil, nil, err
+			return nil, err
 		}
-		var payload map[string]any
-		if json.Unmarshal(body, &payload) != nil {
+		var asset map[string]any
+		if json.Unmarshal(body, &asset) != nil {
 			continue
 		}
-		asset := objectValue(payload["asset"])
-		if securityAsset(asset) {
-			names[compactTarget(stringValue(asset["name"]))] = true
-			symbols[strings.ToLower(stringValue(asset["symbol"]))] = true
+		normalizeAsset(asset)
+		assets = append(assets, asset)
+	}
+	return assets, rows.Err()
+}
+
+func securityAssetAliases(assets []map[string]any) (map[string]bool, map[string]bool) {
+	names, symbols := map[string]bool{}, map[string]bool{}
+	for _, asset := range assets {
+		for _, term := range append([]any{asset["name"]}, anySlice(asset["aliases"])...) {
+			if compact := compactTarget(stringValue(term)); compact != "" {
+				names[compact] = true
+			}
+		}
+		if symbol := strings.ToLower(strings.TrimSpace(stringValue(asset["symbol"]))); symbol != "" {
+			symbols[symbol] = true
 		}
 	}
-	return names, symbols, rows.Err()
+	return names, symbols
+}
+
+var preferredPublishedSecurity = map[string]string{
+	"nvidia":          "equity:NASDAQ:NVDA",
+	"nvidia股价":        "equity:NASDAQ:NVDA",
+	"nvda":            "equity:NASDAQ:NVDA",
+	"spacex":          "crypto:coingecko:spacex-prestocks-2",
+	"spacexprestocks": "crypto:coingecko:spacex-prestocks-2",
+}
+
+func resolvePublishedSecurityImpacts(value any, assets []map[string]any) []any {
+	byID := make(map[string]map[string]any, len(assets))
+	for _, asset := range assets {
+		byID[stringValue(asset["asset_id"])] = asset
+	}
+	resolved := make([]any, 0, len(anySlice(value)))
+	for _, raw := range anySlice(value) {
+		impact := deepCloneObject(objectValue(raw))
+		if impact == nil {
+			continue
+		}
+		normalizeTargetImpact(impact)
+		current := objectValue(impact["asset"])
+		asset := byID[stringValue(valueOrNil(current, "asset_id"))]
+		if asset == nil {
+			asset = matchPublishedMasterAsset(stringValue(impact["target_name"]), assets)
+		}
+		if asset != nil {
+			impact["target_type"] = "tradable_asset"
+			impact["target_name"] = fallbackString(stringValue(asset["name"]), stringValue(impact["target_name"]))
+			impact["asset"] = deepCloneObject(asset)
+		}
+		resolved = append(resolved, impact)
+	}
+	return dedupePublishedSecurityImpacts(resolved)
+}
+
+func matchPublishedMasterAsset(name string, assets []map[string]any) map[string]any {
+	compact := compactTarget(name)
+	base := compact
+	for _, suffix := range []string{"stockprice", "shareprice", "股价", "股票"} {
+		base = strings.TrimSuffix(base, suffix)
+	}
+	if preferredID := preferredPublishedSecurity[base]; preferredID != "" {
+		for _, asset := range assets {
+			if stringValue(asset["asset_id"]) == preferredID {
+				return asset
+			}
+		}
+	}
+	bestScore := -1.0
+	var best map[string]any
+	tied := false
+	for _, asset := range assets {
+		score := publishedMasterAssetScore(base, asset)
+		if score < 0 {
+			continue
+		}
+		if score > bestScore {
+			bestScore, best, tied = score, asset, false
+		} else if score == bestScore && stringValue(asset["asset_id"]) != stringValue(best["asset_id"]) {
+			tied = true
+		}
+	}
+	if tied {
+		return nil
+	}
+	return best
+}
+
+func publishedMasterAssetScore(target string, asset map[string]any) float64 {
+	if target == "" || !securityAsset(asset) || !boolValue(asset["active"]) {
+		return -1
+	}
+	tier := stringValue(asset["association_tier"])
+	exact, prefix := false, false
+	terms := append([]any{asset["symbol"], asset["name"]}, anySlice(asset["aliases"])...)
+	for _, raw := range terms {
+		term := compactTarget(stringValue(raw))
+		if term == "" {
+			continue
+		}
+		if target == term {
+			exact = true
+		}
+		if len([]rune(target)) >= 4 && len([]rune(term)) >= 4 && (strings.Contains(target, term) || strings.Contains(term, target)) {
+			prefix = true
+		}
+	}
+	if tier == "manual_only" || ((tier == "exact_only" || tier == "") && !exact) || (!exact && !prefix) {
+		return -1
+	}
+	score := 100.0
+	if exact {
+		score += 1000
+	}
+	if tier == "standard" {
+		score += 100
+	}
+	if stringValue(asset["asset_class"]) == "equity" {
+		score += 40
+	}
+	if stringValue(asset["instrument_type"]) == "common_stock" {
+		score += 20
+	}
+	score += math.Log10(math.Max(1, numberValue(asset["market_cap"])))
+	return score
+}
+
+func dedupePublishedSecurityImpacts(impacts []any) []any {
+	result := make([]any, 0, len(impacts))
+	indexes := make(map[string]int)
+	for _, raw := range impacts {
+		impact := objectValue(raw)
+		key := publishedImpactKey(impact)
+		if index, found := indexes[key]; found {
+			if preferPublishedImpact(impact, objectValue(result[index])) {
+				result[index] = impact
+			}
+			continue
+		}
+		indexes[key] = len(result)
+		result = append(result, impact)
+	}
+	return result
 }
 
 func visibleEventStatus(value string) bool {
@@ -744,12 +896,20 @@ func stripTargetWrappers(value string) string {
 }
 
 func canonicalizeGoTarget(name, targetType string, asset map[string]any, taxonomy map[string]canonicalTarget) canonicalTarget {
-	if asset != nil && !securityAsset(asset) && stringValue(asset["asset_id"]) != "" {
+	if asset != nil && stringValue(asset["asset_id"]) != "" {
+		if securityAsset(asset) {
+			return canonicalTarget{
+				Key: stringValue(asset["asset_id"]), Label: fallbackString(stringValue(asset["name"]), strings.TrimSpace(name)), TargetType: "tradable_asset",
+			}
+		}
 		return canonicalTarget{Key: stringValue(asset["asset_id"]), Label: fallbackString(strings.TrimSpace(name), stringValue(asset["asset_id"])), TargetType: targetType}
 	}
 	normalized := compactTarget(name)
 	if normalized == "" {
 		normalized = "unknown"
+	}
+	if targetType == "economy" && unitedStatesEconomyAlias(name) {
+		return canonicalTarget{Key: "economy:us", Label: "美国经济", TargetType: "economy"}
 	}
 	if targetType != "sector" && targetType != "economy" && targetType != "risk_asset" && targetType != "other" {
 		return canonicalTarget{Key: targetType + ":" + normalized, Label: fallbackString(strings.TrimSpace(name), normalized), TargetType: targetType}
@@ -764,6 +924,14 @@ func canonicalizeGoTarget(name, targetType string, asset map[string]any, taxonom
 		return matched
 	}
 	return canonicalTarget{Key: targetType + ":" + normalized, Label: fallbackString(strings.TrimSpace(name), normalized), TargetType: targetType}
+}
+
+func unitedStatesEconomyAlias(value string) bool {
+	switch compactTarget(value) {
+	case "美国股市", "美国", "美国经济", "useconomy", "usequitymarket":
+		return true
+	}
+	return false
 }
 
 func fallbackString(value, fallback string) string {

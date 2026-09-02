@@ -34,6 +34,39 @@ func TestBatchThreeCanonicalTargetAndDualHorizonTrend(t *testing.T) {
 	}
 }
 
+func TestCanonicalTargetMergesUnitedStatesAliases(t *testing.T) {
+	for _, name := range []string{"美国股市", "美国", "美国经济", "US Economy", "US Equity Market"} {
+		got := canonicalizeGoTarget(name, "economy", nil, nil)
+		if got.Key != "economy:us" || got.Label != "美国经济" || got.TargetType != "economy" {
+			t.Fatalf("%q was not canonicalized to the US economy: %+v", name, got)
+		}
+	}
+}
+
+func TestPublishedSecurityResolverUsesSelectedMasterAssetsAndDeduplicates(t *testing.T) {
+	assets := []map[string]any{
+		{"asset_id": "equity:NASDAQ:NVDA", "asset_class": "equity", "symbol": "NVDA", "name": "NVIDIA Corporation", "aliases": []any{"NVIDIA"}, "association_tier": "standard", "instrument_type": "common_stock", "market_cap": float64(100), "active": true},
+		{"asset_id": "crypto:coingecko:spacex-prestocks-2", "asset_class": "crypto", "symbol": "SPACEX", "name": "SpaceX PreStocks", "aliases": []any{"SpaceX"}, "association_tier": "exact_only", "market_cap": float64(10), "active": true},
+		{"asset_id": "crypto:other:spacex", "asset_class": "crypto", "symbol": "SPCX", "name": "SpaceX Token", "association_tier": "manual_only", "active": true},
+	}
+	impacts := []any{
+		map[string]any{"target_name": "NVIDIA", "target_type": "economy", "rating": "bullish", "direction_score": float64(40), "rating_confidence": .7},
+		map[string]any{"target_name": "NVIDIA 股价", "target_type": "tradable_asset", "rating": "bearish", "direction_score": float64(-70), "rating_confidence": .8},
+		map[string]any{"target_name": "SPACEX", "target_type": "economy", "rating": "bullish", "direction_score": float64(20), "rating_confidence": .6},
+	}
+	got := resolvePublishedSecurityImpacts(impacts, assets)
+	if len(got) != 2 {
+		t.Fatalf("expected deduplicated NVIDIA and SpaceX impacts, got %#v", got)
+	}
+	first, second := objectValue(got[0]), objectValue(got[1])
+	if stringValue(objectValue(first["asset"])["asset_id"]) != "equity:NASDAQ:NVDA" || stringValue(first["target_type"]) != "tradable_asset" || stringValue(first["rating"]) != "bearish" {
+		t.Fatalf("NVIDIA was not rebound/deduplicated to NVDA: %#v", first)
+	}
+	if stringValue(objectValue(second["asset"])["asset_id"]) != "crypto:coingecko:spacex-prestocks-2" || stringValue(second["target_type"]) != "tradable_asset" {
+		t.Fatalf("SpaceX was not rebound to the selected exact asset: %#v", second)
+	}
+}
+
 func TestRoundPlacesUsesTiesToEven(t *testing.T) {
 	if got, want := roundPlaces(0.44325, 4), 0.4432; got != want {
 		t.Fatalf("roundPlaces ties-to-even = %v, want %v", got, want)

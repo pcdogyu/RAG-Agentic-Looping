@@ -49,3 +49,31 @@ func TestMappingHintRejectsUnmentionedProxy(t *testing.T) {
 		t.Fatalf("unmentioned proxy must be rejected: %#v", got)
 	}
 }
+
+func TestMappingShortlistHonorsAssociationTiers(t *testing.T) {
+	assets := []mappingAsset{
+		{ID: "equity:NASDAQ:NVDA", Symbol: "NVDA", Name: "NVIDIA Corporation", Aliases: []string{"NVIDIA"}, AssociationTier: "standard", MarketCap: 100},
+		{ID: "crypto:tokenized:nvda", Symbol: "NVIDIA", Name: "NVIDIA xStock", AssociationTier: "exact_only", MarketCap: 10},
+		{ID: "manual:nvda", Symbol: "NVDA", Name: "NVIDIA manual", AssociationTier: "manual_only", MarketCap: 1000},
+	}
+	got := shortlistMappingAssets("NVIDIA 股价上涨", assets, 30)
+	if len(got) != 1 || got[0].ID != "equity:NASDAQ:NVDA" {
+		t.Fatalf("generic NVIDIA mention must choose the standard master listing: %#v", got)
+	}
+	got = shortlistMappingAssets("NVIDIA xStock 报价异常", assets, 30)
+	if len(got) != 2 || got[0].ID != "crypto:tokenized:nvda" {
+		t.Fatalf("an exact-only asset must require and win on an exact source mention: %#v", got)
+	}
+}
+
+func TestMappingShortlistUsesSelectedSpaceXMasterAsset(t *testing.T) {
+	assets := []mappingAsset{
+		{ID: "crypto:coingecko:spacex-prestocks-2", Symbol: "SPACEX", Name: "SpaceX PreStocks", Aliases: []string{"SpaceX"}, AssociationTier: "exact_only", MarketCap: 10},
+		{ID: "crypto:other:spacex", Symbol: "SPACEX", Name: "SpaceX", AssociationTier: "exact_only", MarketCap: 100},
+		{ID: "crypto:manual:spacex", Symbol: "SPACEX", Name: "SpaceX manual", AssociationTier: "manual_only", MarketCap: 1000},
+	}
+	got := shortlistMappingAssets("SPACEX 完成新一轮试飞", assets, 30)
+	if len(got) != 1 || got[0].ID != "crypto:coingecko:spacex-prestocks-2" {
+		t.Fatalf("generic SpaceX mention must use the selected exact master asset: %#v", got)
+	}
+}

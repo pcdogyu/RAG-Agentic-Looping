@@ -27,6 +27,7 @@ type Config struct {
 	NewsDiscoveryLookback time.Duration
 	NewsWatermarkOverlap  time.Duration
 	ResearchCooldown      time.Duration
+	RecentResearchFilter  time.Duration
 	ResearchCoalesce      time.Duration
 	ResearchLease         time.Duration
 	ModelAuditRetention   time.Duration
@@ -105,6 +106,7 @@ func Load() (Config, error) {
 		NewsDiscoveryLookback: time.Duration(envInt("NEWS_DISCOVERY_LOOKBACK_HOURS", 24)) * time.Hour,
 		NewsWatermarkOverlap:  time.Duration(envInt("NEWS_WATERMARK_OVERLAP_MINUTES", 10)) * time.Minute,
 		ResearchCooldown:      time.Duration(envInt("RESEARCH_ASSET_COOLDOWN_HOURS", 24)) * time.Hour,
+		RecentResearchFilter:  time.Duration(envInt("RECENT_RESEARCH_FILTER_HOURS", 48)) * time.Hour,
 		ResearchCoalesce:      time.Duration(envInt("RESEARCH_COALESCE_WINDOW_HOURS", 24)) * time.Hour,
 		ResearchLease:         time.Duration(envInt("RESEARCH_LEASE_SECONDS", 120)) * time.Second,
 		ModelAuditRetention:   time.Duration(envInt("MODEL_AUDIT_RETENTION_DAYS", 90)) * 24 * time.Hour,

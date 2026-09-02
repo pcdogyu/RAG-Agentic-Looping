@@ -52,6 +52,27 @@ func TestSanitizeEventImpactsRejectsVolumeAsMacroTarget(t *testing.T) {
 	}
 }
 
+func TestSanitizeEventImpactsReclassifiesMappedSecurityAndKeepsFilteredItemsOut(t *testing.T) {
+	event := map[string]any{
+		"candidates": []any{map[string]any{"asset": map[string]any{
+			"asset_id": "equity:NASDAQ:NVDA", "name": "NVIDIA Corporation", "symbol": "NVDA", "asset_class": "equity", "association_tier": "standard",
+		}}},
+		"recent_research_filter": map[string]any{
+			"excluded_asset_terms":    []any{"SpaceX", "SPACEX"},
+			"excluded_industry_terms": []any{"半导体", "Semiconductors"},
+		},
+	}
+	values := []eventImpactDraft{
+		{TargetType: "economy", TargetName: "NVIDIA 股价", DirectionScore: 50},
+		{TargetType: "economy", TargetName: "SpaceX", DirectionScore: 20},
+		{TargetType: "sector", TargetName: "半导体", DirectionScore: 30},
+	}
+	actual := sanitizeEventImpacts(values, event)
+	if len(actual) != 1 || actual[0].TargetType != "tradable_asset" || actual[0].AssetID != "equity:NASDAQ:NVDA" || actual[0].TargetName != "NVIDIA Corporation" {
+		t.Fatalf("mapped securities must be rebound and filtered targets must stay excluded: %#v", actual)
+	}
+}
+
 func TestPermanentResearchErrorIsTerminal(t *testing.T) {
 	value := permanentJobError{context.DeadlineExceeded}
 	var marker interface{ Permanent() bool }

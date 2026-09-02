@@ -124,3 +124,101 @@ func TestMappingGoldenStateAgainstIsolatedServices(t *testing.T) {
 		t.Fatalf("idempotent run count=%d err=%v", runCount, err)
 	}
 }
+
+func TestRecentResearchFilterAgainstPostgres(t *testing.T) {
+	if os.Getenv("MAPPING_TEST_ISOLATED") != "1" {
+		t.Skip("MAPPING_TEST_ISOLATED=1 is required")
+	}
+	databaseURL := strings.Replace(os.Getenv("TEST_DATABASE_URL"), "postgresql+psycopg://", "postgresql://", 1)
+	if databaseURL == "" {
+		t.Fatal("TEST_DATABASE_URL is required")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err := migrate.Up(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+
+	suffix := uuid.NewString()
+	asset47 := "equity:TEST:recent-completed-" + suffix
+	asset48 := "equity:TEST:boundary-" + suffix
+	assetInsufficient := "equity:TEST:recent-insufficient-" + suffix
+	assetActive := "equity:TEST:active-" + suffix
+	industryID := "industry:test:" + suffix
+	eventRunID, eventID := uuid.NewString(), uuid.NewString()
+	now := time.Now().UTC()
+	insertRun := func(assetID, status string, completedAt time.Time) {
+		t.Helper()
+		payload, _ := json.Marshal(map[string]any{"completed_at": iso(completedAt)})
+		if _, err := pool.Exec(ctx, `INSERT INTO research_runs(id,asset_id,status,payload,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$5)`, uuid.NewString(), assetID, status, payload, completedAt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	insertRun(asset47, "completed", now.Add(-47*time.Hour))
+	insertRun(asset48, "completed", now.Add(-48*time.Hour))
+	insertRun(assetInsufficient, "insufficient_evidence", now.Add(-47*time.Hour))
+	insertRun(assetActive, "running", now)
+	if _, err := pool.Exec(ctx, `INSERT INTO industries(id,parent_id,level,name_zh,name_en,aliases,active) VALUES($1,NULL,2,'测试半导体','Test Semiconductors','["芯片测试"]',true)`, industryID); err != nil {
+		t.Fatal(err)
+	}
+	report, _ := json.Marshal(map[string]any{"report": map[string]any{"impacts": []any{map[string]any{"target_type": "sector", "target_name": "芯片测试"}}}})
+	if _, err := pool.Exec(ctx, `INSERT INTO event_research_runs(id,event_id,status,payload,created_at,updated_at) VALUES($1,$2,'completed',$3,$4,$4)`, eventRunID, eventID, report, now.Add(-47*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM research_runs WHERE asset_id=ANY($1)`, []string{asset47, asset48, assetInsufficient, assetActive})
+		_, _ = pool.Exec(context.Background(), `DELETE FROM event_research_runs WHERE id=$1`, eventRunID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM industries WHERE id=$1`, industryID)
+	})
+
+	candidate := func(assetID, name, relationship string) map[string]any {
+		return map[string]any{"relationship": relationship, "asset": map[string]any{"asset_id": assetID, "name": name, "symbol": name, "industry_id": industryID}}
+	}
+	event := map[string]any{
+		"id": uuid.NewString(), "headline": "mixed event", "analysis_steps": []any{},
+		"candidates": []any{
+			candidate(asset47, "RECENT47", "entity"),
+			candidate(asset48, "BOUNDARY48", "entity"),
+			candidate(assetInsufficient, "INSUFFICIENT47", "entity"),
+			candidate(assetActive, "ACTIVE", "entity"),
+		},
+		"industry_ids": []any{industryID},
+	}
+	runtime := &ExtractRuntime{cfg: config.Config{RecentResearchFilter: 48 * time.Hour}, db: pool}
+	if err := runtime.applyRecentResearchFilter(ctx, event, true); err != nil {
+		t.Fatal(err)
+	}
+	remaining := anySlice(event["candidates"])
+	if len(remaining) != 2 || stringValue(objectValue(objectValue(remaining[0])["asset"])["asset_id"]) != asset48 || stringValue(objectValue(objectValue(remaining[1])["asset"])["asset_id"]) != assetActive {
+		t.Fatalf("47h terminal runs must be filtered while 48h and active runs remain: %#v", remaining)
+	}
+	if len(stringSlice(event["industry_ids"])) != 0 {
+		t.Fatalf("recent canonical industry must be filtered: %#v", event["industry_ids"])
+	}
+	metadata := objectValue(event["recent_research_filter"])
+	if len(anySlice(metadata["excluded_asset_ids"])) != 2 || len(anySlice(metadata["excluded_industry_ids"])) != 1 {
+		t.Fatalf("filter audit metadata is incomplete: %#v", metadata)
+	}
+
+	bypassEvent := map[string]any{"id": uuid.NewString(), "headline": "manual retry", "analysis_steps": []any{}, "candidates": []any{candidate(asset47, "RECENT47", "entity")}, "industry_ids": []any{industryID}}
+	if err := runtime.applyRecentResearchFilter(ctx, bypassEvent, false); err != nil {
+		t.Fatal(err)
+	}
+	if len(anySlice(bypassEvent["candidates"])) != 1 || stringValue(latestAnalysisStep(bypassEvent, "recent_research_filter")["status"]) != "bypassed" {
+		t.Fatalf("manual bypass must preserve candidates and remain auditable: %#v", bypassEvent)
+	}
+	queued, err := (&researchRuntime{cfg: config.Config{ResearchCooldown: 48 * time.Hour}, db: pool}).enqueueAssetResearch(
+		ctx,
+		map[string]any{"id": uuid.NewString(), "headline": "active task guard"},
+		objectValue(candidate(assetActive, "ACTIVE", "entity")["asset"]),
+		true,
+	)
+	if err != nil || queued {
+		t.Fatalf("manual bypass must not bypass an active research run: queued=%v err=%v", queued, err)
+	}
+}

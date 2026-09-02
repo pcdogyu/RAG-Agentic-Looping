@@ -21,10 +21,15 @@ type cancellationInput struct {
 }
 
 type modelRetryInput struct {
-	TaskID     string  `json:"task_id"`
-	Kind       string  `json:"kind"`
-	EntityID   *string `json:"entity_id"`
-	InstanceID *string `json:"instance_id"`
+	TaskID               string  `json:"task_id"`
+	Kind                 string  `json:"kind"`
+	EntityID             *string `json:"entity_id"`
+	InstanceID           *string `json:"instance_id"`
+	FilterRecentResearch *bool   `json:"filter_recent_research"`
+}
+
+type modelRetryOptions struct {
+	FilterRecentResearch *bool `json:"filter_recent_research"`
 }
 
 type cancelSummary struct {
@@ -166,13 +171,18 @@ func (s *Server) retryModelQueueTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "retryable model task not found")
 		return
 	}
-	taskID, retryErr := s.retryModelTask(r.Context(), queueID, selected, 0)
+	filterRecent := boolPointerDefault(input.FilterRecentResearch, true)
+	taskID, retryErr := s.retryModelTask(r.Context(), queueID, selected, 0, filterRecent)
 	if retryErr != nil {
 		writeAPIFailure(w, retryErr)
 		return
 	}
 	_ = s.redis.Del(r.Context(), modelQueueOverviewCacheKey).Err()
-	writeJSON(w, http.StatusAccepted, map[string]any{"queue_id": queueID, "requested": 1, "retried": 1, "skipped": 0, "task_ids": []string{taskID}, "priority": "highest"})
+	payload := map[string]any{"queue_id": queueID, "requested": 1, "retried": 1, "skipped": 0, "task_ids": []string{taskID}, "priority": "highest"}
+	if queueID == "assist" {
+		payload["filter_recent_research"] = filterRecent
+	}
+	writeJSON(w, http.StatusAccepted, payload)
 }
 
 func (s *Server) retryModelQueueTasks(w http.ResponseWriter, r *http.Request) {
@@ -189,6 +199,11 @@ func (s *Server) retryModelTasks(w http.ResponseWriter, r *http.Request, instanc
 		writeError(w, http.StatusUnprocessableEntity, "this model queue does not support bulk retry")
 		return
 	}
+	var options modelRetryOptions
+	if r.ContentLength != 0 && !decodeJSONBody(w, r, &options) {
+		return
+	}
+	filterRecent := boolPointerDefault(options.FilterRecentResearch, true)
 	tasks, instanceFound, err := s.retryableModelTasks(r.Context(), queueID, instanceID)
 	if err != nil {
 		writeError(w, 500, "model queue state unavailable")
@@ -201,7 +216,7 @@ func (s *Server) retryModelTasks(w http.ResponseWriter, r *http.Request, instanc
 	ids := make([]string, 0, len(tasks))
 	skipped := 0
 	for _, task := range tasks {
-		id, retryErr := s.retryModelTask(r.Context(), queueID, task, 5)
+		id, retryErr := s.retryModelTask(r.Context(), queueID, task, 5, filterRecent)
 		if retryErr != nil {
 			skipped++
 			continue
@@ -213,7 +228,17 @@ func (s *Server) retryModelTasks(w http.ResponseWriter, r *http.Request, instanc
 	if instanceID != "" {
 		payload["instance_id"] = instanceID
 	}
+	if queueID == "assist" {
+		payload["filter_recent_research"] = filterRecent
+	}
 	writeJSON(w, http.StatusAccepted, payload)
+}
+
+func boolPointerDefault(value *bool, fallback bool) bool {
+	if value == nil {
+		return fallback
+	}
+	return *value
 }
 
 func (s *Server) retryableModelTasks(ctx context.Context, queueID, instanceID string) ([]map[string]any, bool, error) {
@@ -253,7 +278,7 @@ func (s *Server) retryableModelTasks(ctx context.Context, queueID, instanceID st
 	return []map[string]any{}, false, nil
 }
 
-func (s *Server) retryModelTask(ctx context.Context, queueID string, task map[string]any, priority int) (string, error) {
+func (s *Server) retryModelTask(ctx context.Context, queueID string, task map[string]any, priority int, filterRecent bool) (string, error) {
 	kind, entityID, oldTaskID := stringValue(task["kind"]), stringValue(task["entity_id"]), stringValue(task["task_id"])
 	preferred := stringValue(task["instance_id"])
 	switch queueID {
@@ -280,7 +305,13 @@ func (s *Server) retryModelTask(ctx context.Context, queueID string, task map[st
 		}
 		taskID := uuid.NewString()
 		s.trackModelTask(ctx, "assist", taskID, "asset_mapping", entityID, headline, "股票映射", "manual", instanceID)
-		if _, err = s.enqueueGoModelJob(ctx, "assist", taskID, "market_loop.resolve_event_assets", []any{entityID}, map[string]any{"force": true, "model_instance_id": instanceID}, priority, "mapping:"+entityID); err != nil {
+		kwargs := map[string]any{
+			"force_mapping":          true,
+			"refresh_event_report":   true,
+			"filter_recent_research": filterRecent,
+			"model_instance_id":      instanceID,
+		}
+		if _, err = s.enqueueGoModelJob(ctx, "assist", taskID, "market_loop.resolve_event_assets", []any{entityID}, kwargs, priority, "mapping:"+entityID); err != nil {
 			return "", fail(http.StatusServiceUnavailable, "asset mapping retry could not be queued")
 		}
 		_ = s.cancelTrackedTask(ctx, "assist", oldTaskID)

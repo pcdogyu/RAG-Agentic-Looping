@@ -146,6 +146,14 @@ func (runtime *researchRuntime) researchEvent(ctx context.Context, job Job) (any
 	if supersededOrTerminal(run, job.ID.String()) {
 		return run, nil
 	}
+	filterRecentResearch := true
+	if value, found := run["filter_recent_research"]; found {
+		filterRecentResearch = boolValue(value)
+	}
+	if value, found := envelope.Kwargs["filter_recent_research"]; found {
+		filterRecentResearch = boolValue(value)
+	}
+	run["filter_recent_research"] = filterRecentResearch
 	instanceID, releaseInstance, err := runtime.acquireResearchInstance(ctx, stringValue(envelope.Kwargs["model_instance_id"]))
 	if err != nil {
 		return nil, err
@@ -195,7 +203,7 @@ func (runtime *researchRuntime) researchEvent(ctx context.Context, job Job) (any
 		}
 		return nil, runtime.failEventResearch(ctx, job, run, event, err)
 	}
-	queued, err := runtime.enqueueTargetResearches(ctx, event, report, 3)
+	queued, err := runtime.enqueueTargetResearches(ctx, event, report, 3, !filterRecentResearch)
 	if err != nil {
 		return nil, err
 	}
@@ -528,8 +536,9 @@ func (runtime *researchRuntime) generateEventDraft(ctx context.Context, runID uu
 			assets = append(assets, map[string]any{"asset_id": asset["asset_id"], "symbol": asset["symbol"], "name": asset["name"], "asset_class": asset["asset_class"]})
 		}
 	}
-	prompt := "事实框架：" + jsonString(withoutKey(event, "analysis_steps")) + "\n允许绑定的真实标的：" + jsonString(assets) + "\n证据：" + compactResearchEvidence(evidence, 12000) + "\n" +
-		"生成最多6个互不重复的目标影响。每个目标只能输出一个 direction_score（-100到100），评级与置信度由程序计算。asset_id只能来自允许标的；成交量、交易活跃度和投资者参与度是驱动因素，不是宏观经济目标，不得成为独立impact。summary只写事件事实，不写全局方向。未知信息写入missing_information，只能引用给定evidence_ids和actions.id。"
+	filter := objectValue(event["recent_research_filter"])
+	prompt := "事实框架：" + jsonString(withoutKey(event, "analysis_steps")) + "\n允许绑定的真实标的：" + jsonString(assets) + "\n48小时过滤项：" + jsonString(filter) + "\n证据：" + compactResearchEvidence(evidence, 12000) + "\n" +
+		"生成最多6个互不重复的目标影响。每个目标只能输出一个 direction_score（-100到100），评级与置信度由程序计算。asset_id只能来自允许标的；不得为48小时过滤项生成impact，也不得把证券名称伪装成economy或sector。成交量、交易活跃度和投资者参与度是驱动因素，不是宏观经济目标，不得成为独立impact。summary只写事件事实，不写全局方向。未知信息写入missing_information，只能引用给定evidence_ids和actions.id。"
 	schema := eventDraftSchema()
 	var result eventResearchDraft
 	err := runtime.callResearchModel(ctx, runID, "event_research_run", "event_report_drafting", "你是证据优先的逐目标事件研究员；先判断对谁，再判断传导路径。", prompt, schema, instanceID, &result)
@@ -950,7 +959,7 @@ func ratingConfidence(score int, event, candidate map[string]any, path, citedIDs
 	}, distance
 }
 
-func (runtime *researchRuntime) enqueueTargetResearches(ctx context.Context, event, report map[string]any, limit int) (int, error) {
+func (runtime *researchRuntime) enqueueTargetResearches(ctx context.Context, event, report map[string]any, limit int, bypassRecentFilter bool) (int, error) {
 	queued := 0
 	for _, raw := range anySlice(report["impacts"]) {
 		if queued >= limit {
@@ -961,7 +970,7 @@ func (runtime *researchRuntime) enqueueTargetResearches(ctx context.Context, eve
 		if asset == nil || stringValue(impact["trade_status"]) != "tradeable" {
 			continue
 		}
-		inserted, err := runtime.enqueueAssetResearch(ctx, event, asset)
+		inserted, err := runtime.enqueueAssetResearch(ctx, event, asset, bypassRecentFilter)
 		if err != nil {
 			return queued, err
 		}
@@ -972,7 +981,7 @@ func (runtime *researchRuntime) enqueueTargetResearches(ctx context.Context, eve
 	return queued, nil
 }
 
-func (runtime *researchRuntime) enqueueAssetResearch(ctx context.Context, event, asset map[string]any) (bool, error) {
+func (runtime *researchRuntime) enqueueAssetResearch(ctx context.Context, event, asset map[string]any, bypassCooldown bool) (bool, error) {
 	assetID := stringValue(asset["asset_id"])
 	if assetID == "" {
 		return false, nil
@@ -992,11 +1001,13 @@ func (runtime *researchRuntime) enqueueAssetResearch(ctx context.Context, event,
 	if exists {
 		return false, tx.Commit(ctx)
 	}
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM research_runs WHERE asset_id=$1 AND status IN ('completed','insufficient_evidence') AND coalesce((payload->>'completed_at')::timestamptz,updated_at) > now()-$2::interval)`, assetID, interval(runtime.cfg.ResearchCooldown)).Scan(&exists); err != nil {
-		return false, err
-	}
-	if exists {
-		return false, tx.Commit(ctx)
+	if !bypassCooldown && runtime.cfg.ResearchCooldown > 0 {
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM research_runs WHERE asset_id=$1 AND status IN ('completed','insufficient_evidence') AND coalesce((payload->>'completed_at')::timestamptz,updated_at) > now()-$2::interval)`, assetID, interval(runtime.cfg.ResearchCooldown)).Scan(&exists); err != nil {
+			return false, err
+		}
+		if exists {
+			return false, tx.Commit(ctx)
+		}
 	}
 	eventID, err := uuid.Parse(stringValue(event["id"]))
 	if err != nil {
@@ -1128,9 +1139,24 @@ func (runtime *researchRuntime) finishResearchTracking(ctx context.Context, task
 
 func sanitizeEventImpacts(values []eventImpactDraft, event map[string]any) []eventImpactDraft {
 	allowed := candidateAssets(event)
+	filter := objectValue(event["recent_research_filter"])
+	excludedAssets := stringSlice(filter["excluded_asset_terms"])
+	excludedIndustries := stringSlice(filter["excluded_industry_terms"])
 	seen := map[string]bool{}
 	result := make([]eventImpactDraft, 0, min(6, len(values)))
 	for _, item := range values {
+		if item.AssetID == "" && matchesIdentityTerms(item.TargetName, excludedAssets) {
+			continue
+		}
+		if item.TargetType == "sector" && matchesIdentityTerms(item.TargetName, excludedIndustries) {
+			continue
+		}
+		if item.AssetID == "" {
+			if asset := matchCandidateAsset(item.TargetName, allowed); asset != nil {
+				item.AssetID = stringValue(asset["asset_id"])
+				item.TargetType, item.TargetName = "tradable_asset", stringValue(asset["name"])
+			}
+		}
 		if item.AssetID != "" {
 			asset := allowed[item.AssetID]
 			if asset == nil {
@@ -1153,6 +1179,77 @@ func sanitizeEventImpacts(values []eventImpactDraft, event map[string]any) []eve
 		}
 	}
 	return result
+}
+
+func matchCandidateAsset(name string, assets map[string]map[string]any) map[string]any {
+	bestScore := 0
+	var best map[string]any
+	tied := false
+	for _, asset := range assets {
+		score := assetIdentityMatchScore(name, asset)
+		if score == 0 {
+			continue
+		}
+		if stringValue(asset["association_tier"]) == "standard" {
+			score += 20
+		}
+		if stringValue(asset["asset_class"]) == "equity" {
+			score += 10
+		}
+		if score > bestScore {
+			bestScore, best, tied = score, asset, false
+		} else if score == bestScore && stringValue(asset["asset_id"]) != stringValue(best["asset_id"]) {
+			tied = true
+		}
+	}
+	if tied {
+		return nil
+	}
+	return best
+}
+
+func matchesIdentityTerms(name string, terms []string) bool {
+	for _, term := range terms {
+		if identityTextMatch(name, term) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func assetIdentityMatchScore(name string, asset map[string]any) int {
+	best := 0
+	if score := identityTextMatch(name, stringValue(asset["symbol"])); score > 0 {
+		best = score + 100
+	}
+	for _, term := range assetIdentityTerms(asset) {
+		if score := identityTextMatch(name, term); score > best {
+			best = score
+		}
+	}
+	return best
+}
+
+func identityTextMatch(left, right string) int {
+	left, right = researchTargetBase(left), researchTargetBase(right)
+	if left == "" || right == "" {
+		return 0
+	}
+	if left == right {
+		return 300
+	}
+	if len([]rune(left)) >= 4 && len([]rune(right)) >= 4 && (strings.HasPrefix(left, right) || strings.HasPrefix(right, left)) {
+		return 200
+	}
+	return 0
+}
+
+func researchTargetBase(value string) string {
+	value = normalizedText(value)
+	for _, suffix := range []string{"stockprice", "shareprice", "股价", "股票"} {
+		value = strings.TrimSuffix(value, suffix)
+	}
+	return value
 }
 
 func candidateAssets(event map[string]any) map[string]map[string]any {

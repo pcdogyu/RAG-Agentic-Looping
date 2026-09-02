@@ -187,6 +187,45 @@ func TestBatchThreeCommandsAgainstIsolatedServices(t *testing.T) {
 		t.Fatalf("code retry was not queued: %v", codeRetry)
 	}
 
+	const mappingEventID = "35000000-0000-0000-0000-000000000001"
+	if _, err = pool.Exec(ctx, `INSERT INTO news_events(id,headline,event_type,payload,priority,published_at,observed_at,as_of) VALUES($1,'NVIDIA mapping retry','company','{}',0.8,now(),now(),now())`, mappingEventID); err != nil {
+		t.Fatal(err)
+	}
+	failedMapping := map[string]any{
+		"task_id": "35000000-0000-0000-0000-000000000002", "kind": "asset_mapping", "entity_id": mappingEventID,
+		"instance_id": "assist-0", "title": "NVIDIA mapping retry", "subtitle": "company", "error": "boom",
+	}
+	assistSnapshot, _ := json.Marshal(map[string]any{"queues": []any{map[string]any{
+		"id": "assist", "tasks": []any{failedMapping}, "instances": []any{map[string]any{"id": "assist-0", "tasks": []any{failedMapping}}},
+	}}})
+	if err = redisClient.Set(ctx, modelQueueOverviewCacheKey, assistSnapshot, time.Minute).Err(); err != nil {
+		t.Fatal(err)
+	}
+	assistRetry := assertStatus(http.StatusAccepted, http.MethodPost, "/api/v1/model-queues/assist/tasks/retry", `{"task_id":"35000000-0000-0000-0000-000000000002","kind":"asset_mapping","entity_id":"`+mappingEventID+`","instance_id":"assist-0","filter_recent_research":false}`, false)
+	if assistRetry["filter_recent_research"] != false {
+		t.Fatalf("assist retry response did not preserve the bypass: %v", assistRetry)
+	}
+	var retryPayload []byte
+	if err = pool.QueryRow(ctx, `SELECT payload::jsonb FROM go_jobs WHERE id=$1`, stringValue(anySlice(assistRetry["task_ids"])[0])).Scan(&retryPayload); err != nil {
+		t.Fatal(err)
+	}
+	var retryEnvelope map[string]any
+	if err = json.Unmarshal(retryPayload, &retryEnvelope); err != nil {
+		t.Fatal(err)
+	}
+	kwargs := objectValue(retryEnvelope["kwargs"])
+	if kwargs["force_mapping"] != true || kwargs["filter_recent_research"] != false {
+		t.Fatalf("assist retry kwargs are invalid: %#v", kwargs)
+	}
+
+	if err = redisClient.Set(ctx, modelQueueOverviewCacheKey, assistSnapshot, time.Minute).Err(); err != nil {
+		t.Fatal(err)
+	}
+	bulkRetry := assertStatus(http.StatusAccepted, http.MethodPost, "/api/v1/model-queues/assist/instances/assist-0/retry", `{}`, false)
+	if bulkRetry["filter_recent_research"] != true || int64Value(bulkRetry["retried"]) != 1 {
+		t.Fatalf("assist bulk retry must default the filter on: %v", bulkRetry)
+	}
+
 	assistTask := "40000000-0000-0000-0000-000000000001"
 	trackedAssist, _ := json.Marshal(map[string]any{
 		"task_id": assistTask, "instance_id": "assist-0", "kind": "asset_mapping", "status": "queued",

@@ -898,7 +898,7 @@ func (runtime *ExtractRuntime) dispatchEvent(ctx context.Context, event map[stri
 		queued, err := runtime.enqueueMapping(ctx, event, forceMapping, refreshReport, forceWebSearch)
 		return 0, boolInt(queued), err == nil
 	}
-	queued, err := runtime.enqueueEventResearch(ctx, event)
+	queued, err := runtime.enqueueEventResearch(ctx, event, true)
 	return boolInt(queued), 0, err == nil
 }
 
@@ -943,7 +943,10 @@ func (runtime *ExtractRuntime) enqueueMapping(ctx context.Context, event map[str
 	return true, nil
 }
 
-func (runtime *ExtractRuntime) enqueueEventResearch(ctx context.Context, event map[string]any) (bool, error) {
+func (runtime *ExtractRuntime) enqueueEventResearch(ctx context.Context, event map[string]any, filterRecentResearch bool) (bool, error) {
+	if err := runtime.applyRecentResearchFilter(ctx, event, filterRecentResearch); err != nil {
+		return false, err
+	}
 	var existing uuid.UUID
 	if err := runtime.db.QueryRow(ctx, `SELECT id FROM event_research_runs WHERE event_id=$1`, event["id"]).Scan(&existing); err == nil {
 		return false, nil
@@ -959,7 +962,7 @@ func (runtime *ExtractRuntime) enqueueEventResearch(ctx context.Context, event m
 	if observed := parseTime(event["observed_at"]); observed.After(asOf) {
 		asOf = observed
 	}
-	payload := map[string]any{"id": runID, "event_id": event["id"], "status": "queued", "as_of": iso(asOf), "historical_replay": false, "verification_round": 0, "retry_count": 0, "celery_task_id": taskID, "model_instance_id": instanceID, "retryable_reason": nil, "missing_requirements": []any{}, "contradictions": []any{}, "evidence": []any{}, "report": nil, "report_history": []any{}, "error": nil, "analysis_steps": steps, "created_at": iso(now), "updated_at": iso(now)}
+	payload := map[string]any{"id": runID, "event_id": event["id"], "status": "queued", "as_of": iso(asOf), "historical_replay": false, "filter_recent_research": filterRecentResearch, "verification_round": 0, "retry_count": 0, "celery_task_id": taskID, "model_instance_id": instanceID, "retryable_reason": nil, "missing_requirements": []any{}, "contradictions": []any{}, "evidence": []any{}, "report": nil, "report_history": []any{}, "error": nil, "analysis_steps": steps, "created_at": iso(now), "updated_at": iso(now)}
 	body, _ := json.Marshal(payload)
 	inserted, err := runtime.db.Exec(ctx, `INSERT INTO event_research_runs(id,event_id,status,payload,created_at,updated_at) VALUES($1,$2,'queued',$3,$4,$4) ON CONFLICT(event_id) DO NOTHING`, runID, event["id"], body, now)
 	if err != nil {
@@ -968,7 +971,7 @@ func (runtime *ExtractRuntime) enqueueEventResearch(ctx context.Context, event m
 	if inserted.RowsAffected() == 0 {
 		return false, nil
 	}
-	kwargs := map[string]any{"model_instance_id": instanceID}
+	kwargs := map[string]any{"model_instance_id": instanceID, "filter_recent_research": filterRecentResearch}
 	_, queueErr := NewStore(runtime.db).Enqueue(ctx, EnqueueParams{ID: uuid.MustParse(taskID), Queue: "research", TaskType: researchEventTask, Payload: map[string]any{"args": []any{stringValue(event["id"]), runID.String()}, "kwargs": kwargs}, Priority: 1, MaxAttempts: 3, DedupeKey: "research-run:" + runID.String()})
 	if queueErr != nil {
 		payload["status"], payload["error"] = "failed", "event research queue failed"
