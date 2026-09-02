@@ -80,4 +80,13 @@ jobs:
       - name: Verify recent research filtering against PostgreSQL
         env:
           MAPPING_TEST_ISOLATED: "1"
-        run: go test -race ./internal/jobs -run '^TestRecentResearchFilterAgainstPostgres$' -count=1 -v
+        run: |
+          set +e
+          output="$(go test -race ./internal/jobs -run '^TestRecentResearchFilterAgainstPostgres$' -count=1 -v 2>&1)"
+          status=$?
+          printf '%s\n' "$output"
+          if [ "$status" -ne 0 ]; then
+            message="$(printf '%s\n' "$output" | tail -40 | sed -e 's/%/%25/g' -e ':a;N;$!ba;s/\n/%0A/g')"
+            echo "::error title=PostgreSQL recent research filter::$message"
+            exit "$status"
+          fi
