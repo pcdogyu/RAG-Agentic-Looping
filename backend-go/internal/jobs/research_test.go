@@ -178,20 +178,48 @@ func TestResearchModelDoesNotRetryAfterTimeout(t *testing.T) {
 	}
 }
 
-func TestResearchRuntimeDistributesClaimsAcrossModelCapacity(t *testing.T) {
-	runtime := &researchRuntime{cfg: config.Config{ResearchURLs: []string{"http://one", "http://two", "http://three"}}}
-	want := []string{"research-0", "research-1", "research-2", "research-0"}
-	for index, expected := range want {
-		if actual := runtime.nextResearchInstance("research-0"); actual != expected {
-			t.Fatalf("claim %d: expected %s, got %s", index, expected, actual)
+func TestResearchRuntimeHoldsInstanceUntilHandlerReleasesIt(t *testing.T) {
+	runtime := newResearchRuntime(config.Config{ResearchURLs: []string{"http://one", "http://two"}}, nil, nil)
+	first, releaseFirst, err := runtime.acquireResearchInstance(context.Background(), "research-7")
+	if err != nil || first != "research-0" {
+		t.Fatalf("expected first slot research-0, got %q / %v", first, err)
+	}
+	defer releaseFirst()
+	second, releaseSecond, err := runtime.acquireResearchInstance(context.Background(), "research-7")
+	if err != nil || second != "research-1" {
+		t.Fatalf("expected second slot research-1, got %q / %v", second, err)
+	}
+
+	next := make(chan string, 1)
+	go func() {
+		instanceID, release, acquireErr := runtime.acquireResearchInstance(context.Background(), "research-7")
+		if acquireErr == nil {
+			release()
+			next <- instanceID
 		}
+	}()
+	select {
+	case instanceID := <-next:
+		t.Fatalf("third claim unexpectedly reused busy slot %s", instanceID)
+	case <-time.After(20 * time.Millisecond):
+	}
+	releaseSecond()
+	select {
+	case instanceID := <-next:
+		if instanceID != "research-1" {
+			t.Fatalf("expected released slot research-1, got %s", instanceID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("third claim did not receive the released slot")
 	}
 }
 
 func TestResearchRuntimePreservesFallbackWithoutEndpoints(t *testing.T) {
-	runtime := &researchRuntime{}
-	if actual := runtime.nextResearchInstance("research-7"); actual != "research-7" {
-		t.Fatalf("expected fallback instance, got %s", actual)
+	runtime := newResearchRuntime(config.Config{}, nil, nil)
+	actual, release, err := runtime.acquireResearchInstance(context.Background(), "research-7")
+	defer release()
+	if err != nil || actual != "research-7" {
+		t.Fatalf("expected fallback instance, got %s / %v", actual, err)
 	}
 }
 

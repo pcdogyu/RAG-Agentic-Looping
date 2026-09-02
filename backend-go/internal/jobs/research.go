@@ -12,7 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"sync/atomic"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -37,11 +37,11 @@ type permanentJobError struct{ error }
 func (permanentJobError) Permanent() bool { return true }
 
 type researchRuntime struct {
-	cfg          config.Config
-	db           *pgxpool.Pool
-	redis        *redis.Client
-	client       *http.Client
-	nextEndpoint atomic.Uint64
+	cfg           config.Config
+	db            *pgxpool.Pool
+	redis         *redis.Client
+	client        *http.Client
+	instanceSlots chan string
 }
 
 func (runtime *researchRuntime) shared() *ExtractRuntime {
@@ -105,11 +105,22 @@ type eventResearchDraft struct {
 }
 
 func NewResearchHandlers(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) map[string]Handler {
-	runtime := &researchRuntime{cfg: cfg, db: db, redis: redisClient, client: &http.Client{Timeout: cfg.ResearchTimeout}}
+	runtime := newResearchRuntime(cfg, db, redisClient)
 	return map[string]Handler{
 		researchEventTask: runtime.researchEvent,
 		researchAssetTask: runtime.researchAsset,
 	}
+}
+
+func newResearchRuntime(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *researchRuntime {
+	runtime := &researchRuntime{cfg: cfg, db: db, redis: redisClient, client: &http.Client{Timeout: cfg.ResearchTimeout}}
+	if len(cfg.ResearchURLs) > 0 {
+		runtime.instanceSlots = make(chan string, len(cfg.ResearchURLs))
+		for index := range cfg.ResearchURLs {
+			runtime.instanceSlots <- fmt.Sprintf("research-%d", index)
+		}
+	}
+	return runtime
 }
 
 func (runtime *researchRuntime) researchEvent(ctx context.Context, job Job) (any, error) {
@@ -135,7 +146,11 @@ func (runtime *researchRuntime) researchEvent(ctx context.Context, job Job) (any
 	if supersededOrTerminal(run, job.ID.String()) {
 		return run, nil
 	}
-	instanceID := runtime.nextResearchInstance(stringValue(envelope.Kwargs["model_instance_id"]))
+	instanceID, releaseInstance, err := runtime.acquireResearchInstance(ctx, stringValue(envelope.Kwargs["model_instance_id"]))
+	if err != nil {
+		return nil, err
+	}
+	defer releaseInstance()
 	run["model_instance_id"] = instanceID
 	run["status"], run["error"], run["updated_at"] = "running", nil, iso(time.Now())
 	evidence, err := runtime.eventEvidence(ctx, runID, event, boolValue(run["historical_replay"]))
@@ -208,7 +223,11 @@ func (runtime *researchRuntime) researchAsset(ctx context.Context, job Job) (any
 	if supersededOrTerminal(run, job.ID.String()) || stringValue(run["status"]) == "coalesced" {
 		return run, nil
 	}
-	instanceID := runtime.nextResearchInstance(stringValue(envelope.Kwargs["model_instance_id"]))
+	instanceID, releaseInstance, err := runtime.acquireResearchInstance(ctx, stringValue(envelope.Kwargs["model_instance_id"]))
+	if err != nil {
+		return nil, err
+	}
+	defer releaseInstance()
 	run["model_instance_id"] = instanceID
 	started := time.Now().UTC()
 	softCtx, cancel := context.WithTimeout(ctx, runtime.cfg.ResearchSoftLimit)
@@ -307,20 +326,23 @@ func supersededOrTerminal(run map[string]any, taskID string) bool {
 	}
 }
 
-// nextResearchInstance assigns each concurrent claim to a different model
-// endpoint. The durable Go queue stores the selected instance in the payload,
-// but the queue is shared; trusting an old instance hint would therefore let
-// all worker slots drain one former shard into the same model.
-func (runtime *researchRuntime) nextResearchInstance(fallback string) string {
-	capacity := len(runtime.cfg.ResearchURLs)
-	if capacity == 0 {
-		return fallback
+// acquireResearchInstance keeps one durable worker task bound to one model
+// endpoint for its entire handler lifetime. A plain round-robin counter can
+// assign a newly claimed task to an endpoint that is still serving a slower
+// request while another endpoint has already become idle.
+func (runtime *researchRuntime) acquireResearchInstance(ctx context.Context, fallback string) (string, func(), error) {
+	if runtime.instanceSlots == nil {
+		return fallback, func() {}, nil
 	}
-	if capacity == 1 {
-		return "research-0"
+	select {
+	case instanceID := <-runtime.instanceSlots:
+		var once sync.Once
+		return instanceID, func() {
+			once.Do(func() { runtime.instanceSlots <- instanceID })
+		}, nil
+	case <-ctx.Done():
+		return "", func() {}, ctx.Err()
 	}
-	index := (runtime.nextEndpoint.Add(1) - 1) % uint64(capacity)
-	return fmt.Sprintf("research-%d", index)
 }
 
 func (runtime *researchRuntime) eventEvidence(ctx context.Context, runID uuid.UUID, event map[string]any, historical bool) ([]researchEvidence, error) {

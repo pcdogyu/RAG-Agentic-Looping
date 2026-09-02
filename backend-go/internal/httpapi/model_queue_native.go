@@ -159,7 +159,11 @@ func (s *Server) loadNativeModelJobs(ctx context.Context, queue string, cutoff t
 		         WHEN j.queue='extract' THEN nullif(ni.source,'')
 		         ELSE nullif(j.payload#>>'{kwargs,source}','')
 		       END AS source,
-		       nullif(j.payload#>>'{kwargs,model_instance_id}','') AS instance_id
+		       coalesce(
+		         nullif(er.payload->>'model_instance_id',''),
+		         nullif(rr.payload->>'model_instance_id',''),
+		         nullif(j.payload#>>'{kwargs,model_instance_id}','')
+		       ) AS instance_id
 		FROM go_jobs j
 		LEFT JOIN event_research_runs er
 		  ON j.task_type='market_loop.research_event' AND er.id=j.payload->'args'->>1
