@@ -533,7 +533,7 @@ func (runtime *researchRuntime) callResearchModel(ctx context.Context, entityID 
 	messages := []map[string]string{{"role": "system", "content": system}, {"role": "user", "content": prompt + "\n\n只返回符合format JSON Schema的JSON。"}}
 	request := map[string]any{
 		"model": runtime.cfg.ResearchModel, "messages": messages, "format": schema, "stream": false,
-		"think":      true,
+		"think":      runtime.cfg.ResearchThink,
 		"keep_alive": ollamaKeepAliveValue(runtime.cfg.OllamaKeepAlive),
 		"options":    map[string]any{"temperature": 0, "num_ctx": runtime.cfg.ResearchContextLength, "num_predict": runtime.cfg.ResearchMaxOutput, "num_thread": runtime.cfg.OllamaResearchThreads},
 	}

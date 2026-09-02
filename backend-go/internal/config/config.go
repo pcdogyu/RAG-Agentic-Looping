@@ -49,6 +49,7 @@ type Config struct {
 	MappingMaxOutput      int
 	ResearchContextLength int
 	ResearchMaxOutput     int
+	ResearchThink         bool
 	CodeContextLength     int
 	CodeMaxOutput         int
 	OllamaKeepAlive       string
@@ -126,6 +127,7 @@ func Load() (Config, error) {
 		MappingMaxOutput:      envInt("OLLAMA_ASSET_MAPPING_MAX_OUTPUT_TOKENS", 1024),
 		ResearchContextLength: envInt("OLLAMA_RESEARCH_CONTEXT_LENGTH", 16384),
 		ResearchMaxOutput:     envInt("OLLAMA_RESEARCH_MAX_OUTPUT_TOKENS", 4096),
+		ResearchThink:         envBool("OLLAMA_RESEARCH_THINK", false),
 		CodeContextLength:     envInt("OLLAMA_CODE_CONTEXT_LENGTH", 16384),
 		CodeMaxOutput:         envInt("OLLAMA_CODE_MAX_OUTPUT_TOKENS", 8192),
 		OllamaKeepAlive:       env("OLLAMA_KEEP_ALIVE", "0"),

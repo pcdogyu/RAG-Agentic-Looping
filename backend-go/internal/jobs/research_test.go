@@ -67,7 +67,7 @@ func TestResearchLimitsUseThirtyFourAndThirtyFiveMinutes(t *testing.T) {
 	}
 }
 
-func TestResearchModelRequestEnablesThinking(t *testing.T) {
+func TestResearchModelRequestUsesConfiguredThinkingMode(t *testing.T) {
 	var request map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
@@ -75,6 +75,44 @@ func TestResearchModelRequestEnablesThinking(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"message":{"content":"{\"answer\":\"ok\"}"}}`))
+	}))
+	defer server.Close()
+
+	runtime := &researchRuntime{
+		cfg: config.Config{
+			ResearchModel: "qwen3:4b-thinking",
+			ResearchURLs:  []string{server.URL},
+			ResearchThink: true,
+		},
+		client: server.Client(),
+	}
+	var result map[string]any
+	if err := runtime.callResearchModel(
+		context.Background(),
+		[16]byte{},
+		"research_run",
+		"report_drafting",
+		"system",
+		"prompt",
+		map[string]any{"type": "object"},
+		"research-0",
+		&result,
+	); err != nil {
+		t.Fatalf("call research model: %v", err)
+	}
+	if thinking, ok := request["think"].(bool); !ok || !thinking {
+		t.Fatalf("expected think=true, got %#v", request["think"])
+	}
+}
+
+func TestResearchModelRequestDisablesThinkingByDefault(t *testing.T) {
+	var request map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatalf("decode research request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"message":{"content":"{}"}}`))
 	}))
 	defer server.Close()
 
@@ -99,8 +137,8 @@ func TestResearchModelRequestEnablesThinking(t *testing.T) {
 	); err != nil {
 		t.Fatalf("call research model: %v", err)
 	}
-	if thinking, ok := request["think"].(bool); !ok || !thinking {
-		t.Fatalf("expected think=true, got %#v", request["think"])
+	if thinking, ok := request["think"].(bool); !ok || thinking {
+		t.Fatalf("expected think=false, got %#v", request["think"])
 	}
 }
 
