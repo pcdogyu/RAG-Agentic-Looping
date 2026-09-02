@@ -2,7 +2,10 @@ package jobs
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -60,6 +63,43 @@ func TestResearchLimitsUseThirtyFourAndThirtyFiveMinutes(t *testing.T) {
 	cfg := config.Config{ResearchSoftLimit: 34 * time.Minute, ResearchHardLimit: 35 * time.Minute}
 	if cfg.ResearchSoftLimit >= cfg.ResearchHardLimit {
 		t.Fatal("soft research limit must be lower than hard limit")
+	}
+}
+
+func TestResearchModelRequestEnablesThinking(t *testing.T) {
+	var request map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatalf("decode research request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"message":{"content":"{\"answer\":\"ok\"}"}}`))
+	}))
+	defer server.Close()
+
+	runtime := &researchRuntime{
+		cfg: config.Config{
+			ResearchModel: "qwen3:4b-thinking",
+			ResearchURLs:  []string{server.URL},
+		},
+		client: server.Client(),
+	}
+	var result map[string]any
+	if err := runtime.callResearchModel(
+		context.Background(),
+		[16]byte{},
+		"research_run",
+		"report_drafting",
+		"system",
+		"prompt",
+		map[string]any{"type": "object"},
+		"research-0",
+		&result,
+	); err != nil {
+		t.Fatalf("call research model: %v", err)
+	}
+	if thinking, ok := request["think"].(bool); !ok || !thinking {
+		t.Fatalf("expected think=true, got %#v", request["think"])
 	}
 }
 

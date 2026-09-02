@@ -132,7 +132,7 @@ func Load() (Config, error) {
 		EventClusterWindow:    time.Duration(envInt("EVENT_CLUSTER_WINDOW_HOURS", 72)) * time.Hour,
 		AutoResearch:          envBool("AUTO_RESEARCH", true),
 		AssistModel:           env("OLLAMA_ASSIST_MODEL", "qwen2.5:7b"),
-		ResearchModel:         env("OLLAMA_RESEARCH_MODEL", "qwen2.5:7b"),
+		ResearchModel:         env("OLLAMA_RESEARCH_MODEL", "qwen3:4b-thinking"),
 		CodeModel:             env("OLLAMA_CODE_MODEL", "qwen2.5-coder:7b"),
 		EvolutionEnabled:      envBool("EVOLUTION_ENABLED", false),
 		EvolutionAutoMerge:    envBool("EVOLUTION_AUTO_MERGE", false),

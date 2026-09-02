@@ -175,10 +175,10 @@ services:
     environment:
       APP_ENV: development
       GO_WORKER_LANE: research
-      GO_WORKER_CONCURRENCY: ${RESEARCH_PIPELINE_CONCURRENCY:-3}
+      GO_WORKER_CONCURRENCY: ${RESEARCH_PIPELINE_CONCURRENCY:-1}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
-      OLLAMA_RESEARCH_BASE_URLS: ${OLLAMA_RESEARCH_BASE_URLS:-http://host.docker.internal:11435,http://host.docker.internal:11436,http://host.docker.internal:11439}
-      OLLAMA_RESEARCH_MODEL: ${OLLAMA_RESEARCH_MODEL:-qwen2.5:7b}
+      OLLAMA_RESEARCH_BASE_URLS: ${OLLAMA_RESEARCH_BASE_URLS:-http://host.docker.internal:11435}
+      OLLAMA_RESEARCH_MODEL: ${OLLAMA_RESEARCH_MODEL:-qwen3:4b-thinking}
       OLLAMA_RESEARCH_NUM_THREADS: ${OLLAMA_RESEARCH_NUM_THREADS:-10}
       OLLAMA_RESEARCH_CONTEXT_LENGTH: ${OLLAMA_RESEARCH_CONTEXT_LENGTH:-16384}
       OLLAMA_RESEARCH_MAX_OUTPUT_TOKENS: ${OLLAMA_RESEARCH_MAX_OUTPUT_TOKENS:-8192}
@@ -306,7 +306,7 @@ services:
       FMP_RATE_LIMIT_PER_MINUTE: ${FMP_RATE_LIMIT_PER_MINUTE:-55}
       COINGECKO_BASE_URL: ${COINGECKO_BASE_URL:-https://api.coingecko.com/api/v3}
       RESEARCH_ASSET_COOLDOWN_HOURS: ${RESEARCH_ASSET_COOLDOWN_HOURS:-24}
-      OLLAMA_RESEARCH_BASE_URLS: ${OLLAMA_RESEARCH_BASE_URLS:-http://host.docker.internal:11435,http://host.docker.internal:11436,http://host.docker.internal:11439}
+      OLLAMA_RESEARCH_BASE_URLS: ${OLLAMA_RESEARCH_BASE_URLS:-http://host.docker.internal:11435}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
@@ -415,8 +415,8 @@ services:
       GO_WORKER_CONCURRENCY: "1"
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       RESEARCH_COALESCE_WINDOW_HOURS: ${RESEARCH_COALESCE_WINDOW_HOURS:-24}
-      OLLAMA_RESEARCH_BASE_URLS: ${OLLAMA_RESEARCH_BASE_URLS:-http://host.docker.internal:11435,http://host.docker.internal:11436,http://host.docker.internal:11439}
-      OLLAMA_RESEARCH_MODEL: ${OLLAMA_RESEARCH_MODEL:-qwen2.5:7b}
+      OLLAMA_RESEARCH_BASE_URLS: ${OLLAMA_RESEARCH_BASE_URLS:-http://host.docker.internal:11435}
+      OLLAMA_RESEARCH_MODEL: ${OLLAMA_RESEARCH_MODEL:-qwen3:4b-thinking}
     depends_on:
       postgres:
         condition: service_healthy

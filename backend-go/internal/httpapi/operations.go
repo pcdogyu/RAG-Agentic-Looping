@@ -79,7 +79,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 
 func probeOllama(ctx context.Context) ([]map[string]any, []string) {
 	type lane struct{ name, model string }
-	lanes := []lane{{"extract", envValue("OLLAMA_EXTRACT_MODEL", "qwen2.5:3b")}, {"assist", envValue("OLLAMA_ASSIST_MODEL", "qwen2.5:7b")}, {"research", envValue("OLLAMA_RESEARCH_MODEL", "qwen2.5:7b")}, {"code", envValue("OLLAMA_CODE_MODEL", "qwen2.5-coder:7b")}}
+	lanes := []lane{{"extract", envValue("OLLAMA_EXTRACT_MODEL", "qwen2.5:3b")}, {"assist", envValue("OLLAMA_ASSIST_MODEL", "qwen2.5:7b")}, {"research", envValue("OLLAMA_RESEARCH_MODEL", "qwen3:4b-thinking")}, {"code", envValue("OLLAMA_CODE_MODEL", "qwen2.5-coder:7b")}}
 	client := &http.Client{Timeout: 2 * time.Second}
 	seenURLs := map[string]struct{}{}
 	seenModels := map[string]struct{}{}
