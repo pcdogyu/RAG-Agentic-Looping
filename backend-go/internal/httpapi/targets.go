@@ -713,7 +713,7 @@ func (resolver *publishedSecurityResolver) resolve(value any) []any {
 		current := objectValue(impact["asset"])
 		asset := resolver.byID[stringValue(valueOrNil(current, "asset_id"))]
 		if asset == nil {
-			asset = resolver.match(stringValue(impact["target_name"]), stringValue(impact["target_type"]))
+			asset = resolver.match(stringValue(impact["target_name"]))
 		}
 		if asset != nil {
 			impact["target_type"] = "tradable_asset"
@@ -725,7 +725,7 @@ func (resolver *publishedSecurityResolver) resolve(value any) []any {
 	return dedupePublishedSecurityImpacts(resolved)
 }
 
-func (resolver *publishedSecurityResolver) match(name, targetType string) map[string]any {
+func (resolver *publishedSecurityResolver) match(name string) map[string]any {
 	key := compactTarget(name)
 	if resolver.matchKnown[key] {
 		return resolver.matchedAsset[key]
@@ -751,11 +751,7 @@ func (resolver *publishedSecurityResolver) match(name, targetType string) map[st
 			return asset
 		}
 	}
-	if targetType != "tradable_asset" && base == key {
-		return nil
-	}
-	resolver.matchedAsset[key] = matchPublishedMasterAsset(name, resolver.assets)
-	return resolver.matchedAsset[key]
+	return nil
 }
 
 func selectPublishedMasterAsset(target string, candidates []map[string]any) (map[string]any, bool) {
