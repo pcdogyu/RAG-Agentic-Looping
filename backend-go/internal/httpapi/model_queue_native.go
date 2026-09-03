@@ -375,6 +375,11 @@ func nativeQueueState(counts map[string]int64, enabled, observable bool) string 
 func nativeVisibleTasks(queue string, jobs []nativeModelJob, now time.Time) []nativeModelJob {
 	visible := make([]nativeModelJob, 0)
 	for _, job := range jobs {
+		// A news-age-filtered research job remains counted for audit and queue
+		// metrics, but it is terminal work rather than an actionable task card.
+		if queue == "research" && job.Status == "filtered" {
+			continue
+		}
 		if nativeActiveStatus(job.Status) || nativeFailedStatus(job.Status) {
 			visible = append(visible, job)
 		}

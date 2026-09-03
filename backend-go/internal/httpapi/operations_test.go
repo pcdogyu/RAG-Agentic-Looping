@@ -82,6 +82,22 @@ func TestNativeResearchVisibleTasksDeduplicatesActiveAndFailedSubject(t *testing
 	}
 }
 
+func TestNativeResearchVisibleTasksHidesNewsAgeFilteredJobs(t *testing.T) {
+	now := time.Date(2026, time.September, 3, 8, 0, 0, 0, time.UTC)
+	jobs := []nativeModelJob{
+		{ID: "filtered", Status: "filtered", Kind: "event_research", EntityID: "event-1", Title: "过期新闻", CreatedAt: now, UpdatedAt: now},
+		{ID: "queued", Status: "queued", Kind: "event_research", EntityID: "event-2", Title: "待研究新闻", CreatedAt: now, UpdatedAt: now},
+	}
+	visible := nativeVisibleTasks("research", jobs, now)
+	if len(visible) != 1 || visible[0].ID != "queued" {
+		t.Fatalf("filtered research task should not render as a card: %#v", visible)
+	}
+	counts := nativeQueueCounts(jobs)
+	if counts["filtered"] != 1 {
+		t.Fatalf("filtered job must remain in the audit count: %#v", counts)
+	}
+}
+
 func TestNativeModelQueueItemReturnsDatabaseError(t *testing.T) {
 	queue := nativeModelQueueItem(
 		nativeModelQueueSpec{id: "assist", enabled: true},
