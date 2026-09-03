@@ -10,6 +10,13 @@
 - Keep credentials in GitHub Actions secrets or the server environment. Never write tokens, SSH keys, passwords, or production `.env` contents into tracked files or logs.
 - Verified production SSH access: use `hyuser@10.15.0.29` with the local private key `pem/hostdare.pem` and repository directory `/opt/RAG-Agentic-Looping`. Use key-based authentication only; do not copy the private key or its contents into tracked files or command output.
 
+## Production deployment procedure
+
+- Connect with the verified SSH route above and preserve any remote untracked files. Update production only by running `git fetch --verbose origin refs/heads/golang:refs/remotes/origin/golang` followed by `git merge --ff-only origin/golang` in `/opt/RAG-Agentic-Looping`.
+- For research-queue changes, build only the affected images first: `docker compose --profile go-shadow build go-api go-research-worker web`. Replace `go-api` and `web` with `docker compose --profile go-shadow up -d --no-deps --force-recreate go-api web`.
+- Replace `go-research-worker` through `docker compose --profile go-shadow up -d --no-deps --force-recreate go-research-worker`. Its shutdown flow stops claiming work and waits for in-flight tasks to finish or recover before it starts the new container. Do not kill the Worker or Ollama instances unless the user explicitly authorizes a forced cutover.
+- After deployment, verify `GET /health`, the web root HTTP 200, affected API endpoints, `docker compose --profile go-shadow ps`, and queue capacity/instance health. For the 24-hour research-news filter, confirm `GET /api/v1/model-queues/research/news-age-filter`, then explicitly `PUT {"enabled":true}` once to apply the immediate stale queued-task cleanup.
+
 ## Required delivery checks
 
 - Go backend (`backend-go/**`): require clean `gofmt` output, `go vet ./...`, and the relevant Go tests; use `go test ./...` for cross-cutting Go changes and `go test -race ./...` in CI.
