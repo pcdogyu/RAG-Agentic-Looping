@@ -8,6 +8,7 @@
 - After a successful push, trigger the repository's configured remote deployment/upgrade workflow and verify both the API health endpoint and the web application before reporting completion.
 - If deployment credentials or a remote deployment workflow are not configured, report that deployment is blocked; never claim that a server was upgraded when only GitHub CI ran.
 - Keep credentials in GitHub Actions secrets or the server environment. Never write tokens, SSH keys, passwords, or production `.env` contents into tracked files or logs.
+- Verified production SSH access: use `hyuser@10.15.0.29` with the local private key `pem/hostdare.pem` and repository directory `/opt/RAG-Agentic-Looping`. Use key-based authentication only; do not copy the private key or its contents into tracked files or command output.
 
 ## Required delivery checks
 
