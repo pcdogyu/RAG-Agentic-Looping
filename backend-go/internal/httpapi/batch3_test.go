@@ -111,6 +111,25 @@ func TestMergeConcreteTargetChangesIncludesCommoditiesAndKeepsLatestKey(t *testi
 	}
 }
 
+func TestConcreteEventTargetChangeIncludesOnlyPublishedConcreteTargets(t *testing.T) {
+	cases := []struct {
+		targetType string
+		security   bool
+		want       bool
+	}{
+		{targetType: "commodity_price", security: false, want: true},
+		{targetType: "commodity_price", security: true, want: false},
+		{targetType: "tradable_asset", security: true, want: true},
+		{targetType: "tradable_asset", security: false, want: false},
+		{targetType: "economy", security: false, want: false},
+	}
+	for _, test := range cases {
+		if got := concreteEventTargetChange(test.targetType, test.security); got != test.want {
+			t.Fatalf("concreteEventTargetChange(%q, %v) = %v, want %v", test.targetType, test.security, got, test.want)
+		}
+	}
+}
+
 func TestMergeConcreteTargetChangesPreservesInputOrderForExactTies(t *testing.T) {
 	stamp := time.Date(2026, 8, 31, 1, 2, 13, 0, time.UTC)
 	id := "00000000-0000-0000-0000-000000000001"

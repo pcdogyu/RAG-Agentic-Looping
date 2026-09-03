@@ -248,8 +248,6 @@ var macroTargetTypes = map[string]bool{
 	"interest_rate": true, "sector": true, "risk_asset": true, "shipping": true, "other": true,
 }
 
-var commodityTargetTypes = map[string]bool{"commodity_price": true}
-
 func (s *Server) targetChanges(w http.ResponseWriter, r *http.Request) {
 	kind := r.URL.Query().Get("kind")
 	if kind != "macro" && kind != "asset" {
@@ -375,15 +373,15 @@ func impactFields(value map[string]any) map[string]any {
 }
 
 func (s *Server) macroTargetChanges(r *http.Request) ([]map[string]any, error) {
-	return s.eventTargetChanges(r, macroTargetTypes, "macro", false)
+	return s.eventTargetChanges(r, macroTargetTypes, "macro", func(targetType string, isSecurity bool) bool {
+		return !isSecurity
+	})
 }
 
-func (s *Server) commodityTargetChanges(r *http.Request) ([]map[string]any, error) {
-	return s.eventTargetChanges(r, commodityTargetTypes, "asset", false)
-}
+var concreteEventTargetTypes = map[string]bool{"commodity_price": true, "tradable_asset": true}
 
-func (s *Server) securityTargetChanges(r *http.Request) ([]map[string]any, error) {
-	return s.eventTargetChanges(r, map[string]bool{"tradable_asset": true}, "asset", true)
+func concreteEventTargetChange(targetType string, isSecurity bool) bool {
+	return (targetType == "commodity_price" && !isSecurity) || (targetType == "tradable_asset" && isSecurity)
 }
 
 func (s *Server) concreteTargetChanges(r *http.Request) ([]map[string]any, error) {
@@ -391,15 +389,11 @@ func (s *Server) concreteTargetChanges(r *http.Request) ([]map[string]any, error
 	if err != nil {
 		return nil, err
 	}
-	commodityChanges, err := s.commodityTargetChanges(r)
+	eventChanges, err := s.eventTargetChanges(r, concreteEventTargetTypes, "asset", concreteEventTargetChange)
 	if err != nil {
 		return nil, err
 	}
-	securityChanges, err := s.securityTargetChanges(r)
-	if err != nil {
-		return nil, err
-	}
-	return mergeConcreteTargetChanges(assetChanges, commodityChanges, securityChanges), nil
+	return mergeConcreteTargetChanges(assetChanges, eventChanges), nil
 }
 
 func mergeConcreteTargetChanges(groups ...[]map[string]any) []map[string]any {
@@ -433,7 +427,7 @@ func targetChangeAfter(left, right map[string]any) bool {
 	return leftTime != nil && (rightTime == nil || leftTime.After(*rightTime))
 }
 
-func (s *Server) eventTargetChanges(r *http.Request, targetTypes map[string]bool, kind string, includeSecurities bool) ([]map[string]any, error) {
+func (s *Server) eventTargetChanges(r *http.Request, targetTypes map[string]bool, kind string, include func(string, bool) bool) ([]map[string]any, error) {
 	taxonomy, err := s.targetTaxonomy(r)
 	if err != nil {
 		return nil, err
@@ -509,7 +503,7 @@ func (s *Server) eventTargetChanges(r *http.Request, targetTypes map[string]bool
 			if targetType == "economy" && unitedStatesEconomyAlias(stringValue(impact["target_name"])) {
 				isSecurity = false
 			}
-			if !targetTypes[targetType] || (includeSecurities && !isSecurity) || (!includeSecurities && isSecurity) {
+			if !targetTypes[targetType] || !include(targetType, isSecurity) {
 				continue
 			}
 			if asset == nil {
