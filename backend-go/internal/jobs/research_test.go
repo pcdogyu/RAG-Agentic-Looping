@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/config"
 )
 
@@ -196,6 +197,59 @@ func TestResearchModelDoesNotRetryAfterTimeout(t *testing.T) {
 	}
 	if actual := requests.Load(); actual != 1 {
 		t.Fatalf("expected one timed-out request without retry, got %d", actual)
+	}
+}
+
+func TestEventDraftUsesEvidenceFirstSystemPromptAndParsesSchema(t *testing.T) {
+	var request struct {
+		Messages []map[string]string `json:"messages"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatalf("decode research request: %v", err)
+		}
+		response := map[string]any{"summary": "公司获得订单。", "affected_markets": []string{}, "affected_sectors": []string{}, "scenarios": []string{}, "catalysts": []string{}, "risks": []string{}, "unresolved_questions": []string{}, "evidence_ids": []string{"ev-1"}, "impacts": []map[string]any{{"target_type": "tradable_asset", "target_name": "Acme", "asset_id": "asset-1", "action_id": nil, "direction_score": 40, "transmission_path": []string{"订单增加", "收入预期上修"}, "rationale": "订单是收入的直接证据。", "evidence_ids": []string{"ev-1"}, "missing_information": []string{}}}, "missing_information": []string{}}
+		_ = json.NewEncoder(w).Encode(map[string]any{"message": map[string]any{"content": jsonString(response)}})
+	}))
+	defer server.Close()
+
+	runtime := &researchRuntime{cfg: config.Config{ResearchModel: "qwen3:4b-thinking", ResearchURLs: []string{server.URL}}, client: server.Client()}
+	event := map[string]any{"candidates": []any{map[string]any{"asset": map[string]any{"asset_id": "asset-1", "symbol": "ACME", "name": "Acme", "asset_class": "equity"}}}}
+	draft, err := runtime.generateEventDraft(context.Background(), uuid.New(), event, []researchEvidence{{ID: "ev-1", Claim: "Acme received an order."}}, "research-0")
+	if err != nil {
+		t.Fatalf("generate event draft: %v", err)
+	}
+	if len(request.Messages) != 2 || request.Messages[0]["role"] != "system" || request.Messages[0]["content"] != eventResearchSystemPrompt {
+		t.Fatalf("unexpected event system message: %#v", request.Messages)
+	}
+	if len(draft.Impacts) != 1 || draft.Impacts[0].AssetID != "asset-1" || draft.Impacts[0].EvidenceIDs[0] != "ev-1" {
+		t.Fatalf("event draft did not parse expected schema: %#v", draft)
+	}
+}
+
+func TestAssetDraftUsesEvidenceFirstSystemPromptAndParsesSchema(t *testing.T) {
+	var request struct {
+		Messages []map[string]string `json:"messages"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatalf("decode research request: %v", err)
+		}
+		response := map[string]any{"summary": "订单增加可能改善收入。", "historical_context": "", "financials_and_growth": "", "products_or_protocol": "", "competition": "", "valuation_or_tokenomics": "", "catalysts": []string{}, "risks": []string{}, "invalidation_conditions": []string{}, "evidence_ids": []string{"ev-1"}, "direction_score": 35, "transmission_path": []string{"订单增加", "收入预期上修"}, "missing_information": []string{}}
+		_ = json.NewEncoder(w).Encode(map[string]any{"message": map[string]any{"content": jsonString(response)}})
+	}))
+	defer server.Close()
+
+	runtime := &researchRuntime{cfg: config.Config{ResearchModel: "qwen3:4b-thinking", ResearchURLs: []string{server.URL}}, client: server.Client()}
+	draft, err := runtime.generateAssetDraft(context.Background(), uuid.New(), map[string]any{"asset_id": "asset-1", "symbol": "ACME", "name": "Acme"}, map[string]any{"headline": "Acme received an order."}, []researchEvidence{{ID: "ev-1", Claim: "Acme received an order."}}, "research-0")
+	if err != nil {
+		t.Fatalf("generate asset draft: %v", err)
+	}
+	if len(request.Messages) != 2 || request.Messages[0]["role"] != "system" || request.Messages[0]["content"] != assetResearchSystemPrompt {
+		t.Fatalf("unexpected asset system message: %#v", request.Messages)
+	}
+	if draft.DirectionScore != 35 || len(draft.TransmissionPath) != 2 || draft.EvidenceIDs[0] != "ev-1" {
+		t.Fatalf("asset draft did not parse expected schema: %#v", draft)
 	}
 }
 

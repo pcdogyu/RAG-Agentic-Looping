@@ -25,6 +25,9 @@ import (
 const (
 	researchEventTask = "market_loop.research_event"
 	researchAssetTask = "market_loop.research_asset"
+
+	eventResearchSystemPrompt = "你是证据优先的逐目标事件研究员，不提供实盘指令。严格按“对象相关性→证据归因→最短传导链→影响结论”工作：先仅识别与事件存在直接、可证实关联的受影响目标；不能确认目标时不创建 impact。每个目标必须用给定 evidence_ids 或 actions.id 区分事实与推断，再写出从事件到目标的最短、可检验传导链，并落到供需、收入、成本、利润、现金流、估值或风险溢价。传导环节、方向或时点缺少证据时，必须写入 missing_information，不得用常识、市场情绪或未给出的信息补全。目标不得重复，宏观、行业与证券不得互相伪装。"
+	assetResearchSystemPrompt = "你是证据优先的单标的事件研究员，不提供实盘指令。只评价给定研究对象，严格按“对象相关性→证据归因→最短传导链→影响结论”工作：先确认事件与该标的存在可证实关联，再用给定 evidence_ids 区分事实与推断，最后写出从事件到该标的供需、收入、成本、利润、现金流、估值或风险溢价的最短、可检验传导链。传导环节、方向或时点缺少证据时，必须写入 missing_information，不得用常识、市场情绪或未给出的信息补全。"
 )
 
 var errResearchInactive = errors.New("research run was cancelled or superseded")
@@ -541,7 +544,7 @@ func (runtime *researchRuntime) generateEventDraft(ctx context.Context, runID uu
 		"生成最多6个互不重复的目标影响。每个目标只能输出一个 direction_score（-100到100），评级与置信度由程序计算。asset_id只能来自允许标的；不得为48小时过滤项生成impact，也不得把证券名称伪装成economy或sector。成交量、交易活跃度和投资者参与度是驱动因素，不是宏观经济目标，不得成为独立impact。summary只写事件事实，不写全局方向。未知信息写入missing_information，只能引用给定evidence_ids和actions.id。"
 	schema := eventDraftSchema()
 	var result eventResearchDraft
-	err := runtime.callResearchModel(ctx, runID, "event_research_run", "event_report_drafting", "你是证据优先的逐目标事件研究员；先判断对谁，再判断传导路径。", prompt, schema, instanceID, &result)
+	err := runtime.callResearchModel(ctx, runID, "event_research_run", "event_report_drafting", eventResearchSystemPrompt, prompt, schema, instanceID, &result)
 	if err != nil {
 		return eventResearchDraft{}, err
 	}
@@ -553,7 +556,7 @@ func (runtime *researchRuntime) generateAssetDraft(ctx context.Context, runID uu
 	prompt := "研究对象：" + jsonString(asset) + "\n触发事件：" + jsonString(withoutKey(event, "analysis_steps")) + "\n证据：" + compactResearchEvidence(evidence, 14000) + "\n" +
 		"只评价当前研究对象。输出一个direction_score（-100到100），不得输出评级、概率或置信度；程序会计算这些字段。区分事实、推断和未知，只能引用给定evidence_ids。传导路径需从事件连接到营收、成本、利润、现金流或估值；证据不足写入missing_information，不得编造。"
 	var result assetResearchDraft
-	err := runtime.callResearchModel(ctx, runID, "research_run", "report_drafting", "你是证据优先的投资研究员，不给实盘指令。", prompt, assetDraftSchema(), instanceID, &result)
+	err := runtime.callResearchModel(ctx, runID, "research_run", "report_drafting", assetResearchSystemPrompt, prompt, assetDraftSchema(), instanceID, &result)
 	if err != nil {
 		return assetResearchDraft{}, err
 	}
