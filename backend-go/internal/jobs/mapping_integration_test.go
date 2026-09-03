@@ -151,6 +151,7 @@ func TestRecentResearchFilterAgainstPostgres(t *testing.T) {
 	assetActive := "equity:TEST:active-" + suffix
 	industryID := "industry:test:" + suffix
 	eventRunID, eventID := uuid.NewString(), uuid.NewString()
+	filterEventID, bypassEventID := uuid.NewString(), uuid.NewString()
 	now := time.Now().UTC()
 	insertRun := func(assetID, status string, completedAt time.Time) {
 		t.Helper()
@@ -173,6 +174,7 @@ func TestRecentResearchFilterAgainstPostgres(t *testing.T) {
 	t.Cleanup(func() {
 		_, _ = pool.Exec(context.Background(), `DELETE FROM research_runs WHERE asset_id=ANY($1)`, []string{asset47, asset48, assetInsufficient, assetActive})
 		_, _ = pool.Exec(context.Background(), `DELETE FROM event_research_runs WHERE id=$1`, eventRunID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM news_events WHERE id=ANY($1)`, []string{filterEventID, bypassEventID})
 		_, _ = pool.Exec(context.Background(), `DELETE FROM industries WHERE id=$1`, industryID)
 	})
 
@@ -180,7 +182,8 @@ func TestRecentResearchFilterAgainstPostgres(t *testing.T) {
 		return map[string]any{"relationship": relationship, "asset": map[string]any{"asset_id": assetID, "name": name, "symbol": name, "industry_id": industryID}}
 	}
 	event := map[string]any{
-		"id": uuid.NewString(), "headline": "mixed event", "analysis_steps": []any{},
+		"id": filterEventID, "headline": "mixed event", "event_type": "other", "priority": .5,
+		"published_at": iso(now), "observed_at": iso(now), "as_of": iso(now), "analysis_steps": []any{},
 		"candidates": []any{
 			candidate(asset47, "RECENT47", "entity"),
 			candidate(asset48, "BOUNDARY48", "entity"),
@@ -205,7 +208,11 @@ func TestRecentResearchFilterAgainstPostgres(t *testing.T) {
 		t.Fatalf("filter audit metadata is incomplete: %#v", metadata)
 	}
 
-	bypassEvent := map[string]any{"id": uuid.NewString(), "headline": "manual retry", "analysis_steps": []any{}, "candidates": []any{candidate(asset47, "RECENT47", "entity")}, "industry_ids": []any{industryID}}
+	bypassEvent := map[string]any{
+		"id": bypassEventID, "headline": "manual retry", "event_type": "other", "priority": .5,
+		"published_at": iso(now), "observed_at": iso(now), "as_of": iso(now), "analysis_steps": []any{},
+		"candidates": []any{candidate(asset47, "RECENT47", "entity")}, "industry_ids": []any{industryID},
+	}
 	if err := runtime.applyRecentResearchFilter(ctx, bypassEvent, false); err != nil {
 		t.Fatal(err)
 	}
