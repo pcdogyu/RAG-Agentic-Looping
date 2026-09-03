@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/jobs"
 )
 
 const (
@@ -41,6 +43,7 @@ type nativeModelJob struct {
 	Subtitle    string
 	Source      string
 	InstanceID  string
+	RunID       string
 }
 
 type nativeModelQueueResult struct {
@@ -55,6 +58,7 @@ type nativeExecutionSamples struct {
 
 func (s *Server) buildNativeModelQueueOverview(ctx context.Context, limit int) map[string]any {
 	now := time.Now().UTC()
+	newsAgeFilter, newsAgeFilterErr := jobs.LoadResearchNewsAgeFilter(ctx, s.db)
 	specs := []nativeModelQueueSpec{
 		{id: "extract", model: s.cfg.ExtractModel, purpose: "新闻抽取", binding: "新闻事件结构化抽取", enabled: true},
 		{id: "research", model: s.cfg.ResearchModel, purpose: "标的研究", binding: "工具深度研究与逐目标事件研报", enabled: true},
@@ -73,7 +77,11 @@ func (s *Server) buildNativeModelQueueOverview(ctx context.Context, limit int) m
 			if auditErr != nil {
 				slog.Error("native model execution metrics query failed", "queue", spec.id, "error", auditErr)
 			}
-			results <- nativeModelQueueResult{index: index, queue: nativeModelQueueItem(spec, inference, jobs, executionSamples, limit, now, err)}
+			item := nativeModelQueueItem(spec, inference, jobs, executionSamples, limit, now, err)
+			if spec.id == "research" && newsAgeFilterErr == nil {
+				item["news_age_filter"] = newsAgeFilter
+			}
+			results <- nativeModelQueueResult{index: index, queue: item}
 		}(index, spec)
 	}
 	queues := make([]any, len(specs))
@@ -120,8 +128,10 @@ func (s *Server) loadRecentModelExecutionSamples(ctx context.Context, queue stri
 // degrade into one headline lookup per card.
 func (s *Server) loadNativeModelJobs(ctx context.Context, queue string, cutoff time.Time) ([]nativeModelJob, error) {
 	rows, err := s.db.Query(ctx, `
-		SELECT j.id::text,j.task_type,j.status,j.attempt,
-		       coalesce(j.error,''),j.created_at,j.available_at,j.updated_at,j.started_at,j.attempt_started_at,
+		SELECT j.id::text,j.task_type,
+		       CASE WHEN j.status='cancelled' AND coalesce(er.payload->>'status',rr.payload->>'status')='filtered' THEN 'filtered' ELSE j.status END,
+		       j.attempt,
+		       coalesce(nullif(j.error,''),nullif(er.payload->>'error',''),nullif(rr.payload->>'error',''),''),j.created_at,j.available_at,j.updated_at,j.started_at,j.attempt_started_at,
 		       j.completed_at,j.execution_duration_ms,
 		       CASE
 		         WHEN j.task_type='market_loop.research_event' THEN 'event_research'
@@ -164,7 +174,8 @@ func (s *Server) loadNativeModelJobs(ctx context.Context, queue string, cutoff t
 		         nullif(er.payload->>'model_instance_id',''),
 		         nullif(rr.payload->>'model_instance_id',''),
 		         nullif(j.payload#>>'{kwargs,model_instance_id}','')
-		       ) AS instance_id
+		       ) AS instance_id,
+		       coalesce(er.id::text,rr.id::text) AS run_id
 		FROM go_jobs j
 		LEFT JOIN event_research_runs er
 		  ON j.task_type='market_loop.research_event' AND er.id=j.payload->'args'->>1
@@ -189,12 +200,12 @@ func (s *Server) loadNativeModelJobs(ctx context.Context, queue string, cutoff t
 	jobs := make([]nativeModelJob, 0)
 	for rows.Next() {
 		var job nativeModelJob
-		var entityID, title, subtitle, source, instanceID *string
+		var entityID, title, subtitle, source, instanceID, runID *string
 		if err := rows.Scan(
 			&job.ID, &job.TaskType, &job.Status, &job.Attempt, &job.Error,
 			&job.CreatedAt, &job.AvailableAt, &job.UpdatedAt, &job.StartedAt, &job.AttemptAt,
 			&job.CompletedAt, &job.ExecutionMS, &job.Kind,
-			&entityID, &title, &subtitle, &source, &instanceID,
+			&entityID, &title, &subtitle, &source, &instanceID, &runID,
 		); err != nil {
 			return nil, err
 		}
@@ -203,6 +214,7 @@ func (s *Server) loadNativeModelJobs(ctx context.Context, queue string, cutoff t
 		job.Subtitle = stringPointerValue(subtitle)
 		job.Source = stringPointerValue(source)
 		job.InstanceID = stringPointerValue(instanceID)
+		job.RunID = stringPointerValue(runID)
 		// Research workers acquire an instance only after a job has been claimed.
 		// An enqueue-time model_instance_id is merely a historical preference and
 		// must not make queued or retrying work look assigned to that instance.
@@ -265,7 +277,7 @@ func nativeModelQueueItem(spec nativeModelQueueSpec, inference map[string]any, j
 	if spec.id != "research" && len(instances) > 0 {
 		first := instances[0].(map[string]any)
 		firstCounts := first["counts"].(map[string]int64)
-		for _, field := range []string{"queued", "running", "retrying", "verifying", "completed", "failed"} {
+		for _, field := range []string{"queued", "running", "retrying", "verifying", "completed", "failed", "filtered"} {
 			var assigned int64
 			for _, raw := range instances {
 				assigned += raw.(map[string]any)["counts"].(map[string]int64)[field]
@@ -319,7 +331,7 @@ func nativeInferenceInstances(value any) []any {
 }
 
 func nativeQueueCounts(jobs []nativeModelJob) map[string]int64 {
-	counts := map[string]int64{"queued": 0, "running": 0, "retrying": 0, "verifying": 0, "waiting_for_model": 0, "completed": 0, "failed": 0}
+	counts := map[string]int64{"queued": 0, "running": 0, "retrying": 0, "verifying": 0, "waiting_for_model": 0, "completed": 0, "failed": 0, "filtered": 0}
 	for _, job := range jobs {
 		switch job.Status {
 		case "queued", "proposed":
@@ -334,6 +346,8 @@ func nativeQueueCounts(jobs []nativeModelJob) map[string]int64 {
 			counts["completed"]++
 		case "failed", "rejected", "rolled_back":
 			counts["failed"]++
+		case "filtered":
+			counts["filtered"]++
 		}
 	}
 	return counts
@@ -418,7 +432,7 @@ func nativeTaskValues(jobs []nativeModelJob, now time.Time) []any {
 			executionDuration = nativeExecutionDuration(job, now)
 		}
 		values = append(values, map[string]any{
-			"task_id": job.ID, "instance_id": nilIfEmpty(job.InstanceID), "kind": job.Kind,
+			"task_id": job.ID, "instance_id": nilIfEmpty(job.InstanceID), "run_id": nilIfEmpty(job.RunID), "kind": job.Kind,
 			"entity_id": nilIfEmpty(job.EntityID), "title": job.Title, "subtitle": job.Subtitle,
 			"source": nilIfEmpty(job.Source), "status": job.Status, "attempt": max(1, job.Attempt), "task_count": 1,
 			"queued_at": job.CreatedAt.UTC(), "started_at": startedAt, "completed_at": completedAt,
@@ -540,7 +554,7 @@ func nativeTaskInstance(taskID string, instanceIDs []string) string {
 }
 
 func nativeCountedTasks(counts map[string]int64) int64 {
-	return counts["queued"] + counts["running"] + counts["retrying"] + counts["verifying"] + counts["completed"] + counts["failed"]
+	return counts["queued"] + counts["running"] + counts["retrying"] + counts["verifying"] + counts["completed"] + counts["failed"] + counts["filtered"]
 }
 
 func nativeActiveStatus(status string) bool {
@@ -548,7 +562,7 @@ func nativeActiveStatus(status string) bool {
 }
 
 func nativeFailedStatus(status string) bool {
-	return status == "failed" || status == "rejected" || status == "rolled_back"
+	return status == "failed" || status == "rejected" || status == "rolled_back" || status == "filtered"
 }
 
 func nativeStatusRank(status string) int {
@@ -559,7 +573,7 @@ func nativeStatusRank(status string) int {
 		return 1
 	case "queued", "proposed":
 		return 2
-	case "failed", "rejected", "rolled_back":
+	case "failed", "rejected", "rolled_back", "filtered":
 		return 3
 	default:
 		return 4

@@ -64,6 +64,8 @@ func (s *Server) operations() []operation {
 		{"news_extraction_queue_api_v1_news_extraction_queue_get", http.MethodGet, "/api/v1/news-extraction-queue", s.newsExtractionQueue},
 		{"model_inference_queues_api_v1_model_inference_queues_get", http.MethodGet, "/api/v1/model-inference-queues", s.modelInferenceQueues},
 		{"model_queue_overview_api_v1_model_queue_overview_get", http.MethodGet, "/api/v1/model-queue-overview", s.modelQueueOverview},
+		{"research_news_age_filter_api_v1_model_queues_research_news_age_filter_get", http.MethodGet, "/api/v1/model-queues/research/news-age-filter", s.researchNewsAgeFilter},
+		{"update_research_news_age_filter_api_v1_model_queues_research_news_age_filter_put", http.MethodPut, "/api/v1/model-queues/research/news-age-filter", s.updateResearchNewsAgeFilter},
 		{"scan_status_api_v1_scan_status_get", http.MethodGet, "/api/v1/scan/status", s.scanStatus},
 		{"task_status_api_v1_tasks__task_id__get", http.MethodGet, "/api/v1/tasks/{taskID}", s.taskStatus},
 		{"news_board_api_v1_news_board_get", http.MethodGet, "/api/v1/news-board", s.newsBoard},

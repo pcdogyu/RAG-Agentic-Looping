@@ -149,6 +149,11 @@ func (runtime *researchRuntime) researchEvent(ctx context.Context, job Job) (any
 	if supersededOrTerminal(run, job.ID.String()) {
 		return run, nil
 	}
+	if filtered, filterErr := runtime.filterExpiredAutomaticResearch(ctx, job, run, event, true); filterErr != nil {
+		return nil, filterErr
+	} else if filtered {
+		return map[string]any{"status": "filtered", "event_research_run_id": runID}, nil
+	}
 	filterRecentResearch := true
 	if value, found := run["filter_recent_research"]; found {
 		filterRecentResearch = boolValue(value)
@@ -234,6 +239,17 @@ func (runtime *researchRuntime) researchAsset(ctx context.Context, job Job) (any
 	if supersededOrTerminal(run, job.ID.String()) || stringValue(run["status"]) == "coalesced" {
 		return run, nil
 	}
+	var event map[string]any
+	if rawEventID := fmt.Sprint(envelope.Args[1]); rawEventID != "" && rawEventID != "<nil>" {
+		if eventID, parseErr := uuid.Parse(rawEventID); parseErr == nil {
+			event, _ = runtime.shared().loadEvent(ctx, eventID)
+		}
+	}
+	if filtered, filterErr := runtime.filterExpiredAutomaticResearch(ctx, job, run, event, false); filterErr != nil {
+		return nil, filterErr
+	} else if filtered {
+		return map[string]any{"status": "filtered", "run_id": runID}, nil
+	}
 	instanceID, releaseInstance, err := runtime.acquireResearchInstance(ctx, stringValue(envelope.Kwargs["model_instance_id"]))
 	if err != nil {
 		return nil, err
@@ -249,12 +265,6 @@ func (runtime *researchRuntime) researchAsset(ctx context.Context, job Job) (any
 			return map[string]any{"status": "superseded", "run_id": runID}, nil
 		}
 		return nil, err
-	}
-	var event map[string]any
-	if rawEventID := fmt.Sprint(envelope.Args[1]); rawEventID != "" && rawEventID != "<nil>" {
-		if eventID, parseErr := uuid.Parse(rawEventID); parseErr == nil {
-			event, _ = runtime.shared().loadEvent(softCtx, eventID)
-		}
 	}
 	evidence, err := runtime.assetEvidence(softCtx, runID, event)
 	if err != nil {
@@ -330,7 +340,7 @@ func supersededOrTerminal(run map[string]any, taskID string) bool {
 		return true
 	}
 	switch stringValue(run["status"]) {
-	case "completed", "insufficient_evidence", "cancelled":
+	case "completed", "insufficient_evidence", "cancelled", "filtered":
 		return true
 	default:
 		return false
@@ -985,6 +995,13 @@ func (runtime *researchRuntime) enqueueTargetResearches(ctx context.Context, eve
 }
 
 func (runtime *researchRuntime) enqueueAssetResearch(ctx context.Context, event, asset map[string]any, bypassCooldown bool) (bool, error) {
+	filter, err := LoadResearchNewsAgeFilter(ctx, runtime.db)
+	if err != nil {
+		return false, err
+	}
+	if ResearchNewsExpired(filter, parseTime(event["published_at"]), time.Now().UTC()) {
+		return false, nil
+	}
 	assetID := stringValue(asset["asset_id"])
 	if assetID == "" {
 		return false, nil
@@ -1024,7 +1041,7 @@ func (runtime *researchRuntime) enqueueAssetResearch(ctx context.Context, event,
 	payload := map[string]any{
 		"id": runID, "event_id": eventID, "trigger_event_ids": []string{eventID.String()}, "asset": asset, "status": "queued",
 		"as_of": iso(time.Now()), "historical_replay": false, "retry_of_run_id": nil, "retry_attempt": 0,
-		"celery_task_id": taskID, "model_instance_id": instanceID, "coalesced_into_run_id": nil, "retryable_reason": nil,
+		"celery_task_id": taskID, "model_instance_id": instanceID, "coalesced_into_run_id": nil, "retryable_reason": nil, "news_age_filter_bypass": false,
 		"verification_round": 0, "missing_requirements": []any{}, "contradictions": []any{}, "evidence": []any{},
 		"recommendation": nil, "error": nil, "analysis_steps": steps, "created_at": iso(now), "started_at": nil, "completed_at": nil, "updated_at": iso(now),
 	}
@@ -1040,6 +1057,28 @@ func (runtime *researchRuntime) enqueueAssetResearch(ctx context.Context, event,
 		return false, err
 	}
 	runtime.recordResearchTask(ctx, taskID.String(), "asset_research", runID.String(), stringValue(asset["name"]), stringValue(asset["symbol"]), instanceID)
+	return true, nil
+}
+
+func (runtime *researchRuntime) filterExpiredAutomaticResearch(ctx context.Context, job Job, run, event map[string]any, eventRun bool) (bool, error) {
+	if event == nil || researchNewsAgeFilterBypass(run) {
+		return false, nil
+	}
+	filter, err := LoadResearchNewsAgeFilter(ctx, runtime.db)
+	if err != nil || !ResearchNewsExpired(filter, parseTime(event["published_at"]), time.Now().UTC()) {
+		return false, err
+	}
+	markResearchNewsAgeFiltered(run, parseTime(event["published_at"]))
+	if eventRun {
+		err = runtime.saveEventResearch(ctx, run, nil)
+	} else {
+		err = runtime.saveRun(ctx, run, nil)
+	}
+	if err != nil {
+		return false, err
+	}
+	_ = NewStore(runtime.db).Cancel(ctx, job.ID)
+	updateResearchAgeFilterTracking(ctx, runtime.redis, job.ID.String())
 	return true, nil
 }
 

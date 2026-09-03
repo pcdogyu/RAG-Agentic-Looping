@@ -26,8 +26,8 @@ func TestFrozenContractContainsExpectedSurface(t *testing.T) {
 			}
 		}
 	}
-	if operations != 78 {
-		t.Fatalf("public contract changed: got %d operations, want 78", operations)
+	if operations != 80 {
+		t.Fatalf("public contract changed: got %d operations, want 80", operations)
 	}
 	for _, path := range []string{"/health", "/api/v1/stream", "/api/v1/research-conclusions", "/api/v1/failed-research-runs"} {
 		if _, ok := spec.Paths[path]; !ok {

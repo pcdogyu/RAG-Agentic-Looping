@@ -5977,6 +5977,23 @@
         "summary": "Model Queue Overview"
       }
     },
+    "/api/v1/model-queues/research/news-age-filter": {
+      "get": {
+        "operationId": "research_news_age_filter_api_v1_model_queues_research_news_age_filter_get",
+        "responses": {
+          "200": {"content": {"application/json": {"schema": {}}}, "description": "Successful Response"}
+        },
+        "summary": "Get Research News Age Filter"
+      },
+      "put": {
+        "operationId": "update_research_news_age_filter_api_v1_model_queues_research_news_age_filter_put",
+        "requestBody": {"content": {"application/json": {"schema": {}}}, "required": true},
+        "responses": {
+          "200": {"content": {"application/json": {"schema": {}}}, "description": "Successful Response"}
+        },
+        "summary": "Update Research News Age Filter"
+      }
+    },
     "/api/v1/model-queues/assist/tasks/cancel": {
       "post": {
         "operationId": "cancel_asset_mapping_task_api_v1_model_queues_assist_tasks_cancel_post",

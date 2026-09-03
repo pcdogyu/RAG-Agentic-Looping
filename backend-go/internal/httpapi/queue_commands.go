@@ -22,6 +22,7 @@ type cancellationInput struct {
 
 type modelRetryInput struct {
 	TaskID               string  `json:"task_id"`
+	RunID                *string `json:"run_id"`
 	Kind                 string  `json:"kind"`
 	EntityID             *string `json:"entity_id"`
 	InstanceID           *string `json:"instance_id"`
@@ -172,6 +173,9 @@ func (s *Server) retryModelQueueTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	filterRecent := boolPointerDefault(input.FilterRecentResearch, true)
+	if input.RunID != nil {
+		selected["run_id"] = stringPointerValue(input.RunID)
+	}
 	taskID, retryErr := s.retryModelTask(r.Context(), queueID, selected, 0, filterRecent)
 	if retryErr != nil {
 		writeAPIFailure(w, retryErr)
@@ -342,12 +346,16 @@ func (s *Server) retryModelTask(ctx context.Context, queueID string, task map[st
 		_ = s.cancelTrackedTask(ctx, "code", oldTaskID)
 		return taskID, nil
 	case "research":
+		runID := stringValue(task["run_id"])
+		if runID == "" {
+			return "", fail(http.StatusConflict, "research task has no durable run id")
+		}
 		if kind == "asset_research" {
-			queued, err := s.retryAssetResearch(ctx, oldTaskID, preferred)
+			queued, err := s.retryAssetResearch(ctx, runID, preferred)
 			return queued.TaskID, err
 		}
 		if kind == "event_research" {
-			queued, err := s.retryEventResearch(ctx, oldTaskID, preferred)
+			queued, err := s.retryEventResearch(ctx, runID, preferred)
 			if err != nil {
 				return "", err
 			}

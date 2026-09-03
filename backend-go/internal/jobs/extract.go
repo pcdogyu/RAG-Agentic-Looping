@@ -944,6 +944,13 @@ func (runtime *ExtractRuntime) enqueueMapping(ctx context.Context, event map[str
 }
 
 func (runtime *ExtractRuntime) enqueueEventResearch(ctx context.Context, event map[string]any, filterRecentResearch bool) (bool, error) {
+	newsAgeFilter, err := LoadResearchNewsAgeFilter(ctx, runtime.db)
+	if err != nil {
+		return false, err
+	}
+	if ResearchNewsExpired(newsAgeFilter, parseTime(event["published_at"]), time.Now().UTC()) {
+		return false, nil
+	}
 	if err := runtime.applyRecentResearchFilter(ctx, event, filterRecentResearch); err != nil {
 		return false, err
 	}
@@ -962,7 +969,7 @@ func (runtime *ExtractRuntime) enqueueEventResearch(ctx context.Context, event m
 	if observed := parseTime(event["observed_at"]); observed.After(asOf) {
 		asOf = observed
 	}
-	payload := map[string]any{"id": runID, "event_id": event["id"], "status": "queued", "as_of": iso(asOf), "historical_replay": false, "filter_recent_research": filterRecentResearch, "verification_round": 0, "retry_count": 0, "celery_task_id": taskID, "model_instance_id": instanceID, "retryable_reason": nil, "missing_requirements": []any{}, "contradictions": []any{}, "evidence": []any{}, "report": nil, "report_history": []any{}, "error": nil, "analysis_steps": steps, "created_at": iso(now), "updated_at": iso(now)}
+	payload := map[string]any{"id": runID, "event_id": event["id"], "status": "queued", "as_of": iso(asOf), "historical_replay": false, "filter_recent_research": filterRecentResearch, "news_age_filter_bypass": false, "verification_round": 0, "retry_count": 0, "celery_task_id": taskID, "model_instance_id": instanceID, "retryable_reason": nil, "missing_requirements": []any{}, "contradictions": []any{}, "evidence": []any{}, "report": nil, "report_history": []any{}, "error": nil, "analysis_steps": steps, "created_at": iso(now), "updated_at": iso(now)}
 	body, _ := json.Marshal(payload)
 	inserted, err := runtime.db.Exec(ctx, `INSERT INTO event_research_runs(id,event_id,status,payload,created_at,updated_at) VALUES($1,$2,'queued',$3,$4,$4) ON CONFLICT(event_id) DO NOTHING`, runID, event["id"], body, now)
 	if err != nil {

@@ -1315,6 +1315,7 @@ describe("research queue page", () => {
     expect(disabledMarkup).toContain('type="checkbox"');
     expect(disabledMarkup).not.toContain('checked=""');
     expect(researchMarkup).not.toContain("过滤 48h 已研究");
+    expect(researchMarkup).toContain("过滤 24h 新闻");
 
     const task = {
       task_id: "mapping-1", kind: "asset_mapping", entity_id: "event-1", instance_id: "assist-0",
@@ -1330,6 +1331,16 @@ describe("research queue page", () => {
     });
     expect(JSON.parse(String(modelTaskRetryRequest(research, task, true).body))).not.toHaveProperty("filter_recent_research");
     expect(modelQueueRetryRequest(research, true).body).toBeUndefined();
+  });
+
+  it("includes the durable research run id in a queue-card manual retry", () => {
+    const research = overviewQueue({ id: "research", purpose: "标的研究" });
+    const task = {
+      task_id: "job-1", run_id: "run-1", kind: "asset_research", entity_id: "asset-1", instance_id: null,
+    } as Pick<ModelQueueTask, "task_id" | "run_id" | "kind" | "entity_id" | "instance_id">;
+    expect(JSON.parse(String(modelTaskRetryRequest(research, task, true).body))).toMatchObject({
+      task_id: "job-1", run_id: "run-1",
+    });
   });
 
   it("keeps extract and mapping instances left, then shared research and code panels right", () => {

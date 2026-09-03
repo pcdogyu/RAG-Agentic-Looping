@@ -67,7 +67,7 @@ func (s *Server) failedResearchRuns(w http.ResponseWriter, r *http.Request) {
 				ORDER BY coalesce(audit.completed_at,audit.started_at) DESC,audit.started_at DESC,audit.id DESC
 				LIMIT 1
 			) model_failure ON true
-			WHERE er.status IN ('failed','insufficient_evidence')
+			WHERE er.status IN ('failed','insufficient_evidence','filtered')
 			  AND (er.status='failed' OR er.payload->>'retryable_reason' IS NOT NULL)
 			  AND NOT EXISTS (
 				SELECT 1

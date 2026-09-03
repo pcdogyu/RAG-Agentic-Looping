@@ -39,7 +39,7 @@ func TestNativeOperationsMatchFrozenContractAndCompleteBatchThree(t *testing.T) 
 	}
 
 	operations := (&Server{}).operations()
-	if got, want := len(operations), 78; got != want {
+	if got, want := len(operations), 80; got != want {
 		t.Fatalf("batch three must own %d native operations, got %d", want, got)
 	}
 	seenIDs := map[string]bool{}
@@ -90,7 +90,7 @@ func TestMigrationStatusIsDerivedFromRegisteredRoutes(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload.Total != 78 || payload.Native != 78 || payload.Remaining != 0 || !payload.Ready {
+	if payload.Total != 80 || payload.Native != 80 || payload.Remaining != 0 || !payload.Ready {
 		t.Fatalf("unexpected migration status: %+v", payload)
 	}
 	if len(payload.OperationID) != payload.Native || !sort.StringsAreSorted(payload.OperationID) {

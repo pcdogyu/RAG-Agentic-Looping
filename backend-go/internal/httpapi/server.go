@@ -25,7 +25,7 @@ type Server struct {
 	nativeOperations []operation
 }
 
-const totalContractOperations = 78
+const totalContractOperations = 80
 
 func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) (*Server, error) {
 	s := &Server{cfg: cfg, db: db, redis: redisClient}
