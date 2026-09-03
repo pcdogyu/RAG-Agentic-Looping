@@ -442,6 +442,7 @@ func (s *Server) eventTargetChanges(r *http.Request, targetTypes map[string]bool
 	if err != nil {
 		return nil, err
 	}
+	securityResolver := newPublishedSecurityResolver(masterAssets)
 	securityNames, securitySymbols := securityAssetAliases(masterAssets)
 	rows, err := s.db.Query(r.Context(), `SELECT er.id,er.status,er.updated_at,er.payload::jsonb,e.published_at
 		FROM event_research_runs er LEFT JOIN news_events e ON e.id=er.event_id ORDER BY er.updated_at,er.id`)
@@ -471,7 +472,7 @@ func (s *Server) eventTargetChanges(r *http.Request, targetTypes map[string]bool
 			continue
 		}
 		normalizeEventReport(report)
-		report["impacts"] = resolvePublishedSecurityImpacts(report["impacts"], masterAssets)
+		report["impacts"] = securityResolver.resolve(report["impacts"])
 		runs = append(runs, run)
 		for _, raw := range anySlice(report["impacts"]) {
 			impact := objectValue(raw)
@@ -673,11 +674,35 @@ var preferredPublishedSecurity = map[string]string{
 	"spacexprestocks": "crypto:coingecko:spacex-prestocks-2",
 }
 
-func resolvePublishedSecurityImpacts(value any, assets []map[string]any) []any {
-	byID := make(map[string]map[string]any, len(assets))
-	for _, asset := range assets {
-		byID[stringValue(asset["asset_id"])] = asset
+type publishedSecurityResolver struct {
+	assets       []map[string]any
+	byID         map[string]map[string]any
+	byExactTerm  map[string][]map[string]any
+	matchKnown   map[string]bool
+	matchedAsset map[string]map[string]any
+}
+
+func newPublishedSecurityResolver(assets []map[string]any) *publishedSecurityResolver {
+	resolver := &publishedSecurityResolver{
+		assets: assets, byID: make(map[string]map[string]any, len(assets)), byExactTerm: map[string][]map[string]any{},
+		matchKnown: map[string]bool{}, matchedAsset: map[string]map[string]any{},
 	}
+	for _, asset := range assets {
+		resolver.byID[stringValue(asset["asset_id"])] = asset
+		for _, raw := range append([]any{asset["symbol"], asset["name"]}, anySlice(asset["aliases"])...) {
+			if term := compactTarget(stringValue(raw)); term != "" {
+				resolver.byExactTerm[term] = append(resolver.byExactTerm[term], asset)
+			}
+		}
+	}
+	return resolver
+}
+
+func resolvePublishedSecurityImpacts(value any, assets []map[string]any) []any {
+	return newPublishedSecurityResolver(assets).resolve(value)
+}
+
+func (resolver *publishedSecurityResolver) resolve(value any) []any {
 	resolved := make([]any, 0, len(anySlice(value)))
 	for _, raw := range anySlice(value) {
 		impact := deepCloneObject(objectValue(raw))
@@ -686,9 +711,9 @@ func resolvePublishedSecurityImpacts(value any, assets []map[string]any) []any {
 		}
 		normalizeTargetImpact(impact)
 		current := objectValue(impact["asset"])
-		asset := byID[stringValue(valueOrNil(current, "asset_id"))]
+		asset := resolver.byID[stringValue(valueOrNil(current, "asset_id"))]
 		if asset == nil {
-			asset = matchPublishedMasterAsset(stringValue(impact["target_name"]), assets)
+			asset = resolver.match(stringValue(impact["target_name"]))
 		}
 		if asset != nil {
 			impact["target_type"] = "tradable_asset"
@@ -698,6 +723,44 @@ func resolvePublishedSecurityImpacts(value any, assets []map[string]any) []any {
 		resolved = append(resolved, impact)
 	}
 	return dedupePublishedSecurityImpacts(resolved)
+}
+
+func (resolver *publishedSecurityResolver) match(name string) map[string]any {
+	key := compactTarget(name)
+	if resolver.matchKnown[key] {
+		return resolver.matchedAsset[key]
+	}
+	resolver.matchKnown[key] = true
+	base := key
+	for _, suffix := range []string{"stockprice", "shareprice", "股价", "股票"} {
+		base = strings.TrimSuffix(base, suffix)
+	}
+	if preferredID := preferredPublishedSecurity[base]; preferredID != "" {
+		resolver.matchedAsset[key] = resolver.byID[preferredID]
+		return resolver.matchedAsset[key]
+	}
+	if candidates := resolver.byExactTerm[base]; len(candidates) > 0 {
+		bestScore := -1.0
+		var best map[string]any
+		tied := false
+		for _, asset := range candidates {
+			score := publishedMasterAssetScore(base, asset)
+			if score < 0 {
+				continue
+			}
+			if score > bestScore {
+				bestScore, best, tied = score, asset, false
+			} else if score == bestScore && stringValue(asset["asset_id"]) != stringValue(best["asset_id"]) {
+				tied = true
+			}
+		}
+		if !tied {
+			resolver.matchedAsset[key] = best
+			return best
+		}
+	}
+	resolver.matchedAsset[key] = matchPublishedMasterAsset(name, resolver.assets)
+	return resolver.matchedAsset[key]
 }
 
 func matchPublishedMasterAsset(name string, assets []map[string]any) map[string]any {
