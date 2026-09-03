@@ -25,15 +25,16 @@ type continuationError struct {
 func (e *continuationError) Error() string { return "job continuation requested" }
 
 type Worker struct {
-	Store        *Store
-	ID           string
-	Queues       []string
-	Lease        time.Duration
-	PollInterval time.Duration
-	Handlers     map[string]Handler
-	Concurrency  int
-	Redis        *redis.Client
-	active       atomic.Int64
+	Store           *Store
+	ID              string
+	Queues          []string
+	Lease           time.Duration
+	PollInterval    time.Duration
+	Handlers        map[string]Handler
+	Concurrency     int
+	Redis           *redis.Client
+	DrainOnShutdown bool
+	active          atomic.Int64
 }
 
 func (w *Worker) Run(ctx context.Context) error {
@@ -43,7 +44,12 @@ func (w *Worker) Run(ctx context.Context) error {
 	if w.Concurrency <= 0 {
 		w.Concurrency = 1
 	}
-	heartbeatCtx, stopHeartbeat := context.WithCancel(ctx)
+	// A draining worker stops new claims immediately, but it must not cancel
+	// work that has already acquired a durable lease. The execution context is
+	// kept alive until active handlers finish, while Docker's stop grace period
+	// supplies the final bounded fallback for a stuck handler.
+	drainCtx := w.executionContext(ctx)
+	heartbeatCtx, stopHeartbeat := context.WithCancel(drainCtx)
 	defer stopHeartbeat()
 	go w.workerHeartbeat(heartbeatCtx)
 	var group sync.WaitGroup
@@ -51,11 +57,18 @@ func (w *Worker) Run(ctx context.Context) error {
 		group.Add(1)
 		go func() {
 			defer group.Done()
-			w.claimLoop(ctx)
+			w.claimLoop(ctx, drainCtx)
 		}()
 	}
 	group.Wait()
 	return ctx.Err()
+}
+
+func (w *Worker) executionContext(ctx context.Context) context.Context {
+	if w.DrainOnShutdown {
+		return context.WithoutCancel(ctx)
+	}
+	return ctx
 }
 
 func (w *Worker) workerHeartbeat(ctx context.Context) {
@@ -77,12 +90,12 @@ func (w *Worker) workerHeartbeat(ctx context.Context) {
 	}
 }
 
-func (w *Worker) claimLoop(ctx context.Context) {
-	for ctx.Err() == nil {
-		job, err := w.Store.Claim(ctx, w.ID, w.Queues, w.Lease)
+func (w *Worker) claimLoop(claimCtx, drainCtx context.Context) {
+	for claimCtx.Err() == nil {
+		job, err := w.Store.Claim(claimCtx, w.ID, w.Queues, w.Lease)
 		if errors.Is(err, ErrNoJob) {
 			select {
-			case <-ctx.Done():
+			case <-claimCtx.Done():
 				return
 			case <-time.After(w.PollInterval):
 				continue
@@ -91,14 +104,14 @@ func (w *Worker) claimLoop(ctx context.Context) {
 		if err != nil {
 			slog.Error("claim job", "error", err)
 			select {
-			case <-ctx.Done():
+			case <-claimCtx.Done():
 				return
 			case <-time.After(w.PollInterval):
 			}
 			continue
 		}
 		w.active.Add(1)
-		w.execute(ctx, job)
+		w.execute(drainCtx, job)
 		w.active.Add(-1)
 	}
 }

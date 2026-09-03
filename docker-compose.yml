@@ -198,6 +198,7 @@ services:
       redis:
         condition: service_healthy
     restart: unless-stopped
+    stop_grace_period: ${RESEARCH_WORKER_STOP_GRACE_PERIOD:-36m}
 
   go-evolution-worker:
     profiles: ["go-shadow"]
