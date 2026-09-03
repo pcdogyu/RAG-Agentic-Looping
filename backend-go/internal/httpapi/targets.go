@@ -713,7 +713,7 @@ func (resolver *publishedSecurityResolver) resolve(value any) []any {
 		current := objectValue(impact["asset"])
 		asset := resolver.byID[stringValue(valueOrNil(current, "asset_id"))]
 		if asset == nil {
-			asset = resolver.match(stringValue(impact["target_name"]))
+			asset = resolver.match(stringValue(impact["target_name"]), stringValue(impact["target_type"]))
 		}
 		if asset != nil {
 			impact["target_type"] = "tradable_asset"
@@ -725,7 +725,7 @@ func (resolver *publishedSecurityResolver) resolve(value any) []any {
 	return dedupePublishedSecurityImpacts(resolved)
 }
 
-func (resolver *publishedSecurityResolver) match(name string) map[string]any {
+func (resolver *publishedSecurityResolver) match(name, targetType string) map[string]any {
 	key := compactTarget(name)
 	if resolver.matchKnown[key] {
 		return resolver.matchedAsset[key]
@@ -739,28 +739,41 @@ func (resolver *publishedSecurityResolver) match(name string) map[string]any {
 		resolver.matchedAsset[key] = resolver.byID[preferredID]
 		return resolver.matchedAsset[key]
 	}
-	if candidates := resolver.byExactTerm[base]; len(candidates) > 0 {
-		bestScore := -1.0
-		var best map[string]any
-		tied := false
-		for _, asset := range candidates {
-			score := publishedMasterAssetScore(base, asset)
-			if score < 0 {
-				continue
-			}
-			if score > bestScore {
-				bestScore, best, tied = score, asset, false
-			} else if score == bestScore && stringValue(asset["asset_id"]) != stringValue(best["asset_id"]) {
-				tied = true
-			}
+	terms := []string{base}
+	for _, token := range targetWords.FindAllString(name, -1) {
+		if term := compactTarget(token); term != "" && term != base {
+			terms = append(terms, term)
 		}
-		if !tied {
-			resolver.matchedAsset[key] = best
-			return best
+	}
+	for _, term := range terms {
+		if asset, resolved := selectPublishedMasterAsset(term, resolver.byExactTerm[term]); resolved {
+			resolver.matchedAsset[key] = asset
+			return asset
 		}
+	}
+	if targetType != "tradable_asset" && base == key {
+		return nil
 	}
 	resolver.matchedAsset[key] = matchPublishedMasterAsset(name, resolver.assets)
 	return resolver.matchedAsset[key]
+}
+
+func selectPublishedMasterAsset(target string, candidates []map[string]any) (map[string]any, bool) {
+	bestScore := -1.0
+	var best map[string]any
+	tied := false
+	for _, asset := range candidates {
+		score := publishedMasterAssetScore(target, asset)
+		if score < 0 {
+			continue
+		}
+		if score > bestScore {
+			bestScore, best, tied = score, asset, false
+		} else if score == bestScore && stringValue(asset["asset_id"]) != stringValue(best["asset_id"]) {
+			tied = true
+		}
+	}
+	return best, best != nil && !tied
 }
 
 func matchPublishedMasterAsset(name string, assets []map[string]any) map[string]any {

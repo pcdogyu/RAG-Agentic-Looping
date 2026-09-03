@@ -72,13 +72,13 @@ func TestPublishedSecurityResolverCachesResolvedAndUnmatchedNames(t *testing.T) 
 		{"asset_id": "equity:NASDAQ:NVDA", "asset_class": "equity", "symbol": "NVDA", "name": "NVIDIA Corporation", "aliases": []any{"NVIDIA"}, "association_tier": "standard", "active": true},
 	}
 	resolver := newPublishedSecurityResolver(assets)
-	if got := resolver.match("NVIDIA 股价"); stringValue(got["asset_id"]) != "equity:NASDAQ:NVDA" {
+	if got := resolver.match("NVIDIA 股价", "economy"); stringValue(got["asset_id"]) != "equity:NASDAQ:NVDA" {
 		t.Fatalf("exact alias did not resolve to the selected asset: %#v", got)
 	}
-	if got := resolver.match("unmapped macro factor"); got != nil {
+	if got := resolver.match("unmapped macro factor", "economy"); got != nil {
 		t.Fatalf("unexpected mapping for unmatched target: %#v", got)
 	}
-	if got := resolver.match("unmapped macro factor"); got != nil {
+	if got := resolver.match("unmapped macro factor", "economy"); got != nil {
 		t.Fatalf("cached unmatched target unexpectedly resolved: %#v", got)
 	}
 	if len(resolver.matchKnown) != 2 {
