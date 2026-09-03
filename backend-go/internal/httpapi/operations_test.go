@@ -15,9 +15,9 @@ func TestNativeModelQueueItemUsesDurableJobCountsAndInstances(t *testing.T) {
 	}
 	inference := map[string]any{
 		"capacity": 3, "available": 2, "running": 1, "queued": 2, "observable": true, "per_instance_concurrency": 3,
-		"instances": []map[string]any{{"id": "research-0", "healthy": true, "model_available": true, "capacity": 3, "available": 2, "running": 1, "queued": 2, "observable": true}},
+		"instances": []map[string]any{{"id": "assist-0", "healthy": true, "model_available": true, "capacity": 3, "available": 2, "running": 1, "queued": 2, "observable": true}},
 	}
-	queue := nativeModelQueueItem(nativeModelQueueSpec{id: "research", model: "qwen2.5:7b", purpose: "标的研究", binding: "研究", enabled: true}, inference, jobs, nativeExecutionSamples{}, 50, now, nil)
+	queue := nativeModelQueueItem(nativeModelQueueSpec{id: "assist", model: "qwen2.5:7b", purpose: "股票映射", binding: "映射", enabled: true}, inference, jobs, nativeExecutionSamples{}, 50, now, nil)
 	counts := queue["counts"].(map[string]int64)
 	if counts["running"] != 1 || counts["failed"] != 1 || counts["completed"] != 1 || counts["waiting_for_model"] != 2 {
 		t.Fatalf("unexpected counts: %#v", counts)
@@ -30,8 +30,43 @@ func TestNativeModelQueueItemUsesDurableJobCountsAndInstances(t *testing.T) {
 		t.Fatalf("visible tasks = %d, want 2", len(visible))
 	}
 	first := visible[0].(map[string]any)
-	if stringValue(first["title"]) != "真实新闻标题" || stringValue(first["instance_id"]) != "research-0" {
+	if stringValue(first["title"]) != "真实新闻标题" || stringValue(first["instance_id"]) != "assist-0" {
 		t.Fatalf("headline or instance assignment lost: %#v", first)
+	}
+}
+
+func TestNativeResearchQueueLeavesUnclaimedWorkInSharedPool(t *testing.T) {
+	now := time.Date(2026, time.September, 3, 8, 0, 0, 0, time.UTC)
+	jobs := []nativeModelJob{
+		{ID: "queued", Status: "queued", CreatedAt: now.Add(-time.Hour), AvailableAt: now.Add(-time.Hour), UpdatedAt: now, InstanceID: "research-0"},
+		{ID: "retrying", Status: "retrying", CreatedAt: now.Add(-2 * time.Hour), AvailableAt: now.Add(-time.Minute), UpdatedAt: now, InstanceID: "research-1"},
+		{ID: "running", Status: "running", CreatedAt: now.Add(-3 * time.Hour), UpdatedAt: now, InstanceID: "research-1"},
+	}
+	inference := map[string]any{
+		"capacity": 2, "available": 1, "running": 1, "observable": true, "per_instance_concurrency": 1,
+		"instances": []map[string]any{
+			{"id": "research-0", "healthy": true, "model_available": true, "capacity": 1, "available": 1, "observable": true},
+			{"id": "research-1", "healthy": true, "model_available": true, "capacity": 1, "available": 0, "observable": true},
+		},
+	}
+	queue := nativeModelQueueItem(nativeModelQueueSpec{id: "research", enabled: true}, inference, jobs, nativeExecutionSamples{}, 50, now, nil)
+	counts := queue["counts"].(map[string]int64)
+	if counts["queued"] != 1 || counts["retrying"] != 1 || counts["running"] != 1 {
+		t.Fatalf("unexpected shared pool counts: %#v", counts)
+	}
+	instances := queue["instances"].([]any)
+	firstCounts := instances[0].(map[string]any)["counts"].(map[string]int64)
+	secondCounts := instances[1].(map[string]any)["counts"].(map[string]int64)
+	if firstCounts["queued"] != 0 || firstCounts["retrying"] != 0 || secondCounts["running"] != 1 {
+		t.Fatalf("unclaimed research work was assigned to an instance: first=%#v second=%#v", firstCounts, secondCounts)
+	}
+	for _, raw := range queue["tasks"].([]any) {
+		task := raw.(map[string]any)
+		if task["task_id"] == "queued" || task["task_id"] == "retrying" {
+			if task["instance_id"] != nil {
+				t.Fatalf("unclaimed task has an instance: %#v", task)
+			}
+		}
 	}
 }
 
@@ -126,6 +161,22 @@ func TestNativeQueueMetricsUsesRecentExecutionSamples(t *testing.T) {
 	}
 	if metrics["throughput_per_hour"] != float64(0.5) {
 		t.Fatalf("unexpected throughput: %#v", metrics)
+	}
+}
+
+func TestNativeRetryWaitStartsAtAvailableAt(t *testing.T) {
+	now := time.Date(2026, time.September, 3, 8, 0, 0, 0, time.UTC)
+	availableAt := now.Add(-2 * time.Minute)
+	job := nativeModelJob{
+		ID: "retrying", Status: "retrying", CreatedAt: now.Add(-54 * time.Hour), AvailableAt: availableAt, UpdatedAt: now,
+	}
+	metrics := nativeQueueMetrics([]nativeModelJob{job}, nativeQueueCounts([]nativeModelJob{job}), now)
+	if metrics["average_queue_duration_ms"] != int64((2*time.Minute).Milliseconds()) || metrics["longest_wait_ms"] != int64((2*time.Minute).Milliseconds()) {
+		t.Fatalf("retry wait should start at available_at: %#v", metrics)
+	}
+	task := nativeTaskValues([]nativeModelJob{job}, now)[0].(map[string]any)
+	if task["queue_duration_ms"] != int64((2 * time.Minute).Milliseconds()) {
+		t.Fatalf("task retry wait should start at available_at: %#v", task)
 	}
 }
 

@@ -29,6 +29,7 @@ type nativeModelJob struct {
 	Attempt     int
 	Error       string
 	CreatedAt   time.Time
+	AvailableAt time.Time
 	UpdatedAt   time.Time
 	StartedAt   *time.Time
 	AttemptAt   *time.Time
@@ -120,7 +121,7 @@ func (s *Server) loadRecentModelExecutionSamples(ctx context.Context, queue stri
 func (s *Server) loadNativeModelJobs(ctx context.Context, queue string, cutoff time.Time) ([]nativeModelJob, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT j.id::text,j.task_type,j.status,j.attempt,
-		       coalesce(j.error,''),j.created_at,j.updated_at,j.started_at,j.attempt_started_at,
+		       coalesce(j.error,''),j.created_at,j.available_at,j.updated_at,j.started_at,j.attempt_started_at,
 		       j.completed_at,j.execution_duration_ms,
 		       CASE
 		         WHEN j.task_type='market_loop.research_event' THEN 'event_research'
@@ -191,7 +192,7 @@ func (s *Server) loadNativeModelJobs(ctx context.Context, queue string, cutoff t
 		var entityID, title, subtitle, source, instanceID *string
 		if err := rows.Scan(
 			&job.ID, &job.TaskType, &job.Status, &job.Attempt, &job.Error,
-			&job.CreatedAt, &job.UpdatedAt, &job.StartedAt, &job.AttemptAt,
+			&job.CreatedAt, &job.AvailableAt, &job.UpdatedAt, &job.StartedAt, &job.AttemptAt,
 			&job.CompletedAt, &job.ExecutionMS, &job.Kind,
 			&entityID, &title, &subtitle, &source, &instanceID,
 		); err != nil {
@@ -202,6 +203,12 @@ func (s *Server) loadNativeModelJobs(ctx context.Context, queue string, cutoff t
 		job.Subtitle = stringPointerValue(subtitle)
 		job.Source = stringPointerValue(source)
 		job.InstanceID = stringPointerValue(instanceID)
+		// Research workers acquire an instance only after a job has been claimed.
+		// An enqueue-time model_instance_id is merely a historical preference and
+		// must not make queued or retrying work look assigned to that instance.
+		if queue == "research" && (job.Status == "queued" || job.Status == "retrying") {
+			job.InstanceID = ""
+		}
 		jobs = append(jobs, job)
 	}
 	return jobs, rows.Err()
@@ -216,7 +223,11 @@ func nativeModelQueueItem(spec nativeModelQueueSpec, inference map[string]any, j
 		}
 	}
 	for index := range jobs {
-		if !contains(instanceIDs, jobs[index].InstanceID) {
+		if spec.id == "research" && (jobs[index].Status == "queued" || jobs[index].Status == "retrying") {
+			jobs[index].InstanceID = ""
+			continue
+		}
+		if spec.id != "research" && !contains(instanceIDs, jobs[index].InstanceID) {
 			jobs[index].InstanceID = nativeTaskInstance(jobs[index].ID, instanceIDs)
 		}
 	}
@@ -247,9 +258,11 @@ func nativeModelQueueItem(spec nativeModelQueueSpec, inference map[string]any, j
 			"tasks": nativeTaskValues(instanceVisible[:instanceLimit], now),
 		})
 	}
-	// Tasks with no inferencer are still represented in aggregate counts. Put
-	// their count on the first instance so panel totals stay consistent.
-	if len(instances) > 0 {
+	// Non-research lanes have one deterministic target instance. Tasks with no
+	// inferencer are put on the first panel so its displayed totals stay
+	// consistent. Research is a shared worker pool: unclaimed work intentionally
+	// remains unassigned until a worker acquires a live instance slot.
+	if spec.id != "research" && len(instances) > 0 {
 		first := instances[0].(map[string]any)
 		firstCounts := first["counts"].(map[string]int64)
 		for _, field := range []string{"queued", "running", "retrying", "verifying", "completed", "failed"} {
@@ -387,7 +400,7 @@ func nativeTaskValues(jobs []nativeModelJob, now time.Time) []any {
 		}
 		var queueDuration any
 		if job.Status == "queued" || job.Status == "retrying" {
-			queueDuration = max(int64(0), now.Sub(job.CreatedAt).Milliseconds())
+			queueDuration = nativeQueueWaitDuration(job, now)
 		}
 		var errorValue any
 		if trimmed := strings.TrimSpace(job.Error); trimmed != "" {
@@ -426,7 +439,7 @@ func nativeQueueMetrics(jobs []nativeModelJob, counts map[string]int64, now time
 	var longest int64
 	for _, job := range jobs {
 		if job.Status == "queued" || job.Status == "retrying" {
-			wait := max(int64(0), now.Sub(job.CreatedAt).Milliseconds())
+			wait := nativeQueueWaitDuration(job, now)
 			waits = append(waits, wait)
 			longest = max(longest, wait)
 		}
@@ -472,6 +485,16 @@ func nativeQueueMetrics(jobs []nativeModelJob, counts map[string]int64, now time
 		}
 	}
 	return metrics
+}
+
+// nativeQueueWaitDuration starts at available_at, which is reset for each
+// retry. CreatedAt is retained only as a compatibility fallback for old rows.
+func nativeQueueWaitDuration(job nativeModelJob, now time.Time) int64 {
+	start := job.AvailableAt
+	if start.IsZero() {
+		start = job.CreatedAt
+	}
+	return max(int64(0), now.Sub(start).Milliseconds())
 }
 
 func nativeExecutionDuration(job nativeModelJob, now time.Time) int64 {

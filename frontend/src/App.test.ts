@@ -1275,6 +1275,31 @@ describe("research queue page", () => {
     expect(assistMarkup).toContain("实例可用");
   });
 
+  it("uses one shared research panel with global backlog and live instance slots", () => {
+    const researchQueue = overviewQueue({
+      id: "research", model: "qwen3:4b-thinking", purpose: "标的研究",
+      capacity: 4, available: 0, instance_count: 4, per_instance_concurrency: 1,
+      counts: { queued: 3262, running: 4, retrying: 817, verifying: 0, waiting_for_model: 0, completed: 245, failed: 0 },
+      instances: [
+        { id: "research-0", healthy: true, model_available: true, capacity: 1, available: 0, counts: { queued: 0, running: 1, retrying: 0, verifying: 0, waiting_for_model: 0, completed: 0, failed: 0 } },
+        { id: "research-1", healthy: true, model_available: true, capacity: 1, available: 0, counts: { queued: 0, running: 1, retrying: 0, verifying: 0, waiting_for_model: 0, completed: 0, failed: 0 } },
+        { id: "research-2", healthy: true, model_available: true, capacity: 1, available: 0, counts: { queued: 0, running: 1, retrying: 0, verifying: 0, waiting_for_model: 0, completed: 0, failed: 0 } },
+        { id: "research-3", healthy: true, model_available: true, capacity: 1, available: 0, counts: { queued: 0, running: 1, retrying: 0, verifying: 0, waiting_for_model: 0, completed: 0, failed: 0 } },
+      ],
+    });
+    const [, rightColumn] = modelQueuePanelColumns([researchQueue]);
+    expect(rightColumn.map(({ instance }) => instance.id)).toEqual(["全部实例"]);
+    const markup = renderToStaticMarkup(createElement(UnifiedModelQueuePanel, {
+      queue: researchQueue, instance: rightColumn[0].instance,
+    }));
+
+    expect(markup).toContain("qwen3:4b-thinking 标的研究队列 · 全部实例");
+    expect(markup).toContain("待处理<strong>3262</strong>");
+    expect(markup).toContain("重试/验证<strong>817</strong>");
+    expect(markup).toContain("近24h完成/失败<strong>245/0</strong>");
+    expect(markup).toContain("research-3 · 运行 1 · 槽位 0/1");
+  });
+
   it("shows the default-on 48h retry filter only for assist and sends its value", () => {
     const assist = overviewQueue({ id: "assist", purpose: "股票映射" });
     const research = overviewQueue({ id: "research", purpose: "标的研究" });
@@ -1307,7 +1332,7 @@ describe("research queue page", () => {
     expect(modelQueueRetryRequest(research, true).body).toBeUndefined();
   });
 
-  it("keeps extract and mapping instances left, then research and code instances right", () => {
+  it("keeps extract and mapping instances left, then shared research and code panels right", () => {
     const queues = [
       overviewQueue({
         id: "code",
@@ -1346,7 +1371,7 @@ describe("research queue page", () => {
       "extract-0", "extract-1", "assist-0", "assist-1",
     ]);
     expect(rightColumn.map(({ instance }) => instance.id)).toEqual([
-      "research-0", "research-1", "research-2", "code-0",
+      "全部实例", "code-0",
     ]);
   });
 

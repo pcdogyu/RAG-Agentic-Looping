@@ -300,13 +300,35 @@ export type ModelQueuePanelItem = {
   instance: ModelQueueInstanceItem;
 };
 
+export function modelQueueAggregateInstance(
+  queue: ModelQueueOverviewItem,
+): ModelQueueInstanceItem {
+  const instances = modelQueueInstances(queue);
+  return {
+    id: "全部实例",
+    healthy: instances.every((instance) => instance.healthy),
+    model_available: instances.every((instance) => instance.model_available),
+    state: queue.state,
+    capacity: queue.capacity,
+    available: queue.available,
+    observable: queue.observable,
+    counts: queue.counts,
+    metrics: queue.metrics,
+    total_tasks: queue.total_tasks,
+    truncated: queue.truncated,
+    tasks: queue.tasks,
+  };
+}
+
 export function modelQueuePanelColumns(
   queues: ModelQueueOverviewItem[],
 ): [ModelQueuePanelItem[], ModelQueuePanelItem[]] {
   const buildColumn = (queueIds: ModelQueueOverviewItem["id"][]) => queueIds.flatMap(
     (queueId) => queues
       .filter((queue) => queue.id === queueId)
-      .flatMap((queue) => modelQueueInstances(queue).map((instance) => ({ queue, instance }))),
+      .flatMap((queue) => (queue.id === "research"
+        ? [{ queue, instance: modelQueueAggregateInstance(queue) }]
+        : modelQueueInstances(queue).map((instance) => ({ queue, instance })))),
   );
   return [
     buildColumn(["extract", "assist"]),
@@ -564,7 +586,11 @@ export function UnifiedModelQueuePanel({
   retryingAll?: boolean;
   clearing?: boolean;
 }) {
-  const activeInstance = instance ?? modelQueueInstances(queue)[0];
+  const activeInstance = instance ?? (queue.id === "research"
+    ? modelQueueAggregateInstance(queue)
+    : modelQueueInstances(queue)[0]);
+  const researchAggregate = queue.id === "research" && activeInstance.id === "全部实例";
+  const researchInstances = researchAggregate ? modelQueueInstances(queue) : [];
   const secondary = activeInstance.counts.retrying + activeInstance.counts.verifying;
   const activeCount = activeInstance.counts.queued + activeInstance.counts.running + secondary;
   const clearableCount = activeCount + activeInstance.counts.failed;
@@ -576,7 +602,9 @@ export function UnifiedModelQueuePanel({
       <div>
         <p className="eyebrow">{modelQueueEyebrows[queue.id]}</p>
         <h3>{queue.model} {queue.purpose}队列 · {activeInstance.id}</h3>
-        <small>{queue.binding} · {ready ? "实例可用" : (activeInstance.healthy ? "模型缺失" : "实例离线")}</small>
+        <small>{queue.binding} · {researchAggregate
+          ? `${researchInstances.filter((item) => item.healthy && item.model_available).length}/${researchInstances.length} 实例可用`
+          : (ready ? "实例可用" : (activeInstance.healthy ? "模型缺失" : "实例离线"))}</small>
       </div>
       <div className="model-queue-header-actions">
         {queue.id === "assist" && <label className="model-queue-filter-toggle" title="手动重试时过滤过去 48 小时已经研究过的行业和标的">
@@ -607,7 +635,7 @@ export function UnifiedModelQueuePanel({
       <span>待处理<strong>{activeInstance.counts.queued}</strong></span>
       <span>运行<strong>{activeInstance.counts.running}</strong></span>
       <span>重试/验证<strong>{secondary}</strong></span>
-      <span>完成/失败<strong>{activeInstance.counts.completed}/{activeInstance.counts.failed}</strong></span>
+      <span>{queue.id === "research" ? "近24h完成/失败" : "完成/失败"}<strong>{activeInstance.counts.completed}/{activeInstance.counts.failed}</strong></span>
       <span title={`样本 ${activeInstance.metrics.queue_duration_sample_count}`}>平均排队<strong>{formatQueueDuration(activeInstance.metrics.average_queue_duration_ms)}</strong></span>
       {queue.id === "assist"
         ? <span title="过去 4 小时完成任务的实际吞吐">近4h吞吐<strong>{activeInstance.metrics.throughput_per_hour === null ? "—" : `${activeInstance.metrics.throughput_per_hour.toFixed(1)}/时`}</strong></span>
@@ -616,7 +644,7 @@ export function UnifiedModelQueuePanel({
     <div className={`model-queue-runtime ${queue.id === "research" ? "research" : "standard"}`}>
       <span>模型等待<strong>{activeInstance.counts.waiting_for_model}</strong></span>
       <span>槽位<strong>{activeInstance.available}/{activeInstance.capacity}</strong></span>
-      <span>实例并发<strong>{activeInstance.capacity} 路</strong></span>
+      <span>实例并发<strong>{researchAggregate ? `${queue.instance_count} × ${queue.per_instance_concurrency}` : activeInstance.capacity} 路</strong></span>
       <span>CPU<strong>{queue.threads} 线程</strong></span>
       <span>最长等待<strong>{formatQueueDuration(activeInstance.metrics.longest_wait_ms)}</strong></span>
       <span>预计清空<strong>{formatQueueDuration(activeInstance.metrics.estimated_clear_ms)}</strong></span>
@@ -626,6 +654,14 @@ export function UnifiedModelQueuePanel({
         <span>近24h吞吐<strong>{activeInstance.metrics.throughput_per_hour === null ? "—" : `${activeInstance.metrics.throughput_per_hour.toFixed(1)}/时`}</strong></span>
       </>}
     </div>
+    {researchAggregate && <div className="research-instance-status" aria-label="研究实例实时槽位">
+      {researchInstances.map((item) => {
+        const instanceReady = item.healthy && item.model_available;
+        return <span className={instanceReady ? "healthy" : "unavailable"} key={item.id}>
+          <i />{item.id} · 运行 {item.counts.running} · 槽位 {item.available}/{item.capacity}
+        </span>;
+      })}
+    </div>}
     {!activeInstance.observable && <div className="page-error">模型推理槽位状态暂时不可用。</div>}
     {queue.error && <div className="page-error">{queue.error}</div>}
     {activeInstance.truncated && <div className="page-message">队列过长，当前显示前 500 张任务卡。</div>}
