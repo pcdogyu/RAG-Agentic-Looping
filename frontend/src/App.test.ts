@@ -54,6 +54,7 @@ import {
   researchViewsRefreshIntervalMs,
   type ResearchConclusionItem,
   routeFromHash,
+  shouldSkipTargetChangeRefresh,
   TargetChangeGrid,
   targetChangeResearchKey,
   targetChangeSearchDebounceMs,
@@ -598,6 +599,12 @@ describe("changed targets page", () => {
     expect(targetChangeSearchDebounceMs).toBe(300);
     expect(buildTargetChangeQuery("asset", "  tgt  ")).toBe("kind=asset&limit=50&q=tgt");
     expect(buildTargetChangeQuery("macro", "", "next-page")).toBe("kind=macro&limit=50&cursor=next-page");
+  });
+
+  it("does not let periodic refresh supersede an in-flight target request", () => {
+    expect(shouldSkipTargetChangeRefresh(true, true)).toBe(true);
+    expect(shouldSkipTargetChangeRefresh(false, true)).toBe(false);
+    expect(shouldSkipTargetChangeRefresh(true, false)).toBe(false);
   });
 
   it("keeps legacy target cards compatible with the new four-column grid", () => {

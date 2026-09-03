@@ -2349,6 +2349,10 @@ export function targetChangeResearchKey(item: TargetChange) {
 
 export const targetChangeSearchDebounceMs = 300;
 
+export function shouldSkipTargetChangeRefresh(silent: boolean, inFlight: boolean) {
+  return silent && inFlight;
+}
+
 export function buildTargetChangeQuery(
   kind: "macro" | "asset",
   query: string,
@@ -2389,9 +2393,12 @@ function TargetChangeSection({
   const [error, setError] = useState("");
   const cursorRef = useRef<string | null>(null);
   const requestIdRef = useRef(0);
+  const inFlightRef = useRef(false);
 
   const load = useCallback(async (append = false, silent = false) => {
+    if (shouldSkipTargetChangeRefresh(silent, inFlightRef.current)) return;
     const requestId = ++requestIdRef.current;
+    inFlightRef.current = true;
     const params = buildTargetChangeQuery(kind, query, append ? cursorRef.current : null);
     if (append) setLoadingMore(true);
     else {
@@ -2413,6 +2420,7 @@ function TargetChangeSection({
     } finally {
       if (requestId === requestIdRef.current) {
         if (append) setLoadingMore(false); else if (!silent) setLoading(false);
+        inFlightRef.current = false;
       }
     }
   }, [apiBase, kind, query, title]);
