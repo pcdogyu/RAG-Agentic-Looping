@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -497,6 +498,12 @@ func (s *Server) eventTargetChanges(r *http.Request, targetTypes map[string]bool
 			if impact == nil {
 				continue
 			}
+			// A generic noun or calendar year can coincide with a token in the
+			// provider catalogue. It is not enough evidence to publish it as a
+			// concrete tradable target.
+			if genericPublishedSecurityTarget(stringValue(impact["target_name"])) {
+				continue
+			}
 			targetType := stringValue(impact["target_type"])
 			asset := objectValue(impact["asset"])
 			isSecurity := securityAsset(asset) || resemblesSecurity(impact, securityNames, securitySymbols)
@@ -903,6 +910,23 @@ func valueOrNil(value map[string]any, key string) any {
 func securityAsset(asset map[string]any) bool {
 	class := strings.ToLower(stringValue(valueOrNil(asset, "asset_class")))
 	return class == "equity" || class == "crypto"
+}
+
+func genericPublishedSecurityTarget(value string) bool {
+	compact := compactTarget(value)
+	if compact == "company" || compact == "companies" {
+		return true
+	}
+	if len(compact) != 4 {
+		return false
+	}
+	for _, current := range compact {
+		if current < '0' || current > '9' {
+			return false
+		}
+	}
+	year, err := strconv.Atoi(compact)
+	return err == nil && year >= 1900 && year <= 2100
 }
 
 func resemblesSecurity(impact map[string]any, names, symbols map[string]bool) bool {

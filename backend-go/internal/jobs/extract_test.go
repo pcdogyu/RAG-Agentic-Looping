@@ -98,6 +98,11 @@ func TestSecuritySymbolAndProductMatchingSafety(t *testing.T) {
 	if meaningfulIssuerTerm("机器人") || !meaningfulIssuerTerm("沈阳新松机器人自动化股份有限公司") {
 		t.Fatal("generic and explicit issuer names were not distinguished")
 	}
+	for _, term := range []string{"Company", "2026", "2027"} {
+		if meaningfulTerm(term) {
+			t.Fatalf("generic term %q must not be usable for automatic asset mapping", term)
+		}
+	}
 }
 
 func TestScanCountsKeepRetryAndTerminalStatesSeparate(t *testing.T) {

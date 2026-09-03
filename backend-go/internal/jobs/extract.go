@@ -1289,7 +1289,25 @@ func meaningfulTerm(value string) bool {
 	if hasHan(value) {
 		return len([]rune(compact)) >= 2
 	}
-	return len(compact) >= 3 && !map[string]bool{"inc": true, "ltd": true, "group": true, "market": true, "services": true}[compact]
+	if plausibleCalendarYear(compact) {
+		return false
+	}
+	return len(compact) >= 3 && !map[string]bool{"inc": true, "ltd": true, "group": true, "market": true, "services": true, "company": true, "companies": true}[compact]
+}
+
+// plausibleCalendarYear prevents a date in a headline from being treated as a
+// security identity. Qualified tickers are still accepted by explicitSymbol.
+func plausibleCalendarYear(value string) bool {
+	if len(value) != 4 {
+		return false
+	}
+	for _, current := range value {
+		if !unicode.IsDigit(current) {
+			return false
+		}
+	}
+	year, err := strconv.Atoi(value)
+	return err == nil && year >= 1900 && year <= 2100
 }
 func meaningfulIssuerTerm(value string) bool {
 	if !meaningfulTerm(value) {

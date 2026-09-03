@@ -130,6 +130,19 @@ func TestConcreteEventTargetChangeIncludesOnlyPublishedConcreteTargets(t *testin
 	}
 }
 
+func TestGenericPublishedSecurityTargetsAreNotConcreteTargets(t *testing.T) {
+	for _, value := range []string{"Company", "2026", "2027"} {
+		if !genericPublishedSecurityTarget(value) {
+			t.Fatalf("%q must not be published as a concrete target", value)
+		}
+	}
+	for _, value := range []string{"NVIDIA", "Bitcoin", "2026 Token"} {
+		if genericPublishedSecurityTarget(value) {
+			t.Fatalf("%q must remain eligible when otherwise verified", value)
+		}
+	}
+}
+
 func TestMergeConcreteTargetChangesPreservesInputOrderForExactTies(t *testing.T) {
 	stamp := time.Date(2026, 8, 31, 1, 2, 13, 0, time.UTC)
 	id := "00000000-0000-0000-0000-000000000001"
