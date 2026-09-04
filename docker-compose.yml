@@ -11,6 +11,10 @@ services:
 
   postgres:
     image: pgvector/pgvector:pg16
+    # PostgreSQL uses /dev/shm for parallel-query dynamic shared memory.  The
+    # Docker default (64 MiB) is insufficient when the queue overview queries
+    # run concurrently, causing the status API to fail with SQLSTATE 53100.
+    shm_size: 256mb
     environment:
       POSTGRES_USER: agent
       POSTGRES_PASSWORD: agent
