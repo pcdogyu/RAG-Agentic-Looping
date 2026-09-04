@@ -101,8 +101,9 @@ jobs:
             echo "::error title=PostgreSQL recent research filter::$message"
             exit "$status"
           fi
-      - name: Verify extraction, mapping, and maintenance against isolated PostgreSQL and Redis
+      - name: Verify extraction, mapping, maintenance, and queue commands against isolated PostgreSQL and Redis
         env:
           EXTRACT_TEST_ISOLATED: "1"
           MAPPING_TEST_ISOLATED: "1"
-        run: go test -race ./internal/jobs -run '^(TestExtractRetryGoldenStateAgainstIsolatedServices|TestMappingGoldenStateAgainstIsolatedServices|TestMaintenanceHandlersAgainstPostgres)$' -count=1 -v
+          COMMAND_TEST_ISOLATED: "1"
+        run: go test -race ./internal/jobs ./internal/httpapi -run '^(TestExtractRetryGoldenStateAgainstIsolatedServices|TestMappingGoldenStateAgainstIsolatedServices|TestMaintenanceHandlersAgainstPostgres|TestBatchThreeCommandsAgainstIsolatedServices)$' -count=1 -v

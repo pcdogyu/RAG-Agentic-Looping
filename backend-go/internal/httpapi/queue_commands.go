@@ -57,7 +57,13 @@ func (s *Server) cancelResearchTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "active research task not found")
 		return
 	}
+	// The queue card identifies the durable Go job, while the business row has
+	// a separate run id. Mark both layers so a running worker loses its next
+	// heartbeat and exits cooperatively instead of reviving the cancelled run.
+	result["purged"] = s.cancelGoTaskIDs(r.Context(), []string{input.TaskID})
+	s.cancelTrackedTask(r.Context(), "research", input.TaskID)
 	result["revoked"] = 0
+	_ = s.redis.Del(r.Context(), modelQueueOverviewCacheKey).Err()
 	writeJSON(w, http.StatusAccepted, result)
 }
 
@@ -506,8 +512,8 @@ func (s *Server) cancelResearch(ctx context.Context, kind, entityID, taskID stri
 	assetQuery := `SELECT id,payload::jsonb FROM research_runs WHERE (status IN ('queued','running','verifying') OR ($1 AND status='failed' AND updated_at>=now()-interval '24 hours'))`
 	args := []any{includeFailed}
 	if kind == "asset_research" {
-		assetQuery += ` AND asset_id=$2`
-		args = append(args, entityID)
+		assetQuery += ` AND asset_id=$2 AND payload->>'celery_task_id'=$3`
+		args = append(args, entityID, taskID)
 	}
 	if kind != "event_research" {
 		rows, err := s.db.Query(ctx, assetQuery, args...)
@@ -538,7 +544,7 @@ func (s *Server) cancelResearch(ctx context.Context, kind, entityID, taskID stri
 		eventQuery := `SELECT id,payload::jsonb FROM event_research_runs WHERE (status IN ('queued','running','verifying') OR ($1 AND status='failed' AND updated_at>=now()-interval '24 hours'))`
 		eventArgs := []any{includeFailed}
 		if kind == "event_research" {
-			eventQuery += ` AND id=$2`
+			eventQuery += ` AND payload->>'celery_task_id'=$2`
 			eventArgs = append(eventArgs, taskID)
 		}
 		rows, err := s.db.Query(ctx, eventQuery, eventArgs...)

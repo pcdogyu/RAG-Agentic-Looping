@@ -218,6 +218,57 @@ func TestBatchThreeCommandsAgainstIsolatedServices(t *testing.T) {
 		t.Fatalf("assist retry kwargs are invalid: %#v", kwargs)
 	}
 
+	const cancelEventID = "36000000-0000-0000-0000-000000000001"
+	const cancelRunID = "36000000-0000-0000-0000-000000000002"
+	const cancelTaskID = "36000000-0000-0000-0000-000000000003"
+	cancelEventPayload := map[string]any{"id": cancelEventID, "headline": "decimal headline", "news_item_ids": []any{}}
+	cancelEventBody, _ := json.Marshal(cancelEventPayload)
+	if _, err = pool.Exec(ctx, `INSERT INTO news_events(id,headline,event_type,payload,priority,published_at,observed_at,as_of) VALUES($1,'decimal headline','m_and_a',$2,0.8,now(),now(),now())`, cancelEventID, cancelEventBody); err != nil {
+		t.Fatal(err)
+	}
+	cancelRunPayload := map[string]any{
+		"id": cancelRunID, "event_id": cancelEventID, "status": "running", "celery_task_id": cancelTaskID,
+		"model_instance_id": "research-0", "analysis_steps": []any{}, "created_at": jsonTime(time.Now()), "updated_at": jsonTime(time.Now()),
+	}
+	cancelRunBody, _ := json.Marshal(cancelRunPayload)
+	if _, err = pool.Exec(ctx, `INSERT INTO event_research_runs(id,event_id,status,payload,created_at,updated_at) VALUES($1,$2,'running',$3,now(),now())`, cancelRunID, cancelEventID, cancelRunBody); err != nil {
+		t.Fatal(err)
+	}
+	cancelJobBody, _ := json.Marshal(map[string]any{"args": []any{cancelEventID, cancelRunID}, "kwargs": map[string]any{"model_instance_id": "research-0"}})
+	if _, err = pool.Exec(ctx, `INSERT INTO go_jobs(id,queue,task_type,payload,status,lease_owner,lease_until,heartbeat_at) VALUES($1,'research','market_loop.research_event',$2,'running','isolated-worker',now()+interval '1 minute',now())`, cancelTaskID, cancelJobBody); err != nil {
+		t.Fatal(err)
+	}
+	trackedResearch, _ := json.Marshal(map[string]any{
+		"task_id": cancelTaskID, "instance_id": "research-0", "kind": "event_research", "entity_id": cancelEventID,
+		"status": "running", "updated_at": jsonTime(time.Now()),
+	})
+	if err = redisClient.HSet(ctx, "market-loop:model-queue:research:tasks", cancelTaskID, trackedResearch).Err(); err != nil {
+		t.Fatal(err)
+	}
+	cancelResult := assertStatus(http.StatusAccepted, http.MethodPost, "/api/v1/model-queues/research/tasks/cancel", `{"task_id":"`+cancelTaskID+`","kind":"event_research","entity_id":"`+cancelEventID+`"}`, false)
+	if int64Value(cancelResult["cancelled"]) != 1 || int64Value(cancelResult["purged"]) != 1 {
+		t.Fatalf("event research task was not cancelled by its durable task id: %v", cancelResult)
+	}
+	var cancelRunStatus, cancelPayloadStatus, cancelJobStatus string
+	var cancelRequestedAt *time.Time
+	if err = pool.QueryRow(ctx, `SELECT status,payload->>'status' FROM event_research_runs WHERE id=$1`, cancelRunID).Scan(&cancelRunStatus, &cancelPayloadStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err = pool.QueryRow(ctx, `SELECT status,cancel_requested_at FROM go_jobs WHERE id=$1`, cancelTaskID).Scan(&cancelJobStatus, &cancelRequestedAt); err != nil {
+		t.Fatal(err)
+	}
+	if cancelRunStatus != "cancelled" || cancelPayloadStatus != "cancelled" || cancelJobStatus != "running" || cancelRequestedAt == nil {
+		t.Fatalf("cancel state was not propagated: run=%q payload=%q job=%q requested_at=%v", cancelRunStatus, cancelPayloadStatus, cancelJobStatus, cancelRequestedAt)
+	}
+	trackedBody, err := redisClient.HGet(ctx, "market-loop:model-queue:research:tasks", cancelTaskID).Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var trackedState map[string]any
+	if err = json.Unmarshal(trackedBody, &trackedState); err != nil || stringValue(trackedState["status"]) != "cancelled" {
+		t.Fatalf("tracked research task was not cancelled: state=%v err=%v", trackedState, err)
+	}
+
 	if err = redisClient.Set(ctx, modelQueueOverviewCacheKey, assistSnapshot, time.Minute).Err(); err != nil {
 		t.Fatal(err)
 	}
