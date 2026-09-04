@@ -81,9 +81,10 @@ func TestMaintenanceHandlersAgainstPostgres(t *testing.T) {
 		t.Fatalf("duplicate status=%s err=%v", duplicateStatus, err)
 	}
 
-	event := map[string]any{"id": replayEventID, "headline": "Maintenance replay", "event_type": "other", "news_item_ids": []any{}, "actions": []any{map[string]any{"id": uuid.NewString(), "actor": "test", "action_type": "statement", "action_stage": "statement", "action": "test", "strength": .1}}, "as_of": iso(now), "published_at": iso(now), "observed_at": iso(now), "priority": .5, "analysis_steps": []any{}}
+	replayTime := time.Date(1900, time.January, 1, 0, 0, 0, 0, time.UTC)
+	event := map[string]any{"id": replayEventID, "headline": "Maintenance replay", "event_type": "other", "news_item_ids": []any{}, "actions": []any{map[string]any{"id": uuid.NewString(), "actor": "test", "action_type": "statement", "action_stage": "statement", "action": "test", "strength": .1}}, "as_of": iso(replayTime), "published_at": iso(replayTime), "observed_at": iso(replayTime), "priority": .5, "analysis_steps": []any{}}
 	eventBody, _ := json.Marshal(event)
-	if _, err := pool.Exec(ctx, `INSERT INTO news_events(id,headline,event_type,payload,priority,published_at,observed_at,as_of) VALUES($1,$2,'other',$3,.5,$4,$4,$4)`, replayEventID, event["headline"], eventBody, now); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO news_events(id,headline,event_type,payload,priority,published_at,observed_at,as_of) VALUES($1,$2,'other',$3,.5,$4,$4,$4)`, replayEventID, event["headline"], eventBody, replayTime); err != nil {
 		t.Fatal(err)
 	}
 	run := map[string]any{"id": replayRunID, "event_id": replayEventID, "status": "completed", "as_of": iso(now), "historical_replay": false, "report": map[string]any{"scoring_version": "target-transmission-v2"}, "report_history": []any{}, "analysis_steps": []any{}, "created_at": iso(now), "updated_at": iso(now)}
