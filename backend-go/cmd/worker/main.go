@@ -90,7 +90,7 @@ func main() {
 	}
 	worker := &jobs.Worker{Store: jobs.NewStore(dependencies.DB), ID: cfg.WorkerID, Queues: []string{lane.GoQueue},
 		Lease: cfg.LeaseDuration, PollInterval: cfg.PollInterval, Handlers: handlers, Concurrency: cfg.WorkerConcurrency, Redis: dependencies.Redis,
-		DrainOnShutdown: lane.ID == "research"}
+		DrainOnShutdown: lane.ID == "research" || lane.ID == "extract"}
 	if err := worker.Run(ctx); err != nil && ctx.Err() == nil {
 		slog.Error("worker stopped", "error", err)
 		os.Exit(1)
