@@ -529,10 +529,10 @@ describe("shared hash navigation", () => {
 
   it("renders grouped menu links in order and exposes the current page accessibly", () => {
     expect(navigationGroups.left.map((item) => item.route)).toEqual([
-      "home", "source-filter", "sources", "asset-universe", "news", "queue", "analysis", "conclusions", "targets",
+      "home", "source-filter", "sources", "news", "queue", "analysis", "conclusions", "targets",
     ]);
     expect(navigationGroups.right.map((item) => item.route)).toEqual([
-      "model-logs", "search", "weknora",
+      "model-logs", "asset-universe", "search", "weknora",
     ]);
     const markup = renderToStaticMarkup(createElement(TopNavigation, { current: "source-filter" }));
     const newsMarkup = renderToStaticMarkup(createElement(TopNavigation, { current: "news" }));
@@ -546,14 +546,15 @@ describe("shared hash navigation", () => {
     expect(analysisMarkup).toContain('href="#/analysis" aria-current="page"');
     expect(targetsMarkup).toContain('href="#/targets" aria-current="page"');
     expect(markup.indexOf("数据源过滤")).toBeLessThan(markup.indexOf(">数据源<"));
-    expect(markup.indexOf(">数据源<")).toBeLessThan(markup.indexOf("资产主数据"));
-    expect(markup.indexOf("资产主数据")).toBeLessThan(markup.indexOf(">新闻<"));
+    expect(markup.indexOf(">数据源<")).toBeLessThan(markup.indexOf(">新闻<"));
     expect(markup.indexOf(">新闻<")).toBeLessThan(markup.indexOf(">队列<"));
     expect(markup.indexOf(">队列<")).toBeLessThan(markup.indexOf("分析链路"));
     expect(markup.indexOf("分析链路")).toBeLessThan(markup.indexOf("结论"));
     expect(markup.indexOf("结论")).toBeLessThan(markup.indexOf("标的"));
     expect(markup.indexOf("标的")).toBeLessThan(markup.indexOf("模型日志"));
     expect(markup.indexOf("结论")).toBeLessThan(markup.indexOf("模型日志"));
+    expect(markup.indexOf("模型日志")).toBeLessThan(markup.indexOf("资产主数据"));
+    expect(markup.indexOf("资产主数据")).toBeLessThan(markup.indexOf("搜索引擎"));
     expect(markup).toContain("搜索引擎");
     expect(markup).toContain("WeKnora");
   });

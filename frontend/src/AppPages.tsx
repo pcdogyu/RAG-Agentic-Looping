@@ -11,7 +11,6 @@ export const navigationGroups: Record<"left" | "right", Array<{ route: AppRoute;
     { route: "home", label: "首页" },
     { route: "source-filter", label: "数据源过滤" },
     { route: "sources", label: "数据源" },
-    { route: "asset-universe", label: "资产主数据" },
     { route: "news", label: "新闻" },
     { route: "queue", label: "队列" },
     { route: "analysis", label: "分析链路" },
@@ -20,6 +19,7 @@ export const navigationGroups: Record<"left" | "right", Array<{ route: AppRoute;
   ],
   right: [
     { route: "model-logs", label: "模型日志" },
+    { route: "asset-universe", label: "资产主数据" },
     { route: "search", label: "搜索引擎" },
     { route: "weknora", label: "WeKnora" },
   ],
