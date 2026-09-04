@@ -106,4 +106,6 @@ jobs:
           EXTRACT_TEST_ISOLATED: "1"
           MAPPING_TEST_ISOLATED: "1"
           COMMAND_TEST_ISOLATED: "1"
-        run: go test -race ./internal/jobs ./internal/httpapi -run '^(TestExtractRetryGoldenStateAgainstIsolatedServices|TestMappingGoldenStateAgainstIsolatedServices|TestMaintenanceHandlersAgainstPostgres|TestBatchThreeCommandsAgainstIsolatedServices)$' -count=1 -v
+        run: |
+          go test -race ./internal/jobs -run '^(TestExtractRetryGoldenStateAgainstIsolatedServices|TestMappingGoldenStateAgainstIsolatedServices|TestMaintenanceHandlersAgainstPostgres)$' -count=1 -v
+          go test -race ./internal/httpapi -run '^TestBatchThreeCommandsAgainstIsolatedServices$' -count=1 -v
