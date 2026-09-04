@@ -1,4 +1,7 @@
-FROM node:22-alpine AS builder
+# Node 22.23 bundles npm 10.9.8, which can fail internally while resolving
+# this project's dependency graph. Pin the verified Node/npm toolchain so
+# production image builds are reproducible.
+FROM node:22.20.0-alpine AS builder
 WORKDIR /app
 ARG VITE_BUILD_COMMIT_ID=unknown
 ARG VITE_BUILD_COMMIT_TIME=unknown
