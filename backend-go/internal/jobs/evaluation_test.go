@@ -51,6 +51,16 @@ func TestFrozenWalkForwardAndProbabilitySuitesPass(t *testing.T) {
 	}
 }
 
+func TestFrozenResearchQualitySuitePasses(t *testing.T) {
+	result, err := RunOfflineEvaluation(evaluationRepositoryRoot(t), "research-quality", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !EvaluationPassed(result) || int(numberValue(result["samples"])) != 7 || numberValue(result["quality_gate_accuracy"]) != 1 {
+		t.Fatalf("unexpected research quality result: %v", result)
+	}
+}
+
 func TestCompareEvaluationMetricsTreatsCalibrationErrorsAsLowerIsBetter(t *testing.T) {
 	baseline := map[string]any{"dataset": "baseline", "brier_score": .2, "mapping_precision": .9, "passed": true}
 	candidate := map[string]any{"dataset": "candidate", "brier_score": .15, "mapping_precision": .92, "passed": true}

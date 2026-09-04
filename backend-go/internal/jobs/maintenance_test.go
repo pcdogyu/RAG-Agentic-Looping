@@ -17,7 +17,11 @@ func TestMaintenanceHandlersCoverLane(t *testing.T) {
 }
 
 func TestCurrentTargetImpactScoringAndActiveStatuses(t *testing.T) {
-	if !eventRunHasCurrentScoring(map[string]any{"report": map[string]any{"scoring_version": currentEventScoringVersion}}) {
+	if !eventRunHasCurrentScoring(map[string]any{"report": map[string]any{
+		"scoring_version": currentEventScoringVersion, "prompt_version": eventResearchPromptVersion,
+		"target_evaluation_version": targetEvaluationVersion, "news_confidence_version": newsConfidenceVersion,
+		"report_confidence_version": reportConfidenceVersion,
+	}}) {
 		t.Fatal("current Go event scoring was not recognized")
 	}
 	if eventRunHasCurrentScoring(map[string]any{"report": map[string]any{"scoring_version": "target-transmission-v2"}}) {

@@ -1315,6 +1315,41 @@ type SystemConfidenceFactor = {
   evidence_ids: string[];
 };
 
+type ResearchAssessment = {
+  score: number;
+  reason: string;
+  evidence_ids: string[];
+  action_ids: string[];
+  missing_information: string[];
+  cap_reasons?: string[];
+};
+
+type TargetEvaluation = {
+  object_relevance: ResearchAssessment;
+  evidence_sufficiency: ResearchAssessment;
+  transmission_certainty: ResearchAssessment;
+  impact_support: ResearchAssessment;
+  timing_persistence: ResearchAssessment;
+};
+
+type ResearchClaim = {
+  claim_type: "fact" | "inference";
+  text: string;
+  evidence_ids: string[];
+  action_ids: string[];
+  missing_information: string[];
+};
+
+type TransmissionStep = {
+  source_node: string;
+  mechanism: string;
+  target_node: string;
+  basis_type: "fact" | "inference";
+  evidence_ids: string[];
+  action_ids: string[];
+  missing_information: string[];
+};
+
 export type Recommendation = {
   id: string;
   run_id: string;
@@ -1325,6 +1360,9 @@ export type Recommendation = {
   confidence: number;
   rating_confidence?: number;
   news_confidence?: number;
+  news_credibility_score?: number;
+  report_confidence?: number;
+  report_confidence_score?: number;
   evidence_complete: boolean;
   directional_evidence_complete?: boolean;
   direction_verified?: boolean;
@@ -1375,6 +1413,22 @@ export type Recommendation = {
   evidence_warnings?: string[];
   scoring_version?: string;
   calibration_version?: string;
+  prompt_version?: string;
+  target_evaluation_version?: string;
+  report_confidence_version?: string;
+  target_evaluation_score?: number;
+  target_evaluation?: TargetEvaluation;
+  model_target_evaluation?: TargetEvaluation;
+  impact?: {
+    conclusion_status?: string;
+    impact_channel?: string;
+    claims?: ResearchClaim[];
+    transmission_steps?: TransmissionStep[];
+    target_evaluation_score?: number;
+    target_evaluation?: TargetEvaluation;
+    model_target_evaluation?: TargetEvaluation;
+    applied_caps?: string[];
+  };
   claim_assessments?: Array<{
     claim: string;
     claim_kind: string;
@@ -1437,6 +1491,14 @@ export type EventTargetImpact = {
   transmission_path: string[];
   rationale: string;
   missing_information: string[];
+  conclusion_status?: "directional" | "neutral_supported" | "insufficient_evidence";
+  impact_channel?: "supply" | "demand" | "revenue" | "cost" | "profit" | "cash_flow" | "valuation" | "risk_premium";
+  claims?: ResearchClaim[];
+  transmission_steps?: TransmissionStep[];
+  target_evaluation_score?: number;
+  target_evaluation?: TargetEvaluation;
+  model_target_evaluation?: TargetEvaluation;
+  applied_caps?: string[];
 };
 
 export type EventConclusionDetail = {
@@ -1452,8 +1514,14 @@ export type EventConclusionDetail = {
     risks: string[];
     unresolved_questions: string[];
     confidence: number;
+    report_confidence?: number;
+    report_confidence_score?: number;
     evidence_complete: boolean;
     news_confidence: number;
+    news_credibility_score?: number;
+    prompt_version?: string;
+    target_evaluation_version?: string;
+    report_confidence_version?: string;
     impacts: EventTargetImpact[];
     macro_factors: Array<{ id: string; name: string; description: string; strength: number }>;
     missing_information: string[];
@@ -1476,13 +1544,17 @@ export type ResearchConclusionItem = {
   refresh?: EventResearchRefresh | null;
   report: {
     confidence: number;
+    report_confidence?: number;
+    report_confidence_score?: number;
     news_confidence: number;
+    news_credibility_score?: number;
     direction_score: number | null;
     rating: string | null;
     impact_count: number;
     affected_markets: string[];
     affected_sectors: string[];
     scoring_version: string;
+    prompt_version?: string;
   } | null;
 };
 
@@ -1736,7 +1808,7 @@ const modelRatingLabels: Record<string, string> = {
 export function ConclusionScore({
   score, rating, confidence, evidenceComplete, directionalEvidenceComplete, signalStatus,
   factConfidence, horizonDays, horizonUnit, scoringVersion, directionScore,
-  newsConfidence, ratingConfidence, scoreSource, compact = false,
+  newsConfidence, ratingConfidence, newsCredibilityScore, reportConfidenceScore, scoreSource, compact = false,
 }: {
   score: number | null;
   directionScore?: number | null;
@@ -1744,6 +1816,8 @@ export function ConclusionScore({
   confidence: number;
   newsConfidence?: number;
   ratingConfidence?: number;
+  newsCredibilityScore?: number;
+  reportConfidenceScore?: number;
   evidenceComplete: boolean;
   directionalEvidenceComplete?: boolean;
   signalStatus?: string;
@@ -1769,7 +1843,9 @@ export function ConclusionScore({
     <strong>{scoreBlocked ? "暂不评分" : `${isV3 ? "方向分" : shortTerm ? "影响分" : "发布分"}：${publishedScore > 0 ? "+" : ""}${publishedScore}`}</strong>
     <span>{!compact && `${signalStatusLabels[resolvedStatus] || resolvedStatus} · `}{isV3 ? "五级评级" : shortTerm ? "五档评级" : "评级"}：{recommendationRatingLabel(rating)}{isV3 && scoreSource === "rule_fallback" ? " · 规则回退" : ""}</span>
     {isV3
-      ? <small>新闻可信度 {Math.round((newsConfidence ?? factConfidence ?? 0) * 100)}% · 评级置信度 {Math.round((ratingConfidence ?? confidence) * 100)}% · 未来 {horizonDays ?? 90} 个自然日</small>
+      ? <small>{typeof newsCredibilityScore === "number" || typeof reportConfidenceScore === "number"
+        ? `新闻可信度 ${newsCredibilityScore ?? Math.round((newsConfidence ?? factConfidence ?? 0) * 100)}/100 · 研报置信度 ${reportConfidenceScore ?? Math.round((ratingConfidence ?? confidence) * 100)}/100 · 未来 ${horizonDays ?? 90} 个自然日`
+        : `新闻可信度 ${Math.round((newsConfidence ?? factConfidence ?? 0) * 100)}% · 评级置信度 ${Math.round((ratingConfidence ?? confidence) * 100)}% · 未来 ${horizonDays ?? 90} 个自然日`}</small>
       : shortTerm && !scoreBlocked
       ? <small>新闻事实置信度 {Math.round((factConfidence ?? confidence) * 100)}% · 评级置信度 {Math.round(confidence * 100)}% · 未来 1–{horizonDays ?? 3} 个交易日</small>
       : compact
@@ -1894,6 +1970,63 @@ export function V3ConfidenceDetails({ recommendation }: { recommendation: Recomm
   return <section className="short-term-score-details v3-confidence-details">
     {news && <><h3>新闻可信度五因子</h3><p className="score-formula">30%S + 20%P + 20%V + 15%C + 15%T</p>{factorGrid(newsDefinitions)}</>}
     {rating && <><h3>评级置信度六因子</h3><p className="score-formula">25%M + 20%C + 15%H + 15%I + 10%T + 15%K · 映射距离 L{recommendation.mapping_distance ?? 5}</p>{factorGrid(ratingDefinitions)}</>}
+  </section>;
+}
+
+const targetEvaluationLabels: Array<[keyof TargetEvaluation, string, number]> = [
+  ["object_relevance", "对象相关性", 20],
+  ["evidence_sufficiency", "证据充分度", 25],
+  ["transmission_certainty", "传导确定性", 25],
+  ["impact_support", "影响支持度", 20],
+  ["timing_persistence", "时点持续性", 10],
+];
+
+const evaluationCapLabels: Record<string, string> = {
+  no_valid_support_id: "无有效支持 ID，归零",
+  no_target_specific_evidence: "无目标专属证据，归零",
+  source_independence_gate: "缺少官方来源或两个独立来源组，最高 49",
+  missing_transmission_steps: "缺少传导步骤，归零",
+  incomplete_transmission_step: "关键传导条件缺失，传导确定性最高 39",
+  insufficient_evidence: "结论证据不足，影响支持度最高 39",
+  missing_economic_endpoint: "缺少经济或财务终点，最高 39",
+  unknown_action_stage: "动作阶段未知，最高 20",
+  unresolved_contradiction: "存在未解决矛盾，最高 39",
+};
+
+export function TargetEvaluationDetails({ value, modelValue, score }: { value?: TargetEvaluation; modelValue?: TargetEvaluation; score?: number }) {
+  if (!value) return null;
+  return <section className="short-term-score-details target-evaluation-details">
+    <h3>标的五项综合评价{typeof score === "number" ? ` · ${score}/100` : ""}</h3>
+    <p className="score-formula">20% 对象相关性 + 25% 证据充分度 + 25% 传导确定性 + 20% 影响支持度 + 10% 时点持续性</p>
+    <div className="score-factor-grid confidence-factor-grid">
+      {targetEvaluationLabels.map(([key, label, weight]) => {
+        const assessment = value[key];
+        const rawScore = modelValue?.[key]?.score;
+        return <article key={key}>
+          <span>{label} · 权重 {weight}%</span>
+          <strong>{assessment.score}/100{typeof rawScore === "number" && rawScore !== assessment.score ? `（模型原始 ${rawScore}）` : ""}</strong>
+          {assessment.reason && <p>{assessment.reason}</p>}
+          {!!assessment.cap_reasons?.length && <small>程序封顶：{assessment.cap_reasons.map((reason) => evaluationCapLabels[reason] ?? reason).join("；")}</small>}
+          {!!assessment.evidence_ids?.length && <small>证据：{assessment.evidence_ids.join("、")}</small>}
+          {!!assessment.action_ids?.length && <small>动作：{assessment.action_ids.join("、")}</small>}
+        </article>;
+      })}
+    </div>
+  </section>;
+}
+
+export function ResearchReasoningDetails({ claims, steps }: { claims?: ResearchClaim[]; steps?: TransmissionStep[] }) {
+  if (!claims?.length && !steps?.length) return null;
+  return <section className="research-reasoning-details">
+    {!!claims?.length && <><h3>事实与推断</h3><div className="claim-assessments">{claims.map((claim, index) => <article key={`${claim.claim_type}-${index}`}>
+      <span>{claim.claim_type === "fact" ? "事实" : "推断"}</span><strong>{claim.text}</strong>
+      <small>{[...(claim.evidence_ids || []), ...(claim.action_ids || [])].join("、") || "无有效支持 ID"}</small>
+      {!!claim.missing_information?.length && <small>缺失：{claim.missing_information.map(describeMissingInformation).join("；")}</small>}
+    </article>)}</div></>}
+    {!!steps?.length && <><h3>逐步传导链</h3><ol className="transmission-step-list">{steps.map((step, index) => <li key={`${step.source_node}-${step.target_node}-${index}`}>
+      <strong>{step.source_node} → {step.target_node}</strong><span>{step.mechanism} · {step.basis_type === "fact" ? "事实" : "推断"}</span>
+      <small>{[...(step.evidence_ids || []), ...(step.action_ids || [])].join("、") || "无有效支持 ID"}</small>
+    </li>)}</ol></>}
   </section>;
 }
 
@@ -2226,6 +2359,8 @@ export function ConclusionDetailModal({ detail, onClose }: { detail: ConclusionD
         confidence={detail.recommendation.confidence}
         newsConfidence={detail.recommendation.news_confidence}
         ratingConfidence={detail.recommendation.rating_confidence}
+        newsCredibilityScore={detail.recommendation.news_credibility_score}
+        reportConfidenceScore={detail.recommendation.report_confidence_score}
         evidenceComplete={detail.recommendation.evidence_complete}
         directionalEvidenceComplete={detail.recommendation.directional_evidence_complete}
         signalStatus={detail.recommendation.signal_status}
@@ -2236,15 +2371,19 @@ export function ConclusionDetailModal({ detail, onClose }: { detail: ConclusionD
         scoreSource={detail.recommendation.score_source}
       />
       <p className="score-explanation">{isV3
-        ? "方向分是模型唯一数值判断；五级评级、新闻可信度和评级置信度均由系统独立计算，缺失信息只降低对应置信因子。"
+		? (detail.recommendation.target_evaluation
+		  ? "方向分由模型判断；五级评级、五项评价封顶、新闻可信度和研报置信度均由系统确定性计算。"
+		  : "方向分是模型唯一数值判断；五级评级、新闻可信度和评级置信度均由系统独立计算，缺失信息只降低对应置信因子。")
         : isShortTerm
         ? "影响分按 D × (45M + 25T + 15I + 15C) 计算；证据质量核验只降低置信度，不改变方向或隐藏评分。"
         : "该历史结论沿用原评分与证据门禁规则；证据不足记录继续暂不评分，供追溯和重新调研。"}</p>
       {!isV3 && <ModelOpinion direction={detail.recommendation.model_direction} rating={detail.recommendation.model_rating} confidence={detail.recommendation.model_confidence} />}
       {isV3
-        ? <>
-          <V3ConfidenceDetails recommendation={detail.recommendation} />
-          <div className="probability-grid"><span>牛市 <strong>{Math.round(detail.recommendation.bull_probability * 100)}%</strong></span><span>中性 <strong>{Math.round(detail.recommendation.base_probability * 100)}%</strong></span><span>熊市 <strong>{Math.round(detail.recommendation.bear_probability * 100)}%</strong></span></div>
+		? <>
+		  <V3ConfidenceDetails recommendation={detail.recommendation} />
+		  <TargetEvaluationDetails value={detail.recommendation.target_evaluation} modelValue={detail.recommendation.model_target_evaluation} score={detail.recommendation.target_evaluation_score} />
+		  <ResearchReasoningDetails claims={detail.recommendation.impact?.claims} steps={detail.recommendation.impact?.transmission_steps} />
+		  <div className="probability-grid"><span>牛市 <strong>{Math.round(detail.recommendation.bull_probability * 100)}%</strong></span><span>中性 <strong>{Math.round(detail.recommendation.base_probability * 100)}%</strong></span><span>熊市 <strong>{Math.round(detail.recommendation.bear_probability * 100)}%</strong></span></div>
         </>
         : isShortTerm
         ? <ShortTermScoreDetails recommendation={detail.recommendation} />
@@ -2294,6 +2433,14 @@ const targetTypeLabels: Record<string, string> = {
   other: "其他",
 };
 
+const impactChannelLabels: Record<string, string> = {
+  supply: "供给", demand: "需求", revenue: "收入", cost: "成本", profit: "利润", cash_flow: "现金流", valuation: "估值", risk_premium: "风险溢价",
+};
+
+const conclusionStatusLabels: Record<string, string> = {
+  directional: "方向成立", neutral_supported: "证据支持中性", insufficient_evidence: "证据不足",
+};
+
 const missingInformationDescriptions: Record<string, [chinese: string, english: string]> = {
   target_direction: ["目标影响方向尚未明确", "The target impact direction is not yet established"],
   transmission_evidence: ["缺少影响传导路径的证据", "Evidence for the impact transmission path is missing"],
@@ -2334,8 +2481,8 @@ export function EventConclusionDetailModal({ detail, onClose }: { detail: EventC
       <h2>{detail.event?.headline ?? "事件研报"}</h2>
       <div className="event-report-metrics">
         <span>研究状态<strong>{eventConclusionStatusLabels[detail.run.status] ?? detail.run.status}</strong></span>
-        <span>新闻可信度<strong>{Math.round(report.news_confidence * 100)}%</strong></span>
-        <span>研报置信度<strong>{Math.round(report.confidence * 100)}%</strong></span>
+        <span>新闻可信度<strong>{report.news_credibility_score ?? Math.round(report.news_confidence * 100)}/100</strong></span>
+        <span>研报置信度<strong>{report.report_confidence_score ?? Math.round((report.report_confidence ?? report.confidence) * 100)}/100</strong></span>
         <span>影响目标<strong>{report.impacts.length}</strong></span>
       </div>
       {!report.evidence_complete && <div className="page-message">该报告可追溯，但资料覆盖不足，不应视为可直接交易的确定性结论。</div>}
@@ -2344,13 +2491,17 @@ export function EventConclusionDetailModal({ detail, onClose }: { detail: EventC
         <span>市场：{report.affected_markets.join("、") || "未明确"}</span>
         <span>行业：{report.affected_sectors.join("、") || "未明确"}</span>
       </div>}
+      {!report.impacts.length && <div className="page-empty">当前证据未确认具体影响标的；系统未创建虚假中性目标。</div>}
       {!!report.impacts.length && <><h3>目标影响</h3><div className="event-impact-grid">{report.impacts.map((impact, index) => <article key={`${impact.target_type}-${impact.target_name}-${index}`}>
         <span>{targetTypeLabels[impact.target_type] ?? impact.target_type}{impact.asset?.symbol ? ` · ${impact.asset.symbol}` : ""}</span>
         <strong>{impact.target_name}</strong>
-        <div><b>{recommendationRatingLabel(impact.rating)}</b><b>{impact.direction_score > 0 ? "+" : ""}{impact.direction_score}</b><b>置信度 {Math.round(impact.rating_confidence * 100)}%</b></div>
+        <div><b>{recommendationRatingLabel(impact.rating)}</b><b>{impact.direction_score > 0 ? "+" : ""}{impact.direction_score}</b><b>目标评价 {impact.target_evaluation_score ?? Math.round(impact.rating_confidence * 100)}/100</b></div>
+        {(impact.conclusion_status || impact.impact_channel) && <small>{conclusionStatusLabels[impact.conclusion_status ?? ""] ?? impact.conclusion_status ?? ""}{impact.impact_channel ? ` · ${impactChannelLabels[impact.impact_channel] ?? impact.impact_channel}` : ""}</small>}
         <small>未来 {impact.horizon_days} 个自然日</small>
         {impact.rationale && <p>{impact.rationale}</p>}
         {!!impact.transmission_path.length && <ol>{impact.transmission_path.map((step, stepIndex) => <li key={`${step}-${stepIndex}`}>{step}</li>)}</ol>}
+        <TargetEvaluationDetails value={impact.target_evaluation} modelValue={impact.model_target_evaluation} score={impact.target_evaluation_score} />
+        <ResearchReasoningDetails claims={impact.claims} steps={impact.transmission_steps} />
         {!!impact.missing_information.length && <small>缺失 / Missing：{impact.missing_information.map(describeMissingInformation).join("；")}</small>}
       </article>)}</div></>}
       {!!report.macro_factors.length && <><h3>宏观因子</h3><div className="macro-factor-list">{report.macro_factors.map((factor) => <article key={factor.id}><strong>{factor.name}</strong><span>{Math.round(factor.strength * 100)}%</span><p>{factor.description}</p></article>)}</div></>}

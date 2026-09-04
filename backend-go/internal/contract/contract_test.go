@@ -42,4 +42,32 @@ func TestFrozenContractContainsExpectedSurface(t *testing.T) {
 			t.Errorf("missing required schema %s", schema)
 		}
 	}
+	for schemaName, fields := range map[string][]string{
+		"EventReport":    {"news_credibility_score", "report_confidence", "report_confidence_score", "prompt_version", "target_evaluation_version", "report_confidence_version"},
+		"TargetImpact":   {"claims", "transmission_steps", "conclusion_status", "impact_channel", "model_target_evaluation", "target_evaluation", "target_evaluation_score"},
+		"Recommendation": {"news_credibility_score", "report_confidence", "report_confidence_score", "prompt_version", "target_evaluation", "target_evaluation_score"},
+	} {
+		var schema struct {
+			Properties map[string]json.RawMessage `json:"properties"`
+		}
+		if err := json.Unmarshal(spec.Components.Schemas[schemaName], &schema); err != nil {
+			t.Fatalf("decode schema %s: %v", schemaName, err)
+		}
+		for _, field := range fields {
+			if _, ok := schema.Properties[field]; !ok {
+				t.Errorf("schema %s missing v4.1 field %s", schemaName, field)
+			}
+		}
+	}
+	for _, schemaName := range []string{"EvidenceAssessment", "ResearchClaim", "TransmissionStep", "TargetEvaluation", "TargetImpact"} {
+		var schema struct {
+			AdditionalProperties any `json:"additionalProperties"`
+		}
+		if err := json.Unmarshal(spec.Components.Schemas[schemaName], &schema); err != nil {
+			t.Fatalf("decode schema %s: %v", schemaName, err)
+		}
+		if schema.AdditionalProperties != false {
+			t.Errorf("schema %s must reject unknown properties", schemaName)
+		}
+	}
 }

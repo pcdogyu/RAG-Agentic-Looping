@@ -46,6 +46,7 @@ jobs:
           go run ./cmd/evaluation fixed-evidence --root ..
           go run ./cmd/evaluation walk-forward --root ..
           go run ./cmd/evaluation probability-calibration --root ..
+          go run ./cmd/evaluation research-quality --root ..
           go run ./cmd/evaluation compare-models --root ..
 
   migration-contract:
@@ -64,11 +65,21 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     defaults:
       run:
         working-directory: backend-go
     env:
       TEST_DATABASE_URL: postgresql://migration_test:migration_test@127.0.0.1:5432/migration_test
+      TEST_REDIS_URL: redis://127.0.0.1:6379/15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -90,3 +101,8 @@ jobs:
             echo "::error title=PostgreSQL recent research filter::$message"
             exit "$status"
           fi
+      - name: Verify extraction, mapping, and maintenance against isolated PostgreSQL and Redis
+        env:
+          EXTRACT_TEST_ISOLATED: "1"
+          MAPPING_TEST_ISOLATED: "1"
+        run: go test -race ./internal/jobs -run '^(TestExtractRetryGoldenStateAgainstIsolatedServices|TestMappingGoldenStateAgainstIsolatedServices|TestMaintenanceHandlersAgainstPostgres)$' -count=1 -v

@@ -255,7 +255,12 @@ func (runtime *maintenanceRuntime) targetReplayCandidates(ctx context.Context) (
 }
 
 func eventRunHasCurrentScoring(run map[string]any) bool {
-	return stringValue(objectValue(run["report"])["scoring_version"]) == currentEventScoringVersion
+	report := objectValue(run["report"])
+	return stringValue(report["scoring_version"]) == currentEventScoringVersion &&
+		stringValue(report["prompt_version"]) == eventResearchPromptVersion &&
+		stringValue(report["target_evaluation_version"]) == targetEvaluationVersion &&
+		stringValue(report["news_confidence_version"]) == newsConfidenceVersion &&
+		stringValue(report["report_confidence_version"]) == reportConfidenceVersion
 }
 
 func activeResearchStatus(status string) bool {

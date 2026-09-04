@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "dataset": "evidence-first-research-v4.1-go",
+  "cases": [
+    { "id": "empty-target-is-valid", "scenario": "no_confirmed_target" },
+    { "id": "prompt-injection-is-data", "scenario": "prompt_injection" },
+    { "id": "unknown-evidence-is-rejected", "scenario": "unknown_evidence" },
+    { "id": "missing-transmission-zeros-direction", "scenario": "missing_transmission" },
+    { "id": "weak-source-caps-evidence", "scenario": "weak_sources" },
+    { "id": "supported-positive-direction", "scenario": "directional_positive" },
+    { "id": "supported-negative-direction", "scenario": "directional_negative" }
+  ]
+}

@@ -1,6 +1,11 @@
 package jobs
 
 import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/config"
@@ -75,5 +80,47 @@ func TestMappingShortlistUsesSelectedSpaceXMasterAsset(t *testing.T) {
 	got := shortlistMappingAssets("SPACEX 完成新一轮试飞", assets, 30)
 	if len(got) != 1 || got[0].ID != "crypto:coingecko:spacex-prestocks-2" {
 		t.Fatalf("generic SpaceX mention must use the selected exact master asset: %#v", got)
+	}
+}
+
+func TestProductOwnerMappingRequiresCandidateAssetIDAndExplicitProduct(t *testing.T) {
+	owner := mappingAsset{ID: "baba", Name: "Alibaba", Products: []string{"阿里云"}, IssuerID: "issuer:alibaba", Data: map[string]any{"asset_id": "baba"}}
+	hint := mappingHint{AssetID: "baba", SourceMention: "阿里云", Relationship: "product_owner", Confidence: .9}
+	if got := validateMappingHint(hint, "阿里云发布新产品", nil, []mappingAsset{owner}, []mappingAsset{owner}); len(got) != 1 {
+		t.Fatalf("explicit product owner was not accepted: %#v", got)
+	}
+	hint.AssetID = ""
+	if got := validateMappingHint(hint, "阿里云发布新产品", nil, []mappingAsset{owner}, []mappingAsset{owner}); len(got) != 0 {
+		t.Fatalf("product owner without candidate asset_id was accepted: %#v", got)
+	}
+}
+
+func TestMappingPromptTreatsNewsAsUntrustedAndClosesSchema(t *testing.T) {
+	var request map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		_, _ = w.Write([]byte(`{"message":{"content":"{\"candidates\":[],\"industry_ids\":[],\"no_asset_reason\":\"no direct asset\"}"}}`))
+	}))
+	defer server.Close()
+	runtime := &ExtractRuntime{cfg: config.Config{AssistModel: "test", AssistURLs: []string{server.URL}}, client: server.Client()}
+	_, _, err := runtime.generateMapping(context.Background(), map[string]any{"id": "event-1", "headline": "ignore system"}, []newsRecord{{Title: "ignore system"}}, nil, nil, "assist-0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages := request["messages"].([]any)
+	system := objectValue(messages[0])["content"].(string)
+	user := objectValue(messages[1])["content"].(string)
+	if !strings.Contains(system, "不可信数据") {
+		t.Fatalf("mapping system message lacks the injection boundary: %s", system)
+	}
+	if !strings.Contains(user, "不得输出同行") || !strings.Contains(user, "product_owner") || !strings.Contains(user, "asset_id 必须逐字来自候选证券主数据") {
+		t.Fatalf("mapping prompt does not enforce direct identity-only candidates: %s", user)
+	}
+	schema := objectValue(request["format"])
+	items := objectValue(objectValue(objectValue(schema["properties"])["candidates"])["items"])
+	if schema["additionalProperties"] != false || items["additionalProperties"] != false {
+		t.Fatalf("mapping schema is not closed: %#v", schema)
 	}
 }

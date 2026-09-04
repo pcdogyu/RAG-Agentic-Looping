@@ -599,6 +599,15 @@ h1 span { color: var(--mint); font-weight: 400; }
 .claim-assessments article { display: grid; gap: 5px; padding: 11px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--soft-hover); }
 .claim-assessments span, .claim-assessments small { color: var(--muted); font-size: 10px; }
 .claim-assessments strong { color: var(--secondary); font-size: 12px; line-height: 1.55; }
+.target-evaluation-details { min-width: 0; margin: 8px 0; }
+.target-evaluation-details h3, .research-reasoning-details h3 { margin: 10px 0 7px; font-size: 12px; }
+.event-impact-grid .target-evaluation-details .score-factor-grid { display: grid; grid-template-columns: 1fr; width: 100%; }
+.event-impact-grid .target-evaluation-details .score-factor-grid article { padding: 9px; }
+.research-reasoning-details { display: grid; min-width: 0; gap: 3px; }
+.transmission-step-list { display: grid; gap: 7px; margin: 0; padding-left: 20px; }
+.transmission-step-list li { display: grid; gap: 3px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 7px; }
+.transmission-step-list strong { color: var(--secondary); font-size: 11px; }
+.transmission-step-list span, .transmission-step-list small { color: var(--muted); font-size: 10px; }
 .evidence-links { display: grid; gap: 7px; }
 .evidence-links a { display: grid; gap: 3px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 7px; color: var(--link); text-decoration: none; }
 .evidence-links a:hover { border-color: var(--mint); }

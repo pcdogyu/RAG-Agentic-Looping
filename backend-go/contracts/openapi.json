@@ -384,6 +384,10 @@
             "title": "Confidence",
             "type": "number"
           },
+          "contradictions": {
+            "items": { "type": "string" },
+            "type": "array"
+          },
           "evidence_complete": {
             "default": false,
             "title": "Evidence Complete",
@@ -439,6 +443,11 @@
             ],
             "title": "News Confidence"
           },
+          "news_credibility_score": {
+            "maximum": 100,
+            "minimum": 0,
+            "type": "integer"
+          },
           "news_confidence_factors": {
             "anyOf": [
               {
@@ -471,6 +480,18 @@
             ],
             "title": "Rating Confidence Version"
           },
+          "prompt_version": { "type": "string" },
+          "report_confidence": {
+            "maximum": 1,
+            "minimum": 0,
+            "type": "number"
+          },
+          "report_confidence_score": {
+            "maximum": 100,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "report_confidence_version": { "type": "string" },
           "risks": {
             "items": {
               "type": "string"
@@ -490,6 +511,8 @@
             "title": "Scoring Version",
             "type": "string"
           },
+          "structurally_valid": { "type": "boolean" },
+          "target_evaluation_version": { "type": "string" },
           "summary": {
             "title": "Summary",
             "type": "string"
@@ -2727,6 +2750,16 @@
             "title": "Confidence",
             "type": "number"
           },
+          "report_confidence": {
+            "maximum": 1,
+            "minimum": 0,
+            "type": "number"
+          },
+          "report_confidence_score": {
+            "maximum": 100,
+            "minimum": 0,
+            "type": "integer"
+          },
           "confidence_factors": {
             "anyOf": [
               {
@@ -2913,6 +2946,11 @@
             ],
             "title": "News Confidence"
           },
+          "news_credibility_score": {
+            "maximum": 100,
+            "minimum": 0,
+            "type": "integer"
+          },
           "news_confidence_factors": {
             "anyOf": [
               {
@@ -2945,6 +2983,8 @@
             ],
             "title": "Primary Gate Reason"
           },
+          "prompt_version": { "type": "string" },
+          "report_confidence_version": { "type": "string" },
           "rating": {
             "$ref": "#/components/schemas/Rating"
           },
@@ -2998,6 +3038,19 @@
             "title": "Scoring Version",
             "type": "string"
           },
+          "structurally_valid": { "type": "boolean" },
+          "model_target_evaluation": {
+            "$ref": "#/components/schemas/TargetEvaluation"
+          },
+          "target_evaluation": {
+            "$ref": "#/components/schemas/TargetEvaluation"
+          },
+          "target_evaluation_score": {
+            "maximum": 100,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "target_evaluation_version": { "type": "string" },
           "signal_status": {
             "anyOf": [
               {
@@ -3843,9 +3896,67 @@
         "title": "TargetConfidenceFactors",
         "type": "object"
       },
+      "EvidenceAssessment": {
+        "additionalProperties": false,
+        "properties": {
+          "score": { "type": "integer", "minimum": 0, "maximum": 100 },
+          "reason": { "type": "string" },
+          "evidence_ids": { "type": "array", "items": { "type": "string" } },
+          "action_ids": { "type": "array", "items": { "type": "string" } },
+          "missing_information": { "type": "array", "items": { "type": "string" } },
+          "cap_reasons": { "type": "array", "items": { "type": "string" } }
+        },
+        "required": ["score", "reason", "evidence_ids", "action_ids", "missing_information"],
+        "type": "object"
+      },
+      "ResearchClaim": {
+        "additionalProperties": false,
+        "properties": {
+          "claim_type": { "type": "string", "enum": ["fact", "inference"] },
+          "text": { "type": "string" },
+          "evidence_ids": { "type": "array", "items": { "type": "string" } },
+          "action_ids": { "type": "array", "items": { "type": "string" } },
+          "missing_information": { "type": "array", "items": { "type": "string" } }
+        },
+        "required": ["claim_type", "text", "evidence_ids", "action_ids", "missing_information"],
+        "type": "object"
+      },
+      "TransmissionStep": {
+        "additionalProperties": false,
+        "properties": {
+          "source_node": { "type": "string" },
+          "mechanism": { "type": "string" },
+          "target_node": { "type": "string" },
+          "basis_type": { "type": "string", "enum": ["fact", "inference"] },
+          "evidence_ids": { "type": "array", "items": { "type": "string" } },
+          "action_ids": { "type": "array", "items": { "type": "string" } },
+          "missing_information": { "type": "array", "items": { "type": "string" } }
+        },
+        "required": ["source_node", "mechanism", "target_node", "basis_type", "evidence_ids", "action_ids", "missing_information"],
+        "type": "object"
+      },
+      "TargetEvaluation": {
+        "additionalProperties": false,
+        "properties": {
+          "object_relevance": { "$ref": "#/components/schemas/EvidenceAssessment" },
+          "evidence_sufficiency": { "$ref": "#/components/schemas/EvidenceAssessment" },
+          "transmission_certainty": { "$ref": "#/components/schemas/EvidenceAssessment" },
+          "impact_support": { "$ref": "#/components/schemas/EvidenceAssessment" },
+          "timing_persistence": { "$ref": "#/components/schemas/EvidenceAssessment" }
+        },
+        "required": ["object_relevance", "evidence_sufficiency", "transmission_certainty", "impact_support", "timing_persistence"],
+        "type": "object"
+      },
       "TargetImpact": {
         "additionalProperties": false,
         "properties": {
+          "action_id": {
+            "anyOf": [{ "type": "string" }, { "type": "null" }]
+          },
+          "applied_caps": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
           "asset": {
             "anyOf": [
               {
@@ -3855,6 +3966,14 @@
                 "type": "null"
               }
             ]
+          },
+          "claims": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/ResearchClaim" }
+          },
+          "conclusion_status": {
+            "type": "string",
+            "enum": ["directional", "neutral_supported", "insufficient_evidence"]
           },
           "confidence": {
             "default": 0,
@@ -3913,6 +4032,10 @@
             "$ref": "#/components/schemas/HorizonUnit",
             "default": "calendar_days"
           },
+          "impact_channel": {
+            "type": "string",
+            "enum": ["supply", "demand", "revenue", "cost", "profit", "cash_flow", "valuation", "risk_premium"]
+          },
           "macro_factor_ids": {
             "items": {
               "type": "string"
@@ -3933,6 +4056,9 @@
             },
             "title": "Missing Information",
             "type": "array"
+          },
+          "model_target_evaluation": {
+            "$ref": "#/components/schemas/TargetEvaluation"
           },
           "rating": {
             "$ref": "#/components/schemas/Rating",
@@ -3989,6 +4115,15 @@
             "title": "Technical Failure",
             "type": "boolean"
           },
+          "target_evaluation": {
+            "$ref": "#/components/schemas/TargetEvaluation"
+          },
+          "target_evaluation_score": {
+            "maximum": 100,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "target_evaluation_version": { "type": "string" },
           "trade_status": {
             "$ref": "#/components/schemas/TradeStatus",
             "default": "untradeable"
@@ -3999,6 +4134,12 @@
             },
             "title": "Transmission Path",
             "type": "array"
+          },
+          "transmission_steps": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 3,
+            "items": { "$ref": "#/components/schemas/TransmissionStep" }
           }
         },
         "required": [

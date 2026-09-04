@@ -1,6 +1,12 @@
 package httpapi
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+)
 
 func TestFilterTargetChangesMatchesVisibleIdentityFields(t *testing.T) {
 	items := []map[string]any{
@@ -94,5 +100,34 @@ func TestSanitizePublishedImpactsRemovesActivityAndRebindsStockPrice(t *testing.
 	}
 	if numberValue(hoodImpact["direction_score"]) != 85 {
 		t.Fatalf("got HOOD score %v, want 85", hoodImpact["direction_score"])
+	}
+}
+
+func TestConclusionItemPublishesV41ConfidenceFieldsAndTargetEvaluation(t *testing.T) {
+	impact := map[string]any{
+		"target_type": "tradable_asset", "target_name": "Acme", "direction_score": 45, "rating": "bullish",
+		"target_evaluation_score": 76, "target_evaluation": map[string]any{"evidence_sufficiency": map[string]any{"score": 49, "cap_reasons": []string{"source_independence_gate"}}},
+	}
+	report := map[string]any{
+		"summary": "Acme order", "confidence": .62, "report_confidence": .62, "report_confidence_score": 62,
+		"news_confidence": .8, "news_credibility_score": 80, "evidence_complete": true, "impacts": []any{impact},
+		"affected_markets": []any{"US"}, "affected_sectors": []any{}, "scoring_version": "llm-direction-v3", "prompt_version": "event-research-prompt-v4.1-go",
+	}
+	payload, _ := json.Marshal(map[string]any{"status": "completed", "event_id": uuid.NewString(), "report": report})
+	event, _ := json.Marshal(map[string]any{"headline": "Acme order", "event_type": "product"})
+	item, err := conclusionItem(conclusionRow{Kind: "event", ID: uuid.New(), OccurredAt: time.Now(), Payload: payload, Event: event})
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicReport := objectValue(item["report"])
+	if numberValue(publicReport["report_confidence_score"]) != 62 || numberValue(publicReport["news_credibility_score"]) != 80 || stringValue(publicReport["prompt_version"]) != "event-research-prompt-v4.1-go" {
+		t.Fatalf("v4.1 summary fields were dropped: %#v", publicReport)
+	}
+	publishedImpacts := sanitizePublishedImpacts(report["impacts"])
+	if len(publishedImpacts) != 1 || numberValue(objectValue(publishedImpacts[0])["target_evaluation_score"]) != 76 {
+		t.Fatalf("v4.1 target evaluation was dropped: %#v", publishedImpacts)
+	}
+	if _, err := json.Marshal(item); err != nil {
+		t.Fatalf("v4.1 conclusion item is not JSON serializable: %v", err)
 	}
 }

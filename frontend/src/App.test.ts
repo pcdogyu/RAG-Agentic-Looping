@@ -924,8 +924,29 @@ describe("changed targets page", () => {
       report: {
         summary: "事件结论摘要",
         affected_markets: ["COMMODITY"], affected_sectors: ["能源"], scenarios: ["基准情景"], catalysts: ["政策生效"], risks: ["需求下降"], unresolved_questions: ["执行日期"],
-        confidence: 0.6, evidence_complete: false, news_confidence: 0.82,
-        impacts: [{ target_type: "commodity_price", target_name: "WTI 原油", asset: null, direction_score: 45, rating: "bullish", rating_confidence: 0.71, horizon_days: 90, horizon_unit: "calendar_days", transmission_path: ["供给减少", "价格上升"], rationale: "供应风险溢价上升", missing_information: ["实际减产量"] }],
+        confidence: 0.6, report_confidence: 0.6, report_confidence_score: 60, evidence_complete: false, news_confidence: 0.82, news_credibility_score: 82,
+        impacts: [{
+          target_type: "commodity_price", target_name: "WTI 原油", asset: null, direction_score: 45, rating: "bullish", rating_confidence: 0.71,
+          horizon_days: 90, horizon_unit: "calendar_days", conclusion_status: "directional", impact_channel: "risk_premium",
+          transmission_path: ["供给减少", "风险溢价"], rationale: "供应风险溢价上升", missing_information: ["实际减产量"],
+          claims: [{ claim_type: "fact", text: "政策已宣布", evidence_ids: ["evidence-1"], action_ids: [], missing_information: [] }],
+          transmission_steps: [{ source_node: "政策生效", mechanism: "供应风险上升", target_node: "风险溢价", basis_type: "inference", evidence_ids: ["evidence-1"], action_ids: [], missing_information: [] }],
+          target_evaluation_score: 65,
+          model_target_evaluation: {
+            object_relevance: { score: 90, reason: "对象明确", evidence_ids: ["evidence-1"], action_ids: [], missing_information: [] },
+            evidence_sufficiency: { score: 80, reason: "单一来源", evidence_ids: ["evidence-1"], action_ids: [], missing_information: [] },
+            transmission_certainty: { score: 70, reason: "传导可识别", evidence_ids: ["evidence-1"], action_ids: [], missing_information: [] },
+            impact_support: { score: 65, reason: "方向获支持", evidence_ids: ["evidence-1"], action_ids: [], missing_information: [] },
+            timing_persistence: { score: 50, reason: "时点待确认", evidence_ids: ["evidence-1"], action_ids: [], missing_information: [] },
+          },
+          target_evaluation: {
+            object_relevance: { score: 90, reason: "对象明确", evidence_ids: ["evidence-1"], action_ids: [], missing_information: [] },
+            evidence_sufficiency: { score: 49, reason: "单一来源", evidence_ids: ["evidence-1"], action_ids: [], missing_information: [], cap_reasons: ["source_independence_gate"] },
+            transmission_certainty: { score: 70, reason: "传导可识别", evidence_ids: ["evidence-1"], action_ids: [], missing_information: [] },
+            impact_support: { score: 65, reason: "方向获支持", evidence_ids: ["evidence-1"], action_ids: [], missing_information: [] },
+            timing_persistence: { score: 50, reason: "时点待确认", evidence_ids: ["evidence-1"], action_ids: [], missing_information: [] },
+          },
+        }],
         macro_factors: [{ id: "factor-1", name: "原油供给", description: "供给收缩", strength: 0.7 }], missing_information: ["政策细则"],
       },
       news: [{ id: "news-1", title: "政策新闻", url: "https://example.com/news", source: "Example" }],
@@ -935,12 +956,27 @@ describe("changed targets page", () => {
     expect(modal).toContain("事件结论摘要");
     expect(modal).toContain("WTI 原油");
     expect(modal).toContain("供给减少");
+    expect(modal).toContain("新闻可信度<strong>82/100");
+    expect(modal).toContain("研报置信度<strong>60/100");
+    expect(modal).toContain("目标评价 65/100");
+    expect(modal).toContain("对象相关性");
+    expect(modal).toContain("模型原始 80");
+    expect(modal).toContain("缺少官方来源或两个独立来源组，最高 49");
+    expect(modal).toContain("事实与推断");
+    expect(modal).toContain("逐步传导链");
     expect(modal).toContain("资料覆盖不足");
     expect(modal).toContain("缺失 / Missing");
     expect(modal).toContain("实际减产量 / Additional verified information is required for this item");
     expect(modal).toContain("缺失信息 / Missing information");
     expect(modal).toContain("政策细则 / Additional verified information is required for this item");
     expect(modal).toContain("政策新闻");
+
+    const emptyModal = renderToStaticMarkup(createElement(EventConclusionDetailModal, {
+      detail: { ...detail, report: { ...detail.report, impacts: [], report_confidence: 0, report_confidence_score: 0 } },
+      onClose: () => undefined,
+    }));
+    expect(emptyModal).toContain("当前证据未确认具体影响标的");
+    expect(emptyModal).not.toContain("目标影响</h3>");
   });
 
   it("describes missing event information in Chinese and English", () => {

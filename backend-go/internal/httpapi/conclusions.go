@@ -164,10 +164,10 @@ func conclusionItem(row conclusionRow) (map[string]any, error) {
 		"event":          map[string]any{"id": payload["event_id"], "headline": headline, "event_type": defaultAny(event["event_type"], "other")},
 		"recommendation": nil,
 		"refresh":        publicFullEventResearch(payload),
-		"report": map[string]any{"confidence": report["confidence"], "news_confidence": report["news_confidence"],
+		"report": map[string]any{"confidence": report["confidence"], "report_confidence": report["report_confidence"], "report_confidence_score": report["report_confidence_score"], "news_confidence": report["news_confidence"], "news_credibility_score": report["news_credibility_score"],
 			"direction_score": directionScore, "rating": rating,
 			"impact_count": len(impacts), "affected_markets": defaultAny(report["affected_markets"], []any{}),
-			"affected_sectors": defaultAny(report["affected_sectors"], []any{}), "scoring_version": report["scoring_version"]},
+			"affected_sectors": defaultAny(report["affected_sectors"], []any{}), "scoring_version": report["scoring_version"], "prompt_version": report["prompt_version"]},
 	}, nil
 }
 
