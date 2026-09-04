@@ -80,8 +80,22 @@ func TestNormalizeMCPNewsStopsAtBoundaryAndBuildsHeadline(t *testing.T) {
 		map[string]any{"content": "旧消息", "time": "2026-08-31T23:00:00Z", "url": "https://example.com/b"},
 	}}}
 	items, next, more, reached := normalizeMCPNews(payload, "金十", "jin10_flash_v1", since)
-	if len(items) != 1 || items[0].Title != "黄金ETF持仓下降。" || items[0].URL != "https://example.com/a" || next != "next" || !more || !reached {
+	if len(items) != 1 || items[0].Title != "黄金ETF持仓下降。后续内容" || items[0].Summary != "黄金ETF持仓下降。后续内容" || items[0].URL != "https://example.com/a" || next != "next" || !more || !reached {
 		t.Fatalf("unexpected MCP normalization: items=%#v next=%q more=%v reached=%v", items, next, more, reached)
+	}
+}
+
+func TestNormalizeMCPNewsReadsCompleteNuxtHTMLContent(t *testing.T) {
+	since := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	html := `<!----></div></div></div><script>window.__NUXT__=(function(a,b,c){return {data:[{flash:{data:{content:"\u003Cb\u003E博通(AVGO.O)2026财年Q4展望营收为348亿美元。第二句仍属于正文。\u003C\u002Fb\u003E",title:a}}}]}}(null));</script>`
+	payload := map[string]any{"data": map[string]any{"items": []any{
+		map[string]any{"content": html, "time": "2026-09-01T01:00:00Z", "url": "https://example.com/avgo"},
+	}}}
+
+	items, _, _, _ := normalizeMCPNews(payload, "金十", "jin10_flash_v1", since)
+	want := "博通(AVGO.O)2026财年Q4展望营收为348亿美元。第二句仍属于正文。"
+	if len(items) != 1 || items[0].Title != want || items[0].Summary != want {
+		t.Fatalf("NUXT content was not preserved: %#v", items)
 	}
 }
 

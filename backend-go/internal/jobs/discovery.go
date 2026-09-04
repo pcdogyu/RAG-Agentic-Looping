@@ -10,9 +10,11 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -72,6 +74,11 @@ type discoveryBatch struct {
 	Reports []sourceDiscoveryReport
 	Errors  []string
 }
+
+var (
+	discoveryHTMLTagPattern     = regexp.MustCompile(`(?s)<[^>]*>`)
+	discoveryNuxtContentPattern = regexp.MustCompile(`(?s)(?:^|[,{])\s*content\s*:\s*("(?:\\.|[^"\\])*")`)
+)
 
 func NewDiscoveryHandlers(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) map[string]Handler {
 	runtime := &discoveryRuntime{cfg: cfg, db: db, redis: redisClient, client: &http.Client{Timeout: 45 * time.Second}}
@@ -863,8 +870,8 @@ func normalizeMCPNews(payload any, source, adapter string, since time.Time) ([]d
 	result := make([]discoveredNews, 0)
 	reached := false
 	for _, raw := range discoveryAdapterItems(payload, adapter) {
-		content := strings.TrimSpace(firstDiscoveryString(raw, "content", "introduction"))
-		title := strings.TrimSpace(stringValue(raw["title"]))
+		content := discoveryContentText(firstDiscoveryString(raw, "content", "introduction"))
+		title := discoveryContentText(stringValue(raw["title"]))
 		if title == "" {
 			title = discoveryHeadline(content, 120)
 		}
@@ -1265,17 +1272,28 @@ func firstDiscoveryString(value map[string]any, keys ...string) string {
 }
 
 func discoveryHeadline(content string, limit int) string {
-	compact := strings.Join(strings.Fields(content), " ")
-	if compact == "" {
-		return ""
-	}
-	for index, character := range compact {
-		if strings.ContainsRune("。！？；.!?", character) {
-			compact = compact[:index+len(string(character))]
-			break
+	return truncateRunes(discoveryContentText(content), limit)
+}
+
+// discoveryContentText turns the upstream content field into the complete text
+// sent to extraction. Some financial flash providers return an HTML fragment,
+// while their detail page exposes the same fragment inside window.__NUXT__.
+// Neither case may use sentence punctuation as a record boundary: qualified
+// symbols such as AVGO.O contain an ASCII period, and later sentences are still
+// part of the same news item.
+func discoveryContentText(value string) string {
+	content := strings.TrimSpace(value)
+	if strings.Contains(content, "window.__NUXT__") {
+		if match := discoveryNuxtContentPattern.FindStringSubmatch(content); len(match) == 2 {
+			var embedded string
+			if json.Unmarshal([]byte(match[1]), &embedded) == nil && strings.TrimSpace(embedded) != "" {
+				content = embedded
+			}
 		}
 	}
-	return truncateRunes(compact, limit)
+	content = html.UnescapeString(content)
+	content = discoveryHTMLTagPattern.ReplaceAllString(content, " ")
+	return strings.Join(strings.Fields(content), " ")
 }
 
 func cloneObject(value map[string]any) map[string]any {

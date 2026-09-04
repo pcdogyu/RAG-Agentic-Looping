@@ -531,9 +531,7 @@ func (runtime *ExtractRuntime) extractEvent(ctx context.Context, news newsRecord
 
 func (runtime *ExtractRuntime) generateExtraction(ctx context.Context, news newsRecord, instanceID string) (extractedEvent, error) {
 	system := "你是谨慎的跨市场新闻结构化引擎。拒绝猜测，输出结构化事实。"
-	prompt := "从新闻元数据中提取一个可投资研究事件。不要补充新闻中没有的事实。只提取事实框架，不得输出全局影响方向、分数或评级。" +
-		"actions 逐项记录主体、动作、对象、范围、action_type 与 action_stage；entities 必须保留新闻明确出现的公司、品牌和品牌产品名称。\n" +
-		fmt.Sprintf("标题：%s\n摘要：%s\n来源：%s\n已标注代码：%v", news.Title, truncateRunes(news.Summary, 3000), news.Source, news.Symbols)
+	prompt := extractionPrompt(news)
 	schema := map[string]any{
 		"type": "object", "required": []string{"event_type", "direct_impact"}, "properties": map[string]any{
 			"event_type":    map[string]any{"type": "string", "enum": []string{"earnings", "product", "regulation", "m_and_a", "management", "security", "macro", "supply_chain", "tokenomics", "other"}},
@@ -597,6 +595,14 @@ func (runtime *ExtractRuntime) generateExtraction(ctx context.Context, news news
 		lastErr = errors.New("no extract model endpoint configured")
 	}
 	return extractedEvent{}, lastErr
+}
+
+func extractionPrompt(news newsRecord) string {
+	content := fallbackString(strings.TrimSpace(news.Summary), strings.TrimSpace(news.Title))
+	return "从新闻元数据中提取一个可投资研究事件。不要补充新闻中没有的事实。只提取事实框架，不得输出全局影响方向、分数或评级。" +
+		"actions 逐项记录主体、动作、对象、范围、action_type 与 action_stage；entities 必须保留新闻明确出现的公司、品牌和品牌产品名称。" +
+		"必须阅读完整正文；正文来自上游 HTML 的新闻内容字段，不得按中文或英文句号截断。\n" +
+		fmt.Sprintf("标题：%s\n完整正文：%s\n来源：%s\n已标注代码：%v", news.Title, truncateRunes(content, 3000), news.Source, news.Symbols)
 }
 
 func ollamaKeepAliveValue(value string) any {

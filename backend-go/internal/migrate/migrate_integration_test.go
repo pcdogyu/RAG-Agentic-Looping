@@ -99,6 +99,29 @@ func TestUpCreatesFreshGoRuntimeSchema(t *testing.T) {
 	if _, err := pool.Exec(ctx, `INSERT INTO news_items(id,source,source_quality,title,summary,url,language,published_at,observed_at,as_of,content_hash,symbols,raw_metadata) VALUES($1,'test','official','title','summary','https://example.com','en',now(),now(),now(),$2,'[]','{}')`, uuid.NewString(), fmt.Sprintf("%064d", 1)); err != nil {
 		t.Fatalf("fresh schema rejected a core write: %v", err)
 	}
+
+	newsID, eventID := uuid.New(), uuid.New()
+	summary := "博通(AVGO.O)2026财年Q4展望营收为348亿美元。"
+	if _, err := pool.Exec(ctx, `INSERT INTO news_items(id,source,source_quality,title,summary,url,language,published_at,observed_at,as_of,content_hash,symbols,raw_metadata) VALUES($1,'金十','professional','博通(AVGO.',$2,'https://example.com/avgo','zh',now(),now(),now(),$3,'[]','{"mcp_adapter":"jin10_flash_v1"}')`, newsID, summary, fmt.Sprintf("%064d", 2)); err != nil {
+		t.Fatalf("insert malformed headline fixture: %v", err)
+	}
+	eventPayload := fmt.Sprintf(`{"id":%q,"headline":"博通(AVGO.","news_item_ids":[%q]}`, eventID, newsID)
+	if _, err := pool.Exec(ctx, `INSERT INTO news_events(id,headline,event_type,payload,priority,published_at,observed_at,as_of) VALUES($1,'博通(AVGO.','earnings',$2,0.5,now(),now(),now())`, eventID, eventPayload); err != nil {
+		t.Fatalf("insert malformed event fixture: %v", err)
+	}
+	if err := Up(ctx, pool); err != nil {
+		t.Fatalf("reapply migrations for headline repair: %v", err)
+	}
+	var repairedNews, repairedEvent, repairedPayload string
+	if err := pool.QueryRow(ctx, `SELECT title FROM news_items WHERE id=$1`, newsID).Scan(&repairedNews); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT headline,payload::jsonb->>'headline' FROM news_events WHERE id=$1`, eventID).Scan(&repairedEvent, &repairedPayload); err != nil {
+		t.Fatal(err)
+	}
+	if repairedNews != summary || repairedEvent != summary || repairedPayload != summary {
+		t.Fatalf("dotted symbol headline repair failed: news=%q event=%q payload=%q", repairedNews, repairedEvent, repairedPayload)
+	}
 }
 
 func TestUpUpgradesLegacyAssetTableWithoutRebuildingData(t *testing.T) {

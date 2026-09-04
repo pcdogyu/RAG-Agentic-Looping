@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/config"
@@ -79,6 +80,20 @@ func TestOllamaKeepAlivePreservesNumericJSONType(t *testing.T) {
 	}
 	if got := ollamaKeepAliveValue("5m"); got != "5m" {
 		t.Fatalf("duration keep_alive must remain a string, got %#v", got)
+	}
+}
+
+func TestExtractionPromptUsesCompleteHTMLDerivedContent(t *testing.T) {
+	news := newsRecord{
+		Title:   "博通(AVGO.O)2026财年Q4展望营收为348亿美元。第二句仍属于正文。",
+		Summary: "博通(AVGO.O)2026财年Q4展望营收为348亿美元。第二句仍属于正文。",
+		Source:  "金十",
+	}
+	prompt := extractionPrompt(news)
+	for _, expected := range []string{"AVGO.O", "348亿美元。第二句仍属于正文。", "不得按中文或英文句号截断"} {
+		if !strings.Contains(prompt, expected) {
+			t.Fatalf("extraction prompt omitted %q: %s", expected, prompt)
+		}
 	}
 }
 
