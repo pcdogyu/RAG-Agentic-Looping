@@ -872,6 +872,7 @@ func normalizeMCPNews(payload any, source, adapter string, since time.Time) ([]d
 	for _, raw := range discoveryAdapterItems(payload, adapter) {
 		content := discoveryContentText(firstDiscoveryString(raw, "content", "introduction"))
 		title := discoveryContentText(stringValue(raw["title"]))
+		title = restoreTruncatedMCPHeadline(title, content, adapter)
 		if title == "" {
 			title = discoveryHeadline(content, 120)
 		}
@@ -890,6 +891,21 @@ func normalizeMCPNews(payload any, source, adapter string, since time.Time) ([]d
 		result = append(result, item)
 	}
 	return result, next, more, reached
+}
+
+// restoreTruncatedMCPHeadline repairs a Jin10 adapter defect that treats an
+// ASCII period inside a decimal or qualified symbol as a sentence boundary.
+// The prefix and no-whitespace checks deliberately avoid expanding ordinary
+// short editorial titles into their full article body.
+func restoreTruncatedMCPHeadline(title, content, adapter string) string {
+	if adapter != "jin10_flash_v1" || title == "" || content == "" || !strings.HasSuffix(title, ".") || !strings.HasPrefix(content, title) || len(content) <= len(title) {
+		return title
+	}
+	next := []rune(content[len(title):])
+	if len(next) == 0 || unicode.IsSpace(next[0]) {
+		return title
+	}
+	return discoveryHeadline(content, 120)
 }
 
 type sourceFilterConfig struct {

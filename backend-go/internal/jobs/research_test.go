@@ -165,6 +165,120 @@ func TestResearchModelRequestDisablesThinkingByDefault(t *testing.T) {
 	}
 }
 
+func TestResearchModelFallsBackWithoutThinkingAfterOutputLimit(t *testing.T) {
+	requests := make([]map[string]any, 0, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode research request: %v", err)
+			return
+		}
+		requests = append(requests, request)
+		w.Header().Set("Content-Type", "application/json")
+		if len(requests) == 1 {
+			_, _ = w.Write([]byte(`{"message":{"content":"","thinking":"reasoning"},"prompt_eval_count":1283,"eval_count":16384,"done_reason":"length"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"message":{"content":"{\"answer\":\"ok\"}"},"prompt_eval_count":1283,"eval_count":20,"done_reason":"stop"}`))
+	}))
+	defer server.Close()
+
+	runtime := &researchRuntime{cfg: config.Config{
+		ResearchModel:         "qwen3:4b-thinking",
+		ResearchURLs:          []string{server.URL},
+		ResearchThink:         true,
+		ResearchContextLength: 32768,
+		ResearchMaxOutput:     16384,
+		ResearchFallbackMax:   8192,
+	}, client: server.Client()}
+	var result map[string]any
+	if err := runtime.callResearchModel(context.Background(), uuid.New(), "research_run", "report_drafting", "system", "prompt", map[string]any{"type": "object"}, "research-0", &result); err != nil {
+		t.Fatalf("fallback research call failed: %v", err)
+	}
+	if len(requests) != 2 || requests[0]["think"] != true || requests[1]["think"] != false {
+		t.Fatalf("unexpected thinking fallback sequence: %#v", requests)
+	}
+	firstOptions, secondOptions := objectValue(requests[0]["options"]), objectValue(requests[1]["options"])
+	if int(numberValue(firstOptions["num_ctx"])) != 32768 || int(numberValue(firstOptions["num_predict"])) != 16384 || int(numberValue(secondOptions["num_predict"])) != 8192 {
+		t.Fatalf("unexpected context/output limits: first=%#v second=%#v", firstOptions, secondOptions)
+	}
+	if result["answer"] != "ok" {
+		t.Fatalf("unexpected fallback result: %#v", result)
+	}
+}
+
+func TestResearchModelFallsBackAfterMalformedJSON(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempt := requests.Add(1)
+		if attempt == 1 {
+			_, _ = w.Write([]byte(`{"message":{"content":"{\"answer\":"},"eval_count":100,"done_reason":"stop"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"message":{"content":"{\"answer\":\"recovered\"}"},"eval_count":20,"done_reason":"stop"}`))
+	}))
+	defer server.Close()
+	runtime := &researchRuntime{cfg: config.Config{ResearchModel: "qwen3:4b-thinking", ResearchURLs: []string{server.URL}, ResearchThink: true, ResearchMaxOutput: 16384, ResearchFallbackMax: 8192}, client: server.Client()}
+	var result map[string]any
+	if err := runtime.callResearchModel(context.Background(), uuid.New(), "research_run", "report_drafting", "system", "prompt", map[string]any{"type": "object"}, "research-0", &result); err != nil || result["answer"] != "recovered" {
+		t.Fatalf("malformed JSON fallback failed: result=%#v err=%v", result, err)
+	}
+}
+
+func TestResearchModelMakesSecondOutputFailurePermanent(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		_, _ = w.Write([]byte(`{"message":{"content":""},"eval_count":8192,"done_reason":"length"}`))
+	}))
+	defer server.Close()
+	runtime := &researchRuntime{cfg: config.Config{ResearchModel: "qwen3:4b-thinking", ResearchURLs: []string{server.URL}, ResearchThink: true, ResearchMaxOutput: 16384, ResearchFallbackMax: 8192}, client: server.Client()}
+	var result map[string]any
+	err := runtime.callResearchModel(context.Background(), uuid.New(), "research_run", "report_drafting", "system", "prompt", map[string]any{"type": "object"}, "research-0", &result)
+	if !isPermanentJobFailure(err) || errorKind(err) != "ResearchOutputError" || requests.Load() != 2 {
+		t.Fatalf("second output failure must be terminal after two calls: requests=%d kind=%s err=%v", requests.Load(), errorKind(err), err)
+	}
+}
+
+func TestResearchModelDoesNotUseFallbackForHTTPFailure(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	runtime := &researchRuntime{cfg: config.Config{ResearchModel: "qwen3:4b-thinking", ResearchURLs: []string{server.URL}, ResearchThink: true, ResearchMaxOutput: 16384, ResearchFallbackMax: 8192}, client: server.Client()}
+	var result map[string]any
+	err := runtime.callResearchModel(context.Background(), uuid.New(), "research_run", "report_drafting", "system", "prompt", map[string]any{"type": "object"}, "research-0", &result)
+	if err == nil || isPermanentJobFailure(err) || requests.Load() != 1 {
+		t.Fatalf("HTTP failure should remain transient without fallback: requests=%d err=%v", requests.Load(), err)
+	}
+}
+
+func TestResearchAttemptMetricsDoNotPersistThinkingText(t *testing.T) {
+	response := ollamaResponse{DoneReason: "length", CompletionTokens: 16384}
+	response.Message.Thinking = "private reasoning"
+	metrics := researchAttemptMetrics(researchModelAttempt{Think: true, MaxOutput: 16384, FallbackReason: "output_limit_empty_content"}, response, true)
+	if metrics["thinking_char_count"] != 17 || metrics["output_limit_reached"] != true || metrics["fallback_reason"] != "output_limit_empty_content" {
+		t.Fatalf("unexpected research audit metrics: %#v", metrics)
+	}
+	for _, value := range metrics {
+		if value == response.Message.Thinking {
+			t.Fatal("thinking text must not be stored in audit metrics")
+		}
+	}
+}
+
+func TestDecodeResearchTargetDoesNotPartiallyMutateOnInvalidJSON(t *testing.T) {
+	target := map[string]any{"stable": "value"}
+	if err := decodeResearchTarget(`{"partial":true`, &target); err == nil {
+		t.Fatal("invalid JSON was unexpectedly accepted")
+	}
+	if len(target) != 1 || target["stable"] != "value" {
+		t.Fatalf("invalid JSON partially mutated the target: %#v", target)
+	}
+}
+
 func TestResearchModelDoesNotRetryAfterTimeout(t *testing.T) {
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

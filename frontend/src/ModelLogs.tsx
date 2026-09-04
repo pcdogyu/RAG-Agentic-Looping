@@ -145,6 +145,33 @@ export function fidelityLabel(value: string) {
   }[value] || value;
 }
 
+export function modelTokenLabel(promptTokens: number | null, completionTokens: number | null) {
+  return `输入 ${formatCount(promptTokens)} · 生成 ${formatCount(completionTokens)}`;
+}
+
+export function modelAuditMetricRows(metrics: Record<string, unknown>) {
+  const rows: Array<{ label: string; value: string }> = [];
+  if (typeof metrics.think_enabled === "boolean") {
+    rows.push({ label: "思考模式", value: metrics.think_enabled ? "开启" : "关闭" });
+  }
+  if (typeof metrics.max_output_tokens === "number") {
+    rows.push({ label: "生成上限", value: formatCount(metrics.max_output_tokens) });
+  }
+  if (typeof metrics.done_reason === "string" && metrics.done_reason) {
+    rows.push({ label: "结束原因", value: metrics.done_reason });
+  }
+  if (typeof metrics.thinking_char_count === "number") {
+    rows.push({ label: "思考字符", value: formatCount(metrics.thinking_char_count) });
+  }
+  if (metrics.output_limit_reached === true) {
+    rows.push({ label: "达到上限", value: "是" });
+  }
+  if (typeof metrics.fallback_reason === "string" && metrics.fallback_reason) {
+    rows.push({ label: "降级原因", value: metrics.fallback_reason });
+  }
+  return rows;
+}
+
 export function buildModelLogQuery(filters: Filters, now = Date.now()) {
   const params = new URLSearchParams();
   const range = filters.range.match(/^(\d+)(m|h|d)$/);
@@ -457,7 +484,7 @@ export default function ModelLogsPage({ apiBase, onBack, embedded = false }: { a
                 <button type="button" className="model-log-summary" onClick={() => toggleDetail(item.id)} aria-expanded={open}>
                   <div className="model-log-identity"><strong>{item.model}</strong><span>{item.provider}</span></div>
                   <div><strong>{operationLabels[item.operation] || item.operation}</strong><span>{item.entity_type || "系统调用"}</span></div>
-                  <div><strong>{formatDuration(item.duration_ms)}</strong><span>{(item.prompt_tokens || 0) + (item.completion_tokens || 0)} token</span></div>
+                  <div><strong>{formatDuration(item.duration_ms)}</strong><span>{modelTokenLabel(item.prompt_tokens, item.completion_tokens)}</span></div>
                   <div><strong>{formatTime(item.started_at)}</strong><span>第 {item.attempt} 次尝试</span></div>
                   <span className={`model-log-status ${item.status}`}>{item.status === "completed" ? "成功" : item.status}</span>
                   <span className={`fidelity ${item.fidelity}`}>{fidelityLabel(item.fidelity)}</span>
@@ -473,6 +500,9 @@ export default function ModelLogsPage({ apiBase, onBack, embedded = false }: { a
                           <span>输出语言 <strong>{detail.output_language}</strong></span>
                           <span>关联对象 <strong>{detail.entity_id || "—"}</strong></span>
                           <span>调用 ID <strong>{detail.logical_call_id}</strong></span>
+                          {modelAuditMetricRows(detail.metrics).map((metric) => (
+                            <span key={metric.label}>{metric.label} <strong>{metric.value}</strong></span>
+                          ))}
                         </div>
                         {detail.messages.map((message, index) => (
                           <ContentBlock key={`${message.role}-${index}`} title={`输入 · ${message.role}`} value={message.content} />

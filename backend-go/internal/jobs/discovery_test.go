@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"encoding/xml"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -96,6 +97,41 @@ func TestNormalizeMCPNewsReadsCompleteNuxtHTMLContent(t *testing.T) {
 	want := "博通(AVGO.O)2026财年Q4展望营收为348亿美元。第二句仍属于正文。"
 	if len(items) != 1 || items[0].Title != want || items[0].Summary != want {
 		t.Fatalf("NUXT content was not preserved: %#v", items)
+	}
+}
+
+func TestNormalizeMCPNewsRestoresJin10DecimalAndQualifiedSymbolHeadlines(t *testing.T) {
+	since := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name    string
+		title   string
+		content string
+		want    string
+	}{
+		{name: "decimal", title: "美国非农录得16.", content: "美国非农录得16.2万人，远高于预期。", want: "美国非农录得16.2万人，远高于预期。"},
+		{name: "percentage", title: "黄金日内跌幅1.", content: "黄金日内跌幅1.66%。", want: "黄金日内跌幅1.66%。"},
+		{name: "qualified symbol", title: "摩根士丹利(MS.", content: "摩根士丹利(MS.N)担任承销商。", want: "摩根士丹利(MS.N)担任承销商。"},
+		{name: "ordinary chinese title", title: "独立标题。", content: "独立标题。后续正文", want: "独立标题。"},
+		{name: "period followed by whitespace", title: "Independent title.", content: "Independent title. Next sentence", want: "Independent title."},
+	}
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			payload := map[string]any{"data": map[string]any{"items": []any{map[string]any{
+				"title": test.title, "content": test.content, "time": "2026-09-01T01:00:00Z", "url": fmt.Sprintf("https://example.com/%d", index),
+			}}}}
+			items, _, _, _ := normalizeMCPNews(payload, "金十", "jin10_flash_v1", since)
+			if len(items) != 1 || items[0].Title != test.want {
+				t.Fatalf("headline=%q want %q", items[0].Title, test.want)
+			}
+		})
+	}
+}
+
+func TestRestoreTruncatedMCPHeadlineCapsReconstructedContent(t *testing.T) {
+	content := "数值1." + strings.Repeat("2", 140)
+	actual := restoreTruncatedMCPHeadline("数值1.", content, "jin10_flash_v1")
+	if len([]rune(actual)) != 120 || !strings.HasPrefix(actual, "数值1.2") {
+		t.Fatalf("reconstructed headline was not capped at 120 runes: %q", actual)
 	}
 }
 

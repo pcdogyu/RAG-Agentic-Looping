@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -60,7 +61,25 @@ var errResearchInactive = errors.New("research run was cancelled or superseded")
 // this way because the failure is already visible in the retry UI.
 type permanentJobError struct{ error }
 
-func (permanentJobError) Permanent() bool { return true }
+func (permanentJobError) Permanent() bool     { return true }
+func (value permanentJobError) Unwrap() error { return value.error }
+
+type researchOutputError struct {
+	Reason string
+	Cause  error
+}
+
+func (value *researchOutputError) Error() string {
+	return fmt.Sprintf("研究模型未返回完整 JSON / research model did not return complete JSON (%s)", value.Reason)
+}
+
+func (value *researchOutputError) Unwrap() error { return value.Cause }
+
+type researchModelAttempt struct {
+	Think          bool
+	MaxOutput      int
+	FallbackReason string
+}
 
 type researchRuntime struct {
 	cfg           config.Config
@@ -662,15 +681,29 @@ func (runtime *researchRuntime) generateAssetDraft(ctx context.Context, runID uu
 
 func (runtime *researchRuntime) callResearchModel(ctx context.Context, entityID uuid.UUID, entityType, operation, system, prompt string, schema map[string]any, instanceID string, target any) error {
 	messages := []map[string]string{{"role": "system", "content": system}, {"role": "user", "content": prompt + "\n\n只返回符合format JSON Schema的JSON。"}}
-	request := map[string]any{
-		"model": runtime.cfg.ResearchModel, "messages": messages, "format": schema, "stream": false,
-		"think":      runtime.cfg.ResearchThink,
-		"keep_alive": ollamaKeepAliveValue(runtime.cfg.OllamaKeepAlive),
-		"options":    map[string]any{"temperature": 0, "num_ctx": runtime.cfg.ResearchContextLength, "num_predict": runtime.cfg.ResearchMaxOutput, "num_thread": runtime.cfg.OllamaResearchThreads},
+	primaryMaxOutput := runtime.cfg.ResearchMaxOutput
+	if primaryMaxOutput <= 0 {
+		primaryMaxOutput = 16384
+	}
+	fallbackMaxOutput := runtime.cfg.ResearchFallbackMax
+	if fallbackMaxOutput <= 0 {
+		fallbackMaxOutput = 8192
+	}
+	attempts := []researchModelAttempt{{Think: runtime.cfg.ResearchThink, MaxOutput: primaryMaxOutput}}
+	if runtime.cfg.ResearchThink {
+		attempts = append(attempts, researchModelAttempt{Think: false, MaxOutput: fallbackMaxOutput})
 	}
 	logicalID := uuid.New()
 	var lastErr error
-	for attempt := 1; attempt <= 2; attempt++ {
+	for attemptIndex := range attempts {
+		attempt := &attempts[attemptIndex]
+		request := map[string]any{
+			"model": runtime.cfg.ResearchModel, "messages": messages, "format": schema, "stream": false,
+			"think":      attempt.Think,
+			"keep_alive": ollamaKeepAliveValue(runtime.cfg.OllamaKeepAlive),
+			"options":    map[string]any{"temperature": 0, "num_ctx": runtime.cfg.ResearchContextLength, "num_predict": attempt.MaxOutput, "num_thread": runtime.cfg.OllamaResearchThreads},
+		}
+		var outputErr *researchOutputError
 		for _, baseURL := range preferredEndpoints(runtime.cfg.ResearchURLs, instanceID, "research") {
 			endpoint := researchEndpointIndex(runtime.cfg.ResearchURLs, baseURL)
 			started := time.Now().UTC()
@@ -684,7 +717,7 @@ func (runtime *researchRuntime) callResearchModel(ctx context.Context, entityID 
 			response, err := runtime.client.Do(httpRequest)
 			if err != nil {
 				lastErr = err
-				runtime.persistResearchAudit(context.WithoutCancel(ctx), logicalID, entityID, entityType, operation, attempt, "failed", started, messages, schema, "", nil, err.Error(), 0, 0, endpoint)
+				runtime.persistResearchAudit(context.WithoutCancel(ctx), logicalID, entityID, entityType, operation, attemptIndex+1, "failed", started, messages, schema, "", nil, err.Error(), 0, 0, endpoint, researchAttemptMetrics(*attempt, ollamaResponse{}, false))
 				if isResearchRequestTimeoutOrCancellation(err) {
 					return err
 				}
@@ -698,24 +731,41 @@ func (runtime *researchRuntime) callResearchModel(ctx context.Context, entityID 
 				} else {
 					lastErr = fmt.Errorf("ollama research returned %s", response.Status)
 				}
-				runtime.persistResearchAudit(context.WithoutCancel(ctx), logicalID, entityID, entityType, operation, attempt, "failed", started, messages, schema, string(payload), nil, lastErr.Error(), 0, 0, endpoint)
+				runtime.persistResearchAudit(context.WithoutCancel(ctx), logicalID, entityID, entityType, operation, attemptIndex+1, "failed", started, messages, schema, string(payload), nil, lastErr.Error(), 0, 0, endpoint, researchAttemptMetrics(*attempt, ollamaResponse{}, false))
 				continue
 			}
 			var modelResponse ollamaResponse
 			if err := json.Unmarshal(payload, &modelResponse); err != nil {
 				lastErr = err
+				runtime.persistResearchAudit(context.WithoutCancel(ctx), logicalID, entityID, entityType, operation, attemptIndex+1, "failed", started, messages, schema, string(payload), nil, err.Error(), 0, 0, endpoint, researchAttemptMetrics(*attempt, ollamaResponse{}, false))
 				continue
 			}
-			if err := json.Unmarshal([]byte(modelResponse.Message.Content), target); err != nil {
-				lastErr = err
-				runtime.persistResearchAudit(context.WithoutCancel(ctx), logicalID, entityID, entityType, operation, attempt, "failed", started, messages, schema, modelResponse.Message.Content, nil, err.Error(), modelResponse.PromptTokens, modelResponse.CompletionTokens, endpoint)
-				continue
+			outputLimitReached := researchOutputLimitReached(modelResponse, attempt.MaxOutput)
+			decodeErr := decodeResearchTarget(modelResponse.Message.Content, target)
+			if decodeErr != nil || outputLimitReached {
+				outputErr = classifyResearchOutputError(modelResponse, attempt.MaxOutput, decodeErr)
+				lastErr = outputErr
+				if attemptIndex+1 < len(attempts) {
+					attempt.FallbackReason = outputErr.Reason
+					attempts[attemptIndex+1].FallbackReason = outputErr.Reason
+				}
+				runtime.persistResearchAudit(context.WithoutCancel(ctx), logicalID, entityID, entityType, operation, attemptIndex+1, "failed", started, messages, schema, modelResponse.Message.Content, nil, outputErr.Error(), modelResponse.PromptTokens, modelResponse.CompletionTokens, endpoint, researchAttemptMetrics(*attempt, modelResponse, outputLimitReached))
+				break
 			}
 			parsed, _ := json.Marshal(target)
 			var parsedValue any
 			_ = json.Unmarshal(parsed, &parsedValue)
-			runtime.persistResearchAudit(context.WithoutCancel(ctx), logicalID, entityID, entityType, operation, attempt, "completed", started, messages, schema, modelResponse.Message.Content, parsedValue, "", modelResponse.PromptTokens, modelResponse.CompletionTokens, endpoint)
+			runtime.persistResearchAudit(context.WithoutCancel(ctx), logicalID, entityID, entityType, operation, attemptIndex+1, "completed", started, messages, schema, modelResponse.Message.Content, parsedValue, "", modelResponse.PromptTokens, modelResponse.CompletionTokens, endpoint, researchAttemptMetrics(*attempt, modelResponse, researchOutputLimitReached(modelResponse, attempt.MaxOutput)))
 			return nil
+		}
+		if outputErr != nil {
+			if attemptIndex+1 < len(attempts) {
+				continue
+			}
+			return permanentJobError{outputErr}
+		}
+		if lastErr != nil {
+			return lastErr
 		}
 	}
 	if lastErr == nil {
@@ -724,12 +774,75 @@ func (runtime *researchRuntime) callResearchModel(ctx context.Context, entityID 
 	return lastErr
 }
 
+func classifyResearchOutputError(response ollamaResponse, maxOutput int, cause error) *researchOutputError {
+	if cause == nil && researchOutputLimitReached(response, maxOutput) {
+		return &researchOutputError{Reason: "output_limit_reached", Cause: errors.New("research output limit reached")}
+	}
+	reason := "invalid_json"
+	if strings.TrimSpace(response.Message.Content) == "" {
+		reason = "empty_content"
+	}
+	if researchOutputLimitReached(response, maxOutput) {
+		reason = "output_limit_" + reason
+	}
+	return &researchOutputError{Reason: reason, Cause: cause}
+}
+
+func decodeResearchTarget(content string, target any) error {
+	value := reflect.ValueOf(target)
+	if value.Kind() != reflect.Pointer || value.IsNil() {
+		return errors.New("research target must be a non-nil pointer")
+	}
+	candidate := reflect.New(value.Elem().Type())
+	if err := json.Unmarshal([]byte(content), candidate.Interface()); err != nil {
+		return err
+	}
+	value.Elem().Set(candidate.Elem())
+	return nil
+}
+
+func researchOutputLimitReached(response ollamaResponse, maxOutput int) bool {
+	return strings.EqualFold(strings.TrimSpace(response.DoneReason), "length") || maxOutput > 0 && response.CompletionTokens >= maxOutput
+}
+
+func researchAttemptMetrics(attempt researchModelAttempt, response ollamaResponse, outputLimitReached bool) map[string]any {
+	return map[string]any{
+		"think_enabled":        attempt.Think,
+		"max_output_tokens":    attempt.MaxOutput,
+		"done_reason":          response.DoneReason,
+		"thinking_char_count":  len([]rune(response.Message.Thinking)),
+		"output_limit_reached": outputLimitReached,
+		"fallback_reason":      attempt.FallbackReason,
+	}
+}
+
 func isResearchRequestTimeoutOrCancellation(err error) bool {
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		return true
 	}
 	var netErr net.Error
 	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
+func isPermanentJobFailure(err error) bool {
+	var permanent interface{ Permanent() bool }
+	return errors.As(err, &permanent) && permanent.Permanent()
+}
+
+func researchFailureReason(err error) string {
+	var outputErr *researchOutputError
+	if errors.As(err, &outputErr) {
+		return "model_output_invalid_after_fallback"
+	}
+	return "model_" + errorKind(err)
+}
+
+func researchFailureDescription(err error) string {
+	var outputErr *researchOutputError
+	if errors.As(err, &outputErr) {
+		return "模型思考输出未形成完整 JSON，关闭思考重试后仍未获得有效结果"
+	}
+	return errorKind(err)
 }
 
 func researchEndpointIndex(values []string, selected string) int {
@@ -741,14 +854,18 @@ func researchEndpointIndex(values []string, selected string) int {
 	return 0
 }
 
-func (runtime *researchRuntime) persistResearchAudit(ctx context.Context, logicalID, entityID uuid.UUID, entityType, operation string, attempt int, status string, started time.Time, messages, schema any, raw string, parsed any, errorValue string, promptTokens, completionTokens, endpoint int) {
+func (runtime *researchRuntime) persistResearchAudit(ctx context.Context, logicalID, entityID uuid.UUID, entityType, operation string, attempt int, status string, started time.Time, messages, schema any, raw string, parsed any, errorValue string, promptTokens, completionTokens, endpoint int, callMetrics map[string]any) {
 	if runtime.db == nil {
 		return
 	}
 	messagesJSON, _ := json.Marshal(messages)
 	schemaJSON, _ := json.Marshal(schema)
 	parsedJSON, _ := json.Marshal(parsed)
-	metrics, _ := json.Marshal(map[string]any{"endpoint": fmt.Sprintf("research-%d", endpoint), "lane": "research"})
+	metricsValue := map[string]any{"endpoint": fmt.Sprintf("research-%d", endpoint), "lane": "research"}
+	for key, value := range callMetrics {
+		metricsValue[key] = value
+	}
+	metrics, _ := json.Marshal(metricsValue)
 	var parsedArgument, errorArgument any
 	if parsed != nil {
 		parsedArgument = parsedJSON
@@ -1199,14 +1316,14 @@ func (runtime *researchRuntime) filterExpiredAutomaticResearch(ctx context.Conte
 func (runtime *researchRuntime) failEventResearch(ctx context.Context, job Job, run, event map[string]any, cause error) error {
 	clean := context.WithoutCancel(ctx)
 	status := "queued"
-	if job.Attempt >= job.MaxAttempts {
+	if job.Attempt >= job.MaxAttempts || isPermanentJobFailure(cause) {
 		status = "failed"
 	}
 	run["status"], run["error"], run["updated_at"] = status, fmt.Sprintf("%T: %v", cause, cause), iso(time.Now())
 	if status == "failed" {
-		run["retryable_reason"] = "model_" + errorKind(cause)
+		run["retryable_reason"], run["completed_at"] = researchFailureReason(cause), iso(time.Now())
 	}
-	appendAnalysisStep(run, analysisStep("event_research_failed", ternaryString(status == "failed", "failed", "retrying"), "go-worker", fmt.Sprintf("逐目标事件研报%s（%s）。", ternaryString(status == "failed", "最终失败", "暂时失败，等待重试"), errorKind(cause)), map[string]any{}))
+	appendAnalysisStep(run, analysisStep("event_research_failed", ternaryString(status == "failed", "failed", "retrying"), "go-worker", fmt.Sprintf("逐目标事件研报%s：%s。", ternaryString(status == "failed", "最终失败", "暂时失败，等待重试"), researchFailureDescription(cause)), map[string]any{"failure_reason": researchFailureReason(cause)}))
 	_ = runtime.saveEventResearch(clean, run, payloadEvidence(anySlice(run["evidence"])))
 	title, subtitle := eventResearchTrackingLabels(event)
 	runtime.finishResearchTracking(clean, job.ID.String(), ternaryString(status == "failed", "failed", "retrying"), job.Attempt, stringValue(run["event_id"]), title, subtitle, cause.Error(), nil)
@@ -1233,14 +1350,14 @@ func (runtime *researchRuntime) handleAssetError(ctx context.Context, job Job, r
 		return permanentJobError{cause}
 	}
 	status := "queued"
-	if job.Attempt >= job.MaxAttempts {
+	if job.Attempt >= job.MaxAttempts || isPermanentJobFailure(cause) {
 		status = "failed"
 	}
 	run["status"], run["error"], run["updated_at"] = status, fmt.Sprintf("%T: %v", cause, cause), iso(time.Now())
 	if status == "failed" {
-		run["retryable_reason"], run["completed_at"] = "model_"+errorKind(cause), iso(time.Now())
+		run["retryable_reason"], run["completed_at"] = researchFailureReason(cause), iso(time.Now())
 	}
-	appendAnalysisStep(run, analysisStep("research_failed", ternaryString(status == "failed", "failed", "retrying"), "go-worker", fmt.Sprintf("研究任务在 %s 后%s。", errorKind(cause), ternaryString(status == "failed", "停止，请查看服务日志", "等待重试")), map[string]any{}))
+	appendAnalysisStep(run, analysisStep("research_failed", ternaryString(status == "failed", "failed", "retrying"), "go-worker", fmt.Sprintf("研究任务%s：%s。", ternaryString(status == "failed", "已停止", "暂时失败，等待重试"), researchFailureDescription(cause)), map[string]any{"failure_reason": researchFailureReason(cause)}))
 	_ = runtime.saveRun(clean, run, payloadEvidence(anySlice(run["evidence"])))
 	runtime.finishResearchTracking(clean, job.ID.String(), ternaryString(status == "failed", "failed", "retrying"), job.Attempt, stringValue(objectValue(run["asset"])["asset_id"]), stringValue(objectValue(run["asset"])["name"]), stringValue(objectValue(run["asset"])["symbol"]), cause.Error(), nil)
 	return cause
@@ -1621,6 +1738,10 @@ func absInt(value int) int {
 func clampInt(value, low, high int) int { return max(low, min(high, value)) }
 func round4(value float64) float64      { return math.Round(value*10000) / 10000 }
 func errorKind(value error) string {
+	var outputErr *researchOutputError
+	if errors.As(value, &outputErr) {
+		return "ResearchOutputError"
+	}
 	name := fmt.Sprintf("%T", value)
 	if index := strings.LastIndex(name, "."); index >= 0 {
 		name = name[index+1:]

@@ -109,6 +109,19 @@ func TestUpCreatesFreshGoRuntimeSchema(t *testing.T) {
 	if _, err := pool.Exec(ctx, `INSERT INTO news_events(id,headline,event_type,payload,priority,published_at,observed_at,as_of) VALUES($1,'博通(AVGO.','earnings',$2,0.5,now(),now(),now())`, eventID, eventPayload); err != nil {
 		t.Fatalf("insert malformed event fixture: %v", err)
 	}
+	decimalNewsID, decimalEventID, ordinaryNewsID := uuid.New(), uuid.New(), uuid.New()
+	decimalSummary := "【美国8月非农远高于预期】美国8月季调后非农就业人口录得16.2万人。"
+	decimalTitle := "【美国8月非农远高于预期】美国8月季调后非农就业人口录得16."
+	if _, err := pool.Exec(ctx, `INSERT INTO news_items(id,source,source_quality,title,summary,url,language,published_at,observed_at,as_of,content_hash,symbols,raw_metadata) VALUES($1,'金十','professional',$2,$3,'https://example.com/payroll','zh',now(),now(),now(),$4,'[]','{"mcp_adapter":"jin10_flash_v1"}')`, decimalNewsID, decimalTitle, decimalSummary, fmt.Sprintf("%064d", 3)); err != nil {
+		t.Fatalf("insert decimal headline fixture: %v", err)
+	}
+	decimalPayload := fmt.Sprintf(`{"id":%q,"headline":%q,"news_item_ids":[%q]}`, decimalEventID, decimalTitle, decimalNewsID)
+	if _, err := pool.Exec(ctx, `INSERT INTO news_events(id,headline,event_type,payload,priority,published_at,observed_at,as_of) VALUES($1,$2,'macro',$3,0.5,now(),now(),now())`, decimalEventID, decimalTitle, decimalPayload); err != nil {
+		t.Fatalf("insert decimal event fixture: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO news_items(id,source,source_quality,title,summary,url,language,published_at,observed_at,as_of,content_hash,symbols,raw_metadata) VALUES($1,'金十','professional','Independent title.','Independent title. Next sentence','https://example.com/ordinary','en',now(),now(),now(),$2,'[]','{"mcp_adapter":"jin10_flash_v1"}')`, ordinaryNewsID, fmt.Sprintf("%064d", 4)); err != nil {
+		t.Fatalf("insert ordinary headline fixture: %v", err)
+	}
 	if err := Up(ctx, pool); err != nil {
 		t.Fatalf("reapply migrations for headline repair: %v", err)
 	}
@@ -121,6 +134,22 @@ func TestUpCreatesFreshGoRuntimeSchema(t *testing.T) {
 	}
 	if repairedNews != summary || repairedEvent != summary || repairedPayload != summary {
 		t.Fatalf("dotted symbol headline repair failed: news=%q event=%q payload=%q", repairedNews, repairedEvent, repairedPayload)
+	}
+	if err := pool.QueryRow(ctx, `SELECT title FROM news_items WHERE id=$1`, decimalNewsID).Scan(&repairedNews); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT headline,payload::jsonb->>'headline' FROM news_events WHERE id=$1`, decimalEventID).Scan(&repairedEvent, &repairedPayload); err != nil {
+		t.Fatal(err)
+	}
+	if repairedNews != decimalSummary || repairedEvent != decimalSummary || repairedPayload != decimalSummary {
+		t.Fatalf("decimal headline repair failed: news=%q event=%q payload=%q", repairedNews, repairedEvent, repairedPayload)
+	}
+	var ordinaryTitle string
+	if err := pool.QueryRow(ctx, `SELECT title FROM news_items WHERE id=$1`, ordinaryNewsID).Scan(&ordinaryTitle); err != nil {
+		t.Fatal(err)
+	}
+	if ordinaryTitle != "Independent title." {
+		t.Fatalf("ordinary short title was unexpectedly expanded: %q", ordinaryTitle)
 	}
 }
 

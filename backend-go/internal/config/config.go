@@ -50,6 +50,7 @@ type Config struct {
 	MappingMaxOutput      int
 	ResearchContextLength int
 	ResearchMaxOutput     int
+	ResearchFallbackMax   int
 	ResearchThink         bool
 	CodeContextLength     int
 	CodeMaxOutput         int
@@ -127,9 +128,10 @@ func Load() (Config, error) {
 		OllamaCodeThreads:     envInt("OLLAMA_CODE_NUM_THREADS", 4),
 		MappingContextLength:  envInt("OLLAMA_ASSET_MAPPING_CONTEXT_LENGTH", 8192),
 		MappingMaxOutput:      envInt("OLLAMA_ASSET_MAPPING_MAX_OUTPUT_TOKENS", 1024),
-		ResearchContextLength: envInt("OLLAMA_RESEARCH_CONTEXT_LENGTH", 16384),
-		ResearchMaxOutput:     envInt("OLLAMA_RESEARCH_MAX_OUTPUT_TOKENS", 4096),
-		ResearchThink:         envBool("OLLAMA_RESEARCH_THINK", false),
+		ResearchContextLength: envInt("OLLAMA_RESEARCH_CONTEXT_LENGTH", 32768),
+		ResearchMaxOutput:     envInt("OLLAMA_RESEARCH_MAX_OUTPUT_TOKENS", 16384),
+		ResearchFallbackMax:   envInt("OLLAMA_RESEARCH_FALLBACK_MAX_OUTPUT_TOKENS", 8192),
+		ResearchThink:         envBool("OLLAMA_RESEARCH_THINK", true),
 		CodeContextLength:     envInt("OLLAMA_CODE_CONTEXT_LENGTH", 16384),
 		CodeMaxOutput:         envInt("OLLAMA_CODE_MAX_OUTPUT_TOKENS", 8192),
 		OllamaKeepAlive:       env("OLLAMA_KEEP_ALIVE", "0"),
@@ -175,6 +177,9 @@ func Load() (Config, error) {
 	}
 	if cfg.ResearchSoftLimit <= 0 || cfg.ResearchHardLimit <= cfg.ResearchSoftLimit {
 		return Config{}, fmt.Errorf("research asset limits must satisfy 0 < soft < hard")
+	}
+	if cfg.ResearchContextLength < 1 || cfg.ResearchMaxOutput < 1 || cfg.ResearchFallbackMax < 1 {
+		return Config{}, fmt.Errorf("research context and output limits must be positive")
 	}
 	if cfg.ResearchLease < 30*time.Second || cfg.ResearchLease > 10*time.Minute {
 		return Config{}, fmt.Errorf("RESEARCH_LEASE_SECONDS must be between 30 and 600")

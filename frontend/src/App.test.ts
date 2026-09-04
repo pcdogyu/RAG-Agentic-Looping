@@ -68,10 +68,12 @@ import ModelLogsPage, {
   defaultModelLogRange,
   fidelityLabel,
   isModelLogsHash,
+  modelAuditMetricRows,
   ModelRuntimePanel,
   modelActivityLabel,
   modelRuntimeRefreshMs,
   modelRuntimeSummaryURL,
+  modelTokenLabel,
   type ModelRuntimeSummary,
 } from "./ModelLogs";
 
@@ -477,6 +479,25 @@ describe("model log navigation and filters", () => {
     expect(query.get("start")).toBe("2026-08-16T00:00:00.000Z");
     expect(query.get("model")).toBe("qwen2.5:7b");
     expect(query.get("fidelity")).toBe("exact");
+  });
+
+  it("separates prompt and generated tokens and describes thinking fallback", () => {
+    expect(modelTokenLabel(1283, 4096)).toBe("输入 1,283 · 生成 4,096");
+    expect(modelTokenLabel(null, null)).toBe("输入 — · 生成 —");
+    expect(modelAuditMetricRows({
+      think_enabled: false,
+      max_output_tokens: 8192,
+      done_reason: "stop",
+      thinking_char_count: 0,
+      output_limit_reached: false,
+      fallback_reason: "output_limit_empty_content",
+    })).toEqual([
+      { label: "思考模式", value: "关闭" },
+      { label: "生成上限", value: "8,192" },
+      { label: "结束原因", value: "stop" },
+      { label: "思考字符", value: "0" },
+      { label: "降级原因", value: "output_limit_empty_content" },
+    ]);
   });
 
   it.each([

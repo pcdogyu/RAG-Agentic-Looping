@@ -80,10 +80,12 @@ type extractedEvent struct {
 
 type ollamaResponse struct {
 	Message struct {
-		Content string `json:"content"`
+		Content  string `json:"content"`
+		Thinking string `json:"thinking"`
 	} `json:"message"`
-	PromptTokens     int `json:"prompt_eval_count"`
-	CompletionTokens int `json:"eval_count"`
+	PromptTokens     int    `json:"prompt_eval_count"`
+	CompletionTokens int    `json:"eval_count"`
+	DoneReason       string `json:"done_reason"`
 }
 
 func NewExtractHandlers(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) map[string]Handler {
