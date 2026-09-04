@@ -223,7 +223,7 @@ func (runtime *maintenanceRuntime) reprocessTargetImpacts(ctx context.Context, j
 }
 
 func (runtime *maintenanceRuntime) targetReplayCandidates(ctx context.Context) ([]targetReplayCandidate, error) {
-	rows, err := runtime.db.Query(ctx, `SELECT e.id,e.published_at,e.payload::jsonb,r.id,r.status,coalesce(r.payload,'{}'::jsonb)::jsonb
+	rows, err := runtime.db.Query(ctx, `SELECT e.id,e.published_at,e.payload::jsonb,r.id,r.status,coalesce(r.payload,'{}'::json)::jsonb
 		FROM news_events e LEFT JOIN event_research_runs r ON r.event_id=e.id
 		ORDER BY e.published_at,e.id`)
 	if err != nil {
