@@ -32,6 +32,7 @@ func (s *Server) operations() []operation {
 		{"evolutions_api_v1_evolution_get", http.MethodGet, "/api/v1/evolution", s.evolutions},
 		{"model_logs_api_v1_model_logs_get", http.MethodGet, "/api/v1/model-logs", s.modelLogs},
 		{"model_log_api_v1_model_logs__audit_id__get", http.MethodGet, "/api/v1/model-logs/{auditID}", s.modelLog},
+		{"model_runtime_summary_api_v1_model_runtime_summary_get", http.MethodGet, "/api/v1/model-runtime-summary", s.modelRuntimeSummary},
 		{"model_usage_summary_api_v1_model_usage_get", http.MethodGet, "/api/v1/model-usage", s.modelUsage},
 		{"list_research_conclusions_api_v1_research_conclusions_get", http.MethodGet, "/api/v1/research-conclusions", s.researchConclusions},
 		{"failed_research_runs_api_v1_failed_research_runs_get", http.MethodGet, "/api/v1/failed-research-runs", s.failedResearchRuns},

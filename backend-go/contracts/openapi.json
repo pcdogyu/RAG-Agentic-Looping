@@ -1590,6 +1590,229 @@
         "title": "ModelQueueTask",
         "type": "object"
       },
+      "ModelRuntimeLane": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "purpose": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "purpose",
+          "enabled"
+        ],
+        "title": "ModelRuntimeLane",
+        "type": "object"
+      },
+      "ModelRuntimeMetrics": {
+        "properties": {
+          "processed_tasks": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "successful_tasks": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "failed_tasks": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "queued_tasks": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "running_tasks": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "success_rate": {
+            "anyOf": [
+              {
+                "maximum": 1,
+                "minimum": 0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "failure_rate": {
+            "anyOf": [
+              {
+                "maximum": 1,
+                "minimum": 0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "average_processing_ms": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "input_tokens": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "output_tokens": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "average_input_tokens": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "average_output_tokens": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "input_token_task_count": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "output_token_task_count": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "processed_tasks",
+          "successful_tasks",
+          "failed_tasks",
+          "queued_tasks",
+          "running_tasks",
+          "success_rate",
+          "failure_rate",
+          "average_processing_ms",
+          "input_tokens",
+          "output_tokens",
+          "average_input_tokens",
+          "average_output_tokens",
+          "input_token_task_count",
+          "output_token_task_count"
+        ],
+        "title": "ModelRuntimeMetrics",
+        "type": "object"
+      },
+      "ModelRuntimeModel": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ModelRuntimeMetrics"
+          },
+          {
+            "properties": {
+              "provider": {
+                "type": "string"
+              },
+              "model": {
+                "type": "string"
+              },
+              "configured": {
+                "type": "boolean"
+              },
+              "enabled": {
+                "type": "boolean"
+              },
+              "activity_state": {
+                "enum": [
+                  "running",
+                  "queued",
+                  "idle",
+                  "disabled",
+                  "historical"
+                ],
+                "type": "string"
+              },
+              "lanes": {
+                "items": {
+                  "$ref": "#/components/schemas/ModelRuntimeLane"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "provider",
+              "model",
+              "configured",
+              "enabled",
+              "activity_state",
+              "lanes"
+            ],
+            "type": "object"
+          }
+        ],
+        "title": "ModelRuntimeModel"
+      },
+      "ModelRuntimeSummaryResponse": {
+        "properties": {
+          "generated_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "window_started_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "window_ended_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "window_hours": {
+            "const": 24,
+            "type": "integer"
+          },
+          "totals": {
+            "$ref": "#/components/schemas/ModelRuntimeMetrics"
+          },
+          "models": {
+            "items": {
+              "$ref": "#/components/schemas/ModelRuntimeModel"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "generated_at",
+          "window_started_at",
+          "window_ended_at",
+          "window_hours",
+          "totals",
+          "models"
+        ],
+        "title": "ModelRuntimeSummaryResponse",
+        "type": "object"
+      },
       "ModelTaskRetryRequest": {
         "properties": {
           "entity_id": {
@@ -6313,6 +6536,24 @@
           }
         },
         "summary": "Retry Model Queue Task"
+      }
+    },
+    "/api/v1/model-runtime-summary": {
+      "get": {
+        "operationId": "model_runtime_summary_api_v1_model_runtime_summary_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelRuntimeSummaryResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Model Runtime Summary"
       }
     },
     "/api/v1/model-usage": {

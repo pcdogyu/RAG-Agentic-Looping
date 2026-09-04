@@ -65,8 +65,14 @@ import {
 } from "./AppPages";
 import ModelLogsPage, {
   buildModelLogQuery,
+  defaultModelLogRange,
   fidelityLabel,
   isModelLogsHash,
+  ModelRuntimePanel,
+  modelActivityLabel,
+  modelRuntimeRefreshMs,
+  modelRuntimeSummaryURL,
+  type ModelRuntimeSummary,
 } from "./ModelLogs";
 
 const baseStatus = {
@@ -477,6 +483,7 @@ describe("model log navigation and filters", () => {
     ["30m", "2026-08-22T23:30:00.000Z"],
     ["1h", "2026-08-22T23:00:00.000Z"],
     ["12h", "2026-08-22T12:00:00.000Z"],
+    ["1d", "2026-08-22T00:00:00.000Z"],
     ["3d", "2026-08-20T00:00:00.000Z"],
   ])("supports the %s model log time range", (range, expectedStart) => {
     const query = buildModelLogQuery({
@@ -493,6 +500,7 @@ describe("model log navigation and filters", () => {
   });
 
   it("labels reconstructed history and renders the full-screen shell", () => {
+    expect(defaultModelLogRange).toBe("1d");
     expect(fidelityLabel("reconstructed")).toBe("历史重建");
     const markup = renderToStaticMarkup(createElement(ModelLogsPage, {
       apiBase: "http://localhost:8000",
@@ -504,8 +512,141 @@ describe("model log navigation and filters", () => {
     expect(markup).toContain("最近30分钟");
     expect(markup).toContain("最近1小时");
     expect(markup).toContain("最近12小时");
+    expect(markup).toContain("最近24小时");
     expect(markup).toContain("最近3天");
+    expect(markup).toContain("各模型近24小时运行状态");
+    expect(markup).toContain("正在读取模型运行统计");
     expect(markup).toContain("正在读取模型日志");
+  });
+
+  it("renders complete responsive 24-hour runtime cards and zero-state values", () => {
+    const emptyMetrics = {
+      processed_tasks: 0,
+      successful_tasks: 0,
+      failed_tasks: 0,
+      queued_tasks: 0,
+      running_tasks: 0,
+      success_rate: null,
+      failure_rate: null,
+      average_processing_ms: null,
+      input_tokens: 0,
+      output_tokens: 0,
+      average_input_tokens: null,
+      average_output_tokens: null,
+      input_token_task_count: 0,
+      output_token_task_count: 0,
+    };
+    const summary: ModelRuntimeSummary = {
+      generated_at: "2026-09-04T08:00:00Z",
+      window_started_at: "2026-09-03T08:00:00Z",
+      window_ended_at: "2026-09-04T08:00:00Z",
+      window_hours: 24,
+      totals: {
+        ...emptyMetrics,
+        processed_tasks: 1250,
+        successful_tasks: 1200,
+        failed_tasks: 50,
+        queued_tasks: 42,
+        running_tasks: 2,
+        success_rate: 0.96,
+        failure_rate: 0.04,
+        average_processing_ms: 2500,
+        input_tokens: 1234567,
+        output_tokens: 345678,
+        average_input_tokens: 1029,
+        average_output_tokens: 288,
+        input_token_task_count: 1200,
+        output_token_task_count: 1200,
+      },
+      models: [{
+        ...emptyMetrics,
+        provider: "ollama",
+        model: "qwen2.5:7b",
+        configured: true,
+        enabled: true,
+        activity_state: "running",
+        lanes: [{ id: "research", purpose: "标的研究", enabled: true }],
+        processed_tasks: 10,
+        successful_tasks: 9,
+        failed_tasks: 1,
+        queued_tasks: 8,
+        running_tasks: 1,
+        success_rate: 0.9,
+        failure_rate: 0.1,
+        average_processing_ms: 2500,
+        input_tokens: 12345,
+        output_tokens: 2345,
+        average_input_tokens: 1235,
+        average_output_tokens: 235,
+        input_token_task_count: 10,
+        output_token_task_count: 10,
+      }, {
+        ...emptyMetrics,
+        provider: "openai-compatible",
+        model: "historical-model",
+        configured: false,
+        enabled: false,
+        activity_state: "historical",
+        lanes: [],
+      }],
+    };
+    const markup = renderToStaticMarkup(createElement(ModelRuntimePanel, {
+      summary,
+      loading: false,
+      error: null,
+    }));
+
+    expect(markup).toContain('data-layout="responsive-cards"');
+    expect(markup).toContain("处理指标近24小时 · 队列与处理中为当前全量");
+    expect(markup).toContain("qwen2.5:7b");
+    expect(markup).toContain("ollama · 标的研究");
+    expect(markup).toContain("运行中");
+    expect(markup).toContain("历史模型");
+    expect(markup).toContain("当前队列");
+    expect(markup).toContain("处理中");
+    expect(markup).toContain("平均处理时间");
+    expect(markup).toContain("成功率");
+    expect(markup).toContain("失败率");
+    expect(markup).toContain("输入 Token");
+    expect(markup).toContain("输出 Token");
+    expect(markup).toContain("1,234,567");
+    expect(markup).toContain("96.0%");
+    expect(markup).toContain("平均/任务 1,029");
+    expect(markup).toContain("—");
+  });
+
+  it("keeps runtime refresh fixed and independent from log filters", () => {
+    const runtimeURL = modelRuntimeSummaryURL("http://localhost:8000");
+    const filteredLogs = buildModelLogQuery({
+      range: "90d",
+      model: "qwen2.5:7b",
+      provider: "ollama",
+      operation: "report_drafting",
+      status: "failed",
+      language: "zh",
+      fidelity: "exact",
+    });
+
+    expect(modelRuntimeRefreshMs).toBe(30000);
+    expect(runtimeURL).toBe("http://localhost:8000/api/v1/model-runtime-summary");
+    expect(runtimeURL).not.toContain(filteredLogs.toString());
+    expect(modelActivityLabel("running")).toBe("运行中");
+    expect(modelActivityLabel("queued")).toBe("排队中");
+    expect(modelActivityLabel("idle")).toBe("空闲");
+    expect(modelActivityLabel("disabled")).toBe("已停用");
+    expect(modelActivityLabel("historical")).toBe("历史模型");
+  });
+
+  it("keeps runtime errors inside the status area", () => {
+    const markup = renderToStaticMarkup(createElement(ModelRuntimePanel, {
+      summary: null,
+      loading: false,
+      error: "模型运行统计请求失败",
+    }));
+
+    expect(markup).toContain('class="model-runtime-error"');
+    expect(markup).toContain("模型运行统计请求失败");
+    expect(markup).not.toContain('class="model-log-error"');
   });
 });
 

@@ -59,12 +59,7 @@ type nativeExecutionSamples struct {
 func (s *Server) buildNativeModelQueueOverview(ctx context.Context, limit int) map[string]any {
 	now := time.Now().UTC()
 	newsAgeFilter, newsAgeFilterErr := jobs.LoadResearchNewsAgeFilter(ctx, s.db)
-	specs := []nativeModelQueueSpec{
-		{id: "extract", model: s.cfg.ExtractModel, purpose: "新闻抽取", binding: "新闻事件结构化抽取", enabled: true},
-		{id: "research", model: s.cfg.ResearchModel, purpose: "标的研究", binding: "工具深度研究与逐目标事件研报", enabled: true},
-		{id: "assist", model: s.cfg.AssistModel, purpose: "股票映射", binding: "新闻事件二次股票映射", enabled: true},
-		{id: "code", model: s.cfg.CodeModel, purpose: "代码演进", binding: evolutionBinding(s.cfg.EvolutionAutoMerge), enabled: s.cfg.EvolutionEnabled},
-	}
+	specs := s.nativeModelQueueSpecs()
 	results := make(chan nativeModelQueueResult, len(specs))
 	for index, spec := range specs {
 		go func(index int, spec nativeModelQueueSpec) {
@@ -90,6 +85,15 @@ func (s *Server) buildNativeModelQueueOverview(ctx context.Context, limit int) m
 		queues[result.index] = result.queue
 	}
 	return map[string]any{"generated_at": now, "producer": "go-api", "queues": queues}
+}
+
+func (s *Server) nativeModelQueueSpecs() []nativeModelQueueSpec {
+	return []nativeModelQueueSpec{
+		{id: "extract", model: s.cfg.ExtractModel, purpose: "新闻抽取", binding: "新闻事件结构化抽取", enabled: true},
+		{id: "research", model: s.cfg.ResearchModel, purpose: "标的研究", binding: "工具深度研究与逐目标事件研报", enabled: true},
+		{id: "assist", model: s.cfg.AssistModel, purpose: "股票映射", binding: "新闻事件二次股票映射", enabled: true},
+		{id: "code", model: s.cfg.CodeModel, purpose: "代码演进", binding: evolutionBinding(s.cfg.EvolutionAutoMerge), enabled: s.cfg.EvolutionEnabled},
+	}
 }
 
 // loadRecentModelExecutionSamples uses the model audit log as the authority for
