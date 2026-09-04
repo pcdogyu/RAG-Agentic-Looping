@@ -6,9 +6,9 @@ ARG VITE_BUILD_BRANCH=unknown
 ENV VITE_BUILD_COMMIT_ID=$VITE_BUILD_COMMIT_ID \
     VITE_BUILD_COMMIT_TIME=$VITE_BUILD_COMMIT_TIME \
     VITE_BUILD_BRANCH=$VITE_BUILD_BRANCH
-COPY package.json tsconfig.json vite.config.ts index.html ./
+COPY package.json package-lock.json tsconfig.json vite.config.ts index.html ./
 COPY src ./src
-RUN npm install && npm run build
+RUN npm ci && npm run build
 
 FROM nginx:1.27-alpine
 ENV API_UPSTREAM=http://go-api:8081 \
