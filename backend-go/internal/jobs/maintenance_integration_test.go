@@ -99,7 +99,7 @@ func TestMaintenanceHandlersAgainstPostgres(t *testing.T) {
 	}
 	var replayStatus, taskID string
 	if err := pool.QueryRow(ctx, `SELECT status,payload->>'celery_task_id' FROM event_research_runs WHERE id=$1`, replayRunID).Scan(&replayStatus, &taskID); err != nil || replayStatus != "queued" {
-		t.Fatalf("replay status=%s task=%s err=%v", replayStatus, taskID, err)
+		t.Fatalf("replay status=%s task=%s err=%v progress=%#v", replayStatus, taskID, err, continuation.Progress)
 	}
 	queuedTaskID = taskID
 	var taskType string
