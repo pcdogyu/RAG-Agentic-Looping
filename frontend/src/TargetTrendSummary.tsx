@@ -53,7 +53,7 @@ function TrendPeriod({ label, period }: { label: string; period: TargetTrendPeri
       <span className={`target-trend-period__score ${scoreClass}`}>{scoreLabel(period.direction_score)}</span>
     </p>
     <p className="target-trend-period__confidence">
-      评级置信度 {confidenceLabel(period.rating_confidence)}
+      趋势置信度 {confidenceLabel(period.rating_confidence)}
       {period.provisional ? <span className="target-trend-period__provisional"> · 暂定</span> : null}
     </p>
   </section>;
@@ -67,14 +67,14 @@ export function TargetTrendSummary({ trend }: TargetTrendSummaryProps) {
 
   return <section className="target-trend-summary" aria-label="目标趋势摘要">
     <div className="target-trend-summary__periods">
-      <TrendPeriod label="长期趋势" period={trend.long_term} />
-      <TrendPeriod label="短期冲击" period={trend.short_term} />
-      <TrendPeriod label="综合参考" period={trend.composite} />
+      <TrendPeriod label="长期证据趋势" period={trend.long_term} />
+      <TrendPeriod label="短期证据趋势" period={trend.short_term} />
+      <TrendPeriod label="综合证据参考" period={trend.composite} />
     </div>
     <p className="target-trend-summary__evidence" aria-label="90 天事件统计">
       90 天事件 {trend.event_count_90d} 条 · 有效 {trend.eligible_event_count_90d} 条 · 忽略 {trend.ignored_event_count_90d} 条
     </p>
-    {lowConfidenceFiltered ? <p className="target-trend-summary__notice" role="status">低置信事件未改变长期评级</p> : null}
-    {trend.regime_break ? <p className="target-trend-summary__regime" role="status">制度性转折</p> : null}
+    {lowConfidenceFiltered ? <p className="target-trend-summary__notice" role="status">低置信事件未纳入证据趋势</p> : null}
+    {trend.regime_break ? <p className="target-trend-summary__regime" role="status">制度性转折（仍按单步更新总体评级）</p> : null}
   </section>;
 }

@@ -534,7 +534,7 @@ export default function App() {
         </div>
 
         <div className="panel recommendations-panel">
-          <PanelTitle title="最新建议" meta="方向分与双置信度" />
+          <PanelTitle title="最新事件信号" meta="方向分与双置信度" />
           <div className="recommendations">
             {snapshot.recommendations.length === 0 && <Empty text="完成一次深度研究后将在这里生成建议。" />}
             {snapshot.recommendations.map((item) => {
@@ -549,7 +549,7 @@ export default function App() {
                   {directionScore > 0 ? "+" : ""}{directionScore}
                 </div>
                 <div>
-                  <strong>{labels[item.rating] || item.rating}</strong>
+                  <strong>本次事件信号：{labels[item.rating] || item.rating}</strong>
                   <span className="muted">评级置信度 {Math.round((item.rating_confidence ?? item.confidence) * 100)}%</span>
                 </div>
                 <span className={`evidence ${item.scoring_version === "short-term-impact-v1" || item.evidence_complete ? "verified" : "limited"}`}>
@@ -571,7 +571,7 @@ export default function App() {
             <button className="close" onClick={() => setSelected(null)}>×</button>
             <p className="eyebrow">{selected.asset.market} · {selected.asset.symbol}</p>
             <h2>{selected.asset.name}</h2>
-            <div className="modal-score"><strong>{selected.direction_score ?? selected.score}</strong><span>{labels[selected.rating]}</span></div>
+            <div className="modal-score"><strong>{selected.direction_score ?? selected.score}</strong><span>本次事件信号：{labels[selected.rating]}</span></div>
             <p className="muted">{selected.scoring_version === "llm-direction-v3"
               ? `方向分 · 新闻可信度 ${Math.round((selected.news_confidence ?? selected.fact_confidence ?? 0) * 100)}% · 评级置信度 ${Math.round((selected.rating_confidence ?? selected.confidence) * 100)}% · 未来 ${selected.horizon_days ?? 90} 个自然日${selected.score_source === "rule_fallback" ? " · 规则回退" : ""}`
               : selected.scoring_version === "short-term-impact-v1"

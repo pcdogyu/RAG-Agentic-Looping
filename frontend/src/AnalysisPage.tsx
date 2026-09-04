@@ -219,7 +219,7 @@ export function AnalysisTraceList({ logs }: { logs: AnalysisLog[] }) {
 
           {log.result?.kind === "asset_recommendation" ? <div className="trace-result">
             <div><span>信号状态</span><strong>{labels[log.result.signal_status || ""] || "旧版结论"}</strong></div>
-            <div><span>最终结果</span><strong>{labels[log.result.rating] || log.result.rating}</strong></div>
+            <div><span>本次事件信号</span><strong>{labels[log.result.rating] || log.result.rating}</strong></div>
             <div><span>{log.result.scoring_version === "llm-direction-v3" ? "方向分" : log.result.scoring_version === "target-transmission-v2" ? "目标影响分" : "影响分"}</span><strong>{(log.result.direction_score ?? log.result.score) > 0 ? "+" : ""}{log.result.direction_score ?? log.result.score}</strong></div>
             {log.result.scoring_version === "llm-direction-v3" ? <>
               <div><span>新闻可信度</span><strong>{Math.round((log.result.news_confidence ?? log.result.fact_confidence ?? 0) * 100)}%</strong></div>
@@ -245,7 +245,7 @@ export function AnalysisTraceList({ logs }: { logs: AnalysisLog[] }) {
             <p><b>事实摘要：</b>{log.result.summary}</p>
             <div className="target-impact-scroll">
               <table className="target-impact-table">
-                <thead><tr><th>目标</th><th>方向</th><th>方向分</th><th>评级置信度</th><th>评级周期</th><th>传导路径</th><th>状态</th><th>缺失信息</th></tr></thead>
+                <thead><tr><th>目标</th><th>本次事件信号</th><th>方向分</th><th>评级置信度</th><th>评级周期</th><th>传导路径</th><th>状态</th><th>缺失信息</th></tr></thead>
                 <tbody>{(log.result.impacts || []).map((impact) => <tr key={`${impact.target_type}-${impact.asset?.symbol || impact.target_name}`}>
                   <td><strong>{impact.target_name}</strong>{impact.asset && <small>{impact.asset.symbol}</small>}</td>
                   <td>{labels[impact.rating] || impact.rating}</td>

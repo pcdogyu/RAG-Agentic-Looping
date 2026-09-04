@@ -111,6 +111,129 @@ func TestMergeConcreteTargetChangesIncludesCommoditiesAndKeepsLatestKey(t *testi
 	}
 }
 
+func TestStepLimitedRatingReplayMovesOnlyOneLevel(t *testing.T) {
+	base := time.Date(2026, 9, 5, 1, 0, 0, 0, time.UTC)
+	makeSignal := func(index int, rating string) targetRatingSignal {
+		stamp := base.Add(time.Duration(index) * time.Minute)
+		return targetRatingSignal{
+			EventID:        string(rune('a' + index)),
+			Rating:         rating,
+			OccurredAt:     stamp,
+			EvaluatedAt:    stamp,
+			Eligible:       true,
+			DetailKind:     "event",
+			DetailID:       string(rune('A' + index)),
+			SourcePriority: 1,
+		}
+	}
+
+	state := replayRatingState([]targetRatingSignal{makeSignal(0, "strongly_bullish")})
+	if state.Previous != "watch" || state.Current != "bullish" || !state.TransitionLimited {
+		t.Fatalf("neutral plus strongly bullish must move one level: %+v", state)
+	}
+
+	state = replayRatingState([]targetRatingSignal{
+		makeSignal(0, "strongly_bullish"),
+		makeSignal(1, "strongly_bearish"),
+	})
+	if state.Previous != "bullish" || state.Current != "watch" || !state.TransitionLimited {
+		t.Fatalf("bullish plus strongly bearish must return only to neutral: %+v", state)
+	}
+}
+
+func TestStepLimitedRatingReplayRequiresFourEventsToReverseFromStronglyBearish(t *testing.T) {
+	base := time.Date(2026, 9, 5, 2, 0, 0, 0, time.UTC)
+	values := make([]targetRatingSignal, 0, 6)
+	appendSignal := func(eventID, rating string) {
+		stamp := base.Add(time.Duration(len(values)) * time.Minute)
+		values = append(values, targetRatingSignal{EventID: eventID, Rating: rating, OccurredAt: stamp, EvaluatedAt: stamp, Eligible: true})
+	}
+	appendSignal("down-1", "strongly_bearish")
+	appendSignal("down-2", "strongly_bearish")
+	if got := replayRatingState(values).Current; got != "strongly_bearish" {
+		t.Fatalf("setup did not reach strongly bearish: %s", got)
+	}
+
+	for index, want := range []string{"bearish", "watch", "bullish", "strongly_bullish"} {
+		appendSignal("up-"+string(rune('1'+index)), "strongly_bullish")
+		if got := replayRatingState(values).Current; got != want {
+			t.Fatalf("positive event %d produced %s, want %s", index+1, got, want)
+		}
+	}
+}
+
+func TestStepLimitedRatingReplayIgnoresIneligibleManualAndDuplicateEvents(t *testing.T) {
+	base := time.Date(2026, 9, 5, 3, 0, 0, 0, time.UTC)
+	values := []targetRatingSignal{
+		{EventID: "eligible", Rating: "strongly_bullish", OccurredAt: base, EvaluatedAt: base, Eligible: true, SourcePriority: 1},
+		{EventID: "low-confidence", Rating: "strongly_bullish", OccurredAt: base.Add(time.Minute), EvaluatedAt: base.Add(time.Minute), Eligible: false, SourcePriority: 1},
+		{EventID: "eligible", Rating: "strongly_bearish", OccurredAt: base, EvaluatedAt: base.Add(2 * time.Minute), Eligible: true, SourcePriority: 1},
+		{EventID: "eligible", Rating: "strongly_bullish", OccurredAt: base, EvaluatedAt: base.Add(3 * time.Minute), Eligible: true, SourcePriority: 2},
+		{EventID: "", Rating: "strongly_bullish", OccurredAt: base.Add(4 * time.Minute), EvaluatedAt: base.Add(4 * time.Minute), Eligible: true, SourcePriority: 2},
+	}
+	state := replayRatingState(values)
+	if state.Current != "bullish" || state.EligibleEventCount != 1 || len(state.Signals) != 2 {
+		t.Fatalf("duplicate, low-confidence, and manual research handling failed: %+v", state)
+	}
+	if state.Signals[0].SourcePriority != 2 || state.Signals[0].Rating != "strongly_bullish" {
+		t.Fatalf("target-specific research was not preferred for the duplicate event: %+v", state.Signals[0])
+	}
+}
+
+func TestRegimeBreakSignalStillUsesStepLimit(t *testing.T) {
+	stamp := time.Date(2026, 9, 5, 4, 0, 0, 0, time.UTC)
+	observation := targetObservation{
+		Score:                  100,
+		RatingConfidence:       .95,
+		NewsConfidence:         .95,
+		Persistence:            .95,
+		RealizationProbability: .95,
+	}
+	if !regimeBreak(observation) {
+		t.Fatal("test setup must represent a regime break")
+	}
+	state := replayRatingState([]targetRatingSignal{{
+		EventID: "regime-break", Rating: "strongly_bullish", OccurredAt: stamp,
+		EvaluatedAt: stamp, Eligible: true, Observation: observation,
+	}})
+	if state.Current != "bullish" || !state.TransitionLimited {
+		t.Fatalf("regime break bypassed the one-step limit: %+v", state)
+	}
+}
+
+func TestRecommendationRatingSignalEligibilityUsesEvidenceConfidenceAndEvent(t *testing.T) {
+	stamp := time.Date(2026, 9, 5, 5, 0, 0, 0, time.UTC)
+	snapshot := func(eventID string, confidence float64, evidenceComplete, provisional bool) recommendationSnapshot {
+		return recommendationSnapshot{
+			ID: "recommendation", EventID: eventID, OccurredAt: stamp, UpdatedAt: stamp,
+			Payload: map[string]any{
+				"rating": "strongly_bullish", "direction_score": 90, "rating_confidence": confidence,
+				"news_confidence": .9, "evidence_complete": evidenceComplete, "provisional": provisional,
+				"signal_status": "directional",
+			},
+		}
+	}
+	cases := []struct {
+		name     string
+		snapshot recommendationSnapshot
+		eligible bool
+	}{
+		{name: "eligible", snapshot: snapshot("event", .45, true, false), eligible: true},
+		{name: "low confidence", snapshot: snapshot("event", .449, true, false)},
+		{name: "incomplete evidence", snapshot: snapshot("event", .9, false, false)},
+		{name: "provisional", snapshot: snapshot("event", .9, true, true)},
+		{name: "manual research", snapshot: snapshot("", .9, true, false)},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			got := recommendationRatingSignals([]recommendationSnapshot{test.snapshot})
+			if len(got) != 1 || got[0].Eligible != test.eligible {
+				t.Fatalf("eligibility=%v, want %v: %+v", len(got) == 1 && got[0].Eligible, test.eligible, got)
+			}
+		})
+	}
+}
+
 func TestConcreteEventTargetChangeIncludesOnlyPublishedConcreteTargets(t *testing.T) {
 	cases := []struct {
 		targetType string

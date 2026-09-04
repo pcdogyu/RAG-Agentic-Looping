@@ -12,21 +12,21 @@ import (
 )
 
 type recommendationSnapshot struct {
-	ID      string
-	AssetID string
-	AsOf    time.Time
-	Payload map[string]any
+	ID         string
+	AssetID    string
+	EventID    string
+	AsOf       time.Time
+	OccurredAt time.Time
+	UpdatedAt  time.Time
+	Payload    map[string]any
 }
 
 type recommendationChange struct {
 	Previous recommendationSnapshot
 	Current  recommendationSnapshot
 	Latest   recommendationSnapshot
-}
-
-type currentRecommendation struct {
-	Previous *recommendationSnapshot
-	Latest   recommendationSnapshot
+	Signals  []targetRatingSignal
+	State    ratingStateReplay
 }
 
 func (s *Server) changedTargets(w http.ResponseWriter, r *http.Request) {
@@ -39,6 +39,13 @@ func (s *Server) changedTargets(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "changed target query failed")
 		return
 	}
+	changedOnly := changes[:0]
+	for _, item := range changes {
+		if item.State.HasChange {
+			changedOnly = append(changedOnly, item)
+		}
+	}
+	changes = changedOnly
 	if raw := r.URL.Query().Get("cursor"); raw != "" {
 		stamp, id, decodeErr := decodeAssetCursor(raw)
 		if decodeErr != nil {
@@ -47,7 +54,7 @@ func (s *Server) changedTargets(w http.ResponseWriter, r *http.Request) {
 		}
 		filtered := changes[:0]
 		for _, item := range changes {
-			if item.Current.AsOf.Before(stamp) || (item.Current.AsOf.Equal(stamp) && item.Current.ID < id) {
+			if item.State.ChangedAt.Before(stamp) || (item.State.ChangedAt.Equal(stamp) && item.State.ChangeDetailID < id) {
 				filtered = append(filtered, item)
 			}
 		}
@@ -59,105 +66,83 @@ func (s *Server) changedTargets(w http.ResponseWriter, r *http.Request) {
 	}
 	items := make([]any, 0, len(changes))
 	for _, item := range changes {
+		if !item.State.HasChange {
+			continue
+		}
 		normalizeRecommendation(item.Previous.Payload)
 		normalizeRecommendation(item.Current.Payload)
 		normalizeRecommendation(item.Latest.Payload)
 		asset, _ := item.Current.Payload["asset"].(map[string]any)
-		items = append(items, map[string]any{
+		value := map[string]any{
 			"asset": asset, "recommendation_id": item.Current.ID,
 			"latest_recommendation_id": item.Latest.ID, "latest_researched_at": jsonTime(item.Latest.AsOf),
-			"changed_at":     jsonTime(item.Current.AsOf),
+			"changed_at":     jsonTime(item.State.ChangedAt),
 			"previous":       map[string]any{"signal_status": item.Previous.Payload["signal_status"], "rating": item.Previous.Payload["rating"]},
 			"current":        map[string]any{"signal_status": item.Current.Payload["signal_status"], "rating": item.Current.Payload["rating"]},
 			"status_changed": stringValue(item.Previous.Payload["signal_status"]) != stringValue(item.Current.Payload["signal_status"]),
 			"rating_changed": stringValue(item.Previous.Payload["rating"]) != stringValue(item.Current.Payload["rating"]),
-		})
+			"rating_state":   ratingStateValue(item.State), "latest_event_signal": latestEventSignalValue(item.State.LatestSignal),
+			"overall_rating_changed": true,
+		}
+		items = append(items, value)
 	}
 	var next any
 	if hasMore && len(changes) > 0 {
-		last := changes[len(changes)-1].Current
-		next = encodeAssetCursor(last.AsOf, last.ID)
+		last := changes[len(changes)-1].State
+		next = encodeAssetCursor(last.ChangedAt, last.ChangeDetailID)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "next_cursor": next})
 }
 
 func (s *Server) latestChangedTargets(r *http.Request) ([]recommendationChange, error) {
-	rows, err := s.db.Query(r.Context(), `SELECT id,asset_id,as_of,payload::jsonb FROM recommendations ORDER BY asset_id,as_of,id`)
+	histories, err := s.recommendationHistories(r, false)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	previous := map[string]recommendationSnapshot{}
-	latest := map[string]recommendationSnapshot{}
-	changed := map[string][2]recommendationSnapshot{}
-	for rows.Next() {
-		var item recommendationSnapshot
-		var body []byte
-		if err = rows.Scan(&item.ID, &item.AssetID, &item.AsOf, &body); err != nil {
-			return nil, err
+	result := make([]recommendationChange, 0, len(histories))
+	for _, values := range histories {
+		if len(values) == 0 {
+			continue
 		}
-		if err = json.Unmarshal(body, &item.Payload); err != nil {
-			return nil, err
-		}
-		if prior, found := previous[item.AssetID]; found && stringValue(prior.Payload["rating"]) != stringValue(item.Payload["rating"]) {
-			changed[item.AssetID] = [2]recommendationSnapshot{prior, item}
-		}
-		previous[item.AssetID], latest[item.AssetID] = item, item
-	}
-	if err = rows.Err(); err != nil {
-		return nil, err
-	}
-	result := make([]recommendationChange, 0, len(changed))
-	for assetID, pair := range changed {
-		result = append(result, recommendationChange{Previous: pair[0], Current: pair[1], Latest: latest[assetID]})
+		previous, current, latest := rawRecommendationChange(values)
+		signals := recommendationRatingSignals(values)
+		state := replayRatingState(signals)
+		result = append(result, recommendationChange{Previous: previous, Current: current, Latest: latest, Signals: signals, State: state})
 	}
 	sort.Slice(result, func(i, j int) bool {
-		if result[i].Current.AsOf.Equal(result[j].Current.AsOf) {
-			return result[i].Current.ID > result[j].Current.ID
+		left, right := result[i].State.ChangedAt, result[j].State.ChangedAt
+		if left.IsZero() {
+			left = result[i].Latest.AsOf
 		}
-		return result[i].Current.AsOf.After(result[j].Current.AsOf)
+		if right.IsZero() {
+			right = result[j].Latest.AsOf
+		}
+		if left.Equal(right) {
+			return result[i].State.ChangeDetailID > result[j].State.ChangeDetailID
+		}
+		return left.After(right)
 	})
 	return result, nil
 }
 
 func (s *Server) currentAssetRatings(r *http.Request) ([]map[string]any, error) {
-	rows, err := s.db.Query(r.Context(), `SELECT rec.id,rec.asset_id,rec.as_of,rec.payload::jsonb
-		FROM recommendations rec JOIN assets a ON a.id=rec.asset_id
-		WHERE a.active=true AND a.market IN ('CN','HK','US','CRYPTO')
-		ORDER BY rec.asset_id,rec.as_of,rec.id`)
+	histories, err := s.recommendationHistories(r, true)
 	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	current := map[string]currentRecommendation{}
-	for rows.Next() {
-		var item recommendationSnapshot
-		var body []byte
-		if err = rows.Scan(&item.ID, &item.AssetID, &item.AsOf, &body); err != nil {
-			return nil, err
-		}
-		if err = json.Unmarshal(body, &item.Payload); err != nil {
-			return nil, err
-		}
-		entry := current[item.AssetID]
-		if entry.Latest.ID != "" {
-			prior := entry.Latest
-			entry.Previous = &prior
-		}
-		entry.Latest = item
-		current[item.AssetID] = entry
-	}
-	if err = rows.Err(); err != nil {
 		return nil, err
 	}
 	market := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("market")))
 	rating := strings.TrimSpace(r.URL.Query().Get("rating"))
 	query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
-	items := make([]map[string]any, 0, len(current))
-	for _, entry := range current {
-		normalizeRecommendation(entry.Latest.Payload)
-		asset := objectValue(entry.Latest.Payload["asset"])
-		if asset == nil || (market != "" && strings.ToUpper(stringValue(asset["market"])) != market) || (rating != "" && stringValue(entry.Latest.Payload["rating"]) != rating) {
+	items := make([]map[string]any, 0, len(histories))
+	for _, values := range histories {
+		if len(values) == 0 {
+			continue
+		}
+		latest := values[len(values)-1]
+		normalizeRecommendation(latest.Payload)
+		asset := objectValue(latest.Payload["asset"])
+		state := replayRatingState(recommendationRatingSignals(values))
+		if asset == nil || (market != "" && strings.ToUpper(stringValue(asset["market"])) != market) || (rating != "" && state.Current != rating) {
 			continue
 		}
 		if query != "" {
@@ -170,24 +155,28 @@ func (s *Server) currentAssetRatings(r *http.Request) ([]map[string]any, error) 
 			}
 		}
 		var previous any
-		changeState := "first"
-		if entry.Previous != nil {
-			normalizeRecommendation(entry.Previous.Payload)
-			previous = impactFields(entry.Previous.Payload)
-			changeState = "unchanged"
-			if stringValue(entry.Previous.Payload["rating"]) != stringValue(entry.Latest.Payload["rating"]) {
-				changeState = "changed"
-			}
+		if len(values) > 1 {
+			previousSnapshot := values[len(values)-2]
+			normalizeRecommendation(previousSnapshot.Payload)
+			previous = impactFields(previousSnapshot.Payload)
 		}
-		items = append(items, map[string]any{
-			"kind": "asset", "key": entry.Latest.AssetID, "label": asset["name"], "symbol": asset["symbol"], "market": asset["market"],
-			"target_type": "tradable_asset", "rated_at": jsonTime(entry.Latest.AsOf), "changed_at": jsonTime(entry.Latest.AsOf),
-			"previous": previous, "current": impactFields(entry.Latest.Payload), "change_state": changeState,
-			"latest": map[string]any{"rating": entry.Latest.Payload["rating"], "direction_score": entry.Latest.Payload["direction_score"],
-				"rating_confidence": entry.Latest.Payload["rating_confidence"], "news_confidence": entry.Latest.Payload["news_confidence"]},
-			"latest_detail":    map[string]any{"kind": "asset", "id": entry.Latest.ID, "researched_at": jsonTime(entry.Latest.AsOf)},
-			"change_detail_id": entry.Latest.ID,
-		})
+		changeState := "unchanged"
+		if state.EligibleEventCount == 0 {
+			changeState = "first"
+		} else if state.HasChange {
+			changeState = "changed"
+		}
+		value := map[string]any{
+			"kind": "asset", "key": latest.AssetID, "label": asset["name"], "symbol": asset["symbol"], "market": asset["market"],
+			"target_type": "tradable_asset", "rated_at": jsonTime(latest.AsOf), "changed_at": jsonTime(latest.AsOf),
+			"previous": previous, "current": impactFields(latest.Payload), "change_state": changeState,
+			"latest": map[string]any{"rating": latest.Payload["rating"], "direction_score": latest.Payload["direction_score"],
+				"rating_confidence": latest.Payload["rating_confidence"], "news_confidence": latest.Payload["news_confidence"]},
+			"latest_detail": map[string]any{"kind": "asset", "id": latest.ID, "researched_at": jsonTime(latest.AsOf)}, "change_detail_id": latest.ID,
+		}
+		applyRatingState(value, recommendationRatingSignals(values))
+		delete(value, "_rating_signals")
+		items = append(items, value)
 	}
 	sort.Slice(items, func(i, j int) bool {
 		left, right := parseAnyTime(items[i]["rated_at"]), parseAnyTime(items[j]["rated_at"])
@@ -197,6 +186,80 @@ func (s *Server) currentAssetRatings(r *http.Request) ([]map[string]any, error) 
 		return left != nil && (right == nil || left.After(*right))
 	})
 	return items, nil
+}
+
+func (s *Server) recommendationHistories(r *http.Request, activeOnly bool) (map[string][]recommendationSnapshot, error) {
+	query := `SELECT rec.id,rec.asset_id,rec.as_of,rec.payload::jsonb,rr.event_id,rr.updated_at,e.published_at
+		FROM recommendations rec
+		LEFT JOIN research_runs rr ON rr.id=rec.run_id
+		LEFT JOIN news_events e ON e.id=rr.event_id`
+	if activeOnly {
+		query += ` JOIN assets a ON a.id=rec.asset_id WHERE a.active=true AND a.market IN ('CN','HK','US','CRYPTO')`
+	}
+	query += ` ORDER BY rec.asset_id,rec.as_of,rec.id`
+	rows, err := s.db.Query(r.Context(), query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := map[string][]recommendationSnapshot{}
+	for rows.Next() {
+		var item recommendationSnapshot
+		var body []byte
+		var eventID *string
+		var updatedAt, publishedAt *time.Time
+		if err = rows.Scan(&item.ID, &item.AssetID, &item.AsOf, &body, &eventID, &updatedAt, &publishedAt); err != nil {
+			return nil, err
+		}
+		if err = json.Unmarshal(body, &item.Payload); err != nil {
+			return nil, err
+		}
+		item.EventID = stringPointerValue(eventID)
+		item.OccurredAt, item.UpdatedAt = item.AsOf, item.AsOf
+		if publishedAt != nil {
+			item.OccurredAt = *publishedAt
+		}
+		if updatedAt != nil {
+			item.UpdatedAt = *updatedAt
+		}
+		result[item.AssetID] = append(result[item.AssetID], item)
+	}
+	return result, rows.Err()
+}
+
+func rawRecommendationChange(values []recommendationSnapshot) (recommendationSnapshot, recommendationSnapshot, recommendationSnapshot) {
+	latest := values[len(values)-1]
+	previous, current := values[0], latest
+	for index := 1; index < len(values); index++ {
+		if stringValue(values[index-1].Payload["rating"]) != stringValue(values[index].Payload["rating"]) {
+			previous, current = values[index-1], values[index]
+		}
+	}
+	return previous, current, latest
+}
+
+func recommendationRatingSignals(values []recommendationSnapshot) []targetRatingSignal {
+	result := make([]targetRatingSignal, 0, len(values))
+	for _, value := range values {
+		normalizeRecommendation(value.Payload)
+		impact := objectValue(value.Payload["impact"])
+		if impact == nil {
+			impact = value.Payload
+		}
+		confidence := numberValue(value.Payload["rating_confidence"])
+		newsConfidence := numberValue(value.Payload["news_confidence"])
+		status := stringValue(value.Payload["signal_status"])
+		provisional := !boolValue(value.Payload["evidence_complete"]) || boolValue(value.Payload["provisional"]) || boolValue(impact["provisional"]) ||
+			status == "insufficient_evidence" || status == "technical_failure" || boolValue(impact["technical_failure"])
+		observation := canonicalObservation([]map[string]any{impact}, value.OccurredAt, newsConfidence, provisional)
+		result = append(result, targetRatingSignal{
+			EventID: value.EventID, Rating: stringValue(value.Payload["rating"]), DirectionScore: numberValue(value.Payload["direction_score"]),
+			RatingConfidence: confidence, NewsConfidence: newsConfidence, OccurredAt: value.OccurredAt, EvaluatedAt: value.UpdatedAt,
+			DetailKind: "asset", DetailID: value.ID, Eligible: value.EventID != "" && !observation.Insufficient && !observation.Provisional && confidence >= .45,
+			SourcePriority: 2, Observation: observation,
+		})
+	}
+	return result
 }
 
 type targetObservation struct {
@@ -225,6 +288,34 @@ type targetTrend struct {
 	Short, Long, Combined trendScore
 }
 
+type targetRatingSignal struct {
+	EventID          string
+	Rating           string
+	DirectionScore   float64
+	RatingConfidence float64
+	NewsConfidence   float64
+	OccurredAt       time.Time
+	EvaluatedAt      time.Time
+	DetailKind       string
+	DetailID         string
+	Eligible         bool
+	SourcePriority   int
+	Observation      targetObservation
+}
+
+type ratingStateReplay struct {
+	Previous           string
+	Current            string
+	ChangedAt          time.Time
+	ChangeDetailKind   string
+	ChangeDetailID     string
+	EligibleEventCount int
+	TransitionLimited  bool
+	HasChange          bool
+	LatestSignal       *targetRatingSignal
+	Signals            []targetRatingSignal
+}
+
 type canonicalTarget struct {
 	Key, Label, TargetType string
 }
@@ -235,6 +326,7 @@ type macroSnapshot struct {
 	Asset       map[string]any
 	Run         map[string]any
 	RunID       string
+	EventID     string
 	ChangedAt   time.Time
 	Observation targetObservation
 	Provisional bool
@@ -285,7 +377,17 @@ func (s *Server) targetChanges(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if scope == "changed" {
+		changed := items[:0]
+		for _, item := range items {
+			if ratingStateChanged(item) {
+				changed = append(changed, item)
+			}
+		}
+		items = changed
 		items = filterTargetChanges(items, r.URL.Query().Get("q"))
+	}
+	for _, item := range items {
+		delete(item, "_rating_signals")
 	}
 	if raw := r.URL.Query().Get("cursor"); raw != "" {
 		stamp, id, decodeErr := decodeAssetCursor(raw)
@@ -356,7 +458,7 @@ func (s *Server) assetTargetChanges(r *http.Request) ([]map[string]any, error) {
 		normalizeRecommendation(item.Current.Payload)
 		normalizeRecommendation(item.Latest.Payload)
 		asset, _ := item.Current.Payload["asset"].(map[string]any)
-		items = append(items, map[string]any{
+		value := map[string]any{
 			"kind": "asset", "key": item.Current.AssetID, "label": asset["name"], "symbol": asset["symbol"], "market": asset["market"],
 			"target_type": "tradable_asset", "changed_at": jsonTime(item.Current.AsOf),
 			"previous": impactFields(item.Previous.Payload), "current": impactFields(item.Current.Payload),
@@ -364,7 +466,9 @@ func (s *Server) assetTargetChanges(r *http.Request) ([]map[string]any, error) {
 				"rating_confidence": item.Latest.Payload["rating_confidence"], "news_confidence": item.Latest.Payload["news_confidence"]},
 			"latest_detail":    map[string]any{"kind": "asset", "id": item.Latest.ID, "researched_at": jsonTime(item.Latest.AsOf)},
 			"change_detail_id": item.Current.ID,
-		})
+		}
+		applyRatingState(value, item.Signals)
+		items = append(items, value)
 	}
 	return items, nil
 }
@@ -399,25 +503,61 @@ func (s *Server) concreteTargetChanges(r *http.Request) ([]map[string]any, error
 
 func mergeConcreteTargetChanges(groups ...[]map[string]any) []map[string]any {
 	latestByKey := map[string]map[string]any{}
+	signalsByKey := map[string][]targetRatingSignal{}
 	keyOrder := make([]string, 0)
 	for _, group := range groups {
 		for _, item := range group {
 			key := stringValue(item["key"])
+			if signals, ok := item["_rating_signals"].([]targetRatingSignal); ok {
+				signalsByKey[key] = append(signalsByKey[key], signals...)
+			}
 			current := latestByKey[key]
 			if current == nil {
 				keyOrder = append(keyOrder, key)
 				latestByKey[key] = item
-			} else if targetChangeAfter(item, current) {
+			} else if latestEventAfter(item, current) {
 				latestByKey[key] = item
 			}
 		}
 	}
 	result := make([]map[string]any, 0, len(latestByKey))
 	for _, key := range keyOrder {
-		result = append(result, latestByKey[key])
+		value := map[string]any{}
+		for field, raw := range latestByKey[key] {
+			value[field] = raw
+		}
+		state := applyRatingState(value, signalsByKey[key])
+		if len(state.Signals) > 0 {
+			observations := make([]targetObservation, 0, len(state.Signals))
+			for _, signal := range state.Signals {
+				observations = append(observations, signal.Observation)
+			}
+			value["trend"] = publicTargetTrend(aggregateTargetTrend(observations, time.Now().UTC()))
+		}
+		if state.LatestSignal != nil {
+			value["latest"] = map[string]any{
+				"rating": state.LatestSignal.Rating, "direction_score": state.LatestSignal.DirectionScore,
+				"rating_confidence": state.LatestSignal.RatingConfidence, "news_confidence": state.LatestSignal.NewsConfidence,
+			}
+		}
+		delete(value, "_rating_signals")
+		result = append(result, value)
 	}
 	sort.SliceStable(result, func(i, j int) bool { return targetChangeAfter(result[i], result[j]) })
 	return result
+}
+
+func latestEventAfter(left, right map[string]any) bool {
+	leftSignal, rightSignal := objectValue(left["latest_event_signal"]), objectValue(right["latest_event_signal"])
+	leftDetail, rightDetail := objectValue(leftSignal["detail"]), objectValue(rightSignal["detail"])
+	leftTime, rightTime := parseAnyTime(leftDetail["researched_at"]), parseAnyTime(rightDetail["researched_at"])
+	if leftTime == nil && rightTime == nil {
+		return targetChangeAfter(left, right)
+	}
+	if leftTime != nil && rightTime != nil && leftTime.Equal(*rightTime) {
+		return stringValue(leftDetail["id"]) > stringValue(rightDetail["id"])
+	}
+	return leftTime != nil && (rightTime == nil || leftTime.After(*rightTime))
 }
 
 func targetChangeAfter(left, right map[string]any) bool {
@@ -439,24 +579,24 @@ func (s *Server) eventTargetChanges(r *http.Request, targetTypes map[string]bool
 	}
 	securityResolver := newPublishedSecurityResolver(masterAssets)
 	securityNames, securitySymbols := securityAssetAliases(masterAssets)
-	rows, err := s.db.Query(r.Context(), `SELECT er.id,er.status,er.updated_at,er.payload::jsonb,e.published_at
+	rows, err := s.db.Query(r.Context(), `SELECT er.id,er.event_id,er.status,er.updated_at,er.payload::jsonb,e.published_at
 		FROM event_research_runs er LEFT JOIN news_events e ON e.id=er.event_id ORDER BY er.updated_at,er.id`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	type parsedRun struct {
-		id, status string
-		updated    time.Time
-		published  *time.Time
-		payload    map[string]any
+		id, eventID, status string
+		updated             time.Time
+		published           *time.Time
+		payload             map[string]any
 	}
 	runs := make([]parsedRun, 0)
 	aliases := map[string]map[string]any{}
 	for rows.Next() {
 		var run parsedRun
 		var body []byte
-		if err = rows.Scan(&run.id, &run.status, &run.updated, &body, &run.published); err != nil {
+		if err = rows.Scan(&run.id, &run.eventID, &run.status, &run.updated, &body, &run.published); err != nil {
 			return nil, err
 		}
 		if err = json.Unmarshal(body, &run.payload); err != nil {
@@ -536,7 +676,7 @@ func (s *Server) eventTargetChanges(r *http.Request, targetTypes map[string]bool
 			fallback := run.updated
 			occurred = &fallback
 		}
-		provisional := run.status == "insufficient_evidence" || !boolValue(report["evidence_complete"])
+		provisional := run.status == "insufficient_evidence" || !boolValue(report["evidence_complete"]) || boolValue(report["provisional"])
 		newsConfidence := numberValue(report["news_confidence"])
 		if newsConfidence == 0 {
 			newsConfidence = numberValue(report["fact_confidence"])
@@ -550,7 +690,7 @@ func (s *Server) eventTargetChanges(r *http.Request, targetTypes map[string]bool
 			}
 			snapshots[key] = append(snapshots[key], macroSnapshot{
 				Canonical: group.canonical, Impact: representativeMacroImpact(group.impacts), Asset: group.asset,
-				Run: run.payload, RunID: run.id, ChangedAt: run.updated, Observation: observation, Provisional: observation.Provisional,
+				Run: run.payload, RunID: run.id, EventID: run.eventID, ChangedAt: run.updated, Observation: observation, Provisional: observation.Provisional,
 			})
 		}
 	}
@@ -574,7 +714,7 @@ func (s *Server) eventTargetChanges(r *http.Request, targetTypes map[string]bool
 			prior = current
 		}
 		if changed == nil {
-			continue
+			before, changed = &values[0], &values[len(values)-1]
 		}
 		latest := &values[len(values)-1]
 		displayAsset := latest.Asset
@@ -586,7 +726,7 @@ func (s *Server) eventTargetChanges(r *http.Request, targetTypes map[string]bool
 			observations = append(observations, value.Observation)
 		}
 		report := objectValue(latest.Run["report"])
-		output = append(output, map[string]any{
+		value := map[string]any{
 			"kind": kind, "key": key, "label": latest.Canonical.Label, "symbol": valueOrNil(displayAsset, "symbol"),
 			"market": valueOrNil(displayAsset, "market"), "target_type": latest.Canonical.TargetType, "changed_at": jsonTime(changed.ChangedAt),
 			"previous": macroImpactState(before.Impact, before.Provisional), "current": macroImpactState(changed.Impact, changed.Provisional),
@@ -595,7 +735,9 @@ func (s *Server) eventTargetChanges(r *http.Request, targetTypes map[string]bool
 			"trend":            publicTargetTrend(aggregateTargetTrend(observations, now)),
 			"latest_detail":    map[string]any{"kind": "event", "id": latest.RunID, "researched_at": jsonTime(latest.ChangedAt)},
 			"change_detail_id": changed.RunID,
-		})
+		}
+		applyRatingState(value, macroRatingSignals(values))
+		output = append(output, value)
 	}
 	sort.SliceStable(output, func(i, j int) bool { return targetChangeAfter(output[i], output[j]) })
 	return output, nil
@@ -1059,6 +1201,7 @@ func representativeMacroImpact(impacts []map[string]any) map[string]any {
 func canonicalObservation(impacts []map[string]any, occurred time.Time, newsConfidence float64, provisional bool) targetObservation {
 	weights := make([]float64, len(impacts))
 	total, minScore, maxScore, failures := 0.0, math.Inf(1), math.Inf(-1), 0
+	impactProvisional := false
 	for index, impact := range impacts {
 		weights[index] = math.Max(0.05, numberValue(impact["rating_confidence"]))
 		total += weights[index]
@@ -1066,6 +1209,9 @@ func canonicalObservation(impacts []map[string]any, occurred time.Time, newsConf
 		minScore, maxScore = math.Min(minScore, score), math.Max(maxScore, score)
 		if boolValue(impact["technical_failure"]) {
 			failures++
+		}
+		if boolValue(impact["provisional"]) || stringValue(impact["conclusion_status"]) == "insufficient_evidence" {
+			impactProvisional = true
 		}
 	}
 	weighted := func(value func(map[string]any) float64) float64 {
@@ -1078,7 +1224,7 @@ func canonicalObservation(impacts []map[string]any, occurred time.Time, newsConf
 		}
 		return result / total
 	}
-	insufficient := provisional || maxScore-minScore >= 30 || failures == len(impacts)
+	insufficient := provisional || impactProvisional || maxScore-minScore >= 30 || failures == len(impacts)
 	return targetObservation{
 		OccurredAt: occurred, Score: weighted(func(value map[string]any) float64 { return numberValue(value["direction_score"]) }),
 		RatingConfidence: weighted(func(value map[string]any) float64 { return numberValue(value["rating_confidence"]) }),
@@ -1095,6 +1241,21 @@ func macroImpactState(impact map[string]any, provisional bool) map[string]any {
 	return map[string]any{"rating": impact["rating"], "direction_score": impact["direction_score"], "rating_confidence": impact["rating_confidence"], "provisional": provisional}
 }
 
+func macroRatingSignals(values []macroSnapshot) []targetRatingSignal {
+	result := make([]targetRatingSignal, 0, len(values))
+	for _, value := range values {
+		confidence := numberValue(value.Impact["rating_confidence"])
+		newsConfidence := value.Observation.NewsConfidence
+		result = append(result, targetRatingSignal{
+			EventID: value.EventID, Rating: stringValue(value.Impact["rating"]), DirectionScore: numberValue(value.Impact["direction_score"]),
+			RatingConfidence: confidence, NewsConfidence: newsConfidence, OccurredAt: value.Observation.OccurredAt, EvaluatedAt: value.ChangedAt,
+			DetailKind: "event", DetailID: value.RunID, Eligible: value.EventID != "" && !value.Observation.Insufficient && !value.Observation.Provisional && confidence >= .45,
+			SourcePriority: 1, Observation: value.Observation,
+		})
+	}
+	return result
+}
+
 func ratingForScore(score float64) string {
 	switch {
 	case score >= 70:
@@ -1108,6 +1269,142 @@ func ratingForScore(score float64) string {
 	default:
 		return "watch"
 	}
+}
+
+var ratingScale = []string{"strongly_bearish", "bearish", "watch", "bullish", "strongly_bullish"}
+
+func ratingIndex(value string) int {
+	for index, rating := range ratingScale {
+		if value == rating {
+			return index
+		}
+	}
+	return 2
+}
+
+func ratingDistance(left, right int) int {
+	if left < right {
+		return right - left
+	}
+	return left - right
+}
+
+func normalizedSignalRating(value string, score float64) string {
+	for _, rating := range ratingScale {
+		if value == rating {
+			return value
+		}
+	}
+	return ratingForScore(score)
+}
+
+func deduplicateRatingSignals(values []targetRatingSignal) []targetRatingSignal {
+	byEvent := map[string]targetRatingSignal{}
+	for _, value := range values {
+		if strings.TrimSpace(value.EventID) == "" {
+			continue
+		}
+		value.Rating = normalizedSignalRating(value.Rating, value.DirectionScore)
+		current, exists := byEvent[value.EventID]
+		if !exists || value.SourcePriority > current.SourcePriority || value.SourcePriority == current.SourcePriority && value.EvaluatedAt.After(current.EvaluatedAt) {
+			byEvent[value.EventID] = value
+		}
+	}
+	result := make([]targetRatingSignal, 0, len(byEvent))
+	for _, value := range byEvent {
+		result = append(result, value)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].OccurredAt.Equal(result[j].OccurredAt) {
+			if result[i].EventID == result[j].EventID {
+				return result[i].EvaluatedAt.Before(result[j].EvaluatedAt)
+			}
+			return result[i].EventID < result[j].EventID
+		}
+		return result[i].OccurredAt.Before(result[j].OccurredAt)
+	})
+	return result
+}
+
+func replayRatingState(values []targetRatingSignal) ratingStateReplay {
+	signals := deduplicateRatingSignals(values)
+	state := ratingStateReplay{Previous: "watch", Current: "watch", Signals: signals}
+	if len(signals) > 0 {
+		latest := signals[len(signals)-1]
+		state.LatestSignal = &latest
+	}
+	currentIndex := ratingIndex("watch")
+	for _, signal := range signals {
+		if !signal.Eligible {
+			continue
+		}
+		state.EligibleEventCount++
+		desiredIndex := ratingIndex(signal.Rating)
+		if desiredIndex == currentIndex {
+			continue
+		}
+		previousIndex := currentIndex
+		if desiredIndex > currentIndex {
+			currentIndex++
+		} else {
+			currentIndex--
+		}
+		state.Previous = ratingScale[previousIndex]
+		state.Current = ratingScale[currentIndex]
+		state.ChangedAt = signal.EvaluatedAt
+		state.ChangeDetailKind = signal.DetailKind
+		state.ChangeDetailID = signal.DetailID
+		state.TransitionLimited = ratingDistance(desiredIndex, previousIndex) > 1
+		state.HasChange = true
+	}
+	return state
+}
+
+func ratingStateValue(state ratingStateReplay) map[string]any {
+	var changedAt any
+	if !state.ChangedAt.IsZero() {
+		changedAt = jsonTime(state.ChangedAt)
+	}
+	return map[string]any{
+		"previous":             state.Previous,
+		"current":              state.Current,
+		"changed_at":           changedAt,
+		"algorithm_version":    "step-limited-rating-v1",
+		"eligible_event_count": state.EligibleEventCount,
+		"transition_limited":   state.TransitionLimited,
+	}
+}
+
+func latestEventSignalValue(signal *targetRatingSignal) any {
+	if signal == nil {
+		return nil
+	}
+	return map[string]any{
+		"event_id": signal.EventID, "rating": signal.Rating, "direction_score": signal.DirectionScore,
+		"rating_confidence": signal.RatingConfidence, "news_confidence": signal.NewsConfidence,
+		"occurred_at": jsonTime(signal.OccurredAt),
+		"detail":      map[string]any{"kind": signal.DetailKind, "id": signal.DetailID, "researched_at": jsonTime(signal.EvaluatedAt)},
+	}
+}
+
+func ratingStateChanged(value map[string]any) bool {
+	state := objectValue(value["rating_state"])
+	return stringValue(state["previous"]) != stringValue(state["current"])
+}
+
+func applyRatingState(value map[string]any, signals []targetRatingSignal) ratingStateReplay {
+	state := replayRatingState(signals)
+	value["rating_state"] = ratingStateValue(state)
+	value["latest_event_signal"] = latestEventSignalValue(state.LatestSignal)
+	value["_rating_signals"] = state.Signals
+	if state.HasChange {
+		value["changed_at"] = jsonTime(state.ChangedAt)
+		value["change_detail_id"] = state.ChangeDetailID
+	}
+	if state.LatestSignal != nil {
+		value["latest_detail"] = map[string]any{"kind": state.LatestSignal.DetailKind, "id": state.LatestSignal.DetailID, "researched_at": jsonTime(state.LatestSignal.EvaluatedAt)}
+	}
+	return state
 }
 
 func observationQuality(value targetObservation) float64 {

@@ -1455,6 +1455,25 @@ export type Recommendation = {
   };
 };
 
+export type RatingState = {
+  previous: string;
+  current: string;
+  changed_at: string | null;
+  algorithm_version: "step-limited-rating-v1";
+  eligible_event_count: number;
+  transition_limited: boolean;
+};
+
+export type LatestEventSignal = {
+  event_id: string;
+  rating: string;
+  direction_score: number;
+  rating_confidence: number;
+  news_confidence: number;
+  occurred_at: string;
+  detail: { kind: "event" | "asset"; id: string; researched_at: string };
+};
+
 export type ChangedTarget = {
   asset: {
     asset_id: string;
@@ -1470,6 +1489,8 @@ export type ChangedTarget = {
   current: { signal_status: string; rating: string };
   status_changed: boolean;
   rating_changed: boolean;
+  rating_state?: RatingState;
+  latest_event_signal?: LatestEventSignal | null;
 };
 
 export type ConclusionDetail = {
@@ -1575,6 +1596,8 @@ export type TargetChange = {
   previous: { rating: string; direction_score: number | null; rating_confidence: number | null } | null;
   current: { rating: string; direction_score: number | null; rating_confidence: number | null };
   latest: { rating: string; direction_score: number | null; rating_confidence: number | null; news_confidence: number | null };
+  rating_state?: RatingState;
+  latest_event_signal?: LatestEventSignal | null;
   trend?: TargetTrend;
   latest_detail: { kind: "event" | "asset"; id: string; researched_at: string };
   change_detail_id: string;
@@ -1841,7 +1864,7 @@ export function ConclusionScore({
   const scoreTone = scoreBlocked ? "neutral" : publishedScore <= -positiveThreshold ? "negative" : publishedScore >= positiveThreshold ? "positive" : "neutral";
   return <div className={`conclusion-score ${scoreTone}`}>
     <strong>{scoreBlocked ? "暂不评分" : `${isV3 ? "方向分" : shortTerm ? "影响分" : "发布分"}：${publishedScore > 0 ? "+" : ""}${publishedScore}`}</strong>
-    <span>{!compact && `${signalStatusLabels[resolvedStatus] || resolvedStatus} · `}{isV3 ? "五级评级" : shortTerm ? "五档评级" : "评级"}：{recommendationRatingLabel(rating)}{isV3 && scoreSource === "rule_fallback" ? " · 规则回退" : ""}</span>
+    <span>{!compact && `${signalStatusLabels[resolvedStatus] || resolvedStatus} · `}本次事件信号：{recommendationRatingLabel(rating)}{isV3 && scoreSource === "rule_fallback" ? " · 规则回退" : ""}</span>
     {isV3
       ? <small>{typeof newsCredibilityScore === "number" || typeof reportConfidenceScore === "number"
         ? `新闻可信度 ${newsCredibilityScore ?? Math.round((newsConfidence ?? factConfidence ?? 0) * 100)}/100 · 研报置信度 ${reportConfidenceScore ?? Math.round((ratingConfidence ?? confidence) * 100)}/100 · 未来 ${horizonDays ?? 90} 个自然日`
@@ -2269,8 +2292,8 @@ export function EventConclusionCard({
     <div className="event-conclusion-side">
       <button type="button" className={`event-conclusion-summary ${scoreTone}`} onClick={onOpen} aria-label={`查看 ${item.title} 事件研报评分`}>
         <strong>{score === null || score === undefined
-          ? "— · 暂无评级"
-          : `${score > 0 ? "+" : ""}${score} · ${rating ? recommendationRatingLabel(rating) : "暂无评级"}`}</strong>
+          ? "本次事件信号：暂无"
+          : `本次事件信号：${score > 0 ? "+" : ""}${score} · ${rating ? recommendationRatingLabel(rating) : "暂无"}`}</strong>
         <span>影响目标 {report?.impact_count ?? 0} 个</span>
         <small>新闻可信度 {Math.round((report?.news_confidence ?? 0) * 100)}% · 研报置信度 {Math.round((report?.confidence ?? 0) * 100)}%</small>
       </button>
@@ -2295,9 +2318,14 @@ export function ChangedTargetGrid({
   detailLoadingId?: string;
 }) {
   return <div className="target-change-grid" data-columns={changedTargetDesktopColumns}>
-    {items.map((item) => <article className="target-change-card" key={item.asset.asset_id}>
+    {items.map((item) => {
+      const previousRating = item.rating_state?.previous || item.previous.rating;
+      const currentRating = item.rating_state?.current || item.current.rating;
+      const eventSignal = item.latest_event_signal;
+      const changedAt = item.rating_state?.changed_at || item.changed_at;
+      return <article className="target-change-card" key={item.asset.asset_id}>
       <header>
-        <span>{item.asset.market} · {new Date(item.changed_at).toLocaleString("zh-CN")}</span>
+        <span>{item.asset.market} · {new Date(changedAt).toLocaleString("zh-CN")}</span>
         <div className="target-change-symbol-row">
           <button
             type="button"
@@ -2314,10 +2342,15 @@ export function ChangedTargetGrid({
         </div>
       </header>
       <div className="target-change-field changed">
-        <span>评级</span>
-        <strong>{recommendationRatingLabel(item.previous.rating)} → {recommendationRatingLabel(item.current.rating)}</strong>
+        <span>总体评级变化</span>
+        <strong>{recommendationRatingLabel(previousRating)} → {recommendationRatingLabel(currentRating)}</strong>
       </div>
-    </article>)}
+      {eventSignal && <div className="target-change-field">
+        <span>最新新闻信号</span>
+        <div className="target-change-rating-row"><strong>{recommendationRatingLabel(eventSignal.rating)}</strong><b className={eventSignal.direction_score < 0 ? "negative" : eventSignal.direction_score > 0 ? "positive" : "neutral"} title="本次事件原始方向分">{eventSignal.direction_score > 0 ? "+" : ""}{eventSignal.direction_score}</b></div>
+      </div>}
+    </article>;
+    })}
   </div>;
 }
 
@@ -2495,7 +2528,7 @@ export function EventConclusionDetailModal({ detail, onClose }: { detail: EventC
       {!!report.impacts.length && <><h3>目标影响</h3><div className="event-impact-grid">{report.impacts.map((impact, index) => <article key={`${impact.target_type}-${impact.target_name}-${index}`}>
         <span>{targetTypeLabels[impact.target_type] ?? impact.target_type}{impact.asset?.symbol ? ` · ${impact.asset.symbol}` : ""}</span>
         <strong>{impact.target_name}</strong>
-        <div><b>{recommendationRatingLabel(impact.rating)}</b><b>{impact.direction_score > 0 ? "+" : ""}{impact.direction_score}</b><b>目标评价 {impact.target_evaluation_score ?? Math.round(impact.rating_confidence * 100)}/100</b></div>
+        <div><b>本次事件信号：{recommendationRatingLabel(impact.rating)}</b><b>{impact.direction_score > 0 ? "+" : ""}{impact.direction_score}</b><b>目标评价 {impact.target_evaluation_score ?? Math.round(impact.rating_confidence * 100)}/100</b></div>
         {(impact.conclusion_status || impact.impact_channel) && <small>{conclusionStatusLabels[impact.conclusion_status ?? ""] ?? impact.conclusion_status ?? ""}{impact.impact_channel ? ` · ${impactChannelLabels[impact.impact_channel] ?? impact.impact_channel}` : ""}</small>}
         <small>未来 {impact.horizon_days} 个自然日</small>
         {impact.rationale && <p>{impact.rationale}</p>}
@@ -2530,12 +2563,16 @@ export function TargetChangeGrid({
 }) {
   return <div className="target-change-grid unified-target-change-grid" data-columns={changedTargetDesktopColumns}>
     {items.map((item) => {
-      const score = item.latest.direction_score;
-      const newsConfidence = item.latest.news_confidence;
-      const confidence = item.latest.rating_confidence;
+      const eventSignal = item.latest_event_signal;
+      const score = eventSignal?.direction_score ?? item.latest.direction_score;
+      const newsConfidence = eventSignal?.news_confidence ?? item.latest.news_confidence;
+      const confidence = eventSignal?.rating_confidence ?? item.latest.rating_confidence;
+      const previousRating = item.rating_state?.previous || item.previous?.rating || item.current.rating;
+      const currentRating = item.rating_state?.current || item.current.rating;
+      const changedAt = item.rating_state?.changed_at || item.changed_at;
       return <article className={`target-change-card ${item.kind}`} key={item.key}>
         <header>
-          <span>{item.target_type === "commodity_price" || item.kind === "macro" ? (targetTypeLabels[item.target_type] ?? item.target_type) : item.market} · {new Date(item.changed_at).toLocaleString("zh-CN")}</span>
+          <span>{item.target_type === "commodity_price" || item.kind === "macro" ? (targetTypeLabels[item.target_type] ?? item.target_type) : item.market} · {new Date(changedAt).toLocaleString("zh-CN")}</span>
           <div className="target-change-symbol-row">
             <button
               type="button"
@@ -2551,7 +2588,8 @@ export function TargetChangeGrid({
             </button>
           </div>
         </header>
-        <div className="target-change-field changed"><span>{item.latest_detail.kind === "event" ? "最近事件评级变化" : "评级变化"}</span><div className="target-change-rating-row"><strong>{recommendationRatingLabel(item.previous?.rating || item.current.rating)} → {recommendationRatingLabel(item.current.rating)}</strong><b className={score === null ? "neutral" : score < 0 ? "negative" : score > 0 ? "positive" : "neutral"} title="最新方向分">{score === null ? "—" : `${score > 0 ? "+" : ""}${score}`}</b></div></div>
+        <div className="target-change-field changed"><span>总体评级变化</span><div className="target-change-rating-row"><strong>{recommendationRatingLabel(previousRating)} → {recommendationRatingLabel(currentRating)}</strong>{item.rating_state?.transition_limited && <em className="target-change-limited">单步限制</em>}</div></div>
+        <div className="target-change-field"><span>最新新闻信号</span><div className="target-change-rating-row"><strong>{recommendationRatingLabel(eventSignal?.rating || item.latest.rating)}</strong><b className={score === null ? "neutral" : score < 0 ? "negative" : score > 0 ? "positive" : "neutral"} title="本次事件原始方向分">{score === null ? "—" : `${score > 0 ? "+" : ""}${score}`}</b></div></div>
         {item.trend && <TargetTrendSummary trend={item.trend} />}
         <div className={`target-change-latest${onResearch ? " with-research" : ""}`}>
           <span>新闻可信度<strong>{newsConfidence === null ? "—" : `${Math.round(newsConfidence * 100)}%`}</strong></span>
@@ -2723,7 +2761,7 @@ export function ChangedTargetsPage({ apiBase }: { apiBase: string }) {
   }
 
   return <section className="app-page targets-page">
-    <PageHeading eyebrow="RATING CHANGES" title="标的评级变化" copy="左侧追踪宏观经济、行业及跨资产目标，右侧追踪具体证券与商品价格；仅展示最近一次五级评级变化。" />
+    <PageHeading eyebrow="RATING CHANGES" title="标的评级变化" copy="左侧追踪宏观经济、行业及跨资产目标，右侧追踪具体证券与商品价格；总体评级按独立新闻逐档变化。" />
     {detailError && <div className="page-error target-detail-error"><span>{detailError}</span></div>}
     <form className="page-filters target-search" role="search" onSubmit={(event) => { event.preventDefault(); setDebouncedQuery(searchQuery.trim()); }}>
       <input type="search" aria-label="搜索评级变化" placeholder="搜索宏观、行业、代码或标的名称" value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} />
@@ -2731,7 +2769,7 @@ export function ChangedTargetsPage({ apiBase }: { apiBase: string }) {
     </form>
     <div className="target-change-split">
       <TargetChangeSection apiBase={apiBase} kind="macro" title="宏观经济与行业变化" copy="经济、行业、汇率、利率、供给、航运与风险资产。" query={debouncedQuery} onOpen={(item) => void openLatestResearch(item)} detailLoadingId={detailLoadingId} researchStates={researchStates} onResearch={(item) => void researchAgain(item)} />
-      <TargetChangeSection apiBase={apiBase} kind="asset" title="具体标的变化" copy="股票、加密资产与商品价格的最新五级评级变化及研究结论。" query={debouncedQuery} onOpen={(item) => void openLatestResearch(item)} detailLoadingId={detailLoadingId} researchStates={researchStates} onResearch={(item) => void researchAgain(item)} />
+      <TargetChangeSection apiBase={apiBase} kind="asset" title="具体标的变化" copy="股票、加密资产与商品价格的总体评级单步变化及最新新闻信号。" query={debouncedQuery} onOpen={(item) => void openLatestResearch(item)} detailLoadingId={detailLoadingId} researchStates={researchStates} onResearch={(item) => void researchAgain(item)} />
     </div>
     {selectedAsset && <ConclusionDetailModal detail={selectedAsset} onClose={() => setSelectedAsset(null)} />}
     {selectedEvent && <EventConclusionDetailModal detail={selectedEvent} onClose={() => setSelectedEvent(null)} />}

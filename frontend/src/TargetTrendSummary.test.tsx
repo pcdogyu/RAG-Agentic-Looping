@@ -21,9 +21,10 @@ describe("TargetTrendSummary", () => {
   it("shows a bullish long-term trend alongside a bearish short-term shock", () => {
     const markup = renderToStaticMarkup(createElement(TargetTrendSummary, { trend: trend() }));
 
-    expect(markup).toContain("长期趋势");
-    expect(markup).toContain("短期冲击");
-    expect(markup).toContain("综合参考");
+    expect(markup).toContain("长期证据趋势");
+    expect(markup).toContain("短期证据趋势");
+    expect(markup).toContain("综合证据参考");
+    expect(markup).toContain("趋势置信度");
     expect(markup).toContain("看多");
     expect(markup).toContain("看空");
     expect(markup).toContain("+52");
@@ -39,7 +40,7 @@ describe("TargetTrendSummary", () => {
       }),
     }));
 
-    expect(markup).toContain("低置信事件未改变长期评级");
+    expect(markup).toContain("低置信事件未纳入证据趋势");
     expect(markup).toContain("忽略 2 条");
     expect(markup).toContain("暂定");
   });
@@ -47,7 +48,7 @@ describe("TargetTrendSummary", () => {
   it("marks a regime break", () => {
     const markup = renderToStaticMarkup(createElement(TargetTrendSummary, { trend: trend({ regime_break: true }) }));
 
-    expect(markup).toContain("制度性转折");
+    expect(markup).toContain("制度性转折（仍按单步更新总体评级）");
     expect(markup).toContain('role="status"');
   });
 });

@@ -98,7 +98,7 @@ describe("open source and search settings", () => {
     }));
 
     expect(markup).toContain("发布分：0");
-    expect(markup).toContain("评级：中性");
+    expect(markup).toContain("本次事件信号：中性");
     expect(markup).toContain("发布置信度 95% · 资料覆盖完整");
   });
 
@@ -116,7 +116,7 @@ describe("open source and search settings", () => {
     }));
 
     expect(markup).toContain("影响分：-27");
-    expect(markup).toContain("五档评级：看空");
+    expect(markup).toContain("本次事件信号：看空");
     expect(markup).toContain("新闻事实置信度 92%");
     expect(markup).toContain("评级置信度 82%");
     expect(markup).toContain("未来 1–3 个交易日");
@@ -140,7 +140,7 @@ describe("open source and search settings", () => {
     }));
 
     expect(markup).toContain("方向分：+72");
-    expect(markup).toContain("五级评级：强烈看多");
+    expect(markup).toContain("本次事件信号：强烈看多");
     expect(markup).toContain("新闻可信度 95%");
     expect(markup).toContain("评级置信度 81%");
     expect(markup).toContain("未来 90 个自然日");
@@ -221,7 +221,7 @@ describe("open source and search settings", () => {
     }));
 
     expect(markup).toContain("暂不评分");
-    expect(markup).toContain("方向证据不足 · 评级：中性");
+    expect(markup).toContain("方向证据不足 · 本次事件信号：中性");
     expect(markup).toContain("门禁后参考置信度 0%");
     expect(markup).not.toContain("发布分：0");
   });
@@ -400,7 +400,7 @@ describe("open source and search settings", () => {
     }));
 
     expect(markup).toContain("暂不评分");
-    expect(markup).toContain("评级：中性");
+    expect(markup).toContain("本次事件信号：中性");
     expect(markup).toContain("参考置信度 0%");
     expect(markup).not.toContain("方向证据不足");
     expect(markup).not.toContain("资料覆盖不足");

@@ -16,6 +16,23 @@ function macroTarget(withTrend = true): TargetChange {
     previous: { rating: "bullish", direction_score: 69, rating_confidence: 0.8 },
     current: { rating: "bearish", direction_score: -50, rating_confidence: 0.3 },
     latest: { rating: "bearish", direction_score: -50, rating_confidence: 0.3, news_confidence: 0.85 },
+    rating_state: {
+      previous: "bullish",
+      current: "watch",
+      changed_at: "2026-08-30T08:00:00Z",
+      algorithm_version: "step-limited-rating-v1",
+      eligible_event_count: 6,
+      transition_limited: true,
+    },
+    latest_event_signal: {
+      event_id: "event-1",
+      rating: "strongly_bearish",
+      direction_score: -90,
+      rating_confidence: 0.8,
+      news_confidence: 0.85,
+      occurred_at: "2026-08-30T07:00:00Z",
+      detail: { kind: "event", id: "11111111-1111-1111-1111-111111111111", researched_at: "2026-08-30T08:00:00Z" },
+    },
     trend: withTrend ? {
       long_term: { direction_score: 57.25, rating: "bullish", rating_confidence: 0.825, provisional: false },
       short_term: { direction_score: -50, rating: "bearish", rating_confidence: 0.575, provisional: true },
@@ -39,11 +56,16 @@ describe("target trend integration", () => {
 
     expect(markup.match(/target-change-card macro/g)?.length).toBe(1);
     expect(markup).toContain("数字资产");
-    expect(markup).toContain("最近事件评级变化");
-    expect(markup).toContain("长期趋势");
-    expect(markup).toContain("短期冲击");
-    expect(markup).toContain("综合参考");
-    expect(markup).toContain("低置信事件未改变长期评级");
+    expect(markup).toContain("总体评级变化");
+    expect(markup).toContain("看多 → 中性");
+    expect(markup).toContain("最新新闻信号");
+    expect(markup).toContain("强烈看空");
+    expect(markup).toContain("-90");
+    expect(markup).toContain("单步限制");
+    expect(markup).toContain("长期证据趋势");
+    expect(markup).toContain("短期证据趋势");
+    expect(markup).toContain("综合证据参考");
+    expect(markup).toContain("低置信事件未纳入证据趋势");
   });
 
   it("keeps rendering legacy target payloads without trend data", () => {

@@ -513,6 +513,7 @@ h1 span { color: var(--mint); font-weight: 400; }
 .target-change-rating-row b { flex: 0 0 auto; color: var(--amber); font: 500 12px "DM Mono", monospace; }
 .target-change-rating-row b.positive { color: var(--mint); }
 .target-change-rating-row b.negative { color: var(--red); }
+.target-change-limited { flex: 0 0 auto; color: var(--amber); font-size: 9px; font-style: normal; }
 .target-trend-summary { display: grid; gap: 6px; padding: 7px; border: 1px solid rgba(88,214,255,.3); border-radius: 7px; background: rgba(88,214,255,.04); }
 .target-trend-summary__periods { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; }
 .target-trend-period { display: grid; gap: 3px; min-width: 0; padding: 6px; border: 1px solid var(--line); border-radius: 5px; background: var(--panel); }

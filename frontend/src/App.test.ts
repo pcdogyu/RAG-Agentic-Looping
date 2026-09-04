@@ -861,11 +861,12 @@ describe("changed targets page", () => {
       onOpen: () => undefined,
     }));
     expect(commodityMarkup).toContain("商品价格");
-    expect(commodityMarkup).toContain("最近事件评级变化");
-    expect(commodityMarkup).toContain("长期趋势");
-    expect(commodityMarkup).toContain("短期冲击");
-    expect(markup).toContain("评级变化");
-    expect(markup).toContain("最新方向分");
+    expect(commodityMarkup).toContain("总体评级变化");
+    expect(commodityMarkup).toContain("长期证据趋势");
+    expect(commodityMarkup).toContain("短期证据趋势");
+    expect(markup).toContain("总体评级变化");
+    expect(markup).toContain("最新新闻信号");
+    expect(markup).toContain("本次事件原始方向分");
     expect(markup).toContain("新闻可信度");
     expect(markup).toContain("评级置信度");
     expect(markup).toContain("+58");
@@ -912,7 +913,7 @@ describe("changed targets page", () => {
       onOpen: () => undefined,
       onResearch: () => undefined,
     }));
-    expect(emptyCard).toContain("— · 暂无评级");
+    expect(emptyCard).toContain("本次事件信号：暂无");
     expect(emptyCard).toContain("影响目标 0 个");
     expect(emptyCard).toContain("已进入队列");
     expect(eventRefreshResearchState({ status: "running", stage: "web_search", error: null })).toEqual({ status: "queued" });
