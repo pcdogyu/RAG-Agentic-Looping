@@ -11,7 +11,7 @@ ENV VITE_BUILD_COMMIT_ID=$VITE_BUILD_COMMIT_ID \
     VITE_BUILD_BRANCH=$VITE_BUILD_BRANCH
 COPY package.json package-lock.json tsconfig.json vite.config.ts index.html ./
 COPY src ./src
-RUN npm ci && npm run build
+RUN npm ci --no-audit --no-fund && npm run build
 
 FROM nginx:1.27-alpine
 ENV API_UPSTREAM=http://go-api:8081 \
