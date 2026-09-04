@@ -278,6 +278,9 @@ func TestBatchThreeCommandsAgainstIsolatedServices(t *testing.T) {
 	}
 
 	assistTask := "40000000-0000-0000-0000-000000000001"
+	if err = redisClient.Del(ctx, "market-loop:model-queue:assist:tasks").Err(); err != nil {
+		t.Fatal(err)
+	}
 	trackedAssist, _ := json.Marshal(map[string]any{
 		"task_id": assistTask, "instance_id": "assist-0", "kind": "asset_mapping", "status": "queued",
 		"updated_at": jsonTime(time.Now()),
