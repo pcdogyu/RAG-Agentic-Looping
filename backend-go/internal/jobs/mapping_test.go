@@ -64,6 +64,21 @@ func TestMappingHintCanonicalizesUniqueSourceSymbol(t *testing.T) {
 	}
 }
 
+func TestSourceSymbolsSeedCanonicalMappingCandidatesAndShortlist(t *testing.T) {
+	assets := []mappingAsset{
+		{ID: "equity:NYSE:VRT", Class: "equity", Market: "US", Symbol: "VRT", Name: "Vertiv Holdings Co", AssociationTier: "standard", MarketCap: 100, Data: map[string]any{"asset_id": "equity:NYSE:VRT"}},
+		{ID: "crypto:coingecko:vrt", Class: "crypto", Market: "CRYPTO", Symbol: "VRT", Name: "Venus Reward", AssociationTier: "standard", MarketCap: 1, Data: map[string]any{"asset_id": "crypto:coingecko:vrt"}},
+	}
+	candidates, shortlist := sourceSymbolMappingCandidates([]newsRecord{{Source: "FMP Stock News", Symbols: []string{"VRT"}}}, assets)
+	if len(candidates) != 1 || candidates["equity:NYSE:VRT"] == nil || len(shortlist) != 1 || shortlist[0].ID != "equity:NYSE:VRT" {
+		t.Fatalf("FMP stock source symbol did not seed only the canonical US equity: candidates=%#v shortlist=%#v", candidates, shortlist)
+	}
+	merged := mergeSourceSymbolShortlist(shortlist, []mappingAsset{assets[1], assets[0]}, 2)
+	if len(merged) != 2 || merged[0].ID != "equity:NYSE:VRT" || merged[1].ID != "crypto:coingecko:vrt" {
+		t.Fatalf("source-symbol shortlist did not retain deterministic priority: %#v", merged)
+	}
+}
+
 func TestMappingHintRejectsAmbiguousNonCanonicalIdentity(t *testing.T) {
 	assets := []mappingAsset{
 		{ID: "equity:NYSE:SAME", Class: "equity", Market: "US", Symbol: "SAME", Name: "Same One", Data: map[string]any{"asset_id": "equity:NYSE:SAME"}},

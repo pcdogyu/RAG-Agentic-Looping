@@ -195,6 +195,8 @@ func (runtime *ExtractRuntime) mapEvent(ctx context.Context, event map[string]an
 		return mappingResult{}, err
 	}
 	shortlist := shortlistMappingAssets(sourceText, assets, 30)
+	sourceCandidates, sourceShortlist := sourceSymbolMappingCandidates(newsItems, assets)
+	shortlist = mergeSourceSymbolShortlist(sourceShortlist, shortlist, 30)
 	master := productOwnerCandidates(sourceText, assets)
 	industries, mentionedIndustries, err := runtime.mappingIndustries(ctx, sourceText)
 	if err != nil {
@@ -205,6 +207,9 @@ func (runtime *ExtractRuntime) mapEvent(ctx context.Context, event map[string]an
 		return mappingResult{}, err
 	}
 	candidates := map[string]any{}
+	for id, candidate := range sourceCandidates {
+		candidates[id] = candidate
+	}
 	for id, candidate := range master {
 		candidates[id] = candidate
 	}
@@ -239,6 +244,54 @@ func (runtime *ExtractRuntime) mapEvent(ctx context.Context, event map[string]an
 	}
 	sortMappingCandidates(ranked)
 	return mappingResult{Candidates: ranked, IndustryIDs: industryIDs, ProposedCount: len(output.Candidates), MasterDerivedCount: len(master), RejectedCount: rejected, NoAssetReason: ternaryString(len(ranked) == 0, output.NoAssetReason, ""), TechnicalWarning: warning}, nil
+}
+
+func sourceSymbolMappingCandidates(newsItems []newsRecord, assets []mappingAsset) (map[string]any, []mappingAsset) {
+	candidates := map[string]any{}
+	shortlist := make([]mappingAsset, 0)
+	for _, asset := range assets {
+		if asset.AssociationTier == "manual_only" {
+			continue
+		}
+		matched := false
+		for _, news := range newsItems {
+			if sourceSymbolAssetAllowed(news.Source, asset.Class, asset.Market) && containsStringFold(news.Symbols, asset.Symbol) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		asset.ShortlistRank = 110
+		shortlist = append(shortlist, asset)
+		candidates[asset.ID] = mappingCandidate(asset, "direct", .95, .99, "新闻源证券代码与主数据唯一代码匹配", []string{"source_symbol", "provider_master"})
+	}
+	sort.Slice(shortlist, func(i, j int) bool {
+		if shortlist[i].MarketCap != shortlist[j].MarketCap {
+			return shortlist[i].MarketCap > shortlist[j].MarketCap
+		}
+		return shortlist[i].ID < shortlist[j].ID
+	})
+	return candidates, shortlist
+}
+
+func mergeSourceSymbolShortlist(source, matched []mappingAsset, limit int) []mappingAsset {
+	result := make([]mappingAsset, 0, min(limit, len(source)+len(matched)))
+	seen := map[string]bool{}
+	for _, values := range [][]mappingAsset{source, matched} {
+		for _, asset := range values {
+			if seen[asset.ID] {
+				continue
+			}
+			seen[asset.ID] = true
+			result = append(result, asset)
+			if len(result) == limit {
+				return result
+			}
+		}
+	}
+	return result
 }
 
 func (runtime *ExtractRuntime) generateMapping(ctx context.Context, event map[string]any, newsItems []newsRecord, shortlist []mappingAsset, industries []map[string]any, instanceID string) (mappingOutput, string, error) {
