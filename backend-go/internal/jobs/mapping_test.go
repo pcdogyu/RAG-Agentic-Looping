@@ -55,6 +55,26 @@ func TestMappingHintRejectsUnmentionedProxy(t *testing.T) {
 	}
 }
 
+func TestMappingHintCanonicalizesUniqueSourceSymbol(t *testing.T) {
+	asset := mappingAsset{ID: "equity:NYSE:VRT", Class: "equity", Market: "US", Symbol: "VRT", Name: "Vertiv Holdings Co", AssociationTier: "standard", Data: map[string]any{"asset_id": "equity:NYSE:VRT", "name": "Vertiv Holdings Co"}}
+	hint := mappingHint{AssetID: "VRT", Symbol: "VRT", Name: "Vertiv", Market: "US", AssetClass: "equity", SourceMention: "Vertiv", Relationship: "direct", Confidence: 1}
+	got := validateMappingHint(hint, "Vertiv posted AI cooling growth", []newsRecord{{Source: "FMP Stock News", Symbols: []string{"VRT"}}}, []mappingAsset{asset}, []mappingAsset{asset})
+	if len(got) != 1 || stringValue(objectValue(objectValue(got[0])["asset"])["asset_id"]) != asset.ID {
+		t.Fatalf("unique source symbol was not rewritten to its canonical asset id: %#v", got)
+	}
+}
+
+func TestMappingHintRejectsAmbiguousNonCanonicalIdentity(t *testing.T) {
+	assets := []mappingAsset{
+		{ID: "equity:NYSE:SAME", Class: "equity", Market: "US", Symbol: "SAME", Name: "Same One", Data: map[string]any{"asset_id": "equity:NYSE:SAME"}},
+		{ID: "equity:NASDAQ:SAME", Class: "equity", Market: "US", Symbol: "SAME", Name: "Same Two", Data: map[string]any{"asset_id": "equity:NASDAQ:SAME"}},
+	}
+	hint := mappingHint{AssetID: "SAME", Symbol: "SAME", Market: "US", AssetClass: "equity", SourceMention: "SAME", Relationship: "direct", Confidence: 1}
+	if got := validateMappingHint(hint, "$SAME announced results", nil, assets, assets); len(got) != 0 {
+		t.Fatalf("ambiguous source symbol must not select multiple canonical assets: %#v", got)
+	}
+}
+
 func TestMappingShortlistHonorsAssociationTiers(t *testing.T) {
 	assets := []mappingAsset{
 		{ID: "equity:NASDAQ:NVDA", Symbol: "NVDA", Name: "NVIDIA Corporation", Aliases: []string{"NVIDIA"}, AssociationTier: "standard", MarketCap: 100},

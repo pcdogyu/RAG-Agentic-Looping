@@ -391,3 +391,19 @@ func TestEventUpdatedAtUsesLatestAnalysisStep(t *testing.T) {
 		t.Fatalf("unexpected latest event timestamp: %v", got)
 	}
 }
+
+func TestCancelResearchPayloadEndsFullResearchLifecycle(t *testing.T) {
+	payload := map[string]any{
+		"status": "queued",
+		"analysis_steps": []any{
+			analysisStep("full_event_research", "running", "go-worker", "running", map[string]any{}),
+		},
+	}
+	cancelResearchPayload(payload, "queued")
+	if fullResearchActive(payload) {
+		t.Fatalf("cancelled full research remained active: %#v", payload["analysis_steps"])
+	}
+	if stringValue(payload["status"]) != "cancelled" {
+		t.Fatalf("cancelled payload status was not preserved: %#v", payload)
+	}
+}

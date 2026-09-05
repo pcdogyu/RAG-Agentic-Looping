@@ -499,8 +499,18 @@ func validateMappingHint(hint mappingHint, source string, newsItems []newsRecord
 		return mapProductHint(hint, shortlist, assets)
 	}
 	resolved := make([]mappingAsset, 0)
+	hasCanonicalIdentity := false
+	for _, asset := range shortlist {
+		if hint.AssetID == asset.ID {
+			hasCanonicalIdentity = true
+			break
+		}
+	}
 	for _, asset := range shortlist {
 		matches := hint.AssetID == asset.ID
+		if !hasCanonicalIdentity && !matches && mappingHintMatchesAssetIdentity(hint, asset) {
+			matches = true
+		}
 		if !matches || (hint.Market != "" && hint.Market != asset.Market) || (hint.AssetClass != "" && hint.AssetClass != asset.Class) {
 			continue
 		}
@@ -520,6 +530,9 @@ func validateMappingHint(hint mappingHint, source string, newsItems []newsRecord
 		}
 		resolved = append(resolved, asset)
 	}
+	if !hasCanonicalIdentity && len(resolved) != 1 {
+		return nil
+	}
 	result := make([]any, 0, len(resolved))
 	for _, asset := range resolved {
 		relationship, relevance, confidence, basis := hint.Relationship, hint.Confidence, hint.Confidence, []string{"llm_source_mention", "provider_master"}
@@ -530,6 +543,23 @@ func validateMappingHint(hint mappingHint, source string, newsItems []newsRecord
 		result = append(result, mappingCandidate(asset, relationship, relevance, confidence, hint.Rationale, basis))
 	}
 	return result
+}
+
+func mappingHintMatchesAssetIdentity(hint mappingHint, asset mappingAsset) bool {
+	hints := []string{hint.AssetID, hint.Symbol, hint.Name}
+	identities := append([]string{asset.ID, asset.Symbol, asset.Name}, asset.Aliases...)
+	for _, candidate := range hints {
+		candidate = normalizedText(candidate)
+		if candidate == "" {
+			continue
+		}
+		for _, identity := range identities {
+			if candidate == normalizedText(identity) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func mappingNewsAssetAllowed(newsItems []newsRecord, asset mappingAsset) bool {

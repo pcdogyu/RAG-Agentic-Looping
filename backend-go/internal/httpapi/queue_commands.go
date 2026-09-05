@@ -581,6 +581,9 @@ func cancelResearchPayload(payload map[string]any, previous string) {
 		payload["completed_at"] = stamp
 	}
 	payload["analysis_steps"] = append(anySlice(payload["analysis_steps"]), analysisStep("research_cancelled", "cancelled", "admin-api", "用户取消了当前研究任务。", map[string]any{"previous_status": previous}))
+	if fullResearchActive(payload) {
+		payload["analysis_steps"] = append(anySlice(payload["analysis_steps"]), analysisStep("full_event_research", "cancelled", "admin-api", "用户取消了完整重新研究任务，原研报保持不变。", map[string]any{"previous_status": previous}))
+	}
 }
 
 func (s *Server) cancelGoQueue(ctx context.Context, queue string) int64 {
