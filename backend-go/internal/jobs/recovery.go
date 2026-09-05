@@ -155,9 +155,17 @@ func (runtime *recoveryRuntime) requeueResearch(ctx context.Context, candidate q
 		taskType, priority = researchEventTask, 1
 		args = []any{candidate.EventID.String(), candidate.ID.String()}
 	}
+	profile := stringValue(candidate.Payload["research_profile"])
+	if profile != researchProfileDeep {
+		profile = researchProfileFast
+	}
+	routeReason := fallbackString(stringValue(candidate.Payload["route_reason"]), "recovery_preserved")
 	actualID, err := runtime.store.Enqueue(ctx, EnqueueParams{
 		ID: taskID, Queue: "research", TaskType: taskType,
-		Payload:  taskEnvelope{Args: args, Kwargs: map[string]any{"model_instance_id": instanceID}},
+		Payload: taskEnvelope{Args: args, Kwargs: map[string]any{
+			"model_instance_id": instanceID, "research_profile": profile, "route_reason": routeReason,
+			"matched_whitelist_keywords": stringSlice(candidate.Payload["matched_whitelist_keywords"]),
+		}},
 		Priority: priority, MaxAttempts: 3, DedupeKey: "research-run:" + candidate.ID.String(),
 	})
 	if err != nil {

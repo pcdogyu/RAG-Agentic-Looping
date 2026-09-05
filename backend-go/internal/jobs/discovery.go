@@ -25,6 +25,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/config"
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/sourcefilter"
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/text/unicode/norm"
 )
@@ -908,14 +909,8 @@ func restoreTruncatedMCPHeadline(title, content, adapter string) string {
 	return discoveryHeadline(content, 120)
 }
 
-type sourceFilterConfig struct {
-	Enabled   bool
-	Whitelist []string
-	Blacklist []string
-}
-
 func (runtime *discoveryRuntime) filterNews(ctx context.Context, items []discoveredNews) ([]discoveredNews, int, error) {
-	configValue := sourceFilterConfig{Enabled: true, Blacklist: []string{"天气"}}
+	configValue := sourcefilter.Config{Enabled: true, Blacklist: []string{"天气"}}
 	var body []byte
 	err := runtime.db.QueryRow(ctx, `SELECT payload::jsonb FROM integration_settings WHERE key='source-filter'`).Scan(&body)
 	if err == nil {
@@ -931,46 +926,26 @@ func (runtime *discoveryRuntime) filterNews(ctx context.Context, items []discove
 	accepted := make([]discoveredNews, 0, len(items))
 	filtered := 0
 	for _, item := range items {
-		allowed, keyword := evaluateDiscoveryTitle(item.Title, configValue)
-		if allowed {
-			accepted = append(accepted, item)
+		decision := sourcefilter.Evaluate(item.Title, configValue)
+		if decision.Blocked {
+			filtered++
+			keyword := strings.Join(decision.MatchedBlacklist, ", ")
+			_, err = runtime.db.Exec(ctx, `INSERT INTO news_filter_logs(id,content_hash,source,title,url,matched_keyword,published_at,first_filtered_at,last_filtered_at,hit_count) VALUES($1,$2,$3,$4,$5,$6,$7,now(),now(),1) ON CONFLICT(content_hash) DO UPDATE SET last_filtered_at=now(),hit_count=news_filter_logs.hit_count+1,matched_keyword=excluded.matched_keyword`, uuid.New(), item.ContentHash, item.Source, item.Title, item.URL, keyword, item.PublishedAt)
+			if err != nil {
+				return nil, filtered, err
+			}
 			continue
 		}
-		filtered++
-		_, err = runtime.db.Exec(ctx, `INSERT INTO news_filter_logs(id,content_hash,source,title,url,matched_keyword,published_at,first_filtered_at,last_filtered_at,hit_count) VALUES($1,$2,$3,$4,$5,$6,$7,now(),now(),1) ON CONFLICT(content_hash) DO UPDATE SET last_filtered_at=now(),hit_count=news_filter_logs.hit_count+1,matched_keyword=excluded.matched_keyword`, uuid.New(), item.ContentHash, item.Source, item.Title, item.URL, keyword, item.PublishedAt)
-		if err != nil {
-			return nil, filtered, err
+		if item.Metadata == nil {
+			item.Metadata = map[string]any{}
 		}
+		item.Metadata["research_profile"] = decision.Profile
+		item.Metadata["source_filter_rule_version"] = sourcefilter.RuleVersion
+		item.Metadata["matched_whitelist_keywords"] = decision.MatchedWhitelist
+		accepted = append(accepted, item)
 	}
 	_, err = runtime.db.Exec(ctx, `DELETE FROM news_filter_logs WHERE last_filtered_at < now()-interval '30 days'; DELETE FROM news_filter_logs WHERE id IN (SELECT id FROM news_filter_logs ORDER BY last_filtered_at DESC,id DESC OFFSET 5000)`)
 	return accepted, filtered, err
-}
-
-func evaluateDiscoveryTitle(title string, cfg sourceFilterConfig) (bool, string) {
-	if !cfg.Enabled {
-		return true, ""
-	}
-	candidate := discoveryMatchText(title)
-	whitelist := ""
-	for _, keyword := range cfg.Whitelist {
-		if normalized := discoveryMatchText(keyword); normalized != "" && strings.Contains(candidate, normalized) {
-			whitelist = keyword
-			break
-		}
-	}
-	for _, keyword := range cfg.Blacklist {
-		if normalized := discoveryMatchText(keyword); normalized != "" && strings.Contains(candidate, normalized) {
-			return false, keyword
-		}
-	}
-	if whitelist != "" {
-		return true, whitelist
-	}
-	return false, "未命中白名单"
-}
-
-func discoveryMatchText(value string) string {
-	return strings.ToLower(strings.TrimSpace(norm.NFKC.String(value)))
 }
 
 func (runtime *discoveryRuntime) sourceWatermarks(ctx context.Context) (map[string]time.Time, error) {

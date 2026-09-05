@@ -730,6 +730,7 @@ func (runtime *outcomeRuntime) enqueueMarketFactorResearch(ctx context.Context, 
 
 	shared := &ExtractRuntime{cfg: runtime.cfg, db: runtime.db, redis: runtime.redis, client: runtime.client}
 	instanceID := shared.selectDownstreamInstance(ctx, "research", len(runtime.cfg.ResearchURLs))
+	profile, routeReason, matchedKeywords := eventResearchProfile(event, false)
 	runID, taskID := uuid.New(), uuid.New()
 	steps := append([]any{}, anySlice(event["analysis_steps"])...)
 	steps = append(steps,
@@ -739,7 +740,7 @@ func (runtime *outcomeRuntime) enqueueMarketFactorResearch(ctx context.Context, 
 	run := map[string]any{
 		"id": runID.String(), "event_id": eventID, "trigger_event_ids": []any{eventID}, "asset": asset, "status": "queued",
 		"as_of": iso(now), "historical_replay": false, "retry_of_run_id": nil, "retry_attempt": 0,
-		"celery_task_id": taskID.String(), "model_instance_id": instanceID, "coalesced_into_run_id": nil, "retryable_reason": nil,
+		"celery_task_id": taskID.String(), "model_instance_id": instanceID, "research_profile": profile, "route_reason": routeReason, "matched_whitelist_keywords": matchedKeywords, "escalated_to_deep": false, "waiting_for_deep_slot": false, "coalesced_into_run_id": nil, "retryable_reason": nil,
 		"verification_round": 0, "missing_requirements": []any{}, "contradictions": []any{}, "evidence": []any{},
 		"recommendation": nil, "error": nil, "analysis_steps": steps, "created_at": iso(now), "started_at": nil, "completed_at": nil, "updated_at": iso(now),
 	}
@@ -747,7 +748,7 @@ func (runtime *outcomeRuntime) enqueueMarketFactorResearch(ctx context.Context, 
 	if _, err := tx.Exec(ctx, `INSERT INTO research_runs(id,event_id,asset_id,status,payload,created_at,updated_at) VALUES($1,$2,$3,'queued',$4,$5,$5)`, runID, eventUUID, assetID, runBody, now); err != nil {
 		return false, "", err
 	}
-	jobBody, _ := json.Marshal(map[string]any{"args": []any{assetID, eventID, runID.String()}, "kwargs": map[string]any{"model_instance_id": instanceID}})
+	jobBody, _ := json.Marshal(map[string]any{"args": []any{assetID, eventID, runID.String()}, "kwargs": map[string]any{"model_instance_id": instanceID, "research_profile": profile, "route_reason": routeReason, "matched_whitelist_keywords": matchedKeywords}})
 	if _, err := tx.Exec(ctx, `INSERT INTO go_jobs(id,queue,task_type,payload,status,priority,max_attempts,available_at,dedupe_key,created_at,updated_at) VALUES($1,'research',$2,$3,'queued',3,3,now(),$4,now(),now())`, taskID, researchAssetTask, jobBody, "research-run:"+runID.String()); err != nil {
 		return false, "", err
 	}

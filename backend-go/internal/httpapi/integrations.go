@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/jobs"
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/sourcefilter"
 )
 
 type sourceFilterInput struct {
@@ -22,9 +24,12 @@ func defaultSourceFilter() map[string]any {
 	return map[string]any{"enabled": true, "whitelist_keywords": []string{}, "blacklist_keywords": []string{"天气"}}
 }
 
-func (s *Server) sourceFilter(w http.ResponseWriter, r *http.Request) { s.writeSourceFilter(w, r) }
+func (s *Server) sourceFilter(w http.ResponseWriter, r *http.Request) { s.writeSourceFilter(w, r, nil) }
 
-func (s *Server) writeSourceFilter(w http.ResponseWriter, r *http.Request) {
+func (s *Server) writeSourceFilter(w http.ResponseWriter, r *http.Request, warnings []sourcefilter.NormalizationWarning) {
+	if warnings == nil {
+		warnings = []sourcefilter.NormalizationWarning{}
+	}
 	payload := defaultSourceFilter()
 	var body []byte
 	var updated *time.Time
@@ -44,6 +49,15 @@ func (s *Server) writeSourceFilter(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	payload["retained_log_count"], payload["last_filtered_at"], payload["updated_at"] = count, timeOrNil(last), timeOrNil(updated)
+	payload["mode"], payload["default_research_profile"], payload["rule_version"] = "research_routing", "fast", sourcefilter.RuleVersion
+	payload["normalization_warnings"] = warnings
+	var fast, deep, blocked int
+	_ = s.db.QueryRow(r.Context(), `SELECT
+		count(*) FILTER (WHERE coalesce(raw_metadata::jsonb->>'research_profile','fast')='fast')::int,
+		count(*) FILTER (WHERE raw_metadata::jsonb->>'research_profile'='deep')::int
+		FROM news_items WHERE published_at>now()-interval '24 hours'`).Scan(&fast, &deep)
+	_ = s.db.QueryRow(r.Context(), `SELECT count(*)::int FROM news_filter_logs WHERE last_filtered_at>now()-interval '24 hours' AND matched_keyword<>'未命中白名单'`).Scan(&blocked)
+	payload["routing_stats"] = map[string]int{"fast_24h": fast, "deep_24h": deep, "blocked_24h": blocked}
 	writeJSON(w, http.StatusOK, payload)
 }
 
@@ -58,20 +72,15 @@ func (s *Server) updateSourceFilter(w http.ResponseWriter, r *http.Request) {
 	}
 	whitelist, blacklist := []string{}, []string{"天气"}
 	if input.WhitelistKeywords != nil {
-		whitelist = normalizeKeywords(*input.WhitelistKeywords)
+		whitelist = *input.WhitelistKeywords
 	}
 	if input.BlacklistKeywords != nil {
-		blacklist = normalizeKeywords(*input.BlacklistKeywords)
+		blacklist = *input.BlacklistKeywords
 	}
-	if len(whitelist) > 200 || len(blacklist) > 200 {
-		writeError(w, 422, "keyword lists must not exceed 200 items")
+	whitelist, blacklist, issues, warnings := sourcefilter.NormalizeLists(whitelist, blacklist)
+	if len(issues) > 0 {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"detail": "source filter validation failed", "errors": issues})
 		return
-	}
-	for _, value := range append(append([]string{}, whitelist...), blacklist...) {
-		if len([]rune(value)) > 80 {
-			writeError(w, 422, "keywords must not exceed 80 characters")
-			return
-		}
 	}
 	body, _ := json.Marshal(map[string]any{"enabled": enabled, "whitelist_keywords": whitelist, "blacklist_keywords": blacklist})
 	_, err := s.db.Exec(r.Context(), `INSERT INTO integration_settings(key,payload,updated_at) VALUES('source-filter',$1,now()) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload,updated_at=now()`, body)
@@ -79,7 +88,11 @@ func (s *Server) updateSourceFilter(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "source filter update failed")
 		return
 	}
-	s.writeSourceFilter(w, r)
+	if _, err := jobs.ReclassifyQueuedResearchProfiles(r.Context(), s.db); err != nil {
+		writeError(w, http.StatusInternalServerError, "source filter saved but queued research reclassification failed")
+		return
+	}
+	s.writeSourceFilter(w, r, warnings)
 }
 
 func (s *Server) resetSourceFilter(w http.ResponseWriter, r *http.Request) {
@@ -87,7 +100,11 @@ func (s *Server) resetSourceFilter(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "source filter reset failed")
 		return
 	}
-	s.writeSourceFilter(w, r)
+	if _, err := jobs.ReclassifyQueuedResearchProfiles(r.Context(), s.db); err != nil {
+		writeError(w, http.StatusInternalServerError, "source filter reset but queued research reclassification failed")
+		return
+	}
+	s.writeSourceFilter(w, r, nil)
 }
 
 func (s *Server) sourceFilterLogs(w http.ResponseWriter, r *http.Request) {

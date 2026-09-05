@@ -707,7 +707,7 @@ describe("shared hash navigation", () => {
     expect(queueMarkup).toContain('href="#/queue" aria-current="page"');
     expect(analysisMarkup).toContain('href="#/analysis" aria-current="page"');
     expect(targetsMarkup).toContain('href="#/targets" aria-current="page"');
-    expect(markup.indexOf("数据源过滤")).toBeLessThan(markup.indexOf(">数据源<"));
+    expect(markup.indexOf("新闻准入与分流")).toBeLessThan(markup.indexOf(">数据源<"));
     expect(markup.indexOf(">数据源<")).toBeLessThan(markup.indexOf(">新闻<"));
     expect(markup.indexOf(">新闻<")).toBeLessThan(markup.indexOf(">队列<"));
     expect(markup.indexOf(">队列<")).toBeLessThan(markup.indexOf("分析链路"));
@@ -1478,7 +1478,7 @@ describe("research queue page", () => {
   it("uses one shared research panel with global backlog and live instance slots", () => {
     const researchQueue = overviewQueue({
       id: "research", model: "qwen3:4b-thinking", purpose: "标的研究",
-      capacity: 4, available: 0, instance_count: 4, per_instance_concurrency: 1,
+      capacity: 4, deep_capacity: 1, available: 0, instance_count: 4, per_instance_concurrency: 1,
       counts: { queued: 3262, running: 4, retrying: 817, verifying: 0, waiting_for_model: 0, completed: 245, failed: 0 },
       instances: [
         { id: "research-0", healthy: true, model_available: true, capacity: 1, available: 0, counts: { queued: 0, running: 1, retrying: 0, verifying: 0, waiting_for_model: 0, completed: 0, failed: 0 } },
@@ -1497,7 +1497,24 @@ describe("research queue page", () => {
     expect(markup).toContain("待处理<strong>3262</strong>");
     expect(markup).toContain("重试/验证<strong>817</strong>");
     expect(markup).toContain("近24h完成/失败<strong>245/0</strong>");
+    expect(markup).toContain("总/深度并发<strong>4 / 1</strong>");
     expect(markup).toContain("research-3 · 运行 1 · 槽位 0/1");
+  });
+
+  it("labels fast, thinking, escalation, and deep-slot waiting research tasks", () => {
+    const baseTask = {
+      task_id: "research-fast", kind: "event_research", entity_id: "event-1", title: "Fast event", subtitle: "other",
+      source: "automatic", status: "running", attempt: 1, task_count: 1, queued_at: "2026-09-05T00:00:00Z",
+      started_at: "2026-09-05T00:00:01Z", completed_at: null, updated_at: "2026-09-05T00:00:02Z",
+      queue_duration_ms: 1000, execution_duration_ms: 1000, error: null, metrics: {},
+    } satisfies ModelQueueTask;
+    const queue = overviewQueue({ id: "research", purpose: "标的研究", tasks: [
+      { ...baseTask, research_profile: "fast" },
+      { ...baseTask, task_id: "research-deep", title: "Deep event", research_profile: "deep", waiting_for_deep_slot: true, escalated_to_deep: true },
+    ] });
+    const markup = renderToStaticMarkup(createElement(ModelQueueTaskGrid, { queue }));
+    expect(markup).toContain(">快速<");
+    expect(markup).toContain("等待深度槽 · 快速失败后升级");
   });
 
   it("shows the default-off 48h retry filter only for assist and sends its value", () => {

@@ -65,6 +65,7 @@ type newsRecord struct {
 	ObservedAt    time.Time
 	AsOf          time.Time
 	Symbols       []string
+	Metadata      map[string]any
 }
 
 type extractedEvent struct {
@@ -444,16 +445,17 @@ func decodeTaskEnvelope(payload json.RawMessage) (taskEnvelope, error) {
 
 func (runtime *ExtractRuntime) loadNews(ctx context.Context, id uuid.UUID) (newsRecord, error) {
 	var result newsRecord
-	var symbols []byte
-	err := runtime.db.QueryRow(ctx, `SELECT id,source,source_quality,title,summary,url,language,published_at,observed_at,as_of,symbols::jsonb FROM news_items WHERE id=$1`, id).Scan(
+	var symbols, metadata []byte
+	err := runtime.db.QueryRow(ctx, `SELECT id,source,source_quality,title,summary,url,language,published_at,observed_at,as_of,symbols::jsonb,raw_metadata::jsonb FROM news_items WHERE id=$1`, id).Scan(
 		&result.ID, &result.Source, &result.SourceQuality, &result.Title, &result.Summary, &result.URL, &result.Language,
-		&result.PublishedAt, &result.ObservedAt, &result.AsOf, &symbols,
+		&result.PublishedAt, &result.ObservedAt, &result.AsOf, &symbols, &metadata,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return result, fmt.Errorf("unknown news item: %s", id)
 	}
 	if err == nil {
 		_ = json.Unmarshal(symbols, &result.Symbols)
+		_ = json.Unmarshal(metadata, &result.Metadata)
 	}
 	return result, err
 }
@@ -528,6 +530,10 @@ func (runtime *ExtractRuntime) extractEvent(ctx context.Context, news newsRecord
 		"source_quality": news.SourceQuality, "published_at": iso(news.PublishedAt), "observed_at": iso(news.ObservedAt),
 		"as_of": iso(news.AsOf), "candidates": assets, "industry_ids": industries,
 		"novelty": extracted.Novelty, "priority": math.Min(1, extracted.Priority*quality), "analysis_steps": steps,
+		"research_profile":           fallbackString(stringValue(news.Metadata["research_profile"]), "fast"),
+		"research_route_reason":      ternaryString(stringValue(news.Metadata["research_profile"]) == "deep", "whitelist_match", "default_fast"),
+		"matched_whitelist_keywords": stringSlice(news.Metadata["matched_whitelist_keywords"]),
+		"source_filter_rule_version": fallbackString(stringValue(news.Metadata["source_filter_rule_version"]), "research-routing-v1"),
 	}, fallback, nil
 }
 
@@ -1009,21 +1015,30 @@ func (runtime *ExtractRuntime) enqueueEventResearch(ctx context.Context, event m
 		return false, err
 	}
 	var existing uuid.UUID
-	if err := runtime.db.QueryRow(ctx, `SELECT id FROM event_research_runs WHERE event_id=$1`, event["id"]).Scan(&existing); err == nil {
+	var existingTaskID string
+	if err := runtime.db.QueryRow(ctx, `SELECT id,coalesce(payload::jsonb->>'celery_task_id','') FROM event_research_runs WHERE event_id=$1`, event["id"]).Scan(&existing, &existingTaskID); err == nil {
+		if profile, _, matched := eventResearchProfile(event, false); profile == researchProfileDeep {
+			matchedBody, _ := json.Marshal(matched)
+			_, _ = runtime.db.Exec(ctx, `UPDATE event_research_runs SET payload=(payload::jsonb || jsonb_build_object('research_profile','deep','route_reason','whitelist_match','matched_whitelist_keywords',$2::jsonb))::json,updated_at=now() WHERE id=$1 AND status IN ('queued','retrying')`, existing, matchedBody)
+			if existingTaskID != "" {
+				_, _ = runtime.db.Exec(ctx, `UPDATE go_jobs SET payload=jsonb_set(jsonb_set(jsonb_set(payload::jsonb,'{kwargs,research_profile}','"deep"'::jsonb,true),'{kwargs,route_reason}','"whitelist_match"'::jsonb,true),'{kwargs,matched_whitelist_keywords}',$2::jsonb,true)::json,updated_at=now() WHERE id=$1 AND status IN ('queued','retrying')`, existingTaskID, matchedBody)
+			}
+		}
 		return false, nil
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return false, err
 	}
 	runID, taskID := uuid.New(), uuid.NewString()
 	instanceID := runtime.selectDownstreamInstance(ctx, "research", len(runtime.cfg.ResearchURLs))
+	profile, routeReason, matchedKeywords := eventResearchProfile(event, false)
 	steps := append([]any{}, anySlice(event["analysis_steps"])...)
-	steps = append(steps, analysisStep("event_research_queue", "queued", "go-worker", "已创建事实框架与逐目标宏观传导研报任务。", map[string]any{"instance_id": instanceID, "priority": 1}))
+	steps = append(steps, analysisStep("event_research_queue", "queued", "go-worker", "已创建事实框架与逐目标宏观传导研报任务。", map[string]any{"instance_id": instanceID, "priority": 1, "research_profile": profile, "route_reason": routeReason, "matched_whitelist_keywords": matchedKeywords}))
 	now := time.Now().UTC()
 	asOf := parseTime(event["as_of"])
 	if observed := parseTime(event["observed_at"]); observed.After(asOf) {
 		asOf = observed
 	}
-	payload := map[string]any{"id": runID, "event_id": event["id"], "status": "queued", "as_of": iso(asOf), "historical_replay": false, "filter_recent_research": filterRecentResearch, "news_age_filter_bypass": false, "verification_round": 0, "retry_count": 0, "celery_task_id": taskID, "model_instance_id": instanceID, "retryable_reason": nil, "missing_requirements": []any{}, "contradictions": []any{}, "evidence": []any{}, "report": nil, "report_history": []any{}, "error": nil, "analysis_steps": steps, "created_at": iso(now), "updated_at": iso(now)}
+	payload := map[string]any{"id": runID, "event_id": event["id"], "status": "queued", "as_of": iso(asOf), "historical_replay": false, "filter_recent_research": filterRecentResearch, "news_age_filter_bypass": false, "verification_round": 0, "retry_count": 0, "celery_task_id": taskID, "model_instance_id": instanceID, "research_profile": profile, "route_reason": routeReason, "matched_whitelist_keywords": matchedKeywords, "escalated_to_deep": false, "waiting_for_deep_slot": false, "retryable_reason": nil, "missing_requirements": []any{}, "contradictions": []any{}, "evidence": []any{}, "report": nil, "report_history": []any{}, "error": nil, "analysis_steps": steps, "created_at": iso(now), "updated_at": iso(now)}
 	body, _ := json.Marshal(payload)
 	inserted, err := runtime.db.Exec(ctx, `INSERT INTO event_research_runs(id,event_id,status,payload,created_at,updated_at) VALUES($1,$2,'queued',$3,$4,$4) ON CONFLICT(event_id) DO NOTHING`, runID, event["id"], body, now)
 	if err != nil {
@@ -1032,7 +1047,7 @@ func (runtime *ExtractRuntime) enqueueEventResearch(ctx context.Context, event m
 	if inserted.RowsAffected() == 0 {
 		return false, nil
 	}
-	kwargs := map[string]any{"model_instance_id": instanceID, "filter_recent_research": filterRecentResearch}
+	kwargs := map[string]any{"model_instance_id": instanceID, "filter_recent_research": filterRecentResearch, "research_profile": profile, "route_reason": routeReason, "matched_whitelist_keywords": matchedKeywords}
 	_, queueErr := NewStore(runtime.db).Enqueue(ctx, EnqueueParams{ID: uuid.MustParse(taskID), Queue: "research", TaskType: researchEventTask, Payload: map[string]any{"args": []any{stringValue(event["id"]), runID.String()}, "kwargs": kwargs}, Priority: 1, MaxAttempts: 3, DedupeKey: "research-run:" + runID.String()})
 	if queueErr != nil {
 		payload["status"], payload["error"] = "failed", "event research queue failed"
@@ -1173,6 +1188,8 @@ func rebuildEvent(event map[string]any, extracted []map[string]any, missing int)
 	entities, actions, steps := []string{}, []any{}, []any{}
 	seenActions := map[string]bool{}
 	priority, novelty := 0.0, 1.0
+	researchProfile := "fast"
+	matchedWhitelist := []string{}
 	published, observed, asOf := parseTime(lead["published_at"]), parseTime(lead["observed_at"]), parseTime(lead["as_of"])
 	quality := stringValue(lead["source_quality"])
 	for _, item := range extracted {
@@ -1194,6 +1211,10 @@ func rebuildEvent(event map[string]any, extracted []map[string]any, missing int)
 		if qualityRank(stringValue(item["source_quality"])) > qualityRank(quality) {
 			quality = stringValue(item["source_quality"])
 		}
+		if stringValue(item["research_profile"]) == "deep" {
+			researchProfile = "deep"
+		}
+		matchedWhitelist = uniqueStrings(append(matchedWhitelist, stringSlice(item["matched_whitelist_keywords"])...))
 	}
 	if len(actions) > 3 {
 		actions = actions[:3]
@@ -1202,6 +1223,8 @@ func rebuildEvent(event map[string]any, extracted []map[string]any, missing int)
 	event["direct_impact"], event["horizon_days"], event["source_quality"] = lead["direct_impact"], lead["horizon_days"], quality
 	event["published_at"], event["observed_at"], event["as_of"] = iso(published), iso(observed), iso(asOf)
 	event["candidates"], event["industry_ids"], event["novelty"], event["priority"] = []any{}, []any{}, novelty, priority
+	event["research_profile"], event["research_route_reason"] = researchProfile, ternaryString(researchProfile == "deep", "whitelist_match", "default_fast")
+	event["matched_whitelist_keywords"] = matchedWhitelist
 	event["analysis_steps"] = append(anySlice(event["analysis_steps"]), steps...)
 	appendAnalysisStep(event, analysisStep("full_event_reextraction", "completed", "event-refresh:go-v1", fmt.Sprintf("已从 %d 篇关联新闻重新抽取事件事实，缺失 %d 篇。", len(extracted), missing), map[string]any{"available_news_count": len(extracted), "missing_news_count": missing}))
 }
@@ -1230,6 +1253,12 @@ func mergeEvent(existing, fresh map[string]any, news newsRecord) {
 	existing["published_at"] = iso(minTime(parseTime(existing["published_at"]), parseTime(fresh["published_at"])))
 	existing["observed_at"] = iso(minTime(parseTime(existing["observed_at"]), parseTime(fresh["observed_at"])))
 	existing["as_of"] = iso(maxTime(parseTime(existing["as_of"]), parseTime(fresh["as_of"])))
+	if stringValue(existing["research_profile"]) == "deep" || stringValue(fresh["research_profile"]) == "deep" {
+		existing["research_profile"], existing["research_route_reason"] = "deep", "whitelist_match"
+	} else {
+		existing["research_profile"], existing["research_route_reason"] = "fast", "default_fast"
+	}
+	existing["matched_whitelist_keywords"] = uniqueStrings(append(stringSlice(existing["matched_whitelist_keywords"]), stringSlice(fresh["matched_whitelist_keywords"])...))
 	appendAnalysisStep(existing, analysisStep("story_clustering", "completed", "persistent-event-cluster:go-v1", fmt.Sprintf("事件簇 %s 已持久化，当前包含 %d 篇新闻。", stringValue(existing["id"]), len(stringSlice(existing["news_item_ids"]))), map[string]any{"cluster_id": existing["id"], "member_count": len(stringSlice(existing["news_item_ids"])), "latest_source_group": news.Source}))
 }
 

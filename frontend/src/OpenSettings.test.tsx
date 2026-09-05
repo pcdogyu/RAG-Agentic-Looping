@@ -36,6 +36,7 @@ import {
   SourceFilterPage,
   SourceFilterAuditRow,
   sourceFilterRescanPath,
+  validateFilterKeywords,
   SourcesPage,
   type McpSource,
   type Recommendation,
@@ -695,14 +696,13 @@ describe("open source and search settings", () => {
   it("shows public source-filter defaults and editing guidance", () => {
     const markup = renderToStaticMarkup(createElement(SourceFilterPage, { apiBase: "" }));
 
-    expect(markup).toContain("数据源过滤");
-    expect(markup).toContain("启用新闻标题过滤");
+    expect(markup).toContain("新闻准入与研究分流");
+    expect(markup).toContain("启用新闻标题准入与分流");
     expect(markup).toContain("白名单关键字");
     expect(markup).toContain("黑名单关键字");
     expect(markup).toContain("天气");
-    expect(markup).toContain("命中才允许进入 3B");
-    expect(markup).toContain("命中即禁止进入 3B");
-    expect(markup).toContain("黑名单拥有否决权");
+    expect(markup).toContain("命中白名单");
+    expect(markup).toContain("黑名单优先");
     expect(markup).not.toContain("管理员令牌");
   });
 
@@ -710,6 +710,16 @@ describe("open source and search settings", () => {
     expect(parseFilterKeywords(" 天气, WEATHER，weather\n公告 ")).toEqual([
       "天气", "WEATHER", "公告",
     ]);
+  });
+
+  it("validates NFKC duplicates and cross-list conflicts before saving", () => {
+    const normalized = validateFilterKeywords("ＭＳ, ms, 苹果", "天气");
+    expect(normalized.whitelist).toEqual(["MS", "苹果"]);
+    expect(normalized.whitelistDuplicates).toBe(1);
+    expect(normalized.issues).toEqual([]);
+    const conflict = validateFilterKeywords("天气, AI", "天气");
+    expect(conflict.conflicts).toEqual(["天气"]);
+    expect(conflict.issues[0].code).toBe("cross_list_conflict");
   });
 
   it("offers rescan only for whitelist misses", () => {

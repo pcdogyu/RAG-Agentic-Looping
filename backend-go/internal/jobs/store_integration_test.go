@@ -64,6 +64,48 @@ func TestStoreLifecycleAgainstPostgres(t *testing.T) {
 	}
 }
 
+func TestClaimResearchUsesFastAndDeepPreferredLanesAgainstPostgres(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		dsn = os.Getenv("DATABASE_URL")
+	}
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL is not set")
+	}
+	dsn = strings.Replace(dsn, "postgresql+psycopg://", "postgresql://", 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err := migrate.Up(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(pool)
+	queue := "rt-" + uuid.NewString()[:8]
+	fastID, err := store.Enqueue(ctx, EnqueueParams{Queue: queue, TaskType: researchEventTask, Payload: taskEnvelope{Args: []any{"event", "run"}, Kwargs: map[string]any{"research_profile": "fast"}}, Priority: 1, MaxAttempts: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deepID, err := store.Enqueue(ctx, EnqueueParams{Queue: queue, TaskType: researchEventTask, Payload: taskEnvelope{Args: []any{"event", "run"}, Kwargs: map[string]any{"research_profile": "deep"}}, Priority: 1, MaxAttempts: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM go_jobs WHERE id=ANY($1)`, []uuid.UUID{fastID, deepID})
+	}()
+	fast, err := store.ClaimResearch(ctx, "fast-worker", []string{queue}, time.Minute, "fast")
+	if err != nil || fast.ID != fastID {
+		t.Fatalf("fast lane claimed %#v: %v", fast, err)
+	}
+	deep, err := store.ClaimResearch(ctx, "deep-worker", []string{queue}, time.Minute, "preferred")
+	if err != nil || deep.ID != deepID {
+		t.Fatalf("preferred lane claimed %#v: %v", deep, err)
+	}
+}
+
 func TestStoreCompletionClearsRetryError(t *testing.T) {
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {

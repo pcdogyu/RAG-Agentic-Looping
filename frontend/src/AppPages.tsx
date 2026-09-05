@@ -9,7 +9,7 @@ export type AppRoute = "home" | "source-filter" | "sources" | "asset-universe" |
 export const navigationGroups: Record<"left" | "right", Array<{ route: AppRoute; label: string }>> = {
   left: [
     { route: "home", label: "首页" },
-    { route: "source-filter", label: "数据源过滤" },
+    { route: "source-filter", label: "新闻准入与分流" },
     { route: "sources", label: "数据源" },
     { route: "news", label: "新闻" },
     { route: "queue", label: "队列" },
@@ -204,6 +204,10 @@ export type ModelQueueTask = {
   execution_duration_ms: number | null;
   error: string | null;
   metrics: Record<string, unknown>;
+  research_profile?: "fast" | "deep" | string;
+  route_reason?: string;
+  waiting_for_deep_slot?: boolean;
+  escalated_to_deep?: boolean;
 };
 
 type ModelQueueCounts = {
@@ -261,6 +265,7 @@ export type ModelQueueOverviewItem = {
   available: number;
   instance_count: number;
   per_instance_concurrency: number;
+  deep_capacity?: number;
   observable: boolean;
   instances: ModelQueueInstanceSummary[];
   counts: ModelQueueCounts;
@@ -530,6 +535,7 @@ export function ModelQueueTaskGrid({
       </div>
       <h4>{task.title}</h4>
       <p>{task.subtitle || task.kind}</p>
+      {queue.id === "research" && <div className="model-task-count">{task.waiting_for_deep_slot ? "等待深度槽" : task.research_profile === "deep" ? "Thinking" : "快速"}{task.escalated_to_deep ? " · 快速失败后升级" : ""}</div>}
       {task.task_count > 1 && <div className="model-task-count">合并 {task.task_count} 个任务</div>}
       {isMapping && <div className="model-task-results mapping-results">
         <span>提出<strong>{queueMetricValue(task.metrics.proposed_count)}</strong></span>
@@ -660,6 +666,7 @@ export function UnifiedModelQueuePanel({
       <span>模型等待<strong>{activeInstance.counts.waiting_for_model}</strong></span>
       <span>槽位<strong>{activeInstance.available}/{activeInstance.capacity}</strong></span>
       <span>实例并发<strong>{researchAggregate ? `${queue.instance_count} × ${queue.per_instance_concurrency}` : activeInstance.capacity} 路</strong></span>
+      {queue.id === "research" && <span>总/深度并发<strong>{queue.capacity} / {queue.deep_capacity ?? 1}</strong></span>}
       <span>CPU<strong>{queue.threads} 线程</strong></span>
       <span>最长等待<strong>{formatQueueDuration(activeInstance.metrics.longest_wait_ms)}</strong></span>
       <span>预计清空<strong>{formatQueueDuration(activeInstance.metrics.estimated_clear_ms)}</strong></span>
@@ -3082,6 +3089,11 @@ type SourceFilterConfig = {
   retained_log_count: number;
   last_filtered_at: string | null;
   updated_at: string | null;
+  mode?: string;
+  default_research_profile?: string;
+  rule_version?: string;
+  normalization_warnings?: Array<{ field: string; value: string; code: string; message: string }>;
+  routing_stats?: { fast_24h: number; deep_24h: number; blocked_24h: number };
 };
 
 type SourceFilterLog = {
@@ -3126,16 +3138,55 @@ const defaultSourceFilter: SourceFilterConfig = {
   retained_log_count: 0,
   last_filtered_at: null,
   updated_at: null,
+  routing_stats: { fast_24h: 0, deep_24h: 0, blocked_24h: 0 },
 };
 
-export function parseFilterKeywords(value: string) {
+type FilterKeywordIssue = { field: "whitelist_keywords" | "blacklist_keywords"; index: number; value: string; code: string; message: string };
+
+function normalizeFilterKeyword(value: string) {
+  return value.normalize("NFKC").trim().replace(/\s+/g, " ");
+}
+
+function analyzeKeywordList(value: string, field: FilterKeywordIssue["field"]) {
   const seen = new Set<string>();
-  return value.split(/[\r\n,，]+/).map((item) => item.trim()).filter((item) => {
+  const keywords: string[] = [];
+  const issues: FilterKeywordIssue[] = [];
+  let duplicates = 0;
+  value.split(/[\r\n,，]+/).forEach((raw, index) => {
+    const item = normalizeFilterKeyword(raw);
+    if (!item) return;
+    if (/[\u0000-\u001f\u007f-\u009f]/.test(item)) {
+      issues.push({ field, index, value: raw, code: "invalid_character", message: "关键字包含不可用的控制字符" });
+      return;
+    }
+    if (Array.from(item).length > 80) {
+      issues.push({ field, index, value: raw, code: "too_long", message: "关键字不能超过 80 个字符" });
+      return;
+    }
     const key = item.toLocaleLowerCase();
-    if (!item || seen.has(key)) return false;
+    if (seen.has(key)) { duplicates += 1; return; }
     seen.add(key);
-    return true;
+    keywords.push(item);
   });
+  if (keywords.length > 200) issues.push({ field, index: -1, value: "", code: "too_many", message: "每组关键字不能超过 200 个" });
+  return { keywords, issues, duplicates };
+}
+
+export function validateFilterKeywords(whitelist: string, blacklist: string) {
+  const white = analyzeKeywordList(whitelist, "whitelist_keywords");
+  const black = analyzeKeywordList(blacklist, "blacklist_keywords");
+  const blackKeys = new Set(black.keywords.map((item) => item.toLocaleLowerCase()));
+  const conflicts = white.keywords.filter((item) => blackKeys.has(item.toLocaleLowerCase()));
+  const issues = [...white.issues, ...black.issues];
+  conflicts.forEach((value, index) => {
+    issues.push({ field: "whitelist_keywords", index, value, code: "cross_list_conflict", message: `“${value}”同时存在于白名单和黑名单` });
+    issues.push({ field: "blacklist_keywords", index: black.keywords.findIndex((item) => item.toLocaleLowerCase() === value.toLocaleLowerCase()), value, code: "cross_list_conflict", message: `“${value}”同时存在于白名单和黑名单` });
+  });
+  return { whitelist: white.keywords, blacklist: black.keywords, whitelistDuplicates: white.duplicates, blacklistDuplicates: black.duplicates, conflicts, issues };
+}
+
+export function parseFilterKeywords(value: string) {
+  return analyzeKeywordList(value, "whitelist_keywords").keywords;
 }
 
 export function SourceFilterPage({ apiBase }: { apiBase: string }) {
@@ -3151,8 +3202,8 @@ export function SourceFilterPage({ apiBase }: { apiBase: string }) {
   function applyConfig(payload: SourceFilterConfig) {
     setConfig(payload);
     setEnabled(payload.enabled);
-    setWhitelist(payload.whitelist_keywords.join("\n"));
-    setBlacklist(payload.blacklist_keywords.join("\n"));
+    setWhitelist(payload.whitelist_keywords.join(", "));
+    setBlacklist(payload.blacklist_keywords.join(", "));
   }
   async function load() {
     setLoading(true);
@@ -3172,22 +3223,28 @@ export function SourceFilterPage({ apiBase }: { apiBase: string }) {
   useEffect(() => { load(); }, [apiBase]); // eslint-disable-line react-hooks/exhaustive-deps
   async function save(event: FormEvent) {
     event.preventDefault();
+    const validation = validateFilterKeywords(whitelist, blacklist);
+    if (validation.issues.length > 0) {
+      setMessage(validation.issues.map((item) => item.message).join("；"));
+      return;
+    }
     const response = await fetch(`${apiBase}/api/v1/source-filter`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         enabled,
-        whitelist_keywords: parseFilterKeywords(whitelist),
-        blacklist_keywords: parseFilterKeywords(blacklist),
+        whitelist_keywords: validation.whitelist,
+        blacklist_keywords: validation.blacklist,
       }),
     });
     const body = await response.json();
-    if (!response.ok) { setMessage(body.detail?.[0]?.msg || body.detail || "保存失败"); return; }
+    if (!response.ok) { setMessage(body.errors?.map((item: FilterKeywordIssue) => item.message).join("；") || body.detail?.[0]?.msg || body.detail || "保存失败"); return; }
     applyConfig(body as SourceFilterConfig);
-    setMessage("过滤规则已保存，将从下一轮新闻扫描开始生效。");
+    const cleaned = (body as SourceFilterConfig).normalization_warnings?.length || 0;
+    setMessage(`规则已保存，未领取研究任务已重新分类。${cleaned ? ` 已自动清理 ${cleaned} 个重复项。` : ""}`);
   }
   async function reset() {
-    if (!window.confirm("恢复默认过滤规则？白名单将清空，过滤保持启用，因此所有新新闻都会被忽略；黑名单恢复为“天气”。")) return;
+    if (!window.confirm("恢复默认规则？白名单将清空，所有非黑名单新闻使用快速研究；黑名单恢复为“天气”。")) return;
     const response = await fetch(`${apiBase}/api/v1/source-filter`, { method: "DELETE" });
     if (!response.ok) { setMessage("恢复默认失败。"); return; }
     applyConfig(await response.json() as SourceFilterConfig);
@@ -3217,25 +3274,30 @@ export function SourceFilterPage({ apiBase }: { apiBase: string }) {
       });
     }
   }
-  const whitelistCount = parseFilterKeywords(whitelist).length;
-  const blacklistCount = parseFilterKeywords(blacklist).length;
+  const validation = validateFilterKeywords(whitelist, blacklist);
+  const whitelistCount = validation.whitelist.length;
+  const blacklistCount = validation.blacklist.length;
+  const duplicateCount = validation.whitelistDuplicates + validation.blacklistDuplicates;
+  const hasErrors = validation.issues.length > 0;
   return <section className="app-page source-filter-page">
-    <PageHeading eyebrow="PRE-RESEARCH GATE" title="数据源过滤" copy="在新闻进入事件提取和研究队列前检查标题，减少与投资无关的模型调用。" />
+    <PageHeading eyebrow="NEWS ADMISSION & RESEARCH ROUTING" title="新闻准入与研究分流" copy="黑名单控制新闻准入；白名单只决定是否进入 Qwen3 4B Thinking 深度研究。" />
     <div className="filter-metrics">
       <div><span>过滤状态</span><strong className={enabled ? "enabled" : "disabled"}>{enabled ? "已启用" : "已关闭"}</strong></div>
-      <div><span>白名单</span><strong>{whitelistCount}</strong><small>命中才准入</small></div>
-      <div><span>黑名单</span><strong>{blacklistCount}</strong><small>命中即否决</small></div>
-      <div><span>保留记录</span><strong>{config.retained_log_count}</strong><small>最近 30 天</small></div>
+      <div><span>快速研究 / 24h</span><strong>{config.routing_stats?.fast_24h || 0}</strong><small>未命中白名单</small></div>
+      <div><span>Thinking / 24h</span><strong>{config.routing_stats?.deep_24h || 0}</strong><small>命中白名单</small></div>
+      <div><span>黑名单拦截 / 24h</span><strong>{config.routing_stats?.blocked_24h || 0}</strong><small>黑名单优先</small></div>
     </div>
     <form className="source-filter-form" onSubmit={save}>
-      <label className="filter-master-switch"><input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} /><span><strong>启用新闻标题过滤</strong><small>关闭后所有新标题均进入原有流程。</small></span></label>
+      <label className="filter-master-switch"><input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} /><span><strong>启用新闻标题准入与分流</strong><small>关闭后不拦截新闻，全部使用快速研究。</small></span></label>
       <div className="keyword-panels">
-        <label><span><strong>白名单关键字</strong><small>{whitelistCount} / 200 · 命中才允许进入 3B</small></span><textarea aria-label="白名单关键字" value={whitelist} placeholder="例如：苹果供应链" onChange={(e) => setWhitelist(e.target.value)} /></label>
-        <label><span><strong>黑名单关键字</strong><small>{blacklistCount} / 200 · 命中即禁止进入 3B</small></span><textarea aria-label="黑名单关键字" value={blacklist} placeholder="例如：天气" onChange={(e) => setBlacklist(e.target.value)} /></label>
+        <label className={validation.issues.some((item) => item.field === "whitelist_keywords") ? "invalid" : ""}><span><strong>白名单关键字</strong><small>{whitelistCount} / 200 · 重复 {validation.whitelistDuplicates} · 冲突 {validation.conflicts.length}</small></span><textarea aria-label="白名单关键字" aria-invalid={validation.issues.some((item) => item.field === "whitelist_keywords")} value={whitelist} placeholder="例如：苹果供应链, MS" onChange={(e) => setWhitelist(e.target.value)} /></label>
+        <label className={validation.issues.some((item) => item.field === "blacklist_keywords") ? "invalid" : ""}><span><strong>黑名单关键字</strong><small>{blacklistCount} / 200 · 重复 {validation.blacklistDuplicates} · 冲突 {validation.conflicts.length}</small></span><textarea aria-label="黑名单关键字" aria-invalid={validation.issues.some((item) => item.field === "blacklist_keywords")} value={blacklist} placeholder="例如：天气" onChange={(e) => setBlacklist(e.target.value)} /></label>
       </div>
-      <p className="filter-note">每行或逗号分隔一个关键字；忽略英文大小写，仅匹配新闻扫描标题。启用后必须命中白名单且不能命中黑名单，黑名单拥有否决权。</p>
-      {!loading && enabled && whitelistCount === 0 && <div className="page-error">白名单为空：所有新新闻都会被忽略，不会进入 3B。</div>}
-      <div className="card-actions"><button type="submit">保存规则</button><button type="button" onClick={load}>刷新</button><button type="button" className="danger" onClick={reset}>恢复默认</button></div>
+      <p className="filter-note">支持英文逗号、中文逗号和换行分隔；保存后统一显示为英文逗号加空格。短英文、数字和证券代码按完整边界匹配；同时命中时黑名单优先。</p>
+      {!loading && enabled && whitelistCount === 0 && <div className="page-message">白名单为空：所有非黑名单新闻使用快速研究。</div>}
+      {duplicateCount > 0 && <div className="page-message">检测到 {duplicateCount} 个重复项，保存时会自动去重。</div>}
+      {hasErrors && <div className="page-error">{validation.issues.map((item) => item.message).join("；")}</div>}
+      <div className="card-actions"><button type="submit" disabled={hasErrors}>保存规则</button><button type="button" onClick={load}>刷新</button><button type="button" className="danger" onClick={reset}>恢复默认</button></div>
     </form>
     {message && <div className={message.includes("失败") ? "page-error" : "page-message"}>{message}</div>}
     <section className="filter-audit" aria-labelledby="filter-audit-title">

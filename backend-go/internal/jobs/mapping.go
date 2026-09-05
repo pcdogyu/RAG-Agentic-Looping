@@ -913,6 +913,8 @@ func (runtime *ExtractRuntime) enqueueResearchAfterMapping(ctx context.Context, 
 	instanceID := runtime.selectDownstreamInstance(ctx, "research", len(runtime.cfg.ResearchURLs))
 	run["status"], run["as_of"], run["verification_round"] = "queued", iso(time.Now()), 0
 	run["filter_recent_research"] = filterRecentResearch
+	run["research_profile"], run["route_reason"], run["matched_whitelist_keywords"] = researchProfileDeep, "manual_research", []string{}
+	run["escalated_to_deep"], run["waiting_for_deep_slot"] = false, false
 	run["missing_requirements"], run["contradictions"], run["error"], run["retryable_reason"] = []any{}, []any{}, nil, nil
 	run["celery_task_id"], run["model_instance_id"], run["updated_at"] = taskID, instanceID, iso(time.Now())
 	appendAnalysisStep(run, analysisStep("forced_event_research_queue", "queued", "go-worker", "已保留当前事件研报，并创建完整事件重新调研任务。", map[string]any{"instance_id": instanceID, "priority": 1, "previous_status": previousStatus, "archived_report_count": len(anySlice(run["report_history"]))}))
@@ -920,7 +922,7 @@ func (runtime *ExtractRuntime) enqueueResearchAfterMapping(ctx context.Context, 
 	if _, err := runtime.db.Exec(ctx, `UPDATE event_research_runs SET status='queued',payload=$2,updated_at=now() WHERE id=$1`, runID, encoded); err != nil {
 		return "", "", err
 	}
-	kwargs := map[string]any{"model_instance_id": instanceID, "filter_recent_research": filterRecentResearch}
+	kwargs := map[string]any{"model_instance_id": instanceID, "filter_recent_research": filterRecentResearch, "research_profile": researchProfileDeep, "route_reason": "manual_research", "source": "manual"}
 	if forceWebSearch {
 		kwargs["force_web_search"] = true
 	}

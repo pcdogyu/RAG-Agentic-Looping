@@ -25,25 +25,29 @@ type nativeModelQueueSpec struct {
 }
 
 type nativeModelJob struct {
-	ID          string
-	TaskType    string
-	Status      string
-	Attempt     int
-	Error       string
-	CreatedAt   time.Time
-	AvailableAt time.Time
-	UpdatedAt   time.Time
-	StartedAt   *time.Time
-	AttemptAt   *time.Time
-	CompletedAt *time.Time
-	ExecutionMS int64
-	Kind        string
-	EntityID    string
-	Title       string
-	Subtitle    string
-	Source      string
-	InstanceID  string
-	RunID       string
+	ID              string
+	TaskType        string
+	Status          string
+	Attempt         int
+	Error           string
+	CreatedAt       time.Time
+	AvailableAt     time.Time
+	UpdatedAt       time.Time
+	StartedAt       *time.Time
+	AttemptAt       *time.Time
+	CompletedAt     *time.Time
+	ExecutionMS     int64
+	Kind            string
+	EntityID        string
+	Title           string
+	Subtitle        string
+	Source          string
+	InstanceID      string
+	RunID           string
+	ResearchProfile string
+	RouteReason     string
+	WaitingForDeep  bool
+	EscalatedToDeep bool
 }
 
 type nativeModelQueueResult struct {
@@ -179,7 +183,11 @@ func (s *Server) loadNativeModelJobs(ctx context.Context, queue string, cutoff t
 		         nullif(rr.payload->>'model_instance_id',''),
 		         nullif(j.payload#>>'{kwargs,model_instance_id}','')
 		       ) AS instance_id,
-		       coalesce(er.id::text,rr.id::text) AS run_id
+		       coalesce(er.id::text,rr.id::text) AS run_id,
+		       coalesce(nullif(er.payload->>'research_profile',''),nullif(rr.payload->>'research_profile',''),nullif(j.payload#>>'{kwargs,research_profile}',''),CASE WHEN j.task_type='market_loop.research_asset' THEN 'deep' ELSE 'fast' END) AS research_profile,
+		       coalesce(nullif(er.payload->>'route_reason',''),nullif(rr.payload->>'route_reason',''),nullif(j.payload#>>'{kwargs,route_reason}',''),'') AS route_reason,
+		       coalesce((er.payload->>'waiting_for_deep_slot')::boolean,(rr.payload->>'waiting_for_deep_slot')::boolean,false) AS waiting_for_deep_slot,
+		       coalesce((er.payload->>'escalated_to_deep')::boolean,(rr.payload->>'escalated_to_deep')::boolean,false) AS escalated_to_deep
 		FROM go_jobs j
 		LEFT JOIN event_research_runs er
 		  ON j.task_type='market_loop.research_event' AND er.id=j.payload->'args'->>1
@@ -210,6 +218,7 @@ func (s *Server) loadNativeModelJobs(ctx context.Context, queue string, cutoff t
 			&job.CreatedAt, &job.AvailableAt, &job.UpdatedAt, &job.StartedAt, &job.AttemptAt,
 			&job.CompletedAt, &job.ExecutionMS, &job.Kind,
 			&entityID, &title, &subtitle, &source, &instanceID, &runID,
+			&job.ResearchProfile, &job.RouteReason, &job.WaitingForDeep, &job.EscalatedToDeep,
 		); err != nil {
 			return nil, err
 		}
@@ -305,7 +314,8 @@ func nativeModelQueueItem(spec nativeModelQueueSpec, inference map[string]any, j
 		"enabled": spec.enabled, "state": nativeQueueState(counts, spec.enabled, boolValue(inference["observable"])),
 		"threads": modelThreads(spec.id), "capacity": int64Value(inference["capacity"]), "available": available,
 		"instance_count": len(instanceIDs), "per_instance_concurrency": int64Value(inference["per_instance_concurrency"]),
-		"observable": boolValue(inference["observable"]), "instances": instances,
+		"deep_capacity": int64Value(inference["deep_capacity"]),
+		"observable":    boolValue(inference["observable"]), "instances": instances,
 		"counts": counts, "metrics": metrics, "total_tasks": nativeCountedTasks(counts),
 		"truncated": len(visible) > limit, "tasks": nativeTaskValues(visible[:visibleLimit], now), "error": errorValue,
 	}
@@ -446,7 +456,9 @@ func nativeTaskValues(jobs []nativeModelJob, now time.Time) []any {
 			"source": nilIfEmpty(job.Source), "status": job.Status, "attempt": max(1, job.Attempt), "task_count": 1,
 			"queued_at": job.CreatedAt.UTC(), "started_at": startedAt, "completed_at": completedAt,
 			"updated_at": job.UpdatedAt.UTC(), "queue_duration_ms": queueDuration,
-			"execution_duration_ms": executionDuration, "error": errorValue, "metrics": map[string]any{},
+			"execution_duration_ms": executionDuration, "error": errorValue, "research_profile": job.ResearchProfile,
+			"route_reason": job.RouteReason, "waiting_for_deep_slot": job.WaitingForDeep, "escalated_to_deep": job.EscalatedToDeep,
+			"metrics": map[string]any{"research_profile": job.ResearchProfile, "route_reason": job.RouteReason, "waiting_for_deep_slot": job.WaitingForDeep, "escalated_to_deep": job.EscalatedToDeep},
 		})
 	}
 	return values

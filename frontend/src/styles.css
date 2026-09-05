@@ -411,6 +411,7 @@ h1 span { color: var(--mint); font-weight: 400; }
 .keyword-panels label strong { color: var(--text); font-size: 13px; }
 .keyword-panels textarea { min-height: 180px; padding: 12px; resize: vertical; border: 1px solid var(--line); border-radius: 8px; color: var(--text); background: var(--model-surface); font: 12px/1.7 "DM Mono", monospace; }
 .keyword-panels textarea:focus { outline: 1px solid var(--mint); border-color: var(--mint); }
+.keyword-panels label.invalid textarea { border-color: var(--red); outline-color: var(--red); }
 .filter-note { margin: 13px 0; color: var(--muted); font-size: 11px; line-height: 1.7; }
 .filter-audit { overflow: hidden; border: 1px solid var(--line); border-radius: 11px; background: var(--panel); }
 .filter-audit-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 17px 19px; border-bottom: 1px solid var(--line); }

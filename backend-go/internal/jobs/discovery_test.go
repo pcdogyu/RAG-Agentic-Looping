@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/config"
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/sourcefilter"
 )
 
 func TestDiscoveryHandlersCoverMigrationManifest(t *testing.T) {
@@ -46,17 +47,17 @@ func TestDiscoveryIntAcceptsJSONNumbers(t *testing.T) {
 }
 
 func TestDiscoveryTitleFilterSemantics(t *testing.T) {
-	cfg := sourceFilterConfig{Enabled: true, Whitelist: []string{"英伟达"}, Blacklist: []string{"天气"}}
-	if allowed, keyword := evaluateDiscoveryTitle("英伟达发布新产品", cfg); !allowed || keyword != "英伟达" {
-		t.Fatalf("whitelist was not accepted: allowed=%v keyword=%q", allowed, keyword)
+	cfg := sourcefilter.Config{Enabled: true, Whitelist: []string{"英伟达"}, Blacklist: []string{"天气"}}
+	if decision := sourcefilter.Evaluate("英伟达发布新产品", cfg); decision.Blocked || decision.Profile != "deep" {
+		t.Fatalf("whitelist was not routed deep: %#v", decision)
 	}
-	if allowed, keyword := evaluateDiscoveryTitle("英伟达天气影响", cfg); allowed || keyword != "天气" {
-		t.Fatalf("blacklist must override whitelist: allowed=%v keyword=%q", allowed, keyword)
+	if decision := sourcefilter.Evaluate("英伟达天气影响", cfg); !decision.Blocked || decision.Profile != "blocked" {
+		t.Fatalf("blacklist must override whitelist: %#v", decision)
 	}
-	if allowed, keyword := evaluateDiscoveryTitle("其他公司新闻", cfg); allowed || keyword != "未命中白名单" {
-		t.Fatalf("whitelist miss was not recorded: allowed=%v keyword=%q", allowed, keyword)
+	if decision := sourcefilter.Evaluate("其他公司新闻", cfg); decision.Blocked || decision.Profile != "fast" {
+		t.Fatalf("whitelist miss must remain admitted as fast research: %#v", decision)
 	}
-	if allowed, _ := evaluateDiscoveryTitle("ＮＶＩＤＩＡ", sourceFilterConfig{Enabled: true, Whitelist: []string{"nvidia"}}); !allowed {
+	if decision := sourcefilter.Evaluate("ＮＶＩＤＩＡ", sourcefilter.Config{Enabled: true, Whitelist: []string{"nvidia"}}); decision.Profile != "deep" {
 		t.Fatal("NFKC and case-fold matching must be preserved")
 	}
 }

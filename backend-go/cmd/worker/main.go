@@ -64,6 +64,14 @@ func main() {
 		slog.Error("migrate", "error", err)
 		os.Exit(1)
 	}
+	if lane.ID == "research" {
+		if updated, err := jobs.ReclassifyQueuedResearchProfiles(ctx, dependencies.DB); err != nil {
+			slog.Error("reclassify queued research profiles", "error", err)
+			os.Exit(1)
+		} else {
+			slog.Info("queued research profiles classified", "updated", updated)
+		}
+	}
 	handlers := handlerManifest
 	if lane.ID == "extract" {
 		handlers = jobs.NewExtractHandlers(cfg, dependencies.DB, dependencies.Redis)
@@ -90,7 +98,7 @@ func main() {
 	}
 	worker := &jobs.Worker{Store: jobs.NewStore(dependencies.DB), ID: cfg.WorkerID, Queues: []string{lane.GoQueue},
 		Lease: cfg.LeaseDuration, PollInterval: cfg.PollInterval, Handlers: handlers, Concurrency: cfg.WorkerConcurrency, Redis: dependencies.Redis,
-		DrainOnShutdown: lane.ID == "research" || lane.ID == "extract"}
+		DrainOnShutdown: lane.ID == "research" || lane.ID == "extract", ResearchScheduling: lane.ID == "research"}
 	if err := worker.Run(ctx); err != nil && ctx.Err() == nil {
 		slog.Error("worker stopped", "error", err)
 		os.Exit(1)

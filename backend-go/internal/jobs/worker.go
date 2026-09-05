@@ -25,16 +25,17 @@ type continuationError struct {
 func (e *continuationError) Error() string { return "job continuation requested" }
 
 type Worker struct {
-	Store           *Store
-	ID              string
-	Queues          []string
-	Lease           time.Duration
-	PollInterval    time.Duration
-	Handlers        map[string]Handler
-	Concurrency     int
-	Redis           *redis.Client
-	DrainOnShutdown bool
-	active          atomic.Int64
+	Store              *Store
+	ID                 string
+	Queues             []string
+	Lease              time.Duration
+	PollInterval       time.Duration
+	Handlers           map[string]Handler
+	Concurrency        int
+	Redis              *redis.Client
+	DrainOnShutdown    bool
+	ResearchScheduling bool
+	active             atomic.Int64
 }
 
 func (w *Worker) Run(ctx context.Context) error {
@@ -55,10 +56,17 @@ func (w *Worker) Run(ctx context.Context) error {
 	var group sync.WaitGroup
 	for index := 0; index < w.Concurrency; index++ {
 		group.Add(1)
-		go func() {
+		go func(index int) {
 			defer group.Done()
-			w.claimLoop(ctx, drainCtx)
-		}()
+			mode := ""
+			if w.ResearchScheduling && w.Concurrency > 1 {
+				mode = "fast"
+				if index == 1 {
+					mode = "preferred"
+				}
+			}
+			w.claimLoop(ctx, drainCtx, mode)
+		}(index)
 	}
 	group.Wait()
 	return ctx.Err()
@@ -90,9 +98,15 @@ func (w *Worker) workerHeartbeat(ctx context.Context) {
 	}
 }
 
-func (w *Worker) claimLoop(claimCtx, drainCtx context.Context) {
+func (w *Worker) claimLoop(claimCtx, drainCtx context.Context, researchMode string) {
 	for claimCtx.Err() == nil {
-		job, err := w.Store.Claim(claimCtx, w.ID, w.Queues, w.Lease)
+		var job Job
+		var err error
+		if researchMode != "" {
+			job, err = w.Store.ClaimResearch(claimCtx, w.ID, w.Queues, w.Lease, researchMode)
+		} else {
+			job, err = w.Store.Claim(claimCtx, w.ID, w.Queues, w.Lease)
+		}
 		if errors.Is(err, ErrNoJob) {
 			select {
 			case <-claimCtx.Done():

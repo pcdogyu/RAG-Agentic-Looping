@@ -320,10 +320,13 @@ func (runtime *maintenanceRuntime) queueTargetImpactReplay(ctx context.Context, 
 	taskID := uuid.New()
 	shared := &ExtractRuntime{cfg: runtime.cfg, db: runtime.db, redis: runtime.redis}
 	instanceID := shared.selectDownstreamInstance(ctx, "research", len(runtime.cfg.ResearchURLs))
+	profile, routeReason, matchedKeywords := eventResearchProfile(event, false)
 	now := time.Now().UTC()
 	run["report"], run["status"], run["as_of"] = nil, "queued", event["as_of"]
 	run["historical_replay"], run["verification_round"], run["retry_count"] = true, 0, 0
 	run["celery_task_id"], run["model_instance_id"] = taskID.String(), instanceID
+	run["research_profile"], run["route_reason"], run["matched_whitelist_keywords"] = profile, routeReason, matchedKeywords
+	run["escalated_to_deep"], run["waiting_for_deep_slot"] = false, false
 	run["retryable_reason"], run["error"] = nil, nil
 	run["missing_requirements"], run["contradictions"], run["evidence"] = []any{}, []any{}, []any{}
 	run["updated_at"] = iso(now)
@@ -336,7 +339,7 @@ func (runtime *maintenanceRuntime) queueTargetImpactReplay(ctx context.Context, 
 	} else if _, err := tx.Exec(ctx, `UPDATE event_research_runs SET status='queued',payload=$2,updated_at=now() WHERE id=$1`, runID, runBody); err != nil {
 		return nil, err
 	}
-	jobBody, _ := json.Marshal(taskEnvelope{Args: []any{candidate.EventID.String(), runID.String()}, Kwargs: map[string]any{"model_instance_id": instanceID}})
+	jobBody, _ := json.Marshal(taskEnvelope{Args: []any{candidate.EventID.String(), runID.String()}, Kwargs: map[string]any{"model_instance_id": instanceID, "research_profile": profile, "route_reason": routeReason, "matched_whitelist_keywords": matchedKeywords}})
 	if _, err := tx.Exec(ctx, `INSERT INTO go_jobs(id,queue,task_type,payload,status,priority,max_attempts,available_at,dedupe_key,created_at,updated_at)
 		VALUES($1,'research',$2,$3,'queued',1,3,now(),$4,now(),now())`, taskID, researchEventTask, jobBody, "research-run:"+runID.String()); err != nil {
 		return nil, err

@@ -148,6 +148,8 @@ func TestResearchModelRequestUsesConfiguredThinkingMode(t *testing.T) {
 		"prompt",
 		map[string]any{"type": "object"},
 		"research-0",
+		"deep",
+		"test",
 		&result,
 	); err != nil {
 		t.Fatalf("call research model: %v", err)
@@ -185,6 +187,8 @@ func TestResearchModelRequestDisablesThinkingByDefault(t *testing.T) {
 		"prompt",
 		map[string]any{"type": "object"},
 		"research-0",
+		"fast",
+		"test",
 		&result,
 	); err != nil {
 		t.Fatalf("call research model: %v", err)
@@ -221,7 +225,7 @@ func TestResearchModelFallsBackWithoutThinkingAfterOutputLimit(t *testing.T) {
 		ResearchFallbackMax:   8192,
 	}, client: server.Client()}
 	var result map[string]any
-	if err := runtime.callResearchModel(context.Background(), uuid.New(), "research_run", "report_drafting", "system", "prompt", map[string]any{"type": "object"}, "research-0", &result); err != nil {
+	if err := runtime.callResearchModel(context.Background(), uuid.New(), "research_run", "report_drafting", "system", "prompt", map[string]any{"type": "object"}, "research-0", "deep", "test", &result); err != nil {
 		t.Fatalf("fallback research call failed: %v", err)
 	}
 	if len(requests) != 2 || requests[0]["think"] != true || requests[1]["think"] != false {
@@ -233,6 +237,39 @@ func TestResearchModelFallsBackWithoutThinkingAfterOutputLimit(t *testing.T) {
 	}
 	if result["answer"] != "ok" {
 		t.Fatalf("unexpected fallback result: %#v", result)
+	}
+}
+
+func TestFastResearchEscalatesToThinkingAfterInvalidOutput(t *testing.T) {
+	requests := make([]map[string]any, 0, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		requests = append(requests, request)
+		if len(requests) == 1 {
+			_, _ = w.Write([]byte(`{"message":{"content":"{"},"eval_count":10,"done_reason":"stop"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"message":{"content":"{\"answer\":\"deep\"}"},"eval_count":20,"done_reason":"stop"}`))
+	}))
+	defer server.Close()
+	runtime := newResearchRuntime(config.Config{
+		ResearchModel: "qwen3:4b-thinking", ResearchURLs: []string{server.URL}, ResearchThink: true,
+		ResearchFastContext: 16384, ResearchFastMaxOutput: 4096, ResearchContextLength: 32768, ResearchMaxOutput: 16384,
+	}, nil, nil)
+	runtime.client = server.Client()
+	var result map[string]any
+	if err := runtime.callResearchModel(context.Background(), uuid.New(), "research_run", "report_drafting", "system", "prompt", map[string]any{"type": "object"}, "research-0", "fast", "default_fast", &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(requests) != 2 || requests[0]["think"] != false || requests[1]["think"] != true {
+		t.Fatalf("unexpected fast/deep sequence: %#v", requests)
+	}
+	first, second := objectValue(requests[0]["options"]), objectValue(requests[1]["options"])
+	if numberValue(first["num_ctx"]) != 16384 || numberValue(first["num_predict"]) != 4096 || numberValue(second["num_ctx"]) != 32768 {
+		t.Fatalf("unexpected profiles: first=%#v second=%#v", first, second)
 	}
 }
 
@@ -249,7 +286,7 @@ func TestResearchModelFallsBackAfterMalformedJSON(t *testing.T) {
 	defer server.Close()
 	runtime := &researchRuntime{cfg: config.Config{ResearchModel: "qwen3:4b-thinking", ResearchURLs: []string{server.URL}, ResearchThink: true, ResearchMaxOutput: 16384, ResearchFallbackMax: 8192}, client: server.Client()}
 	var result map[string]any
-	if err := runtime.callResearchModel(context.Background(), uuid.New(), "research_run", "report_drafting", "system", "prompt", map[string]any{"type": "object"}, "research-0", &result); err != nil || result["answer"] != "recovered" {
+	if err := runtime.callResearchModel(context.Background(), uuid.New(), "research_run", "report_drafting", "system", "prompt", map[string]any{"type": "object"}, "research-0", "deep", "test", &result); err != nil || result["answer"] != "recovered" {
 		t.Fatalf("malformed JSON fallback failed: result=%#v err=%v", result, err)
 	}
 }
@@ -263,7 +300,7 @@ func TestResearchModelMakesSecondOutputFailurePermanent(t *testing.T) {
 	defer server.Close()
 	runtime := &researchRuntime{cfg: config.Config{ResearchModel: "qwen3:4b-thinking", ResearchURLs: []string{server.URL}, ResearchThink: true, ResearchMaxOutput: 16384, ResearchFallbackMax: 8192}, client: server.Client()}
 	var result map[string]any
-	err := runtime.callResearchModel(context.Background(), uuid.New(), "research_run", "report_drafting", "system", "prompt", map[string]any{"type": "object"}, "research-0", &result)
+	err := runtime.callResearchModel(context.Background(), uuid.New(), "research_run", "report_drafting", "system", "prompt", map[string]any{"type": "object"}, "research-0", "deep", "test", &result)
 	if !isPermanentJobFailure(err) || errorKind(err) != "ResearchOutputError" || requests.Load() != 2 {
 		t.Fatalf("second output failure must be terminal after two calls: requests=%d kind=%s err=%v", requests.Load(), errorKind(err), err)
 	}
@@ -278,7 +315,7 @@ func TestResearchModelDoesNotUseFallbackForHTTPFailure(t *testing.T) {
 	defer server.Close()
 	runtime := &researchRuntime{cfg: config.Config{ResearchModel: "qwen3:4b-thinking", ResearchURLs: []string{server.URL}, ResearchThink: true, ResearchMaxOutput: 16384, ResearchFallbackMax: 8192}, client: server.Client()}
 	var result map[string]any
-	err := runtime.callResearchModel(context.Background(), uuid.New(), "research_run", "report_drafting", "system", "prompt", map[string]any{"type": "object"}, "research-0", &result)
+	err := runtime.callResearchModel(context.Background(), uuid.New(), "research_run", "report_drafting", "system", "prompt", map[string]any{"type": "object"}, "research-0", "deep", "test", &result)
 	if err == nil || isPermanentJobFailure(err) || requests.Load() != 1 {
 		t.Fatalf("HTTP failure should remain transient without fallback: requests=%d err=%v", requests.Load(), err)
 	}
@@ -287,7 +324,7 @@ func TestResearchModelDoesNotUseFallbackForHTTPFailure(t *testing.T) {
 func TestResearchAttemptMetricsDoNotPersistThinkingText(t *testing.T) {
 	response := ollamaResponse{DoneReason: "length", CompletionTokens: 16384}
 	response.Message.Thinking = "private reasoning"
-	metrics := researchAttemptMetrics(researchModelAttempt{Think: true, MaxOutput: 16384, FallbackReason: "output_limit_empty_content"}, response, true)
+	metrics := researchAttemptMetrics(researchModelAttempt{Think: true, MaxOutput: 16384, FallbackReason: "output_limit_empty_content"}, response, true, 0)
 	if metrics["thinking_char_count"] != 17 || metrics["output_limit_reached"] != true || metrics["fallback_reason"] != "output_limit_empty_content" {
 		t.Fatalf("unexpected research audit metrics: %#v", metrics)
 	}
@@ -334,6 +371,8 @@ func TestResearchModelDoesNotRetryAfterTimeout(t *testing.T) {
 		"prompt",
 		map[string]any{"type": "object"},
 		"research-0",
+		"fast",
+		"test",
 		&result,
 	)
 	if !isResearchRequestTimeoutOrCancellation(err) {
@@ -359,7 +398,7 @@ func TestEventDraftUsesEvidenceFirstSystemPromptAndParsesSchema(t *testing.T) {
 
 	runtime := &researchRuntime{cfg: config.Config{ResearchModel: "qwen3:4b-thinking", ResearchURLs: []string{server.URL}}, client: server.Client()}
 	event := map[string]any{"candidates": []any{map[string]any{"asset": map[string]any{"asset_id": "asset-1", "symbol": "ACME", "name": "Acme", "asset_class": "equity"}}}}
-	draft, err := runtime.generateEventDraft(context.Background(), uuid.New(), event, []researchEvidence{{ID: "ev-1", Claim: "Acme received an order."}}, "research-0")
+	draft, err := runtime.generateEventDraft(context.Background(), uuid.New(), event, []researchEvidence{{ID: "ev-1", Claim: "Acme received an order."}}, "research-0", "fast", "test")
 	if err != nil {
 		t.Fatalf("generate event draft: %v", err)
 	}
@@ -385,7 +424,7 @@ func TestAssetDraftUsesEvidenceFirstSystemPromptAndParsesSchema(t *testing.T) {
 	defer server.Close()
 
 	runtime := &researchRuntime{cfg: config.Config{ResearchModel: "qwen3:4b-thinking", ResearchURLs: []string{server.URL}}, client: server.Client()}
-	draft, err := runtime.generateAssetDraft(context.Background(), uuid.New(), map[string]any{"asset_id": "asset-1", "symbol": "ACME", "name": "Acme"}, map[string]any{"headline": "Acme received an order."}, []researchEvidence{{ID: "ev-1", Claim: "Acme received an order."}}, "research-0")
+	draft, err := runtime.generateAssetDraft(context.Background(), uuid.New(), map[string]any{"asset_id": "asset-1", "symbol": "ACME", "name": "Acme"}, map[string]any{"headline": "Acme received an order."}, []researchEvidence{{ID: "ev-1", Claim: "Acme received an order."}}, "research-0", "fast", "test")
 	if err != nil {
 		t.Fatalf("generate asset draft: %v", err)
 	}

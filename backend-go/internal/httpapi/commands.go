@@ -349,7 +349,7 @@ func (s *Server) enqueueAssetResearch(ctx context.Context, assetID, eventID stri
 	run := map[string]any{
 		"id": runID, "event_id": nil, "trigger_event_ids": []any{}, "asset": asset, "status": "queued", "as_of": jsonTime(stamp),
 		"historical_replay": options.Historical, "retry_of_run_id": nil, "retry_attempt": options.RetryAttempt,
-		"celery_task_id": taskID, "model_instance_id": instanceID, "coalesced_into_run_id": nil, "retryable_reason": nil, "news_age_filter_bypass": options.NewsAgeFilterBypass,
+		"celery_task_id": taskID, "model_instance_id": instanceID, "research_profile": "deep", "route_reason": "manual_research", "matched_whitelist_keywords": []string{}, "escalated_to_deep": false, "waiting_for_deep_slot": false, "coalesced_into_run_id": nil, "retryable_reason": nil, "news_age_filter_bypass": options.NewsAgeFilterBypass,
 		"verification_round": 0, "missing_requirements": []any{}, "contradictions": []any{}, "evidence": []any{},
 		"recommendation": nil, "error": nil, "analysis_steps": steps, "created_at": jsonTime(now), "started_at": nil,
 		"completed_at": nil, "updated_at": jsonTime(now),
@@ -366,7 +366,7 @@ func (s *Server) enqueueAssetResearch(ctx context.Context, assetID, eventID stri
 		return queuedResearch{}, err
 	}
 	_ = s.redis.Set(ctx, "market-loop:research:dispatch:"+runID, taskID, 30*24*time.Hour).Err()
-	err = s.publishResearch(ctx, "market_loop.research_asset", taskID, []any{assetID, nullableString(eventID), runID}, map[string]any{"model_instance_id": instanceID, "news_age_filter_bypass": options.NewsAgeFilterBypass}, options.Priority, runID)
+	err = s.publishResearch(ctx, "market_loop.research_asset", taskID, []any{assetID, nullableString(eventID), runID}, map[string]any{"model_instance_id": instanceID, "news_age_filter_bypass": options.NewsAgeFilterBypass, "research_profile": "deep", "route_reason": "manual_research", "source": "manual"}, options.Priority, runID)
 	if err != nil {
 		run["status"], run["error"], run["completed_at"], run["updated_at"] = "failed", "research queue failed", jsonTime(time.Now()), jsonTime(time.Now())
 		failedBody, _ := json.Marshal(run)
@@ -461,6 +461,8 @@ func (s *Server) retryEventResearch(ctx context.Context, runID, preferred string
 	run["status"], run["as_of"], run["verification_round"], run["retry_count"] = "queued", jsonTime(time.Now()), 0, retryCount
 	run["missing_requirements"], run["contradictions"], run["evidence"], run["report"] = []any{}, []any{}, []any{}, nil
 	run["error"], run["retryable_reason"], run["celery_task_id"], run["model_instance_id"], run["news_age_filter_bypass"] = nil, nil, taskID, instanceID, true
+	run["research_profile"], run["route_reason"], run["matched_whitelist_keywords"] = "deep", "manual_research", []string{}
+	run["escalated_to_deep"], run["waiting_for_deep_slot"] = false, false
 	run["analysis_steps"] = append(anySlice(run["analysis_steps"]), analysisStep("event_research_retry_queue", "queued", "go-worker", "已创建事件研报重新执行任务。", map[string]any{"retry_count": retryCount, "instance_id": instanceID, "priority": 1}))
 	run["updated_at"] = jsonTime(time.Now())
 	updated, _ := json.Marshal(run)
@@ -468,7 +470,7 @@ func (s *Server) retryEventResearch(ctx context.Context, runID, preferred string
 		return nil, err
 	}
 	_ = s.redis.Set(ctx, "market-loop:research:dispatch:"+runID, taskID, 30*24*time.Hour).Err()
-	if err = s.publishResearch(ctx, "market_loop.research_event", taskID, []any{eventID, runID}, map[string]any{"model_instance_id": instanceID, "news_age_filter_bypass": true}, 1, runID); err != nil {
+	if err = s.publishResearch(ctx, "market_loop.research_event", taskID, []any{eventID, runID}, map[string]any{"model_instance_id": instanceID, "news_age_filter_bypass": true, "research_profile": "deep", "route_reason": "manual_research", "source": "manual"}, 1, runID); err != nil {
 		return nil, fail(http.StatusServiceUnavailable, "event research retry queue failed")
 	}
 	return map[string]any{"task_id": taskID, "run_id": runID, "retry_count": retryCount, "instance_id": instanceID, "status": "queued"}, nil

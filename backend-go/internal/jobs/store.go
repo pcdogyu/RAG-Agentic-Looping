@@ -153,6 +153,52 @@ func (s *Store) Claim(ctx context.Context, workerID string, queues []string, lea
 	return job, nil
 }
 
+// ClaimResearch reserves work for one of the two research scheduler loops.
+// The fast loop never consumes a deep task. The preferred loop takes deep work
+// first and uses spare capacity for fast work when the deep queue is empty.
+func (s *Store) ClaimResearch(ctx context.Context, workerID string, queues []string, lease time.Duration, mode string) (Job, error) {
+	if len(queues) == 0 {
+		return Job{}, ErrNoJob
+	}
+	row := s.pool.QueryRow(ctx, `
+		WITH candidate AS (
+			SELECT j.id
+			FROM go_jobs j
+			WHERE j.queue = ANY($1)
+			  AND j.status IN ('queued','retrying')
+			  AND j.available_at <= now()
+			  AND j.cancel_requested_at IS NULL
+			  AND ($4::text <> 'fast' OR coalesce(nullif(j.payload->'kwargs'->>'research_profile',''),CASE WHEN j.task_type='market_loop.research_asset' THEN 'deep' ELSE 'fast' END)='fast')
+			  AND NOT EXISTS (
+				SELECT 1 FROM go_job_dependencies d
+				JOIN go_jobs parent ON parent.id=d.depends_on_job_id
+				WHERE d.job_id=j.id AND parent.status <> 'completed'
+			  )
+			ORDER BY
+				CASE WHEN $4::text='preferred' AND coalesce(nullif(j.payload->'kwargs'->>'research_profile',''),CASE WHEN j.task_type='market_loop.research_asset' THEN 'deep' ELSE 'fast' END)='deep' THEN 0 ELSE 1 END,
+				j.priority ASC,j.available_at,j.created_at
+			FOR UPDATE SKIP LOCKED
+			LIMIT 1
+		)
+		UPDATE go_jobs j
+		SET status='running',lease_owner=$2,lease_until=now()+$3::interval,
+			heartbeat_at=now(),attempt=j.attempt+1,updated_at=now(),
+			started_at=coalesce(j.started_at,now()),attempt_started_at=now()
+		FROM candidate
+		WHERE j.id=candidate.id
+		RETURNING j.id,j.queue,j.task_type,j.payload,j.status,j.priority,j.attempt,
+			j.max_attempts,j.cancel_requested_at`, queues, workerID, interval(lease), mode)
+	var job Job
+	if err := row.Scan(&job.ID, &job.Queue, &job.TaskType, &job.Payload, &job.Status,
+		&job.Priority, &job.Attempt, &job.MaxAttempts, &job.CancelRequestedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Job{}, ErrNoJob
+		}
+		return Job{}, err
+	}
+	return job, nil
+}
+
 func (s *Store) Heartbeat(ctx context.Context, id uuid.UUID, workerID string, lease time.Duration) (bool, error) {
 	result, err := s.pool.Exec(ctx, `
 		UPDATE go_jobs SET heartbeat_at=now(),lease_until=now()+$3::interval,updated_at=now()

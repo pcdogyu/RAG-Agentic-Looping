@@ -460,6 +460,10 @@ func (s *Server) modelInferenceQueues(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) inferenceQueue(ctx context.Context, lane, model, purpose, binding string, enabled bool) map[string]any {
 	capacity := envIntValue("OLLAMA_"+strings.ToUpper(lane)+"_MAX_CONCURRENCY", 1)
+	deepCapacity := 0
+	if lane == "research" {
+		deepCapacity = envIntValue("OLLAMA_RESEARCH_DEEP_MAX_CONCURRENCY", 1)
+	}
 	urls := modelURLs(lane)
 	instanceCount := len(urls)
 	base, extra := capacity, 0
@@ -511,7 +515,7 @@ func (s *Server) inferenceQueue(ctx context.Context, lane, model, purpose, bindi
 	return map[string]any{"lane": lane, "model": model, "purpose": purpose, "binding": binding, "task_enabled": enabled,
 		"capacity": capacity, "queued": queued, "running": running, "available": available, "observable": observable,
 		"instances": instances, "instance_count": instanceCount, "per_instance_concurrency": ceilDiv(capacity, instanceCount),
-		"threads": modelThreads(lane), "state": state}
+		"threads": modelThreads(lane), "deep_capacity": deepCapacity, "state": state}
 }
 
 func (s *Server) modelQueueOverview(w http.ResponseWriter, r *http.Request) {

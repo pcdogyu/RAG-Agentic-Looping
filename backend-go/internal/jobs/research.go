@@ -78,9 +78,14 @@ func (value *researchOutputError) Error() string {
 func (value *researchOutputError) Unwrap() error { return value.Cause }
 
 type researchModelAttempt struct {
-	Think          bool
-	MaxOutput      int
-	FallbackReason string
+	Think           bool
+	MaxOutput       int
+	ContextLength   int
+	Profile         string
+	RouteReason     string
+	Escalated       bool
+	FallbackReason  string
+	MatchedKeywords []string
 }
 
 type researchRuntime struct {
@@ -89,6 +94,7 @@ type researchRuntime struct {
 	redis         *redis.Client
 	client        *http.Client
 	instanceSlots chan string
+	deepSlots     chan struct{}
 }
 
 func (runtime *researchRuntime) shared() *ExtractRuntime {
@@ -216,10 +222,19 @@ func NewResearchHandlers(cfg config.Config, db *pgxpool.Pool, redisClient *redis
 func newResearchRuntime(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *researchRuntime {
 	runtime := &researchRuntime{cfg: cfg, db: db, redis: redisClient, client: &http.Client{Timeout: cfg.ResearchTimeout}}
 	if len(cfg.ResearchURLs) > 0 {
-		runtime.instanceSlots = make(chan string, len(cfg.ResearchURLs))
-		for index := range cfg.ResearchURLs {
-			runtime.instanceSlots <- fmt.Sprintf("research-%d", index)
+		capacity := cfg.WorkerConcurrency
+		if capacity <= 0 {
+			capacity = len(cfg.ResearchURLs)
 		}
+		runtime.instanceSlots = make(chan string, capacity)
+		for slot := 0; slot < capacity; slot++ {
+			runtime.instanceSlots <- fmt.Sprintf("research-%d", slot%len(cfg.ResearchURLs))
+		}
+	}
+	deepCapacity := max(1, cfg.ResearchDeepConcurrency)
+	runtime.deepSlots = make(chan struct{}, deepCapacity)
+	for index := 0; index < deepCapacity; index++ {
+		runtime.deepSlots <- struct{}{}
 	}
 	return runtime
 }
@@ -260,6 +275,18 @@ func (runtime *researchRuntime) researchEvent(ctx context.Context, job Job) (any
 		filterRecentResearch = boolValue(value)
 	}
 	run["filter_recent_research"] = filterRecentResearch
+	manual := strings.EqualFold(stringValue(envelope.Kwargs["source"]), "manual") || boolValue(envelope.Kwargs["news_age_filter_bypass"]) || numberValue(run["retry_count"]) > 0
+	profile, routeReason, matchedKeywords := eventResearchProfile(event, manual)
+	if configured := stringValue(envelope.Kwargs["research_profile"]); configured == researchProfileFast || configured == researchProfileDeep {
+		profile = configured
+		routeReason = fallbackString(stringValue(envelope.Kwargs["route_reason"]), routeReason)
+		matchedKeywords = stringSlice(envelope.Kwargs["matched_whitelist_keywords"])
+	}
+	if manual {
+		profile, routeReason = researchProfileDeep, "manual"
+	}
+	run["research_profile"], run["route_reason"], run["matched_whitelist_keywords"] = profile, routeReason, matchedKeywords
+	run["escalated_to_deep"], run["waiting_for_deep_slot"] = false, false
 	instanceID, releaseInstance, err := runtime.acquireResearchInstance(ctx, stringValue(envelope.Kwargs["model_instance_id"]))
 	if err != nil {
 		return nil, err
@@ -280,7 +307,7 @@ func (runtime *researchRuntime) researchEvent(ctx context.Context, job Job) (any
 		}
 		return nil, runtime.failEventResearch(ctx, job, run, event, err)
 	}
-	draft, err := runtime.generateEventDraft(ctx, runID, event, evidence, instanceID)
+	draft, err := runtime.generateEventDraft(ctx, runID, event, evidence, instanceID, profile, routeReason)
 	if err != nil {
 		return nil, runtime.failEventResearch(ctx, job, run, event, err)
 	}
@@ -349,6 +376,18 @@ func (runtime *researchRuntime) researchAsset(ctx context.Context, job Job) (any
 	} else if filtered {
 		return map[string]any{"status": "filtered", "run_id": runID}, nil
 	}
+	manual := strings.EqualFold(stringValue(envelope.Kwargs["source"]), "manual") || boolValue(envelope.Kwargs["news_age_filter_bypass"]) || run["retry_of_run_id"] != nil
+	profile, routeReason, matchedKeywords := eventResearchProfile(event, manual)
+	if configured := stringValue(envelope.Kwargs["research_profile"]); configured == researchProfileFast || configured == researchProfileDeep {
+		profile = configured
+		routeReason = fallbackString(stringValue(envelope.Kwargs["route_reason"]), routeReason)
+		matchedKeywords = stringSlice(envelope.Kwargs["matched_whitelist_keywords"])
+	}
+	if manual {
+		profile, routeReason = researchProfileDeep, "manual"
+	}
+	run["research_profile"], run["route_reason"], run["matched_whitelist_keywords"] = profile, routeReason, matchedKeywords
+	run["escalated_to_deep"], run["waiting_for_deep_slot"] = false, false
 	instanceID, releaseInstance, err := runtime.acquireResearchInstance(ctx, stringValue(envelope.Kwargs["model_instance_id"]))
 	if err != nil {
 		return nil, err
@@ -378,7 +417,7 @@ func (runtime *researchRuntime) researchAsset(ctx context.Context, job Job) (any
 		}
 		return nil, runtime.handleAssetError(ctx, job, run, err)
 	}
-	draft, err := runtime.generateAssetDraft(softCtx, runID, objectValue(run["asset"]), event, evidence, instanceID)
+	draft, err := runtime.generateAssetDraft(softCtx, runID, objectValue(run["asset"]), event, evidence, instanceID, profile, routeReason)
 	if err != nil {
 		return nil, runtime.handleAssetError(ctx, job, run, err)
 	}
@@ -716,7 +755,7 @@ func (runtime *researchRuntime) saveRecommendationAndRun(ctx context.Context, ru
 	return tx.Commit(ctx)
 }
 
-func (runtime *researchRuntime) generateEventDraft(ctx context.Context, runID uuid.UUID, event map[string]any, evidence []researchEvidence, instanceID string) (eventResearchDraft, error) {
+func (runtime *researchRuntime) generateEventDraft(ctx context.Context, runID uuid.UUID, event map[string]any, evidence []researchEvidence, instanceID, profile, routeReason string) (eventResearchDraft, error) {
 	assets := make([]map[string]any, 0)
 	seenAssets := map[string]bool{}
 	for _, raw := range anySlice(event["candidates"]) {
@@ -747,29 +786,40 @@ func (runtime *researchRuntime) generateEventDraft(ctx context.Context, runID uu
 执行要求：过滤项不得生成 impact；每个 impact 必须通过目标准入；非零方向必须具有完整传导链和经济终点；每个 impact 必须输出恰好五项 target_evaluation；没有确认目标时返回 impacts=[] 并记录 no_confirmed_target；所有 ID 必须逐字来自输入。`, jsonString(eventContext), jsonString(assets), jsonString(filter), compactResearchEvidence(evidence, 12000))
 	schema := eventDraftSchema()
 	var result eventResearchDraft
-	err := runtime.callResearchModel(ctx, runID, "event_research_run", "event_report_drafting", eventResearchSystemPrompt, prompt, schema, instanceID, &result)
+	err := runtime.callResearchModel(ctx, runID, "event_research_run", "event_report_drafting", eventResearchSystemPrompt, prompt, schema, instanceID, profile, routeReason, &result)
 	if err != nil {
 		return eventResearchDraft{}, err
 	}
 	return result, nil
 }
 
-func (runtime *researchRuntime) generateAssetDraft(ctx context.Context, runID uuid.UUID, asset, event map[string]any, evidence []researchEvidence, instanceID string) (assetResearchDraft, error) {
+func (runtime *researchRuntime) generateAssetDraft(ctx context.Context, runID uuid.UUID, asset, event map[string]any, evidence []researchEvidence, instanceID, profile, routeReason string) (assetResearchDraft, error) {
 	prompt := fmt.Sprintf(`请只评价当前研究对象。
 <research_target>%s</research_target>
 <event_context>%s</event_context>
 <evidence>%s</evidence>
 所有 evidence_id 和 action_id 必须逐字来自输入。输出一个 direction_score 和恰好五项 target_evaluation；评级、新闻可信度和研报置信度由 Go 程序计算。`, jsonString(asset), jsonString(withoutKey(event, "analysis_steps")), compactResearchEvidence(evidence, 14000))
 	var result assetResearchDraft
-	err := runtime.callResearchModel(ctx, runID, "research_run", "report_drafting", assetResearchSystemPrompt, prompt, assetDraftSchema(), instanceID, &result)
+	err := runtime.callResearchModel(ctx, runID, "research_run", "report_drafting", assetResearchSystemPrompt, prompt, assetDraftSchema(), instanceID, profile, routeReason, &result)
 	if err != nil {
 		return assetResearchDraft{}, err
 	}
 	return result, nil
 }
 
-func (runtime *researchRuntime) callResearchModel(ctx context.Context, entityID uuid.UUID, entityType, operation, system, prompt string, schema map[string]any, instanceID string, target any) error {
+func (runtime *researchRuntime) callResearchModel(ctx context.Context, entityID uuid.UUID, entityType, operation, system, prompt string, schema map[string]any, instanceID, profile, routeReason string, target any) error {
 	messages := []map[string]string{{"role": "system", "content": system}, {"role": "user", "content": prompt + "\n\n只返回符合format JSON Schema的JSON。"}}
+	matchedKeywords := []string{}
+	if runtime.db != nil {
+		table := "research_runs"
+		if entityType == "event_research_run" {
+			table = "event_research_runs"
+		}
+		var matchedBody []byte
+		if runtime.db.QueryRow(ctx, `SELECT coalesce(payload::jsonb->'matched_whitelist_keywords','[]'::jsonb) FROM `+table+` WHERE id=$1`, entityID).Scan(&matchedBody) == nil {
+			_ = json.Unmarshal(matchedBody, &matchedKeywords)
+		}
+	}
 	primaryMaxOutput := runtime.cfg.ResearchMaxOutput
 	if primaryMaxOutput <= 0 {
 		primaryMaxOutput = 16384
@@ -778,19 +828,52 @@ func (runtime *researchRuntime) callResearchModel(ctx context.Context, entityID 
 	if fallbackMaxOutput <= 0 {
 		fallbackMaxOutput = 8192
 	}
-	attempts := []researchModelAttempt{{Think: runtime.cfg.ResearchThink, MaxOutput: primaryMaxOutput}}
-	if runtime.cfg.ResearchThink {
-		attempts = append(attempts, researchModelAttempt{Think: false, MaxOutput: fallbackMaxOutput})
+	deepContext := runtime.cfg.ResearchContextLength
+	if deepContext <= 0 {
+		deepContext = 32768
+	}
+	fastContext := runtime.cfg.ResearchFastContext
+	if fastContext <= 0 {
+		fastContext = 16384
+	}
+	fastMaxOutput := runtime.cfg.ResearchFastMaxOutput
+	if fastMaxOutput <= 0 {
+		fastMaxOutput = 4096
+	}
+	if profile != researchProfileDeep {
+		profile = researchProfileFast
+	}
+	attempts := make([]researchModelAttempt, 0, 3)
+	if profile == researchProfileFast {
+		attempts = append(attempts,
+			researchModelAttempt{Think: false, MaxOutput: fastMaxOutput, ContextLength: fastContext, Profile: researchProfileFast, RouteReason: routeReason},
+			researchModelAttempt{Think: runtime.cfg.ResearchThink, MaxOutput: primaryMaxOutput, ContextLength: deepContext, Profile: researchProfileDeep, RouteReason: "fast_output_invalid", Escalated: true},
+		)
+		if runtime.cfg.ResearchThink {
+			attempts = append(attempts, researchModelAttempt{Think: false, MaxOutput: fallbackMaxOutput, ContextLength: deepContext, Profile: researchProfileDeep, RouteReason: "fast_output_invalid", Escalated: true})
+		}
+	} else {
+		attempts = append(attempts, researchModelAttempt{Think: runtime.cfg.ResearchThink, MaxOutput: primaryMaxOutput, ContextLength: deepContext, Profile: researchProfileDeep, RouteReason: routeReason})
+		if runtime.cfg.ResearchThink {
+			attempts = append(attempts, researchModelAttempt{Think: false, MaxOutput: fallbackMaxOutput, ContextLength: deepContext, Profile: researchProfileDeep, RouteReason: routeReason})
+		}
+	}
+	for index := range attempts {
+		attempts[index].MatchedKeywords = matchedKeywords
 	}
 	logicalID := uuid.New()
 	var lastErr error
 	for attemptIndex := range attempts {
 		attempt := &attempts[attemptIndex]
+		releaseDeep, deepWait, err := runtime.acquireDeepSlot(ctx, entityID, entityType, attempt.Profile == researchProfileDeep, attempt.Escalated)
+		if err != nil {
+			return err
+		}
 		request := map[string]any{
 			"model": runtime.cfg.ResearchModel, "messages": messages, "format": schema, "stream": false,
 			"think":      attempt.Think,
 			"keep_alive": ollamaKeepAliveValue(runtime.cfg.OllamaKeepAlive),
-			"options":    map[string]any{"temperature": 0, "num_ctx": runtime.cfg.ResearchContextLength, "num_predict": attempt.MaxOutput, "num_thread": runtime.cfg.OllamaResearchThreads},
+			"options":    map[string]any{"temperature": 0, "num_ctx": attempt.ContextLength, "num_predict": attempt.MaxOutput, "num_thread": runtime.cfg.OllamaResearchThreads},
 		}
 		var outputErr *researchOutputError
 		for _, baseURL := range preferredEndpoints(runtime.cfg.ResearchURLs, instanceID, "research") {
@@ -806,8 +889,9 @@ func (runtime *researchRuntime) callResearchModel(ctx context.Context, entityID 
 			response, err := runtime.client.Do(httpRequest)
 			if err != nil {
 				lastErr = err
-				runtime.persistResearchAudit(context.WithoutCancel(ctx), logicalID, entityID, entityType, operation, attemptIndex+1, "failed", started, messages, schema, "", nil, err.Error(), 0, 0, endpoint, researchAttemptMetrics(*attempt, ollamaResponse{}, false))
+				runtime.persistResearchAudit(context.WithoutCancel(ctx), logicalID, entityID, entityType, operation, attemptIndex+1, "failed", started, messages, schema, "", nil, err.Error(), 0, 0, endpoint, researchAttemptMetrics(*attempt, ollamaResponse{}, false, deepWait))
 				if isResearchRequestTimeoutOrCancellation(err) {
+					releaseDeep()
 					return err
 				}
 				continue
@@ -820,13 +904,13 @@ func (runtime *researchRuntime) callResearchModel(ctx context.Context, entityID 
 				} else {
 					lastErr = fmt.Errorf("ollama research returned %s", response.Status)
 				}
-				runtime.persistResearchAudit(context.WithoutCancel(ctx), logicalID, entityID, entityType, operation, attemptIndex+1, "failed", started, messages, schema, string(payload), nil, lastErr.Error(), 0, 0, endpoint, researchAttemptMetrics(*attempt, ollamaResponse{}, false))
+				runtime.persistResearchAudit(context.WithoutCancel(ctx), logicalID, entityID, entityType, operation, attemptIndex+1, "failed", started, messages, schema, string(payload), nil, lastErr.Error(), 0, 0, endpoint, researchAttemptMetrics(*attempt, ollamaResponse{}, false, deepWait))
 				continue
 			}
 			var modelResponse ollamaResponse
 			if err := json.Unmarshal(payload, &modelResponse); err != nil {
 				lastErr = err
-				runtime.persistResearchAudit(context.WithoutCancel(ctx), logicalID, entityID, entityType, operation, attemptIndex+1, "failed", started, messages, schema, string(payload), nil, err.Error(), 0, 0, endpoint, researchAttemptMetrics(*attempt, ollamaResponse{}, false))
+				runtime.persistResearchAudit(context.WithoutCancel(ctx), logicalID, entityID, entityType, operation, attemptIndex+1, "failed", started, messages, schema, string(payload), nil, err.Error(), 0, 0, endpoint, researchAttemptMetrics(*attempt, ollamaResponse{}, false, deepWait))
 				continue
 			}
 			outputLimitReached := researchOutputLimitReached(modelResponse, attempt.MaxOutput)
@@ -838,15 +922,17 @@ func (runtime *researchRuntime) callResearchModel(ctx context.Context, entityID 
 					attempt.FallbackReason = outputErr.Reason
 					attempts[attemptIndex+1].FallbackReason = outputErr.Reason
 				}
-				runtime.persistResearchAudit(context.WithoutCancel(ctx), logicalID, entityID, entityType, operation, attemptIndex+1, "failed", started, messages, schema, modelResponse.Message.Content, nil, outputErr.Error(), modelResponse.PromptTokens, modelResponse.CompletionTokens, endpoint, researchAttemptMetrics(*attempt, modelResponse, outputLimitReached))
+				runtime.persistResearchAudit(context.WithoutCancel(ctx), logicalID, entityID, entityType, operation, attemptIndex+1, "failed", started, messages, schema, modelResponse.Message.Content, nil, outputErr.Error(), modelResponse.PromptTokens, modelResponse.CompletionTokens, endpoint, researchAttemptMetrics(*attempt, modelResponse, outputLimitReached, deepWait))
 				break
 			}
 			parsed, _ := json.Marshal(target)
 			var parsedValue any
 			_ = json.Unmarshal(parsed, &parsedValue)
-			runtime.persistResearchAudit(context.WithoutCancel(ctx), logicalID, entityID, entityType, operation, attemptIndex+1, "completed", started, messages, schema, modelResponse.Message.Content, parsedValue, "", modelResponse.PromptTokens, modelResponse.CompletionTokens, endpoint, researchAttemptMetrics(*attempt, modelResponse, researchOutputLimitReached(modelResponse, attempt.MaxOutput)))
+			runtime.persistResearchAudit(context.WithoutCancel(ctx), logicalID, entityID, entityType, operation, attemptIndex+1, "completed", started, messages, schema, modelResponse.Message.Content, parsedValue, "", modelResponse.PromptTokens, modelResponse.CompletionTokens, endpoint, researchAttemptMetrics(*attempt, modelResponse, researchOutputLimitReached(modelResponse, attempt.MaxOutput), deepWait))
+			releaseDeep()
 			return nil
 		}
+		releaseDeep()
 		if outputErr != nil {
 			if attemptIndex+1 < len(attempts) {
 				continue
@@ -861,6 +947,39 @@ func (runtime *researchRuntime) callResearchModel(ctx context.Context, entityID 
 		lastErr = errors.New("no research model endpoint configured")
 	}
 	return lastErr
+}
+
+func (runtime *researchRuntime) acquireDeepSlot(ctx context.Context, entityID uuid.UUID, entityType string, required, escalated bool) (func(), time.Duration, error) {
+	if !required || runtime.deepSlots == nil {
+		return func() {}, 0, nil
+	}
+	started := time.Now()
+	select {
+	case <-runtime.deepSlots:
+		runtime.updateResearchRoutingState(context.WithoutCancel(ctx), entityID, entityType, false, escalated)
+		return func() { runtime.deepSlots <- struct{}{} }, time.Since(started), nil
+	default:
+		runtime.updateResearchRoutingState(context.WithoutCancel(ctx), entityID, entityType, true, escalated)
+	}
+	select {
+	case <-runtime.deepSlots:
+		runtime.updateResearchRoutingState(context.WithoutCancel(ctx), entityID, entityType, false, escalated)
+		return func() { runtime.deepSlots <- struct{}{} }, time.Since(started), nil
+	case <-ctx.Done():
+		runtime.updateResearchRoutingState(context.WithoutCancel(ctx), entityID, entityType, false, escalated)
+		return func() {}, time.Since(started), ctx.Err()
+	}
+}
+
+func (runtime *researchRuntime) updateResearchRoutingState(ctx context.Context, entityID uuid.UUID, entityType string, waiting, escalated bool) {
+	if runtime.db == nil {
+		return
+	}
+	table := "research_runs"
+	if entityType == "event_research_run" {
+		table = "event_research_runs"
+	}
+	_, _ = runtime.db.Exec(ctx, `UPDATE `+table+` SET payload=(payload::jsonb || jsonb_build_object('waiting_for_deep_slot',$2,'escalated_to_deep',coalesce((payload::jsonb->>'escalated_to_deep')::boolean,false) OR $3))::json,updated_at=now() WHERE id=$1`, entityID, waiting, escalated)
 }
 
 func classifyResearchOutputError(response ollamaResponse, maxOutput int, cause error) *researchOutputError {
@@ -894,14 +1013,20 @@ func researchOutputLimitReached(response ollamaResponse, maxOutput int) bool {
 	return strings.EqualFold(strings.TrimSpace(response.DoneReason), "length") || maxOutput > 0 && response.CompletionTokens >= maxOutput
 }
 
-func researchAttemptMetrics(attempt researchModelAttempt, response ollamaResponse, outputLimitReached bool) map[string]any {
+func researchAttemptMetrics(attempt researchModelAttempt, response ollamaResponse, outputLimitReached bool, deepWait time.Duration) map[string]any {
 	return map[string]any{
-		"think_enabled":        attempt.Think,
-		"max_output_tokens":    attempt.MaxOutput,
-		"done_reason":          response.DoneReason,
-		"thinking_char_count":  len([]rune(response.Message.Thinking)),
-		"output_limit_reached": outputLimitReached,
-		"fallback_reason":      attempt.FallbackReason,
+		"think_enabled":              attempt.Think,
+		"max_output_tokens":          attempt.MaxOutput,
+		"context_length":             attempt.ContextLength,
+		"research_profile":           attempt.Profile,
+		"route_reason":               attempt.RouteReason,
+		"escalated_to_deep":          attempt.Escalated,
+		"deep_slot_wait_ms":          deepWait.Milliseconds(),
+		"done_reason":                response.DoneReason,
+		"thinking_char_count":        len([]rune(response.Message.Thinking)),
+		"output_limit_reached":       outputLimitReached,
+		"fallback_reason":            attempt.FallbackReason,
+		"matched_whitelist_keywords": attempt.MatchedKeywords,
 	}
 }
 
@@ -1377,13 +1502,14 @@ func (runtime *researchRuntime) enqueueAssetResearch(ctx context.Context, event,
 	}
 	runID, taskID := uuid.New(), uuid.New()
 	instanceID := runtime.shared().selectDownstreamInstance(ctx, "research", len(runtime.cfg.ResearchURLs))
+	profile, routeReason, matchedKeywords := eventResearchProfile(event, bypassCooldown)
 	now := time.Now().UTC()
 	steps := append([]any{}, anySlice(event["analysis_steps"])...)
-	steps = append(steps, analysisStep("research_queue", "queued", "go-worker", fmt.Sprintf("已为主标的 %s 创建深度研究任务。", stringValue(asset["symbol"])), map[string]any{"instance_id": instanceID, "priority": 3}))
+	steps = append(steps, analysisStep("research_queue", "queued", "go-worker", fmt.Sprintf("已为主标的 %s 创建研究任务。", stringValue(asset["symbol"])), map[string]any{"instance_id": instanceID, "priority": 3, "research_profile": profile, "route_reason": routeReason, "matched_whitelist_keywords": matchedKeywords}))
 	payload := map[string]any{
 		"id": runID, "event_id": eventID, "trigger_event_ids": []string{eventID.String()}, "asset": asset, "status": "queued",
 		"as_of": iso(time.Now()), "historical_replay": false, "retry_of_run_id": nil, "retry_attempt": 0,
-		"celery_task_id": taskID, "model_instance_id": instanceID, "coalesced_into_run_id": nil, "retryable_reason": nil, "news_age_filter_bypass": false,
+		"celery_task_id": taskID, "model_instance_id": instanceID, "research_profile": profile, "route_reason": routeReason, "matched_whitelist_keywords": matchedKeywords, "escalated_to_deep": false, "waiting_for_deep_slot": false, "coalesced_into_run_id": nil, "retryable_reason": nil, "news_age_filter_bypass": bypassCooldown,
 		"verification_round": 0, "missing_requirements": []any{}, "contradictions": []any{}, "evidence": []any{},
 		"recommendation": nil, "error": nil, "analysis_steps": steps, "created_at": iso(now), "started_at": nil, "completed_at": nil, "updated_at": iso(now),
 	}
@@ -1391,7 +1517,7 @@ func (runtime *researchRuntime) enqueueAssetResearch(ctx context.Context, event,
 	if _, err := tx.Exec(ctx, `INSERT INTO research_runs(id,event_id,asset_id,status,payload,created_at,updated_at) VALUES($1,$2,$3,'queued',$4,$5,$5)`, runID, eventID, assetID, encoded, now); err != nil {
 		return false, err
 	}
-	jobPayload, _ := json.Marshal(map[string]any{"args": []any{assetID, eventID.String(), runID.String()}, "kwargs": map[string]any{"model_instance_id": instanceID}})
+	jobPayload, _ := json.Marshal(map[string]any{"args": []any{assetID, eventID.String(), runID.String()}, "kwargs": map[string]any{"model_instance_id": instanceID, "research_profile": profile, "route_reason": routeReason, "matched_whitelist_keywords": matchedKeywords, "news_age_filter_bypass": bypassCooldown}})
 	if _, err := tx.Exec(ctx, `INSERT INTO go_jobs(id,queue,task_type,payload,status,priority,max_attempts,available_at,dedupe_key,created_at,updated_at) VALUES($1,'research',$2,$3,'queued',3,3,now(),$4,now(),now())`, taskID, researchAssetTask, jobPayload, "research-run:"+runID.String()); err != nil {
 		return false, err
 	}
