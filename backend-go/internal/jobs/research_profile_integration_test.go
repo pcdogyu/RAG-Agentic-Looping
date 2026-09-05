@@ -85,3 +85,59 @@ func TestResearchProfileReclassificationAgainstPostgres(t *testing.T) {
 		t.Fatalf("running task was modified: %q", jobProfile)
 	}
 }
+
+func TestResearchRoutingStatePersistenceAgainstPostgres(t *testing.T) {
+	dsn := strings.Replace(os.Getenv("TEST_DATABASE_URL"), "postgresql+psycopg://", "postgresql://", 1)
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err := migrate.Up(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now().UTC()
+	eventID, runID, jobID := uuid.NewString(), uuid.New(), uuid.New()
+	eventPayload, _ := json.Marshal(map[string]any{"id": eventID, "headline": "routing state test"})
+	if _, err := pool.Exec(ctx, `INSERT INTO news_events(id,headline,event_type,payload,priority,published_at,observed_at,as_of) VALUES($1,'routing state test','other',$2,1,$3,$3,$3)`, eventID, eventPayload, now); err != nil {
+		t.Fatal(err)
+	}
+	runPayload, _ := json.Marshal(map[string]any{"id": runID.String(), "event_id": eventID, "status": "running", "research_profile": "fast", "escalated_to_deep": false, "waiting_for_deep_slot": false})
+	if _, err := pool.Exec(ctx, `INSERT INTO event_research_runs(id,event_id,status,payload,created_at,updated_at) VALUES($1,$2,'running',$3,$4,$4)`, runID.String(), eventID, runPayload, now); err != nil {
+		t.Fatal(err)
+	}
+	jobPayload, _ := json.Marshal(taskEnvelope{Args: []any{eventID, runID.String()}, Kwargs: map[string]any{"research_profile": "fast"}})
+	if _, err := pool.Exec(ctx, `INSERT INTO go_jobs(id,queue,task_type,payload,status,priority,max_attempts,available_at,created_at,updated_at) VALUES($1,'research',$2,$3,'running',1,3,now(),now(),now())`, jobID, researchEventTask, jobPayload); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM go_jobs WHERE id=$1; DELETE FROM event_research_runs WHERE id=$2; DELETE FROM news_events WHERE id=$3`, jobID, runID.String(), eventID)
+	})
+
+	runtime := &researchRuntime{db: pool}
+	runtime.updateResearchRoutingState(ctx, runID, "event_research_run", true, true)
+	var runWaiting, runEscalated, jobWaiting, jobEscalated bool
+	if err := pool.QueryRow(ctx, `SELECT (payload->>'waiting_for_deep_slot')::boolean,(payload->>'escalated_to_deep')::boolean FROM event_research_runs WHERE id=$1`, runID.String()).Scan(&runWaiting, &runEscalated); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT (payload->'kwargs'->>'waiting_for_deep_slot')::boolean,(payload->'kwargs'->>'escalated_to_deep')::boolean FROM go_jobs WHERE id=$1`, jobID).Scan(&jobWaiting, &jobEscalated); err != nil {
+		t.Fatal(err)
+	}
+	if !runWaiting || !runEscalated || !jobWaiting || !jobEscalated {
+		t.Fatalf("routing state was not persisted: run=%v/%v job=%v/%v", runWaiting, runEscalated, jobWaiting, jobEscalated)
+	}
+
+	runtime.updateResearchRoutingState(ctx, runID, "event_research_run", false, false)
+	if err := pool.QueryRow(ctx, `SELECT (payload->>'waiting_for_deep_slot')::boolean,(payload->>'escalated_to_deep')::boolean FROM event_research_runs WHERE id=$1`, runID.String()).Scan(&runWaiting, &runEscalated); err != nil {
+		t.Fatal(err)
+	}
+	if runWaiting || !runEscalated {
+		t.Fatalf("escalation must remain sticky after slot acquisition: waiting=%v escalated=%v", runWaiting, runEscalated)
+	}
+}

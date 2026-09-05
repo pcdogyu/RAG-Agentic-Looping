@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"net"
 	"net/http"
@@ -979,7 +980,12 @@ func (runtime *researchRuntime) updateResearchRoutingState(ctx context.Context, 
 	if entityType == "event_research_run" {
 		table = "event_research_runs"
 	}
-	_, _ = runtime.db.Exec(ctx, `UPDATE `+table+` SET payload=(payload::jsonb || jsonb_build_object('waiting_for_deep_slot',$2,'escalated_to_deep',coalesce((payload::jsonb->>'escalated_to_deep')::boolean,false) OR $3))::json,updated_at=now() WHERE id=$1`, entityID, waiting, escalated)
+	if _, err := runtime.db.Exec(ctx, `UPDATE `+table+` SET payload=(payload::jsonb || jsonb_build_object('waiting_for_deep_slot',$2::boolean,'escalated_to_deep',coalesce((payload::jsonb->>'escalated_to_deep')::boolean,false) OR $3::boolean))::json,updated_at=now() WHERE id=$1::text`, entityID.String(), waiting, escalated); err != nil {
+		slog.Error("update research run routing state", "run_id", entityID, "entity_type", entityType, "error", err)
+	}
+	if _, err := runtime.db.Exec(ctx, `UPDATE go_jobs SET payload=jsonb_set(payload::jsonb,'{kwargs}',coalesce(payload::jsonb->'kwargs','{}'::jsonb) || jsonb_build_object('waiting_for_deep_slot',$2::boolean,'escalated_to_deep',coalesce((payload::jsonb#>>'{kwargs,escalated_to_deep}')::boolean,false) OR $3::boolean),true)::json,updated_at=now() WHERE queue='research' AND status='running' AND (payload::jsonb->'args'->>1=$1::text OR payload::jsonb->'args'->>2=$1::text)`, entityID.String(), waiting, escalated); err != nil {
+		slog.Error("update research job routing state", "run_id", entityID, "entity_type", entityType, "error", err)
+	}
 }
 
 func classifyResearchOutputError(response ollamaResponse, maxOutput int, cause error) *researchOutputError {
