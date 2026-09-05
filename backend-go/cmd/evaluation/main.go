@@ -12,7 +12,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: evaluation <fixed-evidence|walk-forward|probability-calibration|research-quality|compare-models> [flags]")
+		fmt.Fprintln(os.Stderr, "usage: evaluation <fixed-evidence|chronological_holdout|probability-calibration|research-quality|compare-models> [flags]")
 		os.Exit(2)
 	}
 	suite := os.Args[1]

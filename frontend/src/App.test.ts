@@ -883,10 +883,10 @@ describe("changed targets page", () => {
       onOpen: () => undefined,
     }));
     expect(commodityMarkup).toContain("商品价格");
-    expect(commodityMarkup).toContain("总体评级变化");
+    expect(commodityMarkup).toContain("事件信号状态变化");
     expect(commodityMarkup).toContain("长期证据趋势");
     expect(commodityMarkup).toContain("短期证据趋势");
-    expect(markup).toContain("总体评级变化");
+    expect(markup).toContain("事件信号状态变化");
     expect(markup).toContain("最新新闻信号");
     expect(markup).toContain("本次事件原始方向分");
     expect(markup).toContain("新闻可信度");

@@ -119,6 +119,17 @@ func verifyEventDraft(draft *eventResearchDraft, event map[string]any, evidence 
 			impactComplete = false
 			directionComplete = false
 		}
+		if item.TargetRelation.Kind != "direct" && item.TargetRelation.Kind != "indirect" {
+			verification.Missing = append(verification.Missing, "target_relation.kind:"+key)
+			impactComplete, directionComplete = false, false
+		}
+		item.TargetRelation.EvidenceIDs, verification.Missing = filterReferenceIDs(item.TargetRelation.EvidenceIDs, validEvidence, "evidence", verification.Missing)
+		item.TargetRelation.ActionIDs, verification.Missing = filterReferenceIDs(item.TargetRelation.ActionIDs, validActions, "action", verification.Missing)
+		item.Missing = append(item.Missing, item.TargetRelation.MissingInformation...)
+		if strings.TrimSpace(item.TargetRelation.Subject) == "" || len(item.TargetRelation.EvidenceIDs)+len(item.TargetRelation.ActionIDs) == 0 {
+			verification.Missing = append(verification.Missing, "target_relation.evidence:"+key)
+			impactComplete, directionComplete = false, false
+		}
 		for index := range item.Claims {
 			claim := &item.Claims[index]
 			if strings.TrimSpace(claim.Text) == "" || (claim.ClaimType != "fact" && claim.ClaimType != "inference") {
@@ -221,19 +232,24 @@ func verifyEventDraft(draft *eventResearchDraft, event map[string]any, evidence 
 			verification.Missing = append(verification.Missing, item.Missing...)
 		}
 		hasEndpoint := impactHasEconomicEndpoint(item)
+		pathContinuous := transmissionPathContinuous(item)
+		if !pathContinuous {
+			verification.Missing = append(verification.Missing, "broken_transmission_path:"+key)
+			impactComplete, directionComplete = false, false
+		}
 		if !hasEndpoint {
 			verification.Missing = append(verification.Missing, "economic_endpoint:"+key)
 			impactComplete = false
 		}
 		if !impactHasTargetSpecificEvidence(item, event, evidence) {
 			verification.Missing = append(verification.Missing, "target_specific_evidence:"+key)
-			impactComplete = false
+			impactComplete, directionComplete = false, false
 		}
 		if item.ConclusionStatus == "insufficient_evidence" && item.DirectionScore != 0 {
 			verification.Contradictions = append(verification.Contradictions, "insufficient conclusion had nonzero direction:"+key)
 			item.DirectionScore = 0
 		}
-		if item.DirectionScore != 0 && (!directionComplete || !hasEndpoint || globalContradiction || item.ConclusionStatus != "directional") {
+		if item.DirectionScore != 0 && (!directionComplete || !hasEndpoint || !pathContinuous || globalContradiction || item.ConclusionStatus != "directional") {
 			verification.Contradictions = append(verification.Contradictions, "nonzero direction without complete support:"+key)
 			item.DirectionScore = 0
 			item.ConclusionStatus = "insufficient_evidence"
@@ -297,7 +313,7 @@ func verifyAssetDraft(draft *assetResearchDraft, asset, event map[string]any, ev
 	if len(eventDraft.Impacts) == 1 {
 		impact := eventDraft.Impacts[0]
 		draft.DirectionScore, draft.ConclusionStatus, draft.ImpactChannel = impact.DirectionScore, impact.ConclusionStatus, impact.ImpactChannel
-		draft.Claims, draft.TransmissionSteps, draft.TransmissionPath = impact.Claims, impact.TransmissionSteps, impact.TransmissionPath
+		draft.Claims, draft.TransmissionSteps, draft.TransmissionPath, draft.TargetRelation = impact.Claims, impact.TransmissionSteps, impact.TransmissionPath, impact.TargetRelation
 		draft.EvidenceIDs, draft.MissingInformation = impact.EvidenceIDs, impact.Missing
 	} else {
 		draft.DirectionScore, draft.ConclusionStatus, draft.EvidenceIDs = 0, "insufficient_evidence", []string{}
@@ -309,7 +325,7 @@ func eventImpactFromAssetDraft(draft assetResearchDraft, asset map[string]any) e
 	return eventImpactDraft{
 		TargetType: "tradable_asset", TargetName: stringValue(asset["name"]), AssetID: stringValue(asset["asset_id"]),
 		ConclusionStatus: draft.ConclusionStatus, ImpactChannel: draft.ImpactChannel, DirectionScore: draft.DirectionScore,
-		Claims: draft.Claims, TransmissionSteps: draft.TransmissionSteps, TransmissionPath: draft.TransmissionPath,
+		Claims: draft.Claims, TransmissionSteps: draft.TransmissionSteps, TransmissionPath: draft.TransmissionPath, TargetRelation: draft.TargetRelation,
 		TargetEvaluation: draft.TargetEvaluation, Rationale: draft.Summary, EvidenceIDs: draft.EvidenceIDs, Missing: draft.MissingInformation,
 	}
 }
@@ -377,6 +393,7 @@ func impactReferenceIDs(item eventImpactDraft) ([]string, []string) {
 	for _, step := range item.TransmissionSteps {
 		evidenceIDs, actionIDs = append(evidenceIDs, step.EvidenceIDs...), append(actionIDs, step.ActionIDs...)
 	}
+	evidenceIDs, actionIDs = append(evidenceIDs, item.TargetRelation.EvidenceIDs...), append(actionIDs, item.TargetRelation.ActionIDs...)
 	for _, assessment := range namedAssessments(item.TargetEvaluation) {
 		evidenceIDs, actionIDs = append(evidenceIDs, assessment.Value.EvidenceIDs...), append(actionIDs, assessment.Value.ActionIDs...)
 	}
@@ -384,27 +401,91 @@ func impactReferenceIDs(item eventImpactDraft) ([]string, []string) {
 }
 
 func impactHasTargetSpecificEvidence(item eventImpactDraft, event map[string]any, evidence []researchEvidence) bool {
-	evidenceIDs, actionIDs := impactReferenceIDs(item)
+	relation := item.TargetRelation
+	if (relation.Kind != "direct" && relation.Kind != "indirect") || strings.TrimSpace(relation.Subject) == "" || len(relation.MissingInformation) > 0 {
+		return false
+	}
+	if relation.Kind == "indirect" && !containsString([]string{"supplier", "customer", "competitor", "holder", "business_exposure"}, relation.RelationshipType) {
+		return false
+	}
+	if relation.Kind == "direct" && !containsString([]string{"issuer", "security_identifier"}, relation.RelationshipType) {
+		return false
+	}
+	evidenceIDs, actionIDs := relation.EvidenceIDs, relation.ActionIDs
 	if len(evidenceIDs)+len(actionIDs) == 0 {
 		return false
 	}
+	asset := candidateAssets(event)[item.AssetID]
+	identity := targetIdentityTerms(item.TargetName, asset)
+	if len(identity) == 0 {
+		return false
+	}
+	allowedEvidence, allowedActions := stringSet(evidenceIDs), stringSet(actionIDs)
+	mentioned, currentEventSupport := false, false
+	for _, current := range evidence {
+		if allowedEvidence[current.ID] && containsTargetIdentity(current.Claim+" "+current.Excerpt, identity) {
+			mentioned = true
+			currentEventSupport = current.ContextRole != "historical_context"
+			break
+		}
+	}
+	if !mentioned {
+		for _, raw := range anySlice(event["actions"]) {
+			action := objectValue(raw)
+			if allowedActions[stringValue(action["id"])] && containsTargetIdentity(stringValue(action["actor"])+" "+stringValue(action["object"])+" "+stringValue(action["scope"]), identity) {
+				mentioned = true
+				currentEventSupport = true
+				break
+			}
+		}
+	}
+	if !mentioned || !currentEventSupport {
+		return false
+	}
 	if item.TargetType == "tradable_asset" {
-		return item.AssetID != "" && candidateAssets(event)[item.AssetID] != nil
+		return asset != nil
 	}
 	target := normalizedText(item.TargetName)
 	if target == "" {
 		return false
 	}
-	allowedEvidence := stringSet(evidenceIDs)
+	allowedEvidence = stringSet(evidenceIDs)
 	for _, current := range evidence {
 		if allowedEvidence[current.ID] && strings.Contains(normalizedText(current.Claim+" "+current.Excerpt), target) {
 			return true
 		}
 	}
-	allowedActions := stringSet(actionIDs)
+	allowedActions = stringSet(actionIDs)
 	for _, raw := range anySlice(event["actions"]) {
 		action := objectValue(raw)
 		if allowedActions[stringValue(action["id"])] && strings.Contains(normalizedText(stringValue(action["actor"])+" "+stringValue(action["object"])+" "+stringValue(action["scope"])), target) {
+			return true
+		}
+	}
+	return false
+}
+
+func targetIdentityTerms(target string, asset map[string]any) []string {
+	values := []string{target}
+	if asset != nil {
+		values = append(values, stringValue(asset["name"]), stringValue(asset["symbol"]))
+		values = append(values, stringSlice(asset["aliases"])...)
+	}
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if len([]rune(value)) >= 2 && !containsString(result, value) {
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
+func containsTargetIdentity(value string, terms []string) bool {
+	normalized := normalizedText(value)
+	for _, term := range terms {
+		needle := normalizedText(term)
+		if needle != "" && strings.Contains(normalized, needle) {
 			return true
 		}
 	}
@@ -427,6 +508,18 @@ func impactHasEconomicEndpoint(item eventImpactDraft) bool {
 		}
 	}
 	return false
+}
+
+func transmissionPathContinuous(item eventImpactDraft) bool {
+	if len(item.TransmissionSteps) == 0 || len(item.TransmissionPath) != len(item.TransmissionSteps)+1 {
+		return false
+	}
+	for index, step := range item.TransmissionSteps {
+		if normalizedText(step.SourceNode) != normalizedText(item.TransmissionPath[index]) || normalizedText(step.TargetNode) != normalizedText(item.TransmissionPath[index+1]) {
+			return false
+		}
+	}
+	return true
 }
 
 func citedSourceCoverage(ids []string, evidence []researchEvidence) (bool, int) {

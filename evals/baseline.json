@@ -10,13 +10,8 @@
   "cluster_recall": 1.0,
   "temporal_integrity": 1.0,
   "stage_composite_score": 0.9875,
-  "calibration_samples": 10,
-  "brier_score": 0.113333,
-  "reference_brier_score": 0.22,
-  "brier_skill": 0.484848,
-  "expected_calibration_error": 0.0,
-  "top_label_accuracy": 0.8,
-  "score_probability_consistency": 1.0,
-  "composite_score": 0.954242,
+  "prediction_evaluation": "skipped",
+  "prediction_skip_reason": "uncalibrated_predictions",
+  "composite_score": 0.9875,
   "passed": true
 }

@@ -57,6 +57,11 @@ type Config struct {
 	ResearchThink           bool
 	ResearchHistoryWindow   time.Duration
 	ResearchHistoryItems    int
+	ResearchPolicyMode      string
+	ResearchPolicyVersion   string
+	ResearchPredictionMode  string
+	PolicyShadowMinDays     int
+	PolicyShadowMinReviewed int
 	CodeContextLength       int
 	CodeMaxOutput           int
 	OllamaKeepAlive         string
@@ -142,6 +147,11 @@ func Load() (Config, error) {
 		ResearchThink:           envBool("OLLAMA_RESEARCH_THINK", false),
 		ResearchHistoryWindow:   time.Duration(envInt("RESEARCH_HISTORY_WINDOW_DAYS", 90)) * 24 * time.Hour,
 		ResearchHistoryItems:    envInt("RESEARCH_HISTORY_MAX_ITEMS", 20),
+		ResearchPolicyMode:      strings.ToLower(env("RESEARCH_POLICY_MODE", "shadow")),
+		ResearchPolicyVersion:   env("RESEARCH_POLICY_VERSION", "p0-evidence-v1"),
+		ResearchPredictionMode:  strings.ToLower(env("RESEARCH_PREDICTION_MODE", "unavailable")),
+		PolicyShadowMinDays:     envInt("RESEARCH_POLICY_SHADOW_MIN_DAYS", 14),
+		PolicyShadowMinReviewed: envInt("RESEARCH_POLICY_SHADOW_MIN_REVIEWED", 100),
 		CodeContextLength:       envInt("OLLAMA_CODE_CONTEXT_LENGTH", 16384),
 		CodeMaxOutput:           envInt("OLLAMA_CODE_MAX_OUTPUT_TOKENS", 8192),
 		OllamaKeepAlive:         env("OLLAMA_KEEP_ALIVE", "0"),
@@ -184,6 +194,23 @@ func Load() (Config, error) {
 	}
 	if cfg.ResearchHistoryItems < 0 || cfg.ResearchHistoryItems > 100 {
 		return Config{}, fmt.Errorf("RESEARCH_HISTORY_MAX_ITEMS must be between 0 and 100")
+	}
+	if cfg.ResearchPolicyMode != "shadow" && cfg.ResearchPolicyMode != "enforce" {
+		return Config{}, fmt.Errorf("RESEARCH_POLICY_MODE must be shadow or enforce")
+	}
+	if cfg.ResearchPolicyVersion == "" {
+		return Config{}, fmt.Errorf("RESEARCH_POLICY_VERSION must not be empty")
+	}
+	if cfg.ResearchPredictionMode != "unavailable" {
+		return Config{}, fmt.Errorf("RESEARCH_PREDICTION_MODE must be unavailable during P0")
+	}
+	if cfg.PolicyShadowMinDays < 14 || cfg.PolicyShadowMinReviewed < 100 {
+		return Config{}, fmt.Errorf("P0 policy shadow gate requires at least 14 days and 100 reviewed impacts")
+	}
+	// P0 is an audit-only policy. Autonomous code merging must never be enabled
+	// while a policy result can still change under review.
+	if cfg.ResearchPolicyMode == "shadow" {
+		cfg.EvolutionAutoMerge = false
 	}
 	if cfg.ScanBatchSize < 1 || cfg.ScanBatchSize > 200 {
 		return Config{}, fmt.Errorf("SCAN_BATCH_SIZE must be between 1 and 200")

@@ -81,7 +81,7 @@ func (s *Server) changedTargets(w http.ResponseWriter, r *http.Request) {
 			"current":        map[string]any{"signal_status": item.Current.Payload["signal_status"], "rating": item.Current.Payload["rating"]},
 			"status_changed": stringValue(item.Previous.Payload["signal_status"]) != stringValue(item.Current.Payload["signal_status"]),
 			"rating_changed": stringValue(item.Previous.Payload["rating"]) != stringValue(item.Current.Payload["rating"]),
-			"rating_state":   ratingStateValue(item.State), "latest_event_signal": latestEventSignalValue(item.State.LatestSignal),
+			"rating_state":   ratingStateValue(item.State), "event_signal_state": ratingStateValue(item.State), "latest_event_signal": latestEventSignalValue(item.State.LatestSignal),
 			"overall_rating_changed": true,
 		}
 		items = append(items, value)
@@ -1395,6 +1395,7 @@ func ratingStateChanged(value map[string]any) bool {
 func applyRatingState(value map[string]any, signals []targetRatingSignal) ratingStateReplay {
 	state := replayRatingState(signals)
 	value["rating_state"] = ratingStateValue(state)
+	value["event_signal_state"] = ratingStateValue(state)
 	value["latest_event_signal"] = latestEventSignalValue(state.LatestSignal)
 	value["_rating_signals"] = state.Signals
 	if state.HasChange {

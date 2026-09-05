@@ -1446,9 +1446,14 @@ export type Recommendation = {
     reason: string;
   }>;
   as_of: string;
-  bull_probability: number;
-  base_probability: number;
-  bear_probability: number;
+  bull_probability: number | null;
+  base_probability: number | null;
+  bear_probability: number | null;
+  event_signal?: { status: string; direction_score: number; rating: string; signal_available_at?: string };
+  event_signal_state?: RatingState;
+  evidence_quality?: { score: number; status: string; rule_version: string };
+  fundamental_rating?: { status: "unavailable"; rating: null; reason: string };
+  short_term_prediction?: { status: "uncalibrated"; probabilities: null; calibration: null; reason: string };
   thesis: {
     summary: string;
     historical_context: string;
@@ -1497,6 +1502,7 @@ export type ChangedTarget = {
   status_changed: boolean;
   rating_changed: boolean;
   rating_state?: RatingState;
+  event_signal_state?: RatingState;
   latest_event_signal?: LatestEventSignal | null;
 };
 
@@ -1610,6 +1616,7 @@ export type TargetChange = {
   current: { rating: string; direction_score: number | null; rating_confidence: number | null };
   latest: { rating: string; direction_score: number | null; rating_confidence: number | null; news_confidence: number | null };
   rating_state?: RatingState;
+  event_signal_state?: RatingState;
   latest_event_signal?: LatestEventSignal | null;
   trend?: TargetTrend;
   latest_detail: { kind: "event" | "asset"; id: string; researched_at: string };
@@ -2337,8 +2344,8 @@ export function ChangedTargetGrid({
 }) {
   return <div className="target-change-grid" data-columns={changedTargetDesktopColumns}>
     {items.map((item) => {
-      const previousRating = item.rating_state?.previous || item.previous.rating;
-      const currentRating = item.rating_state?.current || item.current.rating;
+      const previousRating = item.event_signal_state?.previous || item.rating_state?.previous || item.previous.rating;
+      const currentRating = item.event_signal_state?.current || item.rating_state?.current || item.current.rating;
       const eventSignal = item.latest_event_signal;
       const changedAt = item.rating_state?.changed_at || item.changed_at;
       return <article className="target-change-card" key={item.asset.asset_id}>
@@ -2360,7 +2367,7 @@ export function ChangedTargetGrid({
         </div>
       </header>
       <div className="target-change-field changed">
-        <span>总体评级变化</span>
+        <span>事件信号状态变化</span>
         <strong>{recommendationRatingLabel(previousRating)} → {recommendationRatingLabel(currentRating)}</strong>
       </div>
       {eventSignal && <div className="target-change-field">
@@ -2434,12 +2441,12 @@ export function ConclusionDetailModal({ detail, onClose }: { detail: ConclusionD
 		  <V3ConfidenceDetails recommendation={detail.recommendation} />
 		  <TargetEvaluationDetails value={detail.recommendation.target_evaluation} modelValue={detail.recommendation.model_target_evaluation} score={detail.recommendation.target_evaluation_score} />
 		  <ResearchReasoningDetails claims={detail.recommendation.impact?.claims} steps={detail.recommendation.impact?.transmission_steps} />
-		  <div className="probability-grid"><span>牛市 <strong>{Math.round(detail.recommendation.bull_probability * 100)}%</strong></span><span>中性 <strong>{Math.round(detail.recommendation.base_probability * 100)}%</strong></span><span>熊市 <strong>{Math.round(detail.recommendation.bear_probability * 100)}%</strong></span></div>
+		  <div className="probability-grid"><span>短期预测 <strong>未校准</strong></span><span>概率 <strong>暂不显示</strong></span><span>基本面评级 <strong>未建立</strong></span></div>
         </>
         : isShortTerm
         ? <ShortTermScoreDetails recommendation={detail.recommendation} />
         : <>
-          <div className="probability-grid"><span>看多 <strong>{Math.round(detail.recommendation.bull_probability * 100)}%</strong></span><span>基准 <strong>{Math.round(detail.recommendation.base_probability * 100)}%</strong></span><span>看空 <strong>{Math.round(detail.recommendation.bear_probability * 100)}%</strong></span></div>
+          <div className="probability-grid"><span>短期预测 <strong>未校准</strong></span><span>概率 <strong>暂不显示</strong></span><span>基本面评级 <strong>未建立</strong></span></div>
           <div className="research-gate-grid">
             <span>程序原始分<strong>{detail.recommendation.score_available === false || ["technical_failure", "insufficient_evidence"].includes(detail.recommendation.signal_status || "") ? "—" : <>{(detail.recommendation.raw_score ?? detail.recommendation.score ?? 0) > 0 ? "+" : ""}{detail.recommendation.raw_score ?? detail.recommendation.score ?? 0}</>}</strong></span>
             <span>证据强度<strong>{Math.round((detail.recommendation.evidence_strength ?? (detail.recommendation.evidence_complete ? 1 : 0)) * 100)}%</strong></span>
@@ -2585,8 +2592,8 @@ export function TargetChangeGrid({
       const score = eventSignal?.direction_score ?? item.latest.direction_score;
       const newsConfidence = eventSignal?.news_confidence ?? item.latest.news_confidence;
       const confidence = eventSignal?.rating_confidence ?? item.latest.rating_confidence;
-      const previousRating = item.rating_state?.previous || item.previous?.rating || item.current.rating;
-      const currentRating = item.rating_state?.current || item.current.rating;
+      const previousRating = item.event_signal_state?.previous || item.rating_state?.previous || item.previous?.rating || item.current.rating;
+      const currentRating = item.event_signal_state?.current || item.rating_state?.current || item.current.rating;
       const changedAt = item.rating_state?.changed_at || item.changed_at;
       return <article className={`target-change-card ${item.kind}`} key={item.key}>
         <header>
@@ -2606,7 +2613,7 @@ export function TargetChangeGrid({
             </button>
           </div>
         </header>
-        <div className="target-change-field changed"><span>总体评级变化</span><div className="target-change-rating-row"><strong>{recommendationRatingLabel(previousRating)} → {recommendationRatingLabel(currentRating)}</strong>{item.rating_state?.transition_limited && <em className="target-change-limited">单步限制</em>}</div></div>
+        <div className="target-change-field changed"><span>事件信号状态变化</span><div className="target-change-rating-row"><strong>{recommendationRatingLabel(previousRating)} → {recommendationRatingLabel(currentRating)}</strong>{(item.event_signal_state || item.rating_state)?.transition_limited && <em className="target-change-limited">单步限制</em>}</div></div>
         <div className="target-change-field"><span>最新新闻信号</span><div className="target-change-rating-row"><strong>{recommendationRatingLabel(eventSignal?.rating || item.latest.rating)}</strong><b className={score === null ? "neutral" : score < 0 ? "negative" : score > 0 ? "positive" : "neutral"} title="本次事件原始方向分">{score === null ? "—" : `${score > 0 ? "+" : ""}${score}`}</b></div></div>
         {item.trend && <TargetTrendSummary trend={item.trend} />}
         <div className={`target-change-latest${onResearch ? " with-research" : ""}`}>

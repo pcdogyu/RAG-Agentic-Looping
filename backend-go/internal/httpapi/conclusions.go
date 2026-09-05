@@ -275,10 +275,15 @@ func normalizeRecommendation(payload map[string]any) {
 			payload["signal_status"] = "directional"
 		}
 	}
+	if _, ok := payload["event_signal"]; !ok {
+		payload["event_signal"] = map[string]any{"status": payload["signal_status"], "direction_score": payload["direction_score"], "rating": payload["rating"], "as_of": payload["as_of"], "signal_available_at": payload["as_of"], "algorithm_version": "legacy-compatible"}
+	}
 	defaults := map[string]any{
 		"news_confidence_version": nil, "news_confidence_factors": nil,
 		"rating_confidence_factors": nil, "mapping_distance": float64(5),
 		"score_source": "llm", "impact": nil,
+		"fundamental_rating":    map[string]any{"status": "unavailable", "rating": nil, "reason": "not_implemented_p0"},
+		"short_term_prediction": map[string]any{"status": "uncalibrated", "probabilities": nil, "calibration": nil, "reason": "not_available_until_calibration"},
 	}
 	for key, value := range defaults {
 		if _, ok := payload[key]; !ok {

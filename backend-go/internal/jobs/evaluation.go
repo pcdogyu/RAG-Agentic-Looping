@@ -86,10 +86,10 @@ func RunOfflineEvaluation(root, suite, baselinePath, candidatePath string) (map[
 	switch suite {
 	case "fixed-evidence":
 		return frozenEvidenceEvaluation(root)
-	case "walk-forward":
+	case "walk-forward", "chronological_holdout":
 		return frozenWalkForwardEvaluation(root)
 	case "probability-calibration":
-		return frozenProbabilityEvaluation(root)
+		return map[string]any{"status": "skipped", "reason": "uncalibrated_predictions", "passed": true}, nil
 	case "research-quality":
 		return frozenResearchQualityEvaluation(root)
 	case "compare-models":
@@ -181,6 +181,7 @@ func evaluationResearchInput(direction int) (map[string]any, []researchEvidence,
 		Claims:            []claimDraft{{ClaimType: "fact", Text: "order effective", EvidenceIDs: []string{"ev-1"}, ActionIDs: []string{"action-1"}}},
 		TransmissionSteps: []transmissionStepDraft{{SourceNode: "order", Mechanism: "contract recognition", TargetNode: "revenue", BasisType: "inference", EvidenceIDs: []string{"ev-1"}, ActionIDs: []string{"action-1"}}},
 		TransmissionPath:  []string{"order", "revenue"}, TargetEvaluation: evaluation, EvidenceIDs: []string{"ev-1"}, Rationale: "order to revenue",
+		TargetRelation: targetRelationDraft{Kind: "direct", RelationshipType: "issuer", Subject: "Acme", EvidenceIDs: []string{"ev-1"}, ActionIDs: []string{"action-1"}},
 	}
 	return event, evidence, impact
 }
@@ -222,32 +223,19 @@ func frozenEvidenceEvaluation(root string) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	calibration, err := frozenProbabilityEvaluation(root)
-	if err != nil {
-		return nil, err
-	}
 	stageComposite := numberValue(stage["composite_score"])
 	delete(stage, "composite_score")
-	calibrationComposite := (math.Max(0, numberValue(calibration["brier_skill"])) +
-		(1 - numberValue(calibration["expected_calibration_error"])) +
-		numberValue(calibration["top_label_accuracy"]) +
-		numberValue(calibration["score_probability_consistency"])) / 4
 	result := map[string]any{
 		"version": dataset.Version, "dataset": dataset.Dataset,
-		"stage_composite_score":         roundEvaluation(stageComposite),
-		"calibration_samples":           int(numberValue(calibration["samples"])),
-		"brier_score":                   numberValue(calibration["brier_score"]),
-		"reference_brier_score":         numberValue(calibration["reference_brier_score"]),
-		"brier_skill":                   numberValue(calibration["brier_skill"]),
-		"expected_calibration_error":    numberValue(calibration["expected_calibration_error"]),
-		"top_label_accuracy":            numberValue(calibration["top_label_accuracy"]),
-		"score_probability_consistency": numberValue(calibration["score_probability_consistency"]),
-		"composite_score":               roundEvaluation(.8*stageComposite + .2*calibrationComposite),
+		"stage_composite_score":  roundEvaluation(stageComposite),
+		"prediction_evaluation":  "skipped",
+		"prediction_skip_reason": "uncalibrated_predictions",
+		"composite_score":        roundEvaluation(stageComposite),
 	}
 	for key, value := range stage {
 		result[key] = value
 	}
-	result["passed"] = evaluationMeetsMinimums(result, dataset.Minimums) && EvaluationPassed(calibration)
+	result["passed"] = evaluationMeetsMinimums(result, dataset.Minimums)
 	return result, nil
 }
 

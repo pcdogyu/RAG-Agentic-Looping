@@ -56,7 +56,7 @@ describe("target trend integration", () => {
 
     expect(markup.match(/target-change-card macro/g)?.length).toBe(1);
     expect(markup).toContain("数字资产");
-    expect(markup).toContain("总体评级变化");
+    expect(markup).toContain("事件信号状态变化");
     expect(markup).toContain("看多 → 中性");
     expect(markup).toContain("最新新闻信号");
     expect(markup).toContain("强烈看空");

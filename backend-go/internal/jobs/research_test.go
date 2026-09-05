@@ -538,7 +538,8 @@ func researchQualityFixture() (map[string]any, []researchEvidence, eventImpactDr
 		TransmissionPath:  []string{"新订单", "公司收入"}, TargetEvaluation: targetEvaluationDraft{
 			ObjectRelevance: assessment, EvidenceSufficiency: assessment, TransmissionCertainty: assessment, ImpactSupport: assessment, TimingPersistence: assessment,
 		},
-		Rationale: "订单可传导至收入", EvidenceIDs: []string{"ev-1"}, Missing: []string{},
+		TargetRelation: targetRelationDraft{Kind: "direct", RelationshipType: "issuer", Subject: "Acme", EvidenceIDs: []string{"ev-1"}, ActionIDs: []string{actionID}, MissingInformation: []string{}},
+		Rationale:      "订单可传导至收入", EvidenceIDs: []string{"ev-1"}, Missing: []string{},
 	}
 	return event, evidence, impact
 }
@@ -626,6 +627,27 @@ func TestNonzeroDirectionRequiresImpactEndpoint(t *testing.T) {
 	verifyEventDraft(&draft, event, evidence, time.Time{})
 	if draft.Impacts[0].DirectionScore != 0 || draft.Impacts[0].ConclusionStatus != "insufficient_evidence" {
 		t.Fatalf("direction without matching economic endpoint was retained: %#v", draft.Impacts[0])
+	}
+}
+
+func TestCandidateIdentityIsNotTargetImpactEvidence(t *testing.T) {
+	event, evidence, impact := researchQualityFixture()
+	evidence[0].Claim, evidence[0].Excerpt = "行业订单增加", "未提及发行主体"
+	event["actions"] = []any{map[string]any{"id": "action-1", "actor": "行业协会", "object": "订单", "scope": "行业订单", "action_stage": "effective"}}
+	draft := eventResearchDraft{Summary: "订单事件", Impacts: []eventImpactDraft{impact}}
+	verification := verifyEventDraft(&draft, event, evidence, time.Time{})
+	if draft.Impacts[0].DirectionScore != 0 || !containsPrefix(verification.Missing, "target_specific_evidence:") {
+		t.Fatalf("candidate identity incorrectly became impact evidence: %#v / %#v", draft.Impacts[0], verification)
+	}
+}
+
+func TestBrokenTransmissionPathForcesConditionalSignal(t *testing.T) {
+	event, evidence, impact := researchQualityFixture()
+	impact.TransmissionPath = []string{"新订单", "错误节点"}
+	draft := eventResearchDraft{Summary: "订单事件", Impacts: []eventImpactDraft{impact}}
+	verification := verifyEventDraft(&draft, event, evidence, time.Time{})
+	if draft.Impacts[0].DirectionScore != 0 || !containsPrefix(verification.Missing, "broken_transmission_path:") {
+		t.Fatalf("broken path retained a directional signal: %#v / %#v", draft.Impacts[0], verification)
 	}
 }
 

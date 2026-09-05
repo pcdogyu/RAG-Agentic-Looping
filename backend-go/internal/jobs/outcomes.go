@@ -159,7 +159,15 @@ func (runtime *outcomeRuntime) evaluateRecommendation(
 	if horizonUnit == "" {
 		horizonUnit = "calendar_days"
 	}
-	start := parseTime(recommendation["as_of"])
+	// Outcomes must start when a fully evidenced signal was actually available,
+	// never at the publisher timestamp assumed by a historical replay.
+	start := parseTime(recommendation["signal_available_at"])
+	if start.IsZero() {
+		start = parseTime(objectValue(recommendation["event_signal"])["signal_available_at"])
+	}
+	if start.IsZero() {
+		start = parseTime(recommendation["as_of"])
+	}
 	if start.IsZero() {
 		start = storedAsOf.UTC()
 	}
@@ -197,16 +205,16 @@ func (runtime *outcomeRuntime) evaluateRecommendation(
 	} else if rawReturn >= -neutralBand {
 		actual = [3]float64{0, 1, 0}
 	}
-	predicted := [3]float64{
-		numberValue(recommendation["bull_probability"]),
-		numberValue(recommendation["base_probability"]),
-		numberValue(recommendation["bear_probability"]),
+	var brier any
+	predictionStatus := "uncalibrated"
+	if recommendation["bull_probability"] != nil && recommendation["base_probability"] != nil && recommendation["bear_probability"] != nil {
+		predicted := [3]float64{numberValue(recommendation["bull_probability"]), numberValue(recommendation["base_probability"]), numberValue(recommendation["bear_probability"])}
+		value := 0.0
+		for index := range predicted {
+			value += math.Pow(predicted[index]-actual[index], 2) / 3
+		}
+		brier, predictionStatus = value, "legacy_heuristic_distribution"
 	}
-	brier := 0.0
-	for index := range predicted {
-		brier += math.Pow(predicted[index]-actual[index], 2)
-	}
-	brier /= 3
 	directionScore := numberValue(recommendation["direction_score"])
 	if recommendation["direction_score"] == nil {
 		directionScore = numberValue(recommendation["score"])
@@ -230,7 +238,7 @@ func (runtime *outcomeRuntime) evaluateRecommendation(
 		"raw_return": rawReturn, "benchmark_return": benchmark.Return, "alpha": alpha,
 		"benchmark_status": benchmark.Status, "entry_at": iso(entry.ObservedAt), "exit_at": iso(exit.ObservedAt),
 		"entry_price": entry.Close, "exit_price": exit.Close, "direction_correct": directionCorrect,
-		"brier_score": brier, "max_drawdown": maxDrawdown, "thesis_invalidated": false, "observed_at": iso(now),
+		"brier_score": brier, "prediction_evaluation": predictionStatus, "max_drawdown": maxDrawdown, "thesis_invalidated": false, "observed_at": iso(now),
 	}, "completed", nil
 }
 

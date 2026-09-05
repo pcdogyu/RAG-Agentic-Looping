@@ -1016,6 +1016,18 @@ func (runtime *discoveryRuntime) persistForExtraction(ctx context.Context, scanT
 			_ = tx.Rollback(ctx)
 			return nil, counts, err
 		}
+		if err == nil {
+			lineage := objectValue(item.Metadata["source_lineage"])
+			canonical := fallbackString(stringValue(lineage["canonical_url"]), item.URL)
+			original := stringValue(lineage["original_source"])
+			status := ternaryString(original == "", "unknown", "resolved")
+			if original == "" {
+				original = stringValue(lineage["publisher_domain"])
+			}
+			chain, _ := json.Marshal([]any{map[string]any{"source": item.Source, "publisher": lineage["publisher_domain"], "url": canonical}})
+			payload, _ := json.Marshal(lineage)
+			_, err = tx.Exec(ctx, `INSERT INTO source_lineage(news_item_id,canonical_url,original_publisher,original_document_id,syndication_group,parse_status,source_chain,payload,created_at,updated_at) VALUES($1,$2,$3,NULL,$4,$5,$6,$7,now(),now()) ON CONFLICT(news_item_id) DO UPDATE SET canonical_url=excluded.canonical_url,original_publisher=excluded.original_publisher,syndication_group=excluded.syndication_group,parse_status=excluded.parse_status,source_chain=excluded.source_chain,payload=excluded.payload,updated_at=now()`, newsID, canonical, nullableString(original), nullableString(stringValue(lineage["syndication_group"])), status, chain, payload)
+		}
 		if seen[newsID] {
 			_ = tx.Rollback(ctx)
 			continue
