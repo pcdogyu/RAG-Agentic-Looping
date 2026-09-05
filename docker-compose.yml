@@ -182,7 +182,7 @@ services:
     environment:
       APP_ENV: development
       GO_WORKER_LANE: research
-      GO_WORKER_CONCURRENCY: ${RESEARCH_PIPELINE_CONCURRENCY:-2}
+      GO_WORKER_CONCURRENCY: ${RESEARCH_PIPELINE_CONCURRENCY:-1}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       OLLAMA_RESEARCH_BASE_URLS: ${OLLAMA_RESEARCH_BASE_URLS:-http://host.docker.internal:11435}
       OLLAMA_RESEARCH_MODEL: ${OLLAMA_RESEARCH_MODEL:-qwen3:4b-thinking}

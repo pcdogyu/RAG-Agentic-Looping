@@ -51,9 +51,9 @@ esac
 export OLLAMA_HOST="$host"
 export OLLAMA_KEEP_ALIVE="$(read_project_value OLLAMA_KEEP_ALIVE -1)"
 export OLLAMA_MAX_LOADED_MODELS=1
-export OLLAMA_NUM_PARALLEL="$(read_project_value OLLAMA_RESEARCH_NUM_PARALLEL 2)"
+export OLLAMA_NUM_PARALLEL="$(read_project_value OLLAMA_RESEARCH_NUM_PARALLEL 1)"
 export OLLAMA_FLASH_ATTENTION="$(read_project_value OLLAMA_FLASH_ATTENTION 1)"
-export OLLAMA_KV_CACHE_TYPE="$(read_project_value OLLAMA_KV_CACHE_TYPE q8_0)"
+export OLLAMA_KV_CACHE_TYPE="$(read_project_value OLLAMA_KV_CACHE_TYPE f16)"
 export OLLAMA_CONTEXT_LENGTH="$(read_project_value OLLAMA_RESEARCH_CONTEXT_LENGTH 16384)"
 export OLLAMA_MAX_QUEUE="$(read_project_value OLLAMA_MAX_QUEUE 256)"
 export OLLAMA_LOAD_TIMEOUT="$(read_project_value OLLAMA_LOAD_TIMEOUT 10m)"
