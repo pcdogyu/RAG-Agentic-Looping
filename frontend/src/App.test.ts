@@ -608,7 +608,7 @@ describe("model log navigation and filters", () => {
         configured: false,
         enabled: false,
         activity_state: "historical",
-        lanes: [],
+        lanes: null,
       }],
     };
     const markup = renderToStaticMarkup(createElement(ModelRuntimePanel, {
@@ -623,6 +623,7 @@ describe("model log navigation and filters", () => {
     expect(markup).toContain("ollama · 标的研究");
     expect(markup).toContain("运行中");
     expect(markup).toContain("历史模型");
+    expect(markup).toContain("openai-compatible · 近24小时历史调用");
     expect(markup).toContain("当前队列");
     expect(markup).toContain("处理中");
     expect(markup).toContain("平均处理时间");

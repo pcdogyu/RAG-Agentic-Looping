@@ -276,9 +276,13 @@ func buildModelRuntimeSummary(now time.Time, specs []nativeModelQueueSpec, attem
 	for _, key := range order {
 		item := models[key]
 		totals.add(item.metrics)
+		lanes := item.lanes
+		if lanes == nil {
+			lanes = []modelRuntimeLane{}
+		}
 		items = append(items, modelRuntimeModel{
 			Provider: item.provider, Model: item.model, Configured: item.configured, Enabled: item.enabled,
-			ActivityState: modelRuntimeActivityState(item), Lanes: item.lanes,
+			ActivityState: modelRuntimeActivityState(item), Lanes: lanes,
 			modelRuntimeMetrics: item.metrics.result(),
 		})
 	}

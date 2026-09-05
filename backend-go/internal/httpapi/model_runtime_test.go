@@ -80,6 +80,9 @@ func TestBuildModelRuntimeSummaryUsesLogicalTasksAndCurrentQueues(t *testing.T) 
 	if historical.Provider != "openai-compatible" || historical.Model != "model-z" || historical.Configured || historical.ActivityState != "historical" {
 		t.Fatalf("historical model is incorrect: %+v", historical)
 	}
+	if historical.Lanes == nil || len(historical.Lanes) != 0 {
+		t.Fatalf("historical model lanes must be an empty array: %+v", historical.Lanes)
+	}
 	if payload.Totals.ProcessedTasks != 5 || payload.Totals.QueuedTasks != 7 || payload.Totals.RunningTasks != 1 {
 		t.Fatalf("global totals are incorrect: %+v", payload.Totals)
 	}

@@ -67,7 +67,7 @@ export type ModelRuntimeModel = ModelRuntimeMetrics & {
   configured: boolean;
   enabled: boolean;
   activity_state: "running" | "queued" | "idle" | "disabled" | "historical";
-  lanes: Array<{ id: string; purpose: string; enabled: boolean }>;
+  lanes: Array<{ id: string; purpose: string; enabled: boolean }> | null;
 };
 
 export type ModelRuntimeSummary = {
@@ -265,24 +265,27 @@ export function ModelRuntimePanel({ summary, loading, error }: {
         <RuntimeMetric label="输出 Token" value={formatCount(summary.totals.output_tokens)} note={`平均/任务 ${formatCount(summary.totals.average_output_tokens)}`} />
       </div>
       <div className="model-runtime-grid">
-        {summary.models.map((item) => <article className="model-runtime-card" key={`${item.provider}:${item.model}`}>
-          <header>
-            <div><h4>{item.model}</h4><span>{item.provider} · {item.lanes.length > 0
-              ? item.lanes.map((lane) => `${lane.purpose}${lane.enabled ? "" : "（停用）"}`).join(" · ")
-              : "近24小时历史调用"}</span></div>
-            <strong className={`model-runtime-state ${item.activity_state}`}><i />{modelActivityLabel(item.activity_state)}</strong>
-          </header>
-          <div className="model-runtime-card-metrics">
-            <RuntimeMetric label="已处理" value={formatCount(item.processed_tasks)} />
-            <RuntimeMetric label="当前队列" value={formatCount(item.queued_tasks)} />
-            <RuntimeMetric label="处理中" value={formatCount(item.running_tasks)} />
-            <RuntimeMetric label="平均处理时间" value={item.average_processing_ms === null ? "—" : formatDuration(item.average_processing_ms)} />
-            <RuntimeMetric label="成功率" value={formatRate(item.success_rate)} note={`${formatCount(item.successful_tasks)} 个成功任务`} />
-            <RuntimeMetric label="失败率" value={formatRate(item.failure_rate)} note={`${formatCount(item.failed_tasks)} 个失败任务`} />
-            <RuntimeMetric label="输入 Token" value={formatCount(item.input_tokens)} note={`平均/任务 ${formatCount(item.average_input_tokens)}`} />
-            <RuntimeMetric label="输出 Token" value={formatCount(item.output_tokens)} note={`平均/任务 ${formatCount(item.average_output_tokens)}`} />
-          </div>
-        </article>)}
+        {summary.models.map((item) => {
+          const lanes = item.lanes || [];
+          return <article className="model-runtime-card" key={`${item.provider}:${item.model}`}>
+            <header>
+              <div><h4>{item.model}</h4><span>{item.provider} · {lanes.length > 0
+                ? lanes.map((lane) => `${lane.purpose}${lane.enabled ? "" : "（停用）"}`).join(" · ")
+                : "近24小时历史调用"}</span></div>
+              <strong className={`model-runtime-state ${item.activity_state}`}><i />{modelActivityLabel(item.activity_state)}</strong>
+            </header>
+            <div className="model-runtime-card-metrics">
+              <RuntimeMetric label="已处理" value={formatCount(item.processed_tasks)} />
+              <RuntimeMetric label="当前队列" value={formatCount(item.queued_tasks)} />
+              <RuntimeMetric label="处理中" value={formatCount(item.running_tasks)} />
+              <RuntimeMetric label="平均处理时间" value={item.average_processing_ms === null ? "—" : formatDuration(item.average_processing_ms)} />
+              <RuntimeMetric label="成功率" value={formatRate(item.success_rate)} note={`${formatCount(item.successful_tasks)} 个成功任务`} />
+              <RuntimeMetric label="失败率" value={formatRate(item.failure_rate)} note={`${formatCount(item.failed_tasks)} 个失败任务`} />
+              <RuntimeMetric label="输入 Token" value={formatCount(item.input_tokens)} note={`平均/任务 ${formatCount(item.average_input_tokens)}`} />
+              <RuntimeMetric label="输出 Token" value={formatCount(item.output_tokens)} note={`平均/任务 ${formatCount(item.average_output_tokens)}`} />
+            </div>
+          </article>;
+        })}
       </div>
     </>}
   </section>;
