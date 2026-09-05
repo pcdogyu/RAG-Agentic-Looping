@@ -86,7 +86,7 @@ func probeOllama(ctx context.Context) ([]map[string]any, []string, map[string]ma
 	lanes := []lane{
 		{"extract", envValue("OLLAMA_EXTRACT_MODEL", "qwen2.5:3b"), "http://host.docker.internal:11434"},
 		{"assist", envValue("OLLAMA_ASSIST_MODEL", "qwen2.5:7b"), "http://host.docker.internal:11437"},
-		{"research", envValue("OLLAMA_RESEARCH_MODEL", "qwen3:4b-thinking"), "http://host.docker.internal:11435"},
+		{"research", envValue("OLLAMA_RESEARCH_MODEL", "qwen2.5:7b"), "http://host.docker.internal:11435"},
 		{"code", envValue("OLLAMA_CODE_MODEL", "qwen2.5-coder:7b"), "http://host.docker.internal:11438"},
 	}
 	client := &http.Client{Timeout: 2 * time.Second}

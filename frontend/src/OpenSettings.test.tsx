@@ -702,6 +702,8 @@ describe("open source and search settings", () => {
     expect(markup).toContain("黑名单关键字");
     expect(markup).toContain("天气");
     expect(markup).toContain("命中白名单");
+    expect(markup).toContain("Qwen2.5 7B 深度研究");
+    expect(markup).not.toContain("Thinking / 24h");
     expect(markup).toContain("黑名单优先");
     expect(markup).not.toContain("管理员令牌");
   });

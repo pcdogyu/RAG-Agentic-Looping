@@ -30,7 +30,7 @@ func TestProbeOllamaReportsConfiguredLaneAvailabilityAndLoadedState(t *testing.T
 	defer extract.Close()
 	assist := server([]string{"qwen2.5:7b"}, []string{"qwen2.5:7b"})
 	defer assist.Close()
-	research := server([]string{"qwen3:4b-thinking"}, []string{"qwen3:4b-thinking"})
+	research := server([]string{"qwen2.5:7b"}, []string{"qwen2.5:7b"})
 	defer research.Close()
 	code := server([]string{"qwen2.5-coder:7b"}, nil)
 	code.Close()
@@ -49,10 +49,10 @@ func TestProbeOllamaReportsConfiguredLaneAvailabilityAndLoadedState(t *testing.T
 	if len(instances) != 4 {
 		t.Fatalf("expected four lane instances, got %d", len(instances))
 	}
-	if len(models) != 3 {
-		t.Fatalf("expected models from three reachable instances, got %v", models)
+	if len(models) != 2 {
+		t.Fatalf("expected two distinct models from three reachable instances, got %v", models)
 	}
-	if status := statuses["qwen3:4b-thinking"]; !status["healthy"] || !status["model_available"] || !status["model_loaded"] {
+	if status := statuses["qwen2.5:7b"]; !status["healthy"] || !status["model_available"] || !status["model_loaded"] {
 		t.Fatalf("unexpected research status: %v", status)
 	}
 	if status := statuses["qwen2.5-coder:7b"]; status["healthy"] || status["model_available"] || status["model_loaded"] {

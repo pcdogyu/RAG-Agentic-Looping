@@ -273,6 +273,39 @@ func TestFastResearchEscalatesToThinkingAfterInvalidOutput(t *testing.T) {
 	}
 }
 
+func TestQwenSevenBFastResearchEscalatesWithoutThinking(t *testing.T) {
+	requests := make([]map[string]any, 0, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		requests = append(requests, request)
+		if len(requests) == 1 {
+			_, _ = w.Write([]byte(`{"message":{"content":"{"},"eval_count":10,"done_reason":"stop"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"message":{"content":"{\"answer\":\"deep\"}"},"eval_count":20,"done_reason":"stop"}`))
+	}))
+	defer server.Close()
+	runtime := newResearchRuntime(config.Config{
+		ResearchModel: "qwen2.5:7b", ResearchURLs: []string{server.URL}, ResearchThink: false,
+		ResearchFastContext: 16384, ResearchFastMaxOutput: 4096, ResearchContextLength: 32768, ResearchMaxOutput: 16384,
+	}, nil, nil)
+	runtime.client = server.Client()
+	var result map[string]any
+	if err := runtime.callResearchModel(context.Background(), uuid.New(), "research_run", "report_drafting", "system", "prompt", map[string]any{"type": "object"}, "research-0", "fast", "default_fast", &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(requests) != 2 || requests[0]["think"] != false || requests[1]["think"] != false {
+		t.Fatalf("qwen2.5 research must remain non-thinking after escalation: %#v", requests)
+	}
+	first, second := objectValue(requests[0]["options"]), objectValue(requests[1]["options"])
+	if numberValue(first["num_ctx"]) != 16384 || numberValue(first["num_predict"]) != 4096 || numberValue(second["num_ctx"]) != 32768 || numberValue(second["num_predict"]) != 16384 {
+		t.Fatalf("unexpected non-thinking profiles: first=%#v second=%#v", first, second)
+	}
+}
+
 func TestResearchModelFallsBackAfterMalformedJSON(t *testing.T) {
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

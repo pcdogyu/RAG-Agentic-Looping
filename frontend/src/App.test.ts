@@ -1477,7 +1477,7 @@ describe("research queue page", () => {
 
   it("uses one shared research panel with global backlog and live instance slots", () => {
     const researchQueue = overviewQueue({
-      id: "research", model: "qwen3:4b-thinking", purpose: "标的研究",
+      id: "research", model: "qwen2.5:7b", purpose: "标的研究",
       capacity: 4, deep_capacity: 1, available: 0, instance_count: 4, per_instance_concurrency: 1,
       counts: { queued: 3262, running: 4, retrying: 817, verifying: 0, waiting_for_model: 0, completed: 245, failed: 0 },
       instances: [
@@ -1493,7 +1493,7 @@ describe("research queue page", () => {
       queue: researchQueue, instance: rightColumn[0].instance,
     }));
 
-    expect(markup).toContain("qwen3:4b-thinking 标的研究队列 · 全部实例");
+    expect(markup).toContain("qwen2.5:7b 标的研究队列 · 全部实例");
     expect(markup).toContain("待处理<strong>3262</strong>");
     expect(markup).toContain("重试/验证<strong>817</strong>");
     expect(markup).toContain("近24h完成/失败<strong>245/0</strong>");
@@ -1501,7 +1501,7 @@ describe("research queue page", () => {
     expect(markup).toContain("research-3 · 运行 1 · 槽位 0/1");
   });
 
-  it("labels fast, thinking, escalation, and deep-slot waiting research tasks", () => {
+  it("labels fast, deep, escalation, and deep-slot waiting research tasks", () => {
     const baseTask = {
       task_id: "research-fast", kind: "event_research", entity_id: "event-1", title: "Fast event", subtitle: "other",
       source: "automatic", status: "running", attempt: 1, task_count: 1, queued_at: "2026-09-05T00:00:00Z",
@@ -1510,10 +1510,12 @@ describe("research queue page", () => {
     } satisfies ModelQueueTask;
     const queue = overviewQueue({ id: "research", purpose: "标的研究", tasks: [
       { ...baseTask, research_profile: "fast" },
-      { ...baseTask, task_id: "research-deep", title: "Deep event", research_profile: "deep", waiting_for_deep_slot: true, escalated_to_deep: true },
+      { ...baseTask, task_id: "research-deep", title: "Deep event", research_profile: "deep" },
+      { ...baseTask, task_id: "research-waiting", title: "Waiting event", research_profile: "deep", waiting_for_deep_slot: true, escalated_to_deep: true },
     ] });
     const markup = renderToStaticMarkup(createElement(ModelQueueTaskGrid, { queue }));
     expect(markup).toContain(">快速<");
+    expect(markup).toContain(">深度<");
     expect(markup).toContain("等待深度槽 · 快速失败后升级");
   });
 

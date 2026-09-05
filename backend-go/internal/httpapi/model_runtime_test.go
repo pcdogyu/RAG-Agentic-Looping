@@ -110,6 +110,33 @@ func TestBuildModelRuntimeSummaryReturnsNullRatesAndAveragesWithoutTasks(t *test
 	}
 }
 
+func TestBuildModelRuntimeSummaryMergesAssistAndResearchOnQwenSevenB(t *testing.T) {
+	now := time.Date(2026, time.September, 6, 8, 0, 0, 0, time.UTC)
+	specs := []nativeModelQueueSpec{
+		{id: "assist", model: "qwen2.5:7b", purpose: "股票映射", enabled: true},
+		{id: "research", model: "qwen2.5:7b", purpose: "标的研究", enabled: true},
+	}
+	queues := map[string]modelRuntimeQueueCount{
+		"assist":   {Queued: 2, Running: 1},
+		"research": {Queued: 5, Running: 1},
+	}
+
+	payload := buildModelRuntimeSummary(now, specs, nil, queues)
+	if len(payload.Models) != 1 {
+		t.Fatalf("models = %d, want one shared model", len(payload.Models))
+	}
+	model := payload.Models[0]
+	if model.Model != "qwen2.5:7b" || len(model.Lanes) != 2 {
+		t.Fatalf("shared 7B lanes are incorrect: %+v", model)
+	}
+	if model.Lanes[0].ID != "assist" || model.Lanes[1].ID != "research" {
+		t.Fatalf("shared 7B lane order is incorrect: %+v", model.Lanes)
+	}
+	if model.QueuedTasks != 7 || model.RunningTasks != 2 || payload.Totals.QueuedTasks != 7 || payload.Totals.RunningTasks != 2 {
+		t.Fatalf("shared 7B queue totals are incorrect: model=%+v totals=%+v", model.modelRuntimeMetrics, payload.Totals)
+	}
+}
+
 func intPointer(value int) *int { return &value }
 
 func valueOrZero(value *int64) int64 {

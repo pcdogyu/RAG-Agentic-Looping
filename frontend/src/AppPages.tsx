@@ -535,7 +535,7 @@ export function ModelQueueTaskGrid({
       </div>
       <h4>{task.title}</h4>
       <p>{task.subtitle || task.kind}</p>
-      {queue.id === "research" && <div className="model-task-count">{task.waiting_for_deep_slot ? "等待深度槽" : task.research_profile === "deep" ? "Thinking" : "快速"}{task.escalated_to_deep ? " · 快速失败后升级" : ""}</div>}
+      {queue.id === "research" && <div className="model-task-count">{task.waiting_for_deep_slot ? "等待深度槽" : task.research_profile === "deep" ? "深度" : "快速"}{task.escalated_to_deep ? " · 快速失败后升级" : ""}</div>}
       {task.task_count > 1 && <div className="model-task-count">合并 {task.task_count} 个任务</div>}
       {isMapping && <div className="model-task-results mapping-results">
         <span>提出<strong>{queueMetricValue(task.metrics.proposed_count)}</strong></span>
@@ -3280,11 +3280,11 @@ export function SourceFilterPage({ apiBase }: { apiBase: string }) {
   const duplicateCount = validation.whitelistDuplicates + validation.blacklistDuplicates;
   const hasErrors = validation.issues.length > 0;
   return <section className="app-page source-filter-page">
-    <PageHeading eyebrow="NEWS ADMISSION & RESEARCH ROUTING" title="新闻准入与研究分流" copy="黑名单控制新闻准入；白名单只决定是否进入 Qwen3 4B Thinking 深度研究。" />
+    <PageHeading eyebrow="NEWS ADMISSION & RESEARCH ROUTING" title="新闻准入与研究分流" copy="黑名单控制新闻准入；白名单只决定是否进入 Qwen2.5 7B 深度研究。" />
     <div className="filter-metrics">
       <div><span>过滤状态</span><strong className={enabled ? "enabled" : "disabled"}>{enabled ? "已启用" : "已关闭"}</strong></div>
       <div><span>快速研究 / 24h</span><strong>{config.routing_stats?.fast_24h || 0}</strong><small>未命中白名单</small></div>
-      <div><span>Thinking / 24h</span><strong>{config.routing_stats?.deep_24h || 0}</strong><small>命中白名单</small></div>
+      <div><span>深度研究 / 24h</span><strong>{config.routing_stats?.deep_24h || 0}</strong><small>命中白名单</small></div>
       <div><span>黑名单拦截 / 24h</span><strong>{config.routing_stats?.blocked_24h || 0}</strong><small>黑名单优先</small></div>
     </div>
     <form className="source-filter-form" onSubmit={save}>

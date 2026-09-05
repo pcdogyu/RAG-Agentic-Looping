@@ -24,17 +24,18 @@ func TestRecentResearchFilterDefaultsToFortyEightHours(t *testing.T) {
 	}
 }
 
-func TestResearchThinkingLimitsUseConfiguredDefaults(t *testing.T) {
+func TestResearchLimitsAndModelUseConfiguredDefaults(t *testing.T) {
 	t.Setenv("OLLAMA_RESEARCH_CONTEXT_LENGTH", "")
 	t.Setenv("OLLAMA_RESEARCH_MAX_OUTPUT_TOKENS", "")
 	t.Setenv("OLLAMA_RESEARCH_FALLBACK_MAX_OUTPUT_TOKENS", "")
 	t.Setenv("OLLAMA_RESEARCH_THINK", "")
+	t.Setenv("OLLAMA_RESEARCH_MODEL", "")
 	cfg, err := Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.ResearchContextLength != 32768 || cfg.ResearchMaxOutput != 16384 || cfg.ResearchFallbackMax != 8192 || !cfg.ResearchThink {
-		t.Fatalf("unexpected research limits: context=%d primary=%d fallback=%d think=%v", cfg.ResearchContextLength, cfg.ResearchMaxOutput, cfg.ResearchFallbackMax, cfg.ResearchThink)
+	if cfg.ResearchContextLength != 32768 || cfg.ResearchMaxOutput != 16384 || cfg.ResearchFallbackMax != 8192 || cfg.ResearchThink || cfg.ResearchModel != "qwen2.5:7b" {
+		t.Fatalf("unexpected research defaults: model=%s context=%d primary=%d fallback=%d think=%v", cfg.ResearchModel, cfg.ResearchContextLength, cfg.ResearchMaxOutput, cfg.ResearchFallbackMax, cfg.ResearchThink)
 	}
 }
 
