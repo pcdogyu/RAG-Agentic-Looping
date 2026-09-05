@@ -204,6 +204,20 @@ func TestBatchThreeCommandsAgainstIsolatedServices(t *testing.T) {
 	if err = pool.QueryRow(ctx, `SELECT status FROM news_processing WHERE news_id=$1`, newsID).Scan(&processingStatus); err != nil || processingStatus != "queued" {
 		t.Fatalf("news processing status=%q err=%v", processingStatus, err)
 	}
+	const refreshEventID = "20000000-0000-0000-0000-000000000002"
+	const refreshRunID = "20000000-0000-0000-0000-000000000003"
+	refreshEventPayload, _ := json.Marshal(map[string]any{"id": refreshEventID, "news_item_ids": []string{newsID}})
+	if _, err = pool.Exec(ctx, `INSERT INTO news_events(id,headline,event_type,payload,priority,published_at,observed_at,as_of) VALUES($1,'refresh event','company',$2,.8,now(),now(),now())`, refreshEventID, refreshEventPayload); err != nil {
+		t.Fatal(err)
+	}
+	refreshRunPayload, _ := json.Marshal(map[string]any{"id": refreshRunID, "event_id": refreshEventID, "status": "completed", "report": map[string]any{"summary": "old report"}, "analysis_steps": []any{}})
+	if _, err = pool.Exec(ctx, `INSERT INTO event_research_runs(id,event_id,status,payload,created_at,updated_at) VALUES($1,$2,'completed',$3,now(),now())`, refreshRunID, refreshEventID, refreshRunPayload); err != nil {
+		t.Fatal(err)
+	}
+	refreshed := assertStatus(http.StatusAccepted, http.MethodPost, "/api/v1/event-conclusions/"+refreshRunID+"/research", `{}`, false)
+	if stringValue(refreshed["stage"]) != "event_extraction" || stringValue(refreshed["task_id"]) == "" {
+		t.Fatalf("event conclusion refresh was not queued from JSON-linked news: %v", refreshed)
+	}
 
 	oldCodeTask := "30000000-0000-0000-0000-000000000001"
 	snapshot, _ := json.Marshal(map[string]any{"queues": []any{map[string]any{

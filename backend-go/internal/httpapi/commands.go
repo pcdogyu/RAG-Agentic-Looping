@@ -568,7 +568,7 @@ func (s *Server) researchEventConclusionAgain(w http.ResponseWriter, r *http.Req
 	}
 	eventID := stringValue(run["event_id"])
 	var newsCount int
-	if err := s.db.QueryRow(r.Context(), `SELECT count(*)::int FROM news_items WHERE id IN (SELECT jsonb_array_elements_text(payload->'news_item_ids') FROM news_events WHERE id=$1)`, eventID).Scan(&newsCount); err != nil || newsCount == 0 {
+	if err := s.db.QueryRow(r.Context(), `SELECT count(*)::int FROM news_items WHERE id::text IN (SELECT jsonb_array_elements_text(payload::jsonb->'news_item_ids') FROM news_events WHERE id=$1)`, eventID).Scan(&newsCount); err != nil || newsCount == 0 {
 		writeError(w, http.StatusConflict, "该事件没有可用的关联原始新闻，无法执行完整重新研究。")
 		return
 	}
