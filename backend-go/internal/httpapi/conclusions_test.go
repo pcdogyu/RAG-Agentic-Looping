@@ -37,10 +37,11 @@ func TestFilterTargetChangesMatchesVisibleIdentityFields(t *testing.T) {
 
 func TestRepresentativeImpactUsesStrongestAbsoluteScoreAndKeepsFirstTie(t *testing.T) {
 	tests := []struct {
-		name    string
-		impacts []any
-		score   any
-		rating  any
+		name      string
+		impacts   []any
+		score     any
+		rating    any
+		available bool
 	}{
 		{
 			name: "strongest negative",
@@ -48,7 +49,7 @@ func TestRepresentativeImpactUsesStrongestAbsoluteScoreAndKeepsFirstTie(t *testi
 				map[string]any{"direction_score": 45.0, "rating": "bullish"},
 				map[string]any{"direction_score": -80.0, "rating": "strongly_bearish"},
 			},
-			score: -80.0, rating: "strongly_bearish",
+			score: -80.0, rating: "strongly_bearish", available: true,
 		},
 		{
 			name: "first absolute tie",
@@ -56,25 +57,39 @@ func TestRepresentativeImpactUsesStrongestAbsoluteScoreAndKeepsFirstTie(t *testi
 				map[string]any{"direction_score": 70.0, "rating": "strongly_bullish"},
 				map[string]any{"direction_score": -70.0, "rating": "strongly_bearish"},
 			},
-			score: 70.0, rating: "strongly_bullish",
+			score: 70.0, rating: "strongly_bullish", available: true,
 		},
 		{
 			name: "legacy normalized score",
 			impacts: []any{
 				map[string]any{"score": -0.35, "rating": "bearish"},
 			},
-			score: -35.0, rating: "bearish",
+			score: -35.0, rating: "bearish", available: true,
 		},
-		{name: "no targets", impacts: nil, score: nil, rating: nil},
+		{name: "no targets", impacts: nil, score: float64(0), rating: "watch", available: false},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			score, rating := representativeImpact(test.impacts)
-			if score != test.score || rating != test.rating {
-				t.Fatalf("got score=%v rating=%v, want score=%v rating=%v", score, rating, test.score, test.rating)
+			score, rating, available := representativeImpact(test.impacts)
+			if score != test.score || rating != test.rating || available != test.available {
+				t.Fatalf("got score=%v rating=%v available=%v, want score=%v rating=%v available=%v", score, rating, available, test.score, test.rating, test.available)
 			}
 		})
+	}
+}
+
+func TestConclusionItemUsesWatchForMissingEventSignal(t *testing.T) {
+	report := map[string]any{"summary": "event", "confidence": 0, "report_confidence_score": 0, "news_confidence": .49, "evidence_complete": false, "impacts": []any{}}
+	payload, _ := json.Marshal(map[string]any{"status": "insufficient_evidence", "event_id": uuid.NewString(), "report": report})
+	event, _ := json.Marshal(map[string]any{"headline": "event", "event_type": "other"})
+	item, err := conclusionItem(conclusionRow{Kind: "event", ID: uuid.New(), OccurredAt: time.Now(), Payload: payload, Event: event})
+	if err != nil {
+		t.Fatal(err)
+	}
+	public := objectValue(item["report"])
+	if numberValue(public["direction_score"]) != 0 || stringValue(public["rating"]) != "watch" || boolValue(public["signal_available"]) || stringValue(public["report_confidence_reason"]) != "no_valid_target" {
+		t.Fatalf("missing event signal was not normalized: %#v", public)
 	}
 }
 

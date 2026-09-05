@@ -6,6 +6,9 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 )
 
 func (s *Server) failedResearchRuns(w http.ResponseWriter, r *http.Request) {
@@ -50,6 +53,7 @@ func (s *Server) failedResearchRuns(w http.ResponseWriter, r *http.Request) {
 				LIMIT 1
 			) model_failure ON true
 			WHERE rr.retry_of_run_id IS NULL
+			  AND coalesce(rr.payload->>'failure_dismissed_at','')=''
 			  AND (rr.status='failed' OR rr.retryable_reason IS NOT NULL)
 			  AND NOT (rr.retryable_reason IS NULL AND own_rec.run_id IS NOT NULL)
 			  AND NOT coalesce(retries.has_active,false)
@@ -68,6 +72,7 @@ func (s *Server) failedResearchRuns(w http.ResponseWriter, r *http.Request) {
 				LIMIT 1
 			) model_failure ON true
 			WHERE er.status IN ('failed','insufficient_evidence','filtered')
+			  AND coalesce(er.payload->>'failure_dismissed_at','')=''
 			  AND (er.status='failed' OR er.payload->>'retryable_reason' IS NOT NULL)
 			  AND NOT EXISTS (
 				SELECT 1
@@ -145,6 +150,36 @@ func (s *Server) failedResearchRuns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, items)
+}
+
+func (s *Server) dismissFailedResearchRun(w http.ResponseWriter, r *http.Request) {
+	kind, runID := chi.URLParam(r, "kind"), chi.URLParam(r, "runID")
+	if kind != "asset" && kind != "event" {
+		writeError(w, http.StatusUnprocessableEntity, "kind must be asset or event")
+		return
+	}
+	if _, err := uuid.Parse(runID); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "invalid run_id")
+		return
+	}
+	table := "research_runs"
+	failureCondition := "(status='failed' OR payload->>'retryable_reason' IS NOT NULL)"
+	if kind == "event" {
+		table = "event_research_runs"
+		failureCondition = "(status='failed' OR payload->>'retryable_reason' IS NOT NULL)"
+	}
+	dismissedAt := iso(time.Now())
+	result, err := s.db.Exec(r.Context(), `UPDATE `+table+` SET payload=jsonb_set(jsonb_set(payload::jsonb,'{failure_dismissed_at}',to_jsonb($2::text),true),'{failure_dismissed_by}',to_jsonb('user'::text),true)::json,updated_at=now() WHERE id=$1 AND `+failureCondition+` AND coalesce(payload->>'failure_dismissed_at','')=''`, runID, dismissedAt)
+	if err != nil {
+		slog.Error("dismiss failed research", "kind", kind, "run_id", runID, "error", err)
+		writeError(w, http.StatusInternalServerError, "failed research could not be dismissed")
+		return
+	}
+	if result.RowsAffected() == 0 {
+		writeError(w, http.StatusNotFound, "failed research run not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"kind": kind, "id": runID, "dismissed": true, "dismissed_at": dismissedAt})
 }
 
 func failedResearchError(payload map[string]any, auditedError string) any {

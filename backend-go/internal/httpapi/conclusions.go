@@ -156,7 +156,11 @@ func conclusionItem(row conclusionRow) (map[string]any, error) {
 		headline = stringValue(report["summary"])
 	}
 	impacts := sanitizePublishedImpacts(report["impacts"])
-	directionScore, rating := representativeImpact(impacts)
+	directionScore, rating, signalAvailable := representativeImpact(impacts)
+	var confidenceReason any
+	if !signalAvailable {
+		confidenceReason = "no_valid_target"
+	}
 	return map[string]any{
 		"kind": "event", "id": row.ID, "occurred_at": iso(row.OccurredAt), "status": payload["status"],
 		"evidence_complete": boolValue(report["evidence_complete"]), "title": headline, "summary": report["summary"],
@@ -166,12 +170,13 @@ func conclusionItem(row conclusionRow) (map[string]any, error) {
 		"refresh":        publicFullEventResearch(payload),
 		"report": map[string]any{"confidence": report["confidence"], "report_confidence": report["report_confidence"], "report_confidence_score": report["report_confidence_score"], "news_confidence": report["news_confidence"], "news_credibility_score": report["news_credibility_score"],
 			"direction_score": directionScore, "rating": rating,
+			"signal_available": signalAvailable, "report_confidence_reason": confidenceReason,
 			"impact_count": len(impacts), "affected_markets": defaultAny(report["affected_markets"], []any{}),
 			"affected_sectors": defaultAny(report["affected_sectors"], []any{}), "scoring_version": report["scoring_version"], "prompt_version": report["prompt_version"]},
 	}, nil
 }
 
-func representativeImpact(impacts []any) (any, any) {
+func representativeImpact(impacts []any) (any, any, bool) {
 	var representative map[string]any
 	var representativeScore any
 	strongest := -1.0
@@ -189,9 +194,9 @@ func representativeImpact(impacts []any) (any, any) {
 		strongest = strength
 	}
 	if representative == nil {
-		return nil, nil
+		return float64(0), "watch", false
 	}
-	return representativeScore, representative["rating"]
+	return representativeScore, representative["rating"], true
 }
 
 func normalizedImpactScore(impact map[string]any) (any, float64, bool) {

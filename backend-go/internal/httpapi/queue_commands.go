@@ -178,7 +178,7 @@ func (s *Server) retryModelQueueTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "retryable model task not found")
 		return
 	}
-	filterRecent := boolPointerDefault(input.FilterRecentResearch, true)
+	filterRecent := boolPointerDefault(input.FilterRecentResearch, false)
 	if input.RunID != nil {
 		selected["run_id"] = stringPointerValue(input.RunID)
 	}
@@ -213,7 +213,7 @@ func (s *Server) retryModelTasks(w http.ResponseWriter, r *http.Request, instanc
 	if r.ContentLength != 0 && !decodeJSONBody(w, r, &options) {
 		return
 	}
-	filterRecent := boolPointerDefault(options.FilterRecentResearch, true)
+	filterRecent := boolPointerDefault(options.FilterRecentResearch, false)
 	tasks, instanceFound, err := s.retryableModelTasks(r.Context(), queueID, instanceID)
 	if err != nil {
 		writeError(w, 500, "model queue state unavailable")

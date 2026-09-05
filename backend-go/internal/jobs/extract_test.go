@@ -134,6 +134,14 @@ func TestSecuritySymbolAndProductMatchingSafety(t *testing.T) {
 	if !explicitSymbol("NYSE: AI reports results", "AI", false) {
 		t.Fatal("exchange-qualified ticker did not match")
 	}
+	for _, symbol := range []string{"REAL", "DATA", "MONEY", "RACE"} {
+		if explicitSymbol("the real money is made in the data center race", symbol, false) {
+			t.Fatalf("ordinary lower-case word matched ticker %s", symbol)
+		}
+	}
+	if !explicitSymbol("$REAL rallies", "REAL", false) || !explicitSymbol("NASDAQ:REAL reports", "REAL", false) {
+		t.Fatal("explicitly qualified ticker was not matched")
+	}
 	if !explicitSymbol("Alibaba (9988) rises", "09988", false) {
 		t.Fatal("Hong Kong leading-zero variant did not match")
 	}
@@ -147,6 +155,26 @@ func TestSecuritySymbolAndProductMatchingSafety(t *testing.T) {
 		if meaningfulTerm(term) {
 			t.Fatalf("generic term %q must not be usable for automatic asset mapping", term)
 		}
+	}
+}
+
+func TestSourceSymbolAssetNamespace(t *testing.T) {
+	if !sourceSymbolAssetAllowed("FMP Stock News", "equity", "US") || sourceSymbolAssetAllowed("FMP Stock News", "crypto", "CRYPTO") {
+		t.Fatal("FMP stock symbols must resolve only to US equities")
+	}
+	if !sourceSymbolAssetAllowed("FMP Crypto News", "crypto", "CRYPTO") || sourceSymbolAssetAllowed("FMP Crypto News", "equity", "US") {
+		t.Fatal("FMP crypto symbols must resolve only to crypto assets")
+	}
+}
+
+func TestMappingCandidateSortIsDeterministic(t *testing.T) {
+	values := []any{
+		map[string]any{"relevance": .95, "relationship": "direct", "asset": map[string]any{"asset_id": "crypto:manual:VRT", "association_tier": "exact_only", "market_cap": 0}},
+		map[string]any{"relevance": .95, "relationship": "direct", "asset": map[string]any{"asset_id": "equity:NYSE:VRT", "association_tier": "standard", "market_cap": 100}},
+	}
+	sortMappingCandidates(values)
+	if stringValue(objectValue(objectValue(values[0])["asset"])["asset_id"]) != "equity:NYSE:VRT" {
+		t.Fatalf("standard liquid security was not ranked first: %#v", values)
 	}
 }
 

@@ -13,8 +13,10 @@ import {
   failedResearchAfterBulkRetry,
   failedResearchBulkRetryMessage,
   failedResearchBulkRetryPath,
+  failedResearchDismissPath,
   failedResearchRetryPath,
   firstUnhealthyGroup,
+  EventConclusionCard,
   GateReasons,
   explainGateReason,
   isSearchSource,
@@ -37,6 +39,7 @@ import {
   SourcesPage,
   type McpSource,
   type Recommendation,
+  type ResearchConclusionItem,
   V3ConfidenceDetails,
 } from "./AppPages";
 
@@ -481,6 +484,9 @@ describe("open source and search settings", () => {
     expect(failedResearchBulkRetryPath).toBe(
       "/api/v1/failed-research-runs/retry",
     );
+    expect(failedResearchDismissPath({ kind: "event", id: "event run" })).toBe(
+      "/api/v1/failed-research-runs/event/event%20run",
+    );
     expect(failedResearchRetryPath({ kind: "asset", id: "asset-run" })).toBe(
       "/api/v1/research-runs/asset-run/retry",
     );
@@ -491,6 +497,22 @@ describe("open source and search settings", () => {
       { kind: "asset", id: "asset-run" },
       "research-2",
     )).toBe("/api/v1/research-runs/asset-run/retry?instance_id=research-2");
+  });
+
+  it("renders a missing event signal as zero and watch with a confidence reason", () => {
+    const item: ResearchConclusionItem = {
+      kind: "event", id: "event-run", occurred_at: "2026-09-05T00:00:00Z", status: "insufficient_evidence",
+      evidence_complete: false, title: "No target event", summary: "summary", asset: null,
+      event: { id: "event", headline: "No target event", event_type: "other" }, recommendation: null,
+      report: {
+        confidence: 0, report_confidence_score: 0, news_confidence: .49, direction_score: 0, rating: "watch",
+        signal_available: false, report_confidence_reason: "no_valid_target", impact_count: 0,
+        affected_markets: [], affected_sectors: [], scoring_version: "llm-direction-v3",
+      },
+    };
+    const markup = renderToStaticMarkup(createElement(EventConclusionCard, { item, onOpen: () => undefined, onResearch: () => undefined }));
+    expect(markup).toContain("本次事件信号：0 · 观望");
+    expect(markup).toContain("研报置信度 0%（无有效影响目标）");
   });
 
   it("posts one direct bulk retry request and formats the partial result", async () => {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -72,6 +73,34 @@ func TestSanitizeEventImpactsReclassifiesMappedSecurityAndKeepsFilteredItemsOut(
 	actual := sanitizeEventImpacts(values, event)
 	if len(actual) != 1 || actual[0].TargetType != "tradable_asset" || actual[0].AssetID != "equity:NASDAQ:NVDA" || actual[0].TargetName != "NVIDIA Corporation" {
 		t.Fatalf("mapped securities must be rebound and filtered targets must stay excluded: %#v", actual)
+	}
+}
+
+func TestCandidateAssetsAllowsSixAndCanonicalizesAssetID(t *testing.T) {
+	candidates := make([]any, 0, 7)
+	for index := 0; index < 7; index++ {
+		id := fmt.Sprintf("equity:NYSE:T%d", index)
+		candidates = append(candidates, map[string]any{"asset": map[string]any{"asset_id": id, "symbol": fmt.Sprintf("T%d", index), "name": fmt.Sprintf("Target %d", index), "asset_class": "equity"}})
+	}
+	event := map[string]any{"candidates": candidates}
+	if len(candidateAssets(event)) != 6 {
+		t.Fatalf("candidate allowlist size=%d want 6", len(candidateAssets(event)))
+	}
+	values := sanitizeEventImpacts([]eventImpactDraft{{TargetType: "tradable_asset", TargetName: "Target 5", AssetID: "equity NYSE T5"}}, event)
+	if len(values) != 1 || values[0].AssetID != "equity:NYSE:T5" {
+		t.Fatalf("candidate asset id was not canonicalized: %#v", values)
+	}
+}
+
+func TestHistoricalEvidenceDoesNotChangeCurrentNewsConfidence(t *testing.T) {
+	now := time.Now().UTC()
+	event := map[string]any{"headline": "Current", "published_at": iso(now), "actions": []any{}}
+	current := researchEvidence{ID: "current", SourceQuality: "aggregator", PublishedAt: now, ObservedAt: now, ContextRole: "current_event", IndependentGroup: "current.test"}
+	history := researchEvidence{ID: "history", SourceQuality: "official", PublishedAt: now.Add(-time.Hour), ObservedAt: now.Add(-time.Hour), ContextRole: "historical_context", IndependentGroup: "official.test"}
+	base, _ := newsConfidence(event, []researchEvidence{current})
+	withHistory, _ := newsConfidence(event, []researchEvidence{current, history})
+	if base != withHistory {
+		t.Fatalf("historical context changed current news confidence: base=%v history=%v", base, withHistory)
 	}
 }
 
@@ -609,6 +638,35 @@ func TestCompactResearchEvidenceKeepsAtMostTwoRecordsPerSourceGroup(t *testing.T
 	}
 	if len(ids) != 4 || containsString(ids, "g1-c") || !containsString(ids, "loose-a") || !containsString(ids, "loose-b") {
 		t.Fatalf("unexpected source-group compaction: %#v", ids)
+	}
+}
+
+func TestCompactResearchEvidenceCapsHistoricalContextAtTenThousandCharacters(t *testing.T) {
+	values := []researchEvidence{{ID: "current", Claim: "本次事件", ContextRole: "current_event", IndependentGroup: "current"}}
+	for index := 0; index < 30; index++ {
+		values = append(values, researchEvidence{
+			ID:               fmt.Sprintf("history-%02d", index),
+			Claim:            strings.Repeat("历史摘要", 80),
+			Excerpt:          strings.Repeat("背景", 300),
+			ContextRole:      "historical_context",
+			IndependentGroup: fmt.Sprintf("history-source-%02d", index),
+		})
+	}
+	var decoded []map[string]any
+	if err := json.Unmarshal([]byte(compactResearchEvidence(values, 50000)), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	history := make([]map[string]any, 0, len(decoded))
+	for _, item := range decoded {
+		if stringValue(item["context_role"]) == "historical_context" {
+			history = append(history, item)
+		}
+	}
+	if len([]rune(jsonString(history))) > 10000 {
+		t.Fatalf("historical context exceeded its character budget: %d", len([]rune(jsonString(history))))
+	}
+	if len(decoded) == 0 || stringValue(decoded[0]["id"]) != "current" {
+		t.Fatalf("current-event evidence lost priority: %#v", decoded)
 	}
 }
 

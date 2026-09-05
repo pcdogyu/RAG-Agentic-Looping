@@ -29,10 +29,10 @@ func TestFrozenContractContainsExpectedSurface(t *testing.T) {
 			}
 		}
 	}
-	if operations != 81 {
-		t.Fatalf("public contract changed: got %d operations, want 81", operations)
+	if operations != 82 {
+		t.Fatalf("public contract changed: got %d operations, want 82", operations)
 	}
-	for _, path := range []string{"/health", "/api/v1/stream", "/api/v1/research-conclusions", "/api/v1/failed-research-runs", "/api/v1/model-runtime-summary"} {
+	for _, path := range []string{"/health", "/api/v1/stream", "/api/v1/research-conclusions", "/api/v1/failed-research-runs", "/api/v1/failed-research-runs/{kind}/{runID}", "/api/v1/model-runtime-summary"} {
 		if _, ok := spec.Paths[path]; !ok {
 			t.Errorf("missing required path %s", path)
 		}

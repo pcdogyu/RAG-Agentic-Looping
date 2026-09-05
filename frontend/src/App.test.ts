@@ -934,7 +934,7 @@ describe("changed targets page", () => {
       onOpen: () => undefined,
       onResearch: () => undefined,
     }));
-    expect(emptyCard).toContain("本次事件信号：暂无");
+    expect(emptyCard).toContain("本次事件信号：0 · 观望");
     expect(emptyCard).toContain("影响目标 0 个");
     expect(emptyCard).toContain("已进入队列");
     expect(eventRefreshResearchState({ status: "running", stage: "web_search", error: null })).toEqual({ status: "queued" });
@@ -1500,7 +1500,7 @@ describe("research queue page", () => {
     expect(markup).toContain("research-3 · 运行 1 · 槽位 0/1");
   });
 
-  it("shows the default-on 48h retry filter only for assist and sends its value", () => {
+  it("shows the default-off 48h retry filter only for assist and sends its value", () => {
     const assist = overviewQueue({ id: "assist", purpose: "股票映射" });
     const research = overviewQueue({ id: "research", purpose: "标的研究" });
     const assistMarkup = renderToStaticMarkup(createElement(UnifiedModelQueuePanel, { queue: assist }));
@@ -1511,7 +1511,8 @@ describe("research queue page", () => {
     const researchMarkup = renderToStaticMarkup(createElement(UnifiedModelQueuePanel, { queue: research }));
 
     expect(assistMarkup).toContain("过滤 48h 已研究");
-    expect(assistMarkup).toContain('type="checkbox" checked=""');
+    expect(assistMarkup).toContain('type="checkbox"');
+    expect(assistMarkup).not.toContain('checked=""');
     expect(disabledMarkup).toContain('type="checkbox"');
     expect(disabledMarkup).not.toContain('checked=""');
     expect(researchMarkup).not.toContain("过滤 48h 已研究");

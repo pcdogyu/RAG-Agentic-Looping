@@ -75,15 +75,15 @@ func TestBatchThreeCommandsAgainstIsolatedServices(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	truncate := `TRUNCATE TABLE news_processing_outbox,news_processing,research_runs,event_research_runs,
+	truncate := `TRUNCATE TABLE go_jobs,news_processing_outbox,news_processing,research_runs,event_research_runs,
 		news_events,news_items,evolution_candidates,assets RESTART IDENTITY CASCADE`
 	if _, err = pool.Exec(ctx, truncate); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
+	defer func() {
 		_, _ = pool.Exec(context.Background(), truncate)
 		_ = redisClient.FlushDB(context.Background()).Err()
-	})
+	}()
 
 	call := func(method, path, body string, admin bool) (int, map[string]any) {
 		t.Helper()
@@ -155,6 +155,39 @@ func TestBatchThreeCommandsAgainstIsolatedServices(t *testing.T) {
 	retry := assertStatus(http.StatusAccepted, http.MethodPost, "/api/v1/research-runs/"+failedRunID+"/retry", `{}`, false)
 	if stringValue(retry["retry_of_run_id"]) != failedRunID || int64Value(retry["retry_attempt"]) != 1 {
 		t.Fatalf("research retry lineage is invalid: %v", retry)
+	}
+	const dismissedRunID = "10000000-0000-0000-0000-000000000002"
+	dismissedPayload := map[string]any{"id": dismissedRunID, "event_id": nil, "asset": map[string]any{"asset_id": assetTwo}, "status": "failed", "retry_of_run_id": nil, "retryable_reason": nil, "analysis_steps": []any{}}
+	dismissedBody, _ := json.Marshal(dismissedPayload)
+	if _, err = pool.Exec(ctx, `INSERT INTO research_runs(id,event_id,asset_id,status,payload,created_at,updated_at) VALUES($1,NULL,$2,'failed',$3,now(),now())`, dismissedRunID, assetTwo, dismissedBody); err != nil {
+		t.Fatal(err)
+	}
+	dismissed := assertStatus(http.StatusOK, http.MethodDelete, "/api/v1/failed-research-runs/asset/"+dismissedRunID, ``, false)
+	if dismissed["dismissed"] != true {
+		t.Fatalf("failed run was not dismissed: %v", dismissed)
+	}
+	var dismissedAt string
+	if err = pool.QueryRow(ctx, `SELECT payload->>'failure_dismissed_at' FROM research_runs WHERE id=$1`, dismissedRunID).Scan(&dismissedAt); err != nil || dismissedAt == "" {
+		t.Fatalf("dismiss marker was not persisted: %q err=%v", dismissedAt, err)
+	}
+	listRequest := httptest.NewRequest(http.MethodGet, "/api/v1/failed-research-runs?limit=50", nil)
+	listResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(listResponse, listRequest)
+	if listResponse.Code != http.StatusOK {
+		t.Fatalf("failed research list status=%d payload=%s", listResponse.Code, listResponse.Body.String())
+	}
+	var failureList []map[string]any
+	if err = json.Unmarshal(listResponse.Body.Bytes(), &failureList); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range failureList {
+		if stringValue(item["id"]) == dismissedRunID {
+			t.Fatalf("dismissed failure remained in the list: %v", item)
+		}
+	}
+	bulkFailed := assertStatus(http.StatusAccepted, http.MethodPost, "/api/v1/failed-research-runs/retry", `{}`, false)
+	if int64Value(bulkFailed["requested"]) != 1 {
+		t.Fatalf("dismissed failure was included in bulk retry: %v", bulkFailed)
 	}
 
 	const newsID = "20000000-0000-0000-0000-000000000001"
@@ -273,8 +306,8 @@ func TestBatchThreeCommandsAgainstIsolatedServices(t *testing.T) {
 		t.Fatal(err)
 	}
 	bulkRetry := assertStatus(http.StatusAccepted, http.MethodPost, "/api/v1/model-queues/assist/instances/assist-0/retry", `{}`, false)
-	if bulkRetry["filter_recent_research"] != true || int64Value(bulkRetry["retried"]) != 1 {
-		t.Fatalf("assist bulk retry must default the filter on: %v", bulkRetry)
+	if bulkRetry["filter_recent_research"] != false || int64Value(bulkRetry["retried"]) != 1 {
+		t.Fatalf("assist bulk retry must default the filter off: %v", bulkRetry)
 	}
 
 	assistTask := "40000000-0000-0000-0000-000000000001"

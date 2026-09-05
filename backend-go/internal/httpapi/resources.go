@@ -292,7 +292,13 @@ func (s *Server) eventConclusionDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	publicRun := deepCloneObject(run)
 	publicReport := objectValue(publicRun["report"])
-	publicReport["impacts"] = sanitizePublishedImpacts(publicReport["impacts"])
+	impacts := sanitizePublishedImpacts(publicReport["impacts"])
+	publicReport["impacts"] = impacts
+	directionScore, rating, signalAvailable := representativeImpact(impacts)
+	publicReport["direction_score"], publicReport["rating"], publicReport["signal_available"] = directionScore, rating, signalAvailable
+	if !signalAvailable {
+		publicReport["report_confidence_reason"] = "no_valid_target"
+	}
 	writeJSON(w, 200, map[string]any{"run": publicRun, "refresh": publicFullEventResearch(publicRun), "event": event, "report": publicReport, "news": news, "evidence": defaultAny(publicRun["evidence"], []any{})})
 }
 

@@ -52,6 +52,8 @@ type Config struct {
 	ResearchMaxOutput     int
 	ResearchFallbackMax   int
 	ResearchThink         bool
+	ResearchHistoryWindow time.Duration
+	ResearchHistoryItems  int
 	CodeContextLength     int
 	CodeMaxOutput         int
 	OllamaKeepAlive       string
@@ -132,6 +134,8 @@ func Load() (Config, error) {
 		ResearchMaxOutput:     envInt("OLLAMA_RESEARCH_MAX_OUTPUT_TOKENS", 16384),
 		ResearchFallbackMax:   envInt("OLLAMA_RESEARCH_FALLBACK_MAX_OUTPUT_TOKENS", 8192),
 		ResearchThink:         envBool("OLLAMA_RESEARCH_THINK", true),
+		ResearchHistoryWindow: time.Duration(envInt("RESEARCH_HISTORY_WINDOW_DAYS", 90)) * 24 * time.Hour,
+		ResearchHistoryItems:  envInt("RESEARCH_HISTORY_MAX_ITEMS", 20),
 		CodeContextLength:     envInt("OLLAMA_CODE_CONTEXT_LENGTH", 16384),
 		CodeMaxOutput:         envInt("OLLAMA_CODE_MAX_OUTPUT_TOKENS", 8192),
 		OllamaKeepAlive:       env("OLLAMA_KEEP_ALIVE", "0"),
@@ -168,6 +172,12 @@ func Load() (Config, error) {
 	}
 	if cfg.WorkerConcurrency < 1 {
 		return Config{}, fmt.Errorf("GO_WORKER_CONCURRENCY must be at least 1")
+	}
+	if cfg.ResearchHistoryWindow < 0 {
+		return Config{}, fmt.Errorf("RESEARCH_HISTORY_WINDOW_DAYS must not be negative")
+	}
+	if cfg.ResearchHistoryItems < 0 || cfg.ResearchHistoryItems > 100 {
+		return Config{}, fmt.Errorf("RESEARCH_HISTORY_MAX_ITEMS must be between 0 and 100")
 	}
 	if cfg.ScanBatchSize < 1 || cfg.ScanBatchSize > 200 {
 		return Config{}, fmt.Errorf("SCAN_BATCH_SIZE must be between 1 and 200")

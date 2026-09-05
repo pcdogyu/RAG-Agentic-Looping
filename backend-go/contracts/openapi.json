@@ -5981,6 +5981,31 @@
         "summary": "Failed Research Runs"
       }
     },
+    "/api/v1/failed-research-runs/{kind}/{runID}": {
+      "delete": {
+        "operationId": "dismiss_failed_research_run_api_v1_failed_research_runs__kind___run_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "kind",
+            "required": true,
+            "schema": { "enum": ["asset", "event"], "type": "string" }
+          },
+          {
+            "in": "path",
+            "name": "runID",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": { "description": "Failed research record dismissed" },
+          "404": { "description": "Failed research record not found" },
+          "422": { "description": "Validation Error" }
+        },
+        "summary": "Dismiss Failed Research Run"
+      }
+    },
     "/api/v1/failed-research-runs/retry": {
       "post": {
         "operationId": "retry_failed_research_runs_api_v1_failed_research_runs_retry_post",

@@ -125,6 +125,43 @@ func TestMappingGoldenStateAgainstIsolatedServices(t *testing.T) {
 	}
 }
 
+func TestFMPStockSymbolMapsOnlyCanonicalUSEquity(t *testing.T) {
+	if os.Getenv("MAPPING_TEST_ISOLATED") != "1" {
+		t.Skip("MAPPING_TEST_ISOLATED=1 is required")
+	}
+	databaseURL := strings.Replace(os.Getenv("TEST_DATABASE_URL"), "postgresql+psycopg://", "postgresql://", 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err := migrate.Up(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	ids := []string{"equity:NYSE:VRT-" + uuid.NewString(), "crypto:coingecko:vrt-" + uuid.NewString(), "equity:NASDAQ:REAL-" + uuid.NewString()}
+	fixtures := []struct{ id, class, market, symbol, name, tier string }{
+		{ids[0], "equity", "US", "VRT", "Vertiv Holdings Co", "standard"},
+		{ids[1], "crypto", "CRYPTO", "VRT", "Venus Reward", "manual_only"},
+		{ids[2], "equity", "US", "REAL", "Real", "standard"},
+	}
+	for _, item := range fixtures {
+		if _, err := pool.Exec(ctx, `INSERT INTO assets(id,asset_class,market,symbol,name,exchange_or_provider,currency,aliases,products,competitors,sector_id,industry_id,raw_sector,raw_industry,instrument_type,association_tier,lot_size,active) VALUES($1,$2,$3,$4,$5,'test','USD','[]','[]','[]','','','','','stock',$6,1,true)`, item.id, item.class, item.market, item.symbol, item.name, item.tier); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), `DELETE FROM assets WHERE id=ANY($1)`, ids) })
+	runtime := &ExtractRuntime{db: pool}
+	values, err := runtime.matchAssets(ctx, newsRecord{Source: "FMP Stock News", Symbols: []string{"VRT"}, Title: "Vertiv vs Schneider Electric", Summary: "the real money gets made in the data center race"}, extractedEvent{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(values) != 1 || stringValue(objectValue(objectValue(values[0])["asset"])["asset_id"]) != ids[0] {
+		t.Fatalf("FMP VRT mapping was not isolated to the US equity: %#v", values)
+	}
+}
+
 func TestRecentResearchFilterAgainstPostgres(t *testing.T) {
 	if os.Getenv("MAPPING_TEST_ISOLATED") != "1" {
 		t.Skip("MAPPING_TEST_ISOLATED=1 is required")

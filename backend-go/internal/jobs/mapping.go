@@ -101,7 +101,7 @@ func (runtime *ExtractRuntime) resolveEventAssets(ctx context.Context, job Job) 
 	forceMapping := boolValue(envelope.Kwargs["force_mapping"])
 	refreshReport := boolValue(envelope.Kwargs["refresh_event_report"])
 	forceWebSearch := boolValue(envelope.Kwargs["force_web_search"])
-	filterRecentResearch := true
+	filterRecentResearch := false
 	if value, found := envelope.Kwargs["filter_recent_research"]; found {
 		filterRecentResearch = boolValue(value)
 	}
@@ -162,7 +162,7 @@ func (runtime *ExtractRuntime) mappingFailure(ctx context.Context, job Job, even
 	_ = runtime.saveEvent(ctx, event)
 	runtime.updateTrackedTask(ctx, "assist", job.ID.String(), status, job.Attempt, stringValue(event["id"]), stringValue(event["headline"]), stringValue(event["event_type"]), cause.Error(), nil)
 	if job.Attempt >= job.MaxAttempts {
-		filterRecentResearch := true
+		filterRecentResearch := false
 		if value, found := event["filter_recent_research"]; found {
 			filterRecentResearch = boolValue(value)
 		}
@@ -237,9 +237,7 @@ func (runtime *ExtractRuntime) mapEvent(ctx context.Context, event map[string]an
 	for _, candidate := range candidates {
 		ranked = append(ranked, candidate)
 	}
-	sort.Slice(ranked, func(i, j int) bool {
-		return numberValue(objectValue(ranked[i])["relevance"]) > numberValue(objectValue(ranked[j])["relevance"])
-	})
+	sortMappingCandidates(ranked)
 	return mappingResult{Candidates: ranked, IndustryIDs: industryIDs, ProposedCount: len(output.Candidates), MasterDerivedCount: len(master), RejectedCount: rejected, NoAssetReason: ternaryString(len(ranked) == 0, output.NoAssetReason, ""), TechnicalWarning: warning}, nil
 }
 
@@ -509,9 +507,9 @@ func validateMappingHint(hint mappingHint, source string, newsItems []newsRecord
 		if hint.Symbol != "" && !strings.EqualFold(strings.TrimSpace(hint.Symbol), strings.TrimSpace(asset.Symbol)) {
 			continue
 		}
-		sourceSymbol := explicitSymbol(source, asset.Symbol, false)
+		sourceSymbol := explicitSymbol(source, asset.Symbol, false) && mappingNewsAssetAllowed(newsItems, asset)
 		for _, news := range newsItems {
-			sourceSymbol = sourceSymbol || containsStringFold(news.Symbols, asset.Symbol)
+			sourceSymbol = sourceSymbol || (sourceSymbolAssetAllowed(news.Source, asset.Class, asset.Market) && containsStringFold(news.Symbols, asset.Symbol))
 		}
 		issuerMention := explicitTerm(hint.SourceMention, asset.Name)
 		for _, alias := range asset.Aliases {
@@ -532,6 +530,18 @@ func validateMappingHint(hint mappingHint, source string, newsItems []newsRecord
 		result = append(result, mappingCandidate(asset, relationship, relevance, confidence, hint.Rationale, basis))
 	}
 	return result
+}
+
+func mappingNewsAssetAllowed(newsItems []newsRecord, asset mappingAsset) bool {
+	if len(newsItems) == 0 {
+		return true
+	}
+	for _, news := range newsItems {
+		if sourceSymbolAssetAllowed(news.Source, asset.Class, asset.Market) {
+			return true
+		}
+	}
+	return false
 }
 
 func mapProductHint(hint mappingHint, shortlist, assets []mappingAsset) []any {
@@ -609,7 +619,7 @@ func (runtime *ExtractRuntime) applyRecentResearchFilter(ctx context.Context, ev
 	}
 	if !enabled || window <= 0 {
 		event["recent_research_filter"] = metadata
-		replaceAnalysisStep(event, analysisStep("recent_research_filter", "bypassed", "go-worker", "本次手动映射重试未启用近期研究过滤。", map[string]any{"enabled": false, "hours": hours}))
+		replaceAnalysisStep(event, analysisStep("recent_research_filter", "bypassed", "go-worker", "近期研究过滤已关闭。", map[string]any{"enabled": false, "hours": hours}))
 		return runtime.saveEvent(ctx, event)
 	}
 

@@ -566,7 +566,7 @@ export function ModelQueueTaskGrid({
 export function UnifiedModelQueuePanel({
   queue,
   instance,
-  filterRecentResearch = true,
+  filterRecentResearch = false,
   onFilterRecentResearchChange,
   onResearchNewsAgeFilterChange,
   onCancelTask,
@@ -832,7 +832,7 @@ export function QueuePage({ apiBase }: { apiBase: string }) {
   const [retryingTaskId, setRetryingTaskId] = useState<string | null>(null);
   const [retryingQueueId, setRetryingQueueId] = useState<string | null>(null);
   const [clearingQueueId, setClearingQueueId] = useState<string | null>(null);
-  const [filterRecentResearch, setFilterRecentResearch] = useState(true);
+  const [filterRecentResearch, setFilterRecentResearch] = useState(false);
   const requestInFlight = useRef(false);
   const cancelledTaskIds = useRef(new Map<string, CancelledTaskTombstone>());
 
@@ -1543,6 +1543,10 @@ export type EventConclusionDetail = {
     prompt_version?: string;
     target_evaluation_version?: string;
     report_confidence_version?: string;
+    direction_score?: number;
+    rating?: string;
+    signal_available?: boolean;
+    report_confidence_reason?: "no_valid_target" | null;
     impacts: EventTargetImpact[];
     macro_factors: Array<{ id: string; name: string; description: string; strength: number }>;
     missing_information: string[];
@@ -1571,6 +1575,8 @@ export type ResearchConclusionItem = {
     news_credibility_score?: number;
     direction_score: number | null;
     rating: string | null;
+    signal_available?: boolean;
+    report_confidence_reason?: "no_valid_target" | null;
     impact_count: number;
     affected_markets: string[];
     affected_sectors: string[];
@@ -1639,6 +1645,9 @@ export type FailedResearchBulkRetryResponse = {
 };
 
 export const failedResearchBulkRetryPath = "/api/v1/failed-research-runs/retry";
+
+export const failedResearchDismissPath = (item: Pick<FailedResearch, "kind" | "id">) =>
+  `/api/v1/failed-research-runs/${encodeURIComponent(item.kind)}/${encodeURIComponent(item.id)}`;
 
 export type ConclusionResearchResponse = {
   task_id: string;
@@ -2291,11 +2300,13 @@ export function EventConclusionCard({
     </button>
     <div className="event-conclusion-side">
       <button type="button" className={`event-conclusion-summary ${scoreTone}`} onClick={onOpen} aria-label={`查看 ${item.title} 事件研报评分`}>
-        <strong>{score === null || score === undefined
-          ? "本次事件信号：暂无"
-          : `本次事件信号：${score > 0 ? "+" : ""}${score} · ${rating ? recommendationRatingLabel(rating) : "暂无"}`}</strong>
+        <strong>{report?.signal_available === false
+          ? "本次事件信号：0 · 观望"
+          : score === null || score === undefined
+            ? "本次事件信号：0 · 观望"
+            : `本次事件信号：${score > 0 ? "+" : ""}${score} · ${rating ? recommendationRatingLabel(rating) : "观望"}`}</strong>
         <span>影响目标 {report?.impact_count ?? 0} 个</span>
-        <small>新闻可信度 {Math.round((report?.news_confidence ?? 0) * 100)}% · 研报置信度 {Math.round((report?.confidence ?? 0) * 100)}%</small>
+        <small>新闻可信度 {Math.round((report?.news_confidence ?? 0) * 100)}% · 研报置信度 {Math.round((report?.confidence ?? 0) * 100)}%{report?.report_confidence_reason === "no_valid_target" ? "（无有效影响目标）" : ""}</small>
       </button>
       <ResearchAgainButton state={researchState} onResearch={onResearch} label="重新研究" />
     </div>
@@ -2515,7 +2526,7 @@ export function EventConclusionDetailModal({ detail, onClose }: { detail: EventC
       <div className="event-report-metrics">
         <span>研究状态<strong>{eventConclusionStatusLabels[detail.run.status] ?? detail.run.status}</strong></span>
         <span>新闻可信度<strong>{report.news_credibility_score ?? Math.round(report.news_confidence * 100)}/100</strong></span>
-        <span>研报置信度<strong>{report.report_confidence_score ?? Math.round((report.report_confidence ?? report.confidence) * 100)}/100</strong></span>
+        <span>研报置信度<strong>{report.report_confidence_score ?? Math.round((report.report_confidence ?? report.confidence) * 100)}/100{report.report_confidence_reason === "no_valid_target" ? " · 无有效影响目标" : ""}</strong></span>
         <span>影响目标<strong>{report.impacts.length}</strong></span>
       </div>
       {!report.evidence_complete && <div className="page-message">该报告可追溯，但资料覆盖不足，不应视为可直接交易的确定性结论。</div>}
@@ -2793,6 +2804,7 @@ export function ConclusionsPage({ apiBase }: { apiBase: string }) {
   const [failuresLoading, setFailuresLoading] = useState(true);
   const [retryingId, setRetryingId] = useState("");
   const [retryingAll, setRetryingAll] = useState(false);
+  const [dismissingId, setDismissingId] = useState("");
   const [retryMessage, setRetryMessage] = useState("");
   const [retryMessageError, setRetryMessageError] = useState(false);
   const [researchStates, setResearchStates] = useState<Record<string, ConclusionResearchState>>({});
@@ -2900,6 +2912,21 @@ export function ConclusionsPage({ apiBase }: { apiBase: string }) {
       setRetryMessage(reason instanceof Error ? reason.message : "全部重试失败");
       setRetryMessageError(true);
     } finally { setRetryingAll(false); }
+  }
+
+  async function dismissFailure(item: FailedResearch) {
+    const dismissKey = `${item.kind}-${item.id}`;
+    setDismissingId(dismissKey); setRetryMessage(""); setRetryMessageError(false);
+    setFailedItems((current) => current.filter((candidate) => candidate.id !== item.id || candidate.kind !== item.kind));
+    try {
+      const response = await fetch(`${apiBase}${failedResearchDismissPath(item)}`, { method: "DELETE" });
+      const payload = await response.json() as { detail?: string };
+      if (!response.ok) throw new Error(payload.detail || "关闭失败研究记录失败");
+    } catch (reason) {
+      setRetryMessage(reason instanceof Error ? reason.message : "关闭失败研究记录失败");
+      setRetryMessageError(true);
+      await loadFailures();
+    } finally { setDismissingId(""); }
   }
 
   async function open(item: ResearchConclusionItem) {
@@ -3017,6 +3044,7 @@ export function ConclusionsPage({ apiBase }: { apiBase: string }) {
             {failedItems.map((item) => {
               const retryActive = ["queued", "running", "verifying"].includes(item.latest_retry?.status || "");
               return <article key={`${item.kind}-${item.id}`} className="failed-research-item">
+                <button type="button" className="failed-research-dismiss" aria-label={`关闭失败研究 ${item.asset?.symbol || item.event?.headline || item.id}`} title="关闭并从失败列表隐藏" disabled={dismissingId === `${item.kind}-${item.id}`} onClick={() => void dismissFailure(item)}>×</button>
                 <div><span>{item.kind === "asset" ? "标的研究" : "事件研报"} · {new Date(item.updated_at).toLocaleString("zh-CN")}</span><strong>{item.asset ? `${item.asset.symbol} · ${item.asset.name}` : item.event?.headline || item.id}</strong><p>{item.error || "未记录错误详情"}</p>{item.latest_retry && <small>最近重跑：{item.latest_retry.status} · {new Date(item.latest_retry.updated_at).toLocaleString("zh-CN")}</small>}</div>
                 <div className="failed-research-controls">
                   <button type="button" disabled={retryingAll || retryingId === item.id || retryActive} onClick={() => retry(item)}>{retryingId === item.id ? "正在排队…" : retryActive ? "重跑中" : "重新执行"}</button>

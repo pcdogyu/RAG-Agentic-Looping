@@ -86,6 +86,7 @@ func (s *Server) operations() []operation {
 		{"propose_evolution_api_v1_evolution_post", http.MethodPost, "/api/v1/evolution", s.proposeEvolution},
 		{"execute_evolution_api_v1_evolution__candidate_id__execute_post", http.MethodPost, "/api/v1/evolution/{candidateID}/execute", s.executeEvolution},
 		{"retry_failed_research_runs_api_v1_failed_research_runs_retry_post", http.MethodPost, "/api/v1/failed-research-runs/retry", s.retryFailedResearchRuns},
+		{"dismiss_failed_research_run_api_v1_failed_research_runs__kind___run_id__delete", http.MethodDelete, "/api/v1/failed-research-runs/{kind}/{runID}", s.dismissFailedResearchRun},
 		{"clear_model_queue_api_v1_model_queues__queue_id__clear_post", http.MethodPost, "/api/v1/model-queues/{queueID}/clear", s.clearModelQueue},
 		{"clear_model_instance_queue_api_v1_model_queues__queue_id__instances__instance_id__clear_post", http.MethodPost, "/api/v1/model-queues/{queueID}/instances/{instanceID}/clear", s.clearModelInstanceQueue},
 		{"retry_model_instance_tasks_api_v1_model_queues__queue_id__instances__instance_id__retry_post", http.MethodPost, "/api/v1/model-queues/{queueID}/instances/{instanceID}/retry", s.retryModelInstanceTasks},

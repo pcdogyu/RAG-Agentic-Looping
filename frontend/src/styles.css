@@ -446,7 +446,10 @@ h1 span { color: var(--mint); font-weight: 400; }
 .failed-research-heading button:disabled, .failed-research-controls button:disabled { opacity: .55; cursor: default; }
 .failed-research-copy { flex: 0 0 auto; margin: -4px 0 14px; color: var(--muted); font-size: 12px; }
 .failed-research-list { display: grid; gap: 9px; }
-.failed-research-item { display: grid; grid-template-columns: 1fr; align-items: center; gap: 12px; padding: 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--soft-hover); }
+.failed-research-item { position: relative; display: grid; grid-template-columns: 1fr; align-items: center; gap: 12px; padding: 14px 42px 14px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--soft-hover); }
+.failed-research-dismiss { position: absolute; top: 8px; right: 8px; width: 27px; height: 27px; padding: 0; border: 1px solid transparent; border-radius: 50%; color: var(--muted); background: transparent; font-size: 20px; line-height: 1; cursor: pointer; }
+.failed-research-dismiss:hover { border-color: var(--red); color: var(--red); background: var(--model-surface); }
+.failed-research-dismiss:disabled { opacity: .45; cursor: default; }
 .failed-research-item > div { display: grid; gap: 5px; min-width: 0; }
 .failed-research-item span, .failed-research-item small { color: var(--muted); font-size: 10px; }
 .failed-research-item strong { overflow-wrap: anywhere; }

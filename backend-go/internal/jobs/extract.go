@@ -788,7 +788,7 @@ func normalizeExtraction(value *extractedEvent, news newsRecord) {
 }
 
 func (runtime *ExtractRuntime) matchAssets(ctx context.Context, news newsRecord, extracted extractedEvent) ([]any, error) {
-	rows, err := runtime.db.Query(ctx, `SELECT id,asset_class,market,symbol,name,exchange_or_provider,currency,aliases::jsonb,products::jsonb,competitors::jsonb,sector_id,industry_id,raw_sector,raw_industry,instrument_type,market_cap,market_cap_rank,last_synced_at,issuer_id,primary_listing_asset_id,lot_size,active FROM assets WHERE active=true`)
+	rows, err := runtime.db.Query(ctx, `SELECT id,asset_class,market,symbol,name,exchange_or_provider,currency,aliases::jsonb,products::jsonb,competitors::jsonb,sector_id,industry_id,raw_sector,raw_industry,instrument_type,association_tier,market_cap,market_cap_rank,last_synced_at,issuer_id,primary_listing_asset_id,lot_size,active FROM assets WHERE active=true`)
 	if err != nil {
 		return nil, err
 	}
@@ -801,21 +801,24 @@ func (runtime *ExtractRuntime) matchAssets(ctx context.Context, news newsRecord,
 	for rows.Next() {
 		var id, class, market, symbol, name, exchange, currency string
 		var aliasesJSON, productsJSON, competitorsJSON []byte
-		var sector, industry, rawSector, rawIndustry, instrument string
+		var sector, industry, rawSector, rawIndustry, instrument, associationTier string
 		var marketCap *float64
 		var marketRank *int
 		var synced *time.Time
 		var issuer, primary *string
 		var lot int
 		var active bool
-		if err := rows.Scan(&id, &class, &market, &symbol, &name, &exchange, &currency, &aliasesJSON, &productsJSON, &competitorsJSON, &sector, &industry, &rawSector, &rawIndustry, &instrument, &marketCap, &marketRank, &synced, &issuer, &primary, &lot, &active); err != nil {
+		if err := rows.Scan(&id, &class, &market, &symbol, &name, &exchange, &currency, &aliasesJSON, &productsJSON, &competitorsJSON, &sector, &industry, &rawSector, &rawIndustry, &instrument, &associationTier, &marketCap, &marketRank, &synced, &issuer, &primary, &lot, &active); err != nil {
 			return nil, err
+		}
+		if associationTier == "manual_only" {
+			continue
 		}
 		aliases, products, competitors := []string{}, []string{}, []string{}
 		_ = json.Unmarshal(aliasesJSON, &aliases)
 		_ = json.Unmarshal(productsJSON, &products)
 		_ = json.Unmarshal(competitorsJSON, &competitors)
-		direct := containsStringFold(news.Symbols, symbol) || explicitSymbol(text, symbol, false)
+		direct := sourceSymbolAssetAllowed(news.Source, class, market) && (containsStringFold(news.Symbols, symbol) || explicitSymbol(text, symbol, false))
 		issuerMatch := meaningfulIssuerTerm(name) && explicitTerm(text, name)
 		if !issuerMatch {
 			for _, alias := range aliases {
@@ -835,7 +838,7 @@ func (runtime *ExtractRuntime) matchAssets(ctx context.Context, news newsRecord,
 		if !direct && !issuerMatch && product == "" {
 			continue
 		}
-		asset := map[string]any{"asset_id": id, "asset_class": class, "market": market, "symbol": symbol, "name": name, "exchange_or_provider": exchange, "currency": currency, "aliases": aliases, "products": products, "competitors": competitors, "sector_id": sector, "industry_id": industry, "raw_sector": rawSector, "raw_industry": rawIndustry, "instrument_type": instrument, "market_cap": marketCap, "market_cap_rank": marketRank, "last_synced_at": synced, "issuer_id": issuer, "primary_listing_asset_id": primary, "lot_size": max(1, lot), "active": active}
+		asset := map[string]any{"asset_id": id, "asset_class": class, "market": market, "symbol": symbol, "name": name, "exchange_or_provider": exchange, "currency": currency, "aliases": aliases, "products": products, "competitors": competitors, "sector_id": sector, "industry_id": industry, "raw_sector": rawSector, "raw_industry": rawIndustry, "instrument_type": instrument, "association_tier": associationTier, "market_cap": marketCap, "market_cap_rank": marketRank, "last_synced_at": synced, "issuer_id": issuer, "primary_listing_asset_id": primary, "lot_size": max(1, lot), "active": active}
 		relationship, relevance, confidence, basis, mention := "issuer", .7, .9, []string{"issuer_name", "provider_master"}, name
 		if direct {
 			relationship, relevance, confidence, basis, mention = "direct", .95, .99, []string{"source_symbol", "provider_master"}, symbol
@@ -846,10 +849,44 @@ func (runtime *ExtractRuntime) matchAssets(ctx context.Context, news newsRecord,
 		}
 		results = append(results, map[string]any{"asset": asset, "relationship": relationship, "relevance": relevance, "rationale": fmt.Sprintf("新闻中的 %s 与 %s 匹配", mention, name), "mapping_confidence": confidence, "identity_basis": basis})
 	}
-	sort.Slice(results, func(i, j int) bool {
-		return numberValue(objectValue(results[i])["relevance"]) > numberValue(objectValue(results[j])["relevance"])
-	})
+	sortMappingCandidates(results)
 	return results, rows.Err()
+}
+
+func sourceSymbolAssetAllowed(source, assetClass, market string) bool {
+	switch strings.ToLower(strings.TrimSpace(source)) {
+	case "fmp stock news":
+		return assetClass == "equity" && strings.EqualFold(market, "US")
+	case "fmp crypto news":
+		return assetClass == "crypto"
+	default:
+		return true
+	}
+}
+
+func sortMappingCandidates(values []any) {
+	relationshipRank := map[string]int{"direct": 5, "issuer": 4, "product_owner": 3, "cross_listing_issuer": 2, "entity": 1}
+	tierRank := map[string]int{"standard": 2, "exact_only": 1}
+	sort.SliceStable(values, func(i, j int) bool {
+		left, right := objectValue(values[i]), objectValue(values[j])
+		leftAsset, rightAsset := objectValue(left["asset"]), objectValue(right["asset"])
+		if numberValue(left["relevance"]) != numberValue(right["relevance"]) {
+			return numberValue(left["relevance"]) > numberValue(right["relevance"])
+		}
+		if numberValue(left["mapping_confidence"]) != numberValue(right["mapping_confidence"]) {
+			return numberValue(left["mapping_confidence"]) > numberValue(right["mapping_confidence"])
+		}
+		if relationshipRank[stringValue(left["relationship"])] != relationshipRank[stringValue(right["relationship"])] {
+			return relationshipRank[stringValue(left["relationship"])] > relationshipRank[stringValue(right["relationship"])]
+		}
+		if tierRank[stringValue(leftAsset["association_tier"])] != tierRank[stringValue(rightAsset["association_tier"])] {
+			return tierRank[stringValue(leftAsset["association_tier"])] > tierRank[stringValue(rightAsset["association_tier"])]
+		}
+		if numberValue(leftAsset["market_cap"]) != numberValue(rightAsset["market_cap"]) {
+			return numberValue(leftAsset["market_cap"]) > numberValue(rightAsset["market_cap"])
+		}
+		return stringValue(leftAsset["asset_id"]) < stringValue(rightAsset["asset_id"])
+	})
 }
 
 func (runtime *ExtractRuntime) findCluster(ctx context.Context, event map[string]any) (map[string]any, error) {
@@ -915,7 +952,7 @@ func (runtime *ExtractRuntime) dispatchEvent(ctx context.Context, event map[stri
 		queued, err := runtime.enqueueMapping(ctx, event, forceMapping, refreshReport, forceWebSearch)
 		return 0, boolInt(queued), err == nil
 	}
-	queued, err := runtime.enqueueEventResearch(ctx, event, true)
+	queued, err := runtime.enqueueEventResearch(ctx, event, false)
 	return boolInt(queued), 0, err == nil
 }
 
@@ -1186,9 +1223,7 @@ func mergeEvent(existing, fresh map[string]any, news newsRecord) {
 	for _, item := range mergedCandidates {
 		candidates = append(candidates, item)
 	}
-	sort.Slice(candidates, func(i, j int) bool {
-		return numberValue(objectValue(candidates[i])["relevance"]) > numberValue(objectValue(candidates[j])["relevance"])
-	})
+	sortMappingCandidates(candidates)
 	existing["candidates"] = candidates
 	existing["priority"] = math.Max(numberValue(existing["priority"]), numberValue(fresh["priority"]))
 	existing["novelty"] = math.Min(numberValue(existing["novelty"]), numberValue(fresh["novelty"]))
@@ -1280,8 +1315,20 @@ func explicitSymbol(text, symbol string, allowBare bool) bool {
 		if candidate == "" {
 			candidate = "0"
 		}
-		if !short && explicitTerm(text, candidate) {
-			return true
+		if !short {
+			allDigits := true
+			for _, current := range candidate {
+				allDigits = allDigits && unicode.IsDigit(current)
+			}
+			if allDigits && explicitTerm(text, candidate) {
+				return true
+			}
+			if !allDigits {
+				pattern := `(^|[^A-Za-z0-9])` + regexp.QuoteMeta(strings.ToUpper(candidate)) + `([^A-Za-z0-9]|$)`
+				if matched, _ := regexp.MatchString(pattern, text); matched {
+					return true
+				}
+			}
 		}
 		if allowBare && strings.EqualFold(strings.TrimSpace(text), candidate) {
 			return true
@@ -1330,7 +1377,11 @@ func meaningfulIssuerTerm(value string) bool {
 	if !meaningfulTerm(value) {
 		return false
 	}
-	return !map[string]bool{"机器人": true}[normalizedText(value)]
+	compact := normalizedText(value)
+	if map[string]bool{"机器人": true, "one": true, "real": true, "data": true, "money": true, "race": true, "fight": true, "team": true, "tech": true, "five": true, "bank": true, "stock": true}[compact] {
+		return false
+	}
+	return hasHan(value) || strings.ContainsAny(strings.TrimSpace(value), " .,&-/") || len(compact) >= 5
 }
 func meaningfulProduct(value string) bool {
 	if !meaningfulTerm(value) {

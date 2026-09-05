@@ -68,10 +68,17 @@ func verifyEventDraft(draft *eventResearchDraft, event map[string]any, evidence 
 		if item.AssetID != "" {
 			asset := allowed[item.AssetID]
 			if asset == nil {
+				asset = matchCandidateAsset(item.AssetID, allowed)
+			}
+			if asset == nil {
+				asset = matchCandidateAsset(item.TargetName, allowed)
+			}
+			if asset == nil {
 				verification.Missing = append(verification.Missing, "unknown allowed target: "+item.AssetID)
 				allComplete = false
 				continue
 			}
+			item.AssetID = stringValue(asset["asset_id"])
 			item.TargetType, item.TargetName = "tradable_asset", stringValue(asset["name"])
 		}
 		if strings.TrimSpace(item.TargetName) == "" || nonTargetActivity(item.TargetName) {

@@ -475,7 +475,7 @@ func (s *Server) retryEventResearch(ctx context.Context, runID, preferred string
 }
 
 func (s *Server) retryFailedResearchRuns(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.db.Query(r.Context(), `SELECT 'asset',id FROM research_runs WHERE (status='failed' OR payload->>'retryable_reason' IS NOT NULL) AND payload->>'retry_of_run_id' IS NULL UNION ALL SELECT 'event',id FROM event_research_runs WHERE status='failed' OR payload->>'retryable_reason' IS NOT NULL`)
+	rows, err := s.db.Query(r.Context(), `SELECT 'asset',id FROM research_runs WHERE (status='failed' OR payload->>'retryable_reason' IS NOT NULL) AND payload->>'retry_of_run_id' IS NULL AND coalesce(payload->>'failure_dismissed_at','')='' UNION ALL SELECT 'event',id FROM event_research_runs WHERE (status='failed' OR payload->>'retryable_reason' IS NOT NULL) AND coalesce(payload->>'failure_dismissed_at','')=''`)
 	if err != nil {
 		writeError(w, 500, "failed research query failed")
 		return
