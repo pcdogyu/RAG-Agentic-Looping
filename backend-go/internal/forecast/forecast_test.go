@@ -1,6 +1,9 @@
 package forecast
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func pointer(value float64) *float64 { return &value }
 
@@ -36,5 +39,33 @@ func TestCalculateNeverTreatsMissingAsZero(t *testing.T) {
 	result := Calculate(input, nil)
 	if result.Status != "unavailable" || result.Reason != "missing_required_financial_inputs" || len(result.MissingFields) != 1 || result.MissingFields[0] != "capex" {
 		t.Fatalf("missing input accepted: %#v", result)
+	}
+}
+
+func TestBuildVersionRequiresVisibleFactReferencesAndStableIdentity(t *testing.T) {
+	asOf := time.Date(2026, 9, 6, 0, 0, 0, 0, time.UTC)
+	_, err := buildVersion(Submission{AssetID: "equity:NYSE:VRT", AsOf: asOf, Inputs: baseline()})
+	if err == nil {
+		t.Fatal("missing source references were accepted")
+	}
+	one, err := buildVersion(Submission{AssetID: "equity:NYSE:VRT", AsOf: asOf, Inputs: baseline(), FundamentalSnapshotIDs: []string{"b", "a", "a"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	two, err := buildVersion(Submission{AssetID: "equity:NYSE:VRT", AsOf: asOf, Inputs: baseline(), FundamentalSnapshotIDs: []string{"a", "b"}})
+	if err != nil || one.ID != two.ID {
+		t.Fatalf("source ordering changed deterministic identity: one=%s two=%s err=%v", one.ID, two.ID, err)
+	}
+}
+
+func TestEventAssumptionRequiresPeriodAndProducesSingleLink(t *testing.T) {
+	_, err := buildVersion(Submission{AssetID: "equity:NYSE:VRT", AsOf: time.Now(), Inputs: baseline(), FundamentalSnapshotIDs: []string{"snapshot"}, Assumptions: []Assumption{{Field: "revenue_delta", Value: 1, EventID: "event", EvidenceIDs: []string{"evidence"}, Approved: true}}})
+	if err == nil {
+		t.Fatal("event without fiscal period was accepted")
+	}
+	period := time.Date(2026, 12, 31, 0, 0, 0, 0, time.UTC)
+	version, err := buildVersion(Submission{AssetID: "equity:NYSE:VRT", AsOf: time.Now(), Inputs: baseline(), FundamentalSnapshotIDs: []string{"snapshot"}, Assumptions: []Assumption{{Field: "revenue_delta", Value: 1, EventID: "event", EvidenceIDs: []string{"evidence"}, FiscalPeriodEnd: &period, Approved: true}}})
+	if err != nil || len(versionLinks(version)) != 1 {
+		t.Fatalf("event assumption link=%#v err=%v", versionLinks(version), err)
 	}
 }

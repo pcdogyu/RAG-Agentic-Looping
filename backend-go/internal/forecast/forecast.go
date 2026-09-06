@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"time"
 )
 
 const ModelVersion = "financial-projection-v1"
@@ -24,12 +25,13 @@ type Inputs struct {
 }
 
 type Assumption struct {
-	Field       string   `json:"field"`
-	Value       float64  `json:"value"`
-	EventID     string   `json:"event_id,omitempty"`
-	EvidenceIDs []string `json:"evidence_ids"`
-	Condition   string   `json:"condition,omitempty"`
-	Approved    bool     `json:"approved"`
+	Field           string     `json:"field"`
+	Value           float64    `json:"value"`
+	EventID         string     `json:"event_id,omitempty"`
+	EvidenceIDs     []string   `json:"evidence_ids"`
+	Condition       string     `json:"condition,omitempty"`
+	FiscalPeriodEnd *time.Time `json:"fiscal_period_end,omitempty"`
+	Approved        bool       `json:"approved"`
 }
 
 type Result struct {
@@ -123,6 +125,9 @@ func missingInputs(input Inputs) []string {
 func ValidateAssumption(value Assumption) error {
 	if strings.TrimSpace(value.Field) == "" || len(value.EvidenceIDs) == 0 {
 		return fmt.Errorf("forecast assumption requires field and evidence_ids")
+	}
+	if strings.TrimSpace(value.EventID) != "" && value.FiscalPeriodEnd == nil {
+		return fmt.Errorf("event-linked forecast assumption requires fiscal_period_end")
 	}
 	return nil
 }
