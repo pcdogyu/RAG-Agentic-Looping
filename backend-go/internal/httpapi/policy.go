@@ -68,8 +68,10 @@ func (s *Server) researchPolicyEvaluations(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	rows, err := s.db.Query(r.Context(), `
-		SELECT e.id,e.event_id,e.asset_id,e.policy_result,e.comparison,e.created_at,r.decision,r.reviewer,r.created_at
+		SELECT e.id,e.event_id,e.asset_id,coalesce(n.headline,''),coalesce(a.name,''),coalesce(a.symbol,''),e.input_snapshot,e.policy_result,e.comparison,e.created_at,r.decision,r.reviewer,r.created_at
 		FROM policy_evaluations e
+		LEFT JOIN news_events n ON n.id::text=e.event_id
+		LEFT JOIN assets a ON a.id=e.asset_id
 		LEFT JOIN policy_impact_reviews r ON r.policy_evaluation_id=e.id
 		WHERE e.policy_version=$1 AND e.policy_result->'event_signal'->>'status'='directional'
 		ORDER BY e.created_at DESC,e.id DESC LIMIT $2`, s.cfg.ResearchPolicyVersion, limit)
@@ -82,18 +84,24 @@ func (s *Server) researchPolicyEvaluations(w http.ResponseWriter, r *http.Reques
 	for rows.Next() {
 		var id string
 		var eventID, assetID *string
-		var policyJSON, comparisonJSON []byte
+		var headline, assetName, symbol string
+		var inputJSON, policyJSON, comparisonJSON []byte
 		var created time.Time
 		var decision, reviewer *string
 		var reviewedAt *time.Time
-		if err := rows.Scan(&id, &eventID, &assetID, &policyJSON, &comparisonJSON, &created, &decision, &reviewer, &reviewedAt); err != nil {
+		if err := rows.Scan(&id, &eventID, &assetID, &headline, &assetName, &symbol, &inputJSON, &policyJSON, &comparisonJSON, &created, &decision, &reviewer, &reviewedAt); err != nil {
 			writeError(w, http.StatusInternalServerError, "policy evaluations decode failed")
 			return
 		}
-		policy, comparison := map[string]any{}, map[string]any{}
+		input, policy, comparison := map[string]any{}, map[string]any{}, map[string]any{}
+		_ = json.Unmarshal(inputJSON, &input)
 		_ = json.Unmarshal(policyJSON, &policy)
 		_ = json.Unmarshal(comparisonJSON, &comparison)
-		item := map[string]any{"id": id, "event_id": nullablePolicyString(eventID), "asset_id": nullablePolicyString(assetID), "event_signal": policy["event_signal"], "evidence_quality": policy["evidence_quality"], "comparison": comparison, "created_at": created.UTC(), "decision": nullablePolicyString(decision), "reviewer": nullablePolicyString(reviewer), "reviewed_at": timeOrNil(reviewedAt)}
+		evidence := anySlice(input["evidence"])
+		if len(evidence) > 5 {
+			evidence = evidence[:5]
+		}
+		item := map[string]any{"id": id, "event_id": nullablePolicyString(eventID), "asset_id": nullablePolicyString(assetID), "headline": nullableString(headline), "asset_name": nullableString(assetName), "symbol": nullableString(symbol), "event_signal": policy["event_signal"], "evidence_quality": policy["evidence_quality"], "comparison": comparison, "evidence": evidence, "created_at": created.UTC(), "decision": nullablePolicyString(decision), "reviewer": nullablePolicyString(reviewer), "reviewed_at": timeOrNil(reviewedAt)}
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {

@@ -24,3 +24,11 @@ func TestImpactEligibilityAllowsVerifiedNegativeResearch(t *testing.T) {
 		t.Fatalf("negative verified impact was not eligible for research: %#v", value)
 	}
 }
+
+func TestPolicyInputSnapshotKeepsEvidenceButNotPrompts(t *testing.T) {
+	run := map[string]any{"as_of": "2026-09-06T00:00:00Z", "research_profile": "deep", "evidence": []any{map[string]any{"claim": "issuer statement"}}, "messages": []any{"must-not-be-copied"}}
+	value := policyInputSnapshot("event-1", "asset-1", run, "p0-evidence-v1", "qwen2.5:7b")
+	if len(anySlice(value["evidence"])) != 1 || value["messages"] != nil || stringValue(value["model"]) != "qwen2.5:7b" {
+		t.Fatalf("policy input snapshot was not bounded to structured audit data: %#v", value)
+	}
+}

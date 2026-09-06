@@ -351,7 +351,7 @@ func (runtime *researchRuntime) researchEvent(ctx context.Context, job Job) (any
 		}
 		return nil, runtime.failEventResearch(ctx, job, run, event, err)
 	}
-	runtime.recordPolicyEvaluation(ctx, eventID.String(), "", map[string]any{"direction_score": 0, "report": report}, objectValue(report["policy"]))
+	runtime.recordPolicyEvaluation(ctx, eventID.String(), "", run, map[string]any{"direction_score": 0, "report": report}, objectValue(report["policy"]))
 	queued, err := runtime.enqueueTargetResearches(ctx, event, report, 3, !filterRecentResearch)
 	if err != nil {
 		return nil, err
@@ -451,7 +451,7 @@ func (runtime *researchRuntime) researchAsset(ctx context.Context, job Job) (any
 		}
 		return nil, runtime.handleAssetError(ctx, job, run, err)
 	}
-	runtime.recordPolicyEvaluation(ctx, stringValue(run["event_id"]), assetID, map[string]any{"direction_score": recommendation["direction_score"], "rating": recommendation["rating"]}, map[string]any{"event_signal": recommendation["event_signal"], "evidence_quality": recommendation["evidence_quality"], "fundamental_rating": recommendation["fundamental_rating"], "short_term_prediction": recommendation["short_term_prediction"]})
+	runtime.recordPolicyEvaluation(ctx, stringValue(run["event_id"]), assetID, run, map[string]any{"direction_score": recommendation["direction_score"], "rating": recommendation["rating"], "signal_status": recommendation["signal_status"]}, map[string]any{"event_signal": recommendation["event_signal"], "evidence_quality": recommendation["evidence_quality"], "fundamental_rating": recommendation["fundamental_rating"], "short_term_prediction": recommendation["short_term_prediction"]})
 	runtime.finishResearchTracking(ctx, job.ID.String(), "completed", job.Attempt, assetID, stringValue(objectValue(run["asset"])["name"]), stringValue(objectValue(run["asset"])["symbol"]), "", map[string]any{"rating": recommendation["rating"], "score": recommendation["score"]})
 	return map[string]any{"status": "completed", "run_id": runID, "recommendation_id": recommendation["id"]}, nil
 }

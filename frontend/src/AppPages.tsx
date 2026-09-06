@@ -3934,11 +3934,15 @@ type ResearchPolicyEvaluation = {
   id: string;
   event_id: string | null;
   asset_id: string | null;
+  headline: string | null;
+  asset_name: string | null;
+  symbol: string | null;
   event_signal: { status: string; direction_score: number; rating: string };
   evidence_quality: { score: number; status: string };
   created_at: string;
   decision: "accepted" | "rejected" | null;
   reviewer: string | null;
+  evidence: Array<{ claim?: string; excerpt?: string; source_name?: string }>;
 };
 
 export function ResearchPolicyPage({ apiBase }: { apiBase: string }) {
@@ -3984,7 +3988,7 @@ export function ResearchPolicyPage({ apiBase }: { apiBase: string }) {
     <AdminUnlock token={token} onToken={setToken} />
     {token && <div className="integration-editor"><label>复核人<input value={reviewer} onChange={(event) => setReviewer(event.target.value)} placeholder="姓名或工号" /></label><button type="button" disabled={!status?.ready_for_approval} onClick={() => void approve()}>批准切换资格</button><small>批准只记录资格；仍需将服务配置显式改为 enforce 才会启用。</small></div>}
     {message && <div className="page-message">{message}</div>}
-    {loading ? <div className="page-empty">正在读取影子评估…</div> : <div className="conclusion-list">{items.length === 0 ? <div className="page-empty">暂无可人工复核的有效定向影响。</div> : items.map((item) => <article className="conclusion-card" key={item.id}><span>{new Date(item.created_at).toLocaleString("zh-CN")} · {item.asset_id || item.event_id || "事件"}</span><h3>事件信号：{item.event_signal?.rating || "观望"} · {item.event_signal?.direction_score ?? 0}</h3><p>证据状态：{item.evidence_quality?.status || "unknown"} · 质量 {Math.round((item.evidence_quality?.score || 0) * 100)}%</p>{item.decision ? <small>已由 {item.reviewer || "管理员"} 复核：{item.decision === "accepted" ? "接受" : "驳回"}</small> : token && <div><button type="button" onClick={() => void review(item.id, "accepted")}>接受</button><button type="button" onClick={() => void review(item.id, "rejected")}>驳回</button></div>}</article>)}</div>}
+    {loading ? <div className="page-empty">正在读取影子评估…</div> : <div className="conclusion-list">{items.length === 0 ? <div className="page-empty">暂无可人工复核的有效定向影响。</div> : items.map((item) => <article className="conclusion-card" key={item.id}><span>{new Date(item.created_at).toLocaleString("zh-CN")} · {item.symbol || item.asset_id || item.event_id || "事件"}</span><h3>{item.headline || item.asset_name || "事件信号"}</h3><p>事件信号：{item.event_signal?.rating || "观望"} · {item.event_signal?.direction_score ?? 0}；证据状态：{item.evidence_quality?.status || "unknown"} · 质量 {Math.round((item.evidence_quality?.score || 0) * 100)}%</p>{item.evidence?.length > 0 && <details><summary>证据快照（最多 5 条）</summary>{item.evidence.map((evidence, index) => <p key={index}>{evidence.claim || evidence.excerpt || "证据"}{evidence.source_name ? ` · ${evidence.source_name}` : ""}</p>)}</details>}{item.decision ? <small>已由 {item.reviewer || "管理员"} 复核：{item.decision === "accepted" ? "接受" : "驳回"}</small> : token && <div><button type="button" onClick={() => void review(item.id, "accepted")}>接受</button><button type="button" onClick={() => void review(item.id, "rejected")}>驳回</button></div>}</article>)}</div>}
   </section>;
 }
 

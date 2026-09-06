@@ -64,13 +64,29 @@ func impactEligibility(asset map[string]any, item eventImpactDraft, complete boo
 	}
 }
 
-func (runtime *researchRuntime) recordPolicyEvaluation(ctx context.Context, eventID, assetID string, legacy, policy map[string]any) {
+func (runtime *researchRuntime) recordPolicyEvaluation(ctx context.Context, eventID, assetID string, run, legacy, policy map[string]any) {
 	mode := runtime.effectivePolicyMode(ctx)
-	input, _ := json.Marshal(map[string]any{"event_id": eventID, "asset_id": assetID, "policy_version": runtime.cfg.ResearchPolicyVersion})
+	input, _ := json.Marshal(policyInputSnapshot(eventID, assetID, run, runtime.cfg.ResearchPolicyVersion, runtime.cfg.ResearchModel))
 	legacyJSON, _ := json.Marshal(legacy)
 	policyJSON, _ := json.Marshal(policy)
-	comparison, _ := json.Marshal(map[string]any{"mode": mode, "legacy_direction_score": legacy["direction_score"], "event_signal": policy["event_signal"]})
+	signal := objectValue(policy["event_signal"])
+	comparison, _ := json.Marshal(map[string]any{
+		"mode": mode, "policy_version": runtime.cfg.ResearchPolicyVersion,
+		"legacy_direction_score": legacy["direction_score"], "legacy_rating": legacy["rating"], "legacy_signal_status": legacy["signal_status"],
+		"policy_direction_score": signal["direction_score"], "policy_rating": signal["rating"], "policy_status": signal["status"],
+		"direction_changed": numberValue(legacy["direction_score"]) != numberValue(signal["direction_score"]),
+	})
 	_, _ = runtime.db.Exec(context.WithoutCancel(ctx), `INSERT INTO policy_evaluations(id,event_id,asset_id,policy_version,policy_mode,input_snapshot,legacy_result,policy_result,comparison,code_version,prompt_version,model) VALUES($1,NULLIF($2,''),NULLIF($3,''),$4,$5,$6,$7,$8,$9,$10,$11,$12)`, uuid.NewString(), eventID, assetID, runtime.cfg.ResearchPolicyVersion, mode, input, legacyJSON, policyJSON, comparison, p0PolicyAlgorithmVersion, eventResearchPromptVersion, runtime.cfg.ResearchModel)
+}
+
+func policyInputSnapshot(eventID, assetID string, run map[string]any, policyVersion, model string) map[string]any {
+	// Persist only structured evidence, routing and time data. Prompts and model
+	// reasoning remain in their dedicated audit table and are never duplicated.
+	return map[string]any{
+		"event_id": eventID, "asset_id": assetID, "policy_version": policyVersion, "model": model,
+		"as_of": run["as_of"], "research_profile": run["research_profile"], "route_reason": run["route_reason"],
+		"evidence": anySlice(run["evidence"]), "source_event_ids": anySlice(run["trigger_event_ids"]),
+	}
 }
 
 // Enforce is intentionally opt-in twice: configuration asks for it, then an
