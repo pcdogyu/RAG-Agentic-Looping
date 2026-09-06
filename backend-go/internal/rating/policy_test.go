@@ -29,3 +29,14 @@ func TestFundamentalRatingCanUseAbsolutePolicy(t *testing.T) {
 		t.Fatalf("result=%#v", result)
 	}
 }
+
+func TestFundamentalRevisionIsSeparateAndAuditable(t *testing.T) {
+	previous := &State{Rating: "buy", ValuationRunID: "valuation-old"}
+	revision := Revise(previous, Result{Status: "available", Rating: "sell", ValuationRunID: "valuation-new"})
+	if revision.Action != "downgraded" || revision.PreviousRating != "buy" || revision.CurrentRating != "sell" {
+		t.Fatalf("revision=%#v", revision)
+	}
+	if underReview := Revise(previous, Result{Status: "unavailable", Reason: "missing_benchmark_return"}); underReview.Action != "under_review" {
+		t.Fatalf("unavailable fundamental data should not invent a rating: %#v", underReview)
+	}
+}
