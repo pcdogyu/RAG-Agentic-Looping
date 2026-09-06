@@ -79,8 +79,34 @@ func TestNormalizeOutcomePricesAcceptsProviderShapesAndDeduplicates(t *testing.T
 		map[string]any{"date": "2026-01-05", "close": 999.0},
 	}}
 	points := normalizeOutcomePrices(payload, boundary)
-	if len(points) != 1 || points[0].Close != 101 {
+	if len(points) != 1 || points[0].Close != 101 || !points[0].SessionOnly {
 		t.Fatalf("unexpected normalized points: %#v", points)
+	}
+}
+
+func TestOutcomeWindowDoesNotUseSameDayDateOnlyClose(t *testing.T) {
+	start := time.Date(2026, 1, 2, 10, 8, 0, 0, time.UTC)
+	points := []outcomePricePoint{
+		{ObservedAt: time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC), Close: 100, SessionOnly: true},
+		{ObservedAt: time.Date(2026, 1, 5, 0, 0, 0, 0, time.UTC), Close: 105, SessionOnly: true},
+		{ObservedAt: time.Date(2026, 1, 6, 0, 0, 0, 0, time.UTC), Close: 110, SessionOnly: true},
+	}
+	window := outcomeWindow(points, start, "trading_sessions", 1)
+	if len(window) != 2 || window[0].Close != 105 || window[1].Close != 110 {
+		t.Fatalf("date-only close leaked into same-day entry: %#v", window)
+	}
+}
+
+func TestOutcomeWindowKeepsTimestampedPriceAfterSignal(t *testing.T) {
+	start := time.Date(2026, 1, 2, 10, 8, 0, 0, time.UTC)
+	points := []outcomePricePoint{
+		{ObservedAt: time.Date(2026, 1, 2, 10, 7, 0, 0, time.UTC), Close: 100},
+		{ObservedAt: time.Date(2026, 1, 2, 10, 9, 0, 0, time.UTC), Close: 101},
+		{ObservedAt: time.Date(2026, 1, 2, 10, 10, 0, 0, time.UTC), Close: 102},
+	}
+	window := outcomeWindow(points, start, "trading_sessions", 1)
+	if len(window) != 2 || window[0].Close != 101 || window[1].Close != 102 {
+		t.Fatalf("timestamped entry did not use first observable point: %#v", window)
 	}
 }
 
@@ -133,7 +159,7 @@ func TestEvaluateRecommendationOutcomeMath(t *testing.T) {
 		cfg:    config.Config{MarketAdapterURL: server.URL},
 		client: server.Client(),
 	}
-	start := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	recommendation := map[string]any{
 		"signal_status": "directional", "horizon_days": 3.0, "horizon_unit": "trading_sessions",
 		"as_of": iso(start), "scoring_version": "short-term-impact-v1", "score": 20.0, "direction_score": 20.0,
@@ -157,5 +183,8 @@ func TestEvaluateRecommendationOutcomeMath(t *testing.T) {
 	assertClose("max_drawdown", outcome["max_drawdown"].(float64), 90.0/105.0-1)
 	if outcome["direction_correct"] != true || outcome["benchmark_status"] != "available" {
 		t.Fatalf("unexpected direction/benchmark outcome: %#v", outcome)
+	}
+	if outcome["entry_price_time_precision"] != "daily_close" || outcome["entry_price_policy"] != "first_observable_session_after_signal" {
+		t.Fatalf("outcome did not disclose conservative entry timing: %#v", outcome)
 	}
 }

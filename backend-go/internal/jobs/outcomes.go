@@ -41,6 +41,10 @@ type outcomeRuntime struct {
 type outcomePricePoint struct {
 	ObservedAt time.Time
 	Close      float64
+	// SessionOnly means the provider supplied a calendar date without an
+	// intraday timestamp. It represents that day's close, not a price known at
+	// the beginning of the day.
+	SessionOnly bool
 }
 
 type outcomeBenchmark struct {
@@ -238,7 +242,9 @@ func (runtime *outcomeRuntime) evaluateRecommendation(
 		"raw_return": rawReturn, "benchmark_return": benchmark.Return, "alpha": alpha,
 		"benchmark_status": benchmark.Status, "entry_at": iso(entry.ObservedAt), "exit_at": iso(exit.ObservedAt),
 		"entry_price": entry.Close, "exit_price": exit.Close, "direction_correct": directionCorrect,
-		"brier_score": brier, "prediction_evaluation": predictionStatus, "max_drawdown": maxDrawdown, "thesis_invalidated": false, "observed_at": iso(now),
+		"entry_price_time_precision": ternary(entry.SessionOnly, "daily_close", "timestamped"),
+		"entry_price_policy":         "first_observable_session_after_signal",
+		"brier_score":                brier, "prediction_evaluation": predictionStatus, "max_drawdown": maxDrawdown, "thesis_invalidated": false, "observed_at": iso(now),
 	}, "completed", nil
 }
 
@@ -266,7 +272,7 @@ func outcomeSignalStatus(recommendation map[string]any) string {
 func outcomeWindow(points []outcomePricePoint, start time.Time, unit string, horizon int) []outcomePricePoint {
 	entryIndex := -1
 	for index, point := range points {
-		if !point.ObservedAt.Before(start) {
+		if priceObservableAfterSignal(point, start) {
 			entryIndex = index
 			break
 		}
@@ -288,6 +294,16 @@ func outcomeWindow(points []outcomePricePoint, start time.Time, unit string, hor
 		}
 	}
 	return nil
+}
+
+func priceObservableAfterSignal(point outcomePricePoint, signalAvailableAt time.Time) bool {
+	if point.SessionOnly {
+		// A date-only provider value is the closing price for that session. Its
+		// clock time is intentionally unknown, so using the same calendar day
+		// would let a report generated during that day buy at a future close.
+		return point.ObservedAt.UTC().Truncate(24 * time.Hour).After(signalAvailableAt.UTC().Truncate(24 * time.Hour))
+	}
+	return point.ObservedAt.After(signalAvailableAt)
 }
 
 func (runtime *outcomeRuntime) benchmarkReturn(
@@ -475,10 +491,10 @@ func normalizeOutcomePrices(payload any, notAfter time.Time) []outcomePricePoint
 	byTime := map[int64]outcomePricePoint{}
 	for _, value := range anySlice(raw) {
 		if pair := anySlice(value); len(pair) >= 2 {
-			stamp := outcomeTimestamp(pair[0])
+			stamp, sessionOnly := outcomeTimestampPrecision(pair[0])
 			close := outcomeNumber(pair[1])
 			if !stamp.IsZero() && close > 0 && !stamp.After(notAfter) {
-				byTime[stamp.UnixNano()] = outcomePricePoint{ObservedAt: stamp, Close: close}
+				storeOutcomePricePoint(byTime, outcomePricePoint{ObservedAt: stamp, Close: close, SessionOnly: sessionOnly})
 			}
 			continue
 		}
@@ -486,10 +502,10 @@ func normalizeOutcomePrices(payload any, notAfter time.Time) []outcomePricePoint
 		if item == nil {
 			continue
 		}
-		stamp := time.Time{}
+		stamp, sessionOnly := time.Time{}, false
 		for _, key := range []string{"date", "datetime", "timestamp", "time", "日期"} {
 			if item[key] != nil {
-				stamp = outcomeTimestamp(item[key])
+				stamp, sessionOnly = outcomeTimestampPrecision(item[key])
 				break
 			}
 		}
@@ -501,7 +517,7 @@ func normalizeOutcomePrices(payload any, notAfter time.Time) []outcomePricePoint
 			}
 		}
 		if !stamp.IsZero() && close > 0 && !stamp.After(notAfter) {
-			byTime[stamp.UnixNano()] = outcomePricePoint{ObservedAt: stamp, Close: close}
+			storeOutcomePricePoint(byTime, outcomePricePoint{ObservedAt: stamp, Close: close, SessionOnly: sessionOnly})
 		}
 	}
 	result := make([]outcomePricePoint, 0, len(byTime))
@@ -512,31 +528,49 @@ func normalizeOutcomePrices(payload any, notAfter time.Time) []outcomePricePoint
 	return result
 }
 
+func storeOutcomePricePoint(values map[int64]outcomePricePoint, candidate outcomePricePoint) {
+	key := candidate.ObservedAt.UnixNano()
+	previous, exists := values[key]
+	// Prefer a provider record that carries an actual timestamp over an
+	// otherwise ambiguous date-only duplicate.
+	if !exists || candidate.SessionOnly == previous.SessionOnly || (previous.SessionOnly && !candidate.SessionOnly) {
+		values[key] = candidate
+	}
+}
+
 func outcomeTimestamp(value any) time.Time {
+	stamp, _ := outcomeTimestampPrecision(value)
+	return stamp
+}
+
+func outcomeTimestampPrecision(value any) (time.Time, bool) {
 	switch typed := value.(type) {
 	case float64:
 		seconds := typed
 		if math.Abs(seconds) >= 100_000_000_000 {
 			seconds /= 1000
 		}
-		return time.Unix(0, int64(seconds*float64(time.Second))).UTC()
+		return time.Unix(0, int64(seconds*float64(time.Second))).UTC(), false
 	case json.Number:
 		parsed, _ := typed.Float64()
-		return outcomeTimestamp(parsed)
+		return outcomeTimestampPrecision(parsed)
 	case string:
 		raw := strings.TrimSpace(typed)
-		for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02", "2006-01-02 15:04:05"} {
+		for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05"} {
 			if parsed, err := time.Parse(layout, raw); err == nil {
-				return parsed.UTC()
+				return parsed.UTC(), false
 			}
 		}
+		if parsed, err := time.Parse("2006-01-02", raw); err == nil {
+			return parsed.UTC(), true
+		}
 		if parsed, err := strconv.ParseFloat(raw, 64); err == nil {
-			return outcomeTimestamp(parsed)
+			return outcomeTimestampPrecision(parsed)
 		}
 	case time.Time:
-		return typed.UTC()
+		return typed.UTC(), false
 	}
-	return time.Time{}
+	return time.Time{}, false
 }
 
 func outcomeNumber(value any) float64 {
