@@ -673,7 +673,7 @@ describe("model log navigation and filters", () => {
 });
 
 describe("shared hash navigation", () => {
-  it("recognizes all twelve routes and falls back to home", () => {
+  it("recognizes all policy-aware routes and falls back to home", () => {
     expect(routeFromHash("#/home")).toBe("home");
     expect(routeFromHash("#/source-filter")).toBe("source-filter");
     expect(routeFromHash("#/conclusions")).toBe("conclusions");
@@ -684,6 +684,7 @@ describe("shared hash navigation", () => {
     expect(routeFromHash("#/queue")).toBe("queue");
     expect(routeFromHash("#/analysis")).toBe("analysis");
     expect(routeFromHash("#/model-logs")).toBe("model-logs");
+    expect(routeFromHash("#/policy")).toBe("policy");
     expect(routeFromHash("#/search")).toBe("search");
     expect(routeFromHash("#/weknora")).toBe("weknora");
     expect(routeFromHash("#/unknown")).toBe("home");
@@ -695,14 +696,14 @@ describe("shared hash navigation", () => {
       "home", "source-filter", "sources", "news", "queue", "analysis", "conclusions", "targets",
     ]);
     expect(navigationGroups.right.map((item) => item.route)).toEqual([
-      "model-logs", "asset-universe", "search", "weknora",
+      "model-logs", "policy", "asset-universe", "search", "weknora",
     ]);
     const markup = renderToStaticMarkup(createElement(TopNavigation, { current: "source-filter" }));
     const newsMarkup = renderToStaticMarkup(createElement(TopNavigation, { current: "news" }));
     const queueMarkup = renderToStaticMarkup(createElement(TopNavigation, { current: "queue" }));
     const analysisMarkup = renderToStaticMarkup(createElement(TopNavigation, { current: "analysis" }));
     const targetsMarkup = renderToStaticMarkup(createElement(TopNavigation, { current: "targets" }));
-    expect((markup.match(/<a /g) || []).length).toBe(12);
+    expect((markup.match(/<a /g) || []).length).toBe(13);
     expect(markup).toContain('href="#/source-filter" aria-current="page"');
     expect(newsMarkup).toContain('href="#/news" aria-current="page"');
     expect(queueMarkup).toContain('href="#/queue" aria-current="page"');

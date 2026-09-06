@@ -38,6 +38,7 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) (*Serve
 	r.Get("/go/health", s.goHealth)
 	r.Get("/go/migration-status", s.migrationStatus)
 	r.Get("/go/research-policy", s.researchPolicyStatus)
+	r.Get("/go/research-policy/evaluations", s.researchPolicyEvaluations)
 	r.Post("/go/research-policy/reviews", s.reviewResearchPolicyImpact)
 	r.Post("/go/research-policy/approve", s.approveResearchPolicy)
 	for _, item := range s.nativeOperations {

@@ -4,7 +4,7 @@ import AnalysisPage, { type AnalysisLog } from "./AnalysisPage";
 import ModelLogsPage from "./ModelLogs";
 import { TargetTrendSummary, type TargetTrend } from "./TargetTrendSummary";
 
-export type AppRoute = "home" | "source-filter" | "sources" | "asset-universe" | "news" | "queue" | "analysis" | "conclusions" | "targets" | "model-logs" | "search" | "weknora";
+export type AppRoute = "home" | "source-filter" | "sources" | "asset-universe" | "news" | "queue" | "analysis" | "conclusions" | "targets" | "model-logs" | "policy" | "search" | "weknora";
 
 export const navigationGroups: Record<"left" | "right", Array<{ route: AppRoute; label: string }>> = {
   left: [
@@ -19,6 +19,7 @@ export const navigationGroups: Record<"left" | "right", Array<{ route: AppRoute;
   ],
   right: [
     { route: "model-logs", label: "模型日志" },
+    { route: "policy", label: "策略影子期" },
     { route: "asset-universe", label: "资产主数据" },
     { route: "search", label: "搜索引擎" },
     { route: "weknora", label: "WeKnora" },
@@ -3914,6 +3915,79 @@ export function SearchPage({ apiBase }: { apiBase: string }) {
   return <section className="app-page search-page"><PageHeading eyebrow="NETWORK VERIFICATION" title="搜索引擎" copy="通过已启用 MCP 来源手动验证本地模型结论，结果始终保留原始链接。" /><form className="search-form" onSubmit={search}><input required aria-label="搜索查询" placeholder="输入需要验证的问题" value={query} onChange={(e) => setQuery(e.target.value)} /><select aria-label="搜索来源" value={sourceId} onChange={(e) => setSourceId(e.target.value)}><option value="">全部启用来源</option>{sources.filter(isSearchSource).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select><select aria-label="语言" value={language} onChange={(e) => setLanguage(e.target.value)}><option value="zh-CN">中文</option><option value="en">英文</option><option value="all">不限</option></select><select aria-label="时间范围" value={timeRange} onChange={(e) => setTimeRange(e.target.value)}><option value="">不限时间</option><option value="day">24 小时</option><option value="week">一周</option><option value="month">一月</option><option value="year">一年</option></select><label>结果数<input type="number" min="1" max="20" value={limit} onChange={(e) => setLimit(Number(e.target.value))} /></label><button disabled={loading}>{loading ? "正在搜索…" : "搜索验证"}</button></form>{errors.map((item) => <div className="page-error" key={`${item.source}-${item.error}`}>{item.source}: {item.error}</div>)}<div className="search-results">{items.map((item) => <article key={item.url}><span>{searchSourceLabel(item)} · {item.domain}{item.published_at ? ` · ${new Date(item.published_at).toLocaleString("zh-CN")}` : ""}</span><h3><a href={item.url} target="_blank" rel="noreferrer">{item.title}</a></h3><p>{item.snippet}</p></article>)}</div></section>;
 }
 
+type ResearchPolicyStatus = {
+  configured_mode: "shadow" | "enforce";
+  active_mode: "shadow" | "enforce";
+  version: string;
+  prediction_mode: "unavailable";
+  minimum_days: number;
+  minimum_reviews: number;
+  shadow_started_at?: string;
+  shadow_age_days?: number;
+  valid_impacts: number;
+  reviewed_impacts: number;
+  ready_for_approval: boolean;
+  approved: boolean;
+};
+
+type ResearchPolicyEvaluation = {
+  id: string;
+  event_id: string | null;
+  asset_id: string | null;
+  event_signal: { status: string; direction_score: number; rating: string };
+  evidence_quality: { score: number; status: string };
+  created_at: string;
+  decision: "accepted" | "rejected" | null;
+  reviewer: string | null;
+};
+
+export function ResearchPolicyPage({ apiBase }: { apiBase: string }) {
+  const [token, setToken] = useState(readToken);
+  const [status, setStatus] = useState<ResearchPolicyStatus | null>(null);
+  const [items, setItems] = useState<ResearchPolicyEvaluation[]>([]);
+  const [reviewer, setReviewer] = useState("");
+  const [message, setMessage] = useState("");
+  const [loading, setLoading] = useState(true);
+  const headers = { "Content-Type": "application/json", "X-Admin-Token": token };
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      const response = await fetch(`${apiBase}/go/research-policy/evaluations?limit=50`);
+      if (!response.ok) throw new Error("无法读取影子策略状态");
+      const payload = await response.json() as { items: ResearchPolicyEvaluation[]; policy: ResearchPolicyStatus };
+      setItems(payload.items || []); setStatus(payload.policy);
+    } catch (error) { setMessage(error instanceof Error ? error.message : "无法读取影子策略状态"); }
+    finally { setLoading(false); }
+  }, [apiBase]);
+  useEffect(() => { void refresh(); }, [refresh]);
+  async function review(id: string, decision: "accepted" | "rejected") {
+    if (!reviewer.trim()) { setMessage("请先填写复核人。 "); return; }
+    const response = await fetch(`${apiBase}/go/research-policy/reviews`, { method: "POST", headers, body: JSON.stringify({ policy_evaluation_id: id, reviewer: reviewer.trim(), decision, note: "" }) });
+    if (!response.ok) { setMessage("保存复核失败，请检查管理员令牌或记录状态。"); return; }
+    setMessage("人工复核已保存。 "); await refresh();
+  }
+  async function approve() {
+    if (!reviewer.trim()) { setMessage("请先填写批准人。 "); return; }
+    const response = await fetch(`${apiBase}/go/research-policy/approve`, { method: "POST", headers, body: JSON.stringify({ approved_by: reviewer.trim(), note: "P0 shadow gate approved" }) });
+    setMessage(response.ok ? "已写入不可变批准记录。" : "尚未满足 14 天和 100 条人工复核门槛。");
+    if (response.ok) await refresh();
+  }
+  return <section className="app-page policy-page">
+    <PageHeading eyebrow="P0 EVIDENCE GOVERNANCE" title="策略影子期" copy="事件信号与证据门禁先在影子模式下审计。系统不会自动切换至强制门禁。" />
+    <div className="research-gate-grid">
+      <span>当前模式<strong>{status?.active_mode === "enforce" ? "强制" : "影子"}</strong></span>
+      <span>影子时长<strong>{status?.shadow_age_days ?? 0} / {status?.minimum_days ?? 14} 天</strong></span>
+      <span>人工复核<strong>{status?.reviewed_impacts ?? 0} / {status?.minimum_reviews ?? 100}</strong></span>
+      <span>批准状态<strong>{status?.approved ? "已批准" : "待批准"}</strong></span>
+    </div>
+    <p className="score-explanation">版本 {status?.version || "p0-evidence-v1"} · 概率预测为未校准，不显示数值；基本面评级尚未建立。</p>
+    <AdminUnlock token={token} onToken={setToken} />
+    {token && <div className="integration-editor"><label>复核人<input value={reviewer} onChange={(event) => setReviewer(event.target.value)} placeholder="姓名或工号" /></label><button type="button" disabled={!status?.ready_for_approval} onClick={() => void approve()}>批准切换资格</button><small>批准只记录资格；仍需将服务配置显式改为 enforce 才会启用。</small></div>}
+    {message && <div className="page-message">{message}</div>}
+    {loading ? <div className="page-empty">正在读取影子评估…</div> : <div className="conclusion-list">{items.length === 0 ? <div className="page-empty">暂无可人工复核的有效定向影响。</div> : items.map((item) => <article className="conclusion-card" key={item.id}><span>{new Date(item.created_at).toLocaleString("zh-CN")} · {item.asset_id || item.event_id || "事件"}</span><h3>事件信号：{item.event_signal?.rating || "观望"} · {item.event_signal?.direction_score ?? 0}</h3><p>证据状态：{item.evidence_quality?.status || "unknown"} · 质量 {Math.round((item.evidence_quality?.score || 0) * 100)}%</p>{item.decision ? <small>已由 {item.reviewer || "管理员"} 复核：{item.decision === "accepted" ? "接受" : "驳回"}</small> : token && <div><button type="button" onClick={() => void review(item.id, "accepted")}>接受</button><button type="button" onClick={() => void review(item.id, "rejected")}>驳回</button></div>}</article>)}</div>}
+  </section>;
+}
+
 export function WeknoraPage({ apiBase }: { apiBase: string }) {
   const [token, setToken] = useState(readToken); const [url, setUrl] = useState("http://10.15.0.28/"); const [draft, setDraft] = useState(url); const [message, setMessage] = useState(""); const [failed, setFailed] = useState(false);
   useEffect(() => { fetch(`${apiBase}/api/v1/integrations/weknora`).then((r) => r.json()).then((payload: { url: string }) => { setUrl(payload.url); setDraft(payload.url); }).catch(() => setMessage("无法读取 WeKnora 配置，已使用默认地址。")); }, [apiBase]);
@@ -3929,6 +4003,7 @@ export function RoutedPage({
   route: Exclude<AppRoute, "home">; apiBase: string; analysisLogs: AnalysisLog[];
 }) {
   if (route === "model-logs") return <ModelLogsPage apiBase={apiBase} onBack={() => { window.location.hash = "/home"; }} embedded />;
+  if (route === "policy") return <ResearchPolicyPage apiBase={apiBase} />;
   if (route === "source-filter") return <SourceFilterPage apiBase={apiBase} />;
   if (route === "conclusions") return <ConclusionsPage apiBase={apiBase} />;
   if (route === "targets") return <ChangedTargetsPage apiBase={apiBase} />;

@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -59,6 +60,54 @@ func (s *Server) researchPolicySummary(ctx context.Context) map[string]any {
 
 func (s *Server) researchPolicyStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.researchPolicySummary(r.Context()))
+}
+
+func (s *Server) researchPolicyEvaluations(w http.ResponseWriter, r *http.Request) {
+	limit, ok := intQuery(w, r.URL.Query(), "limit", 50, 1, 100)
+	if !ok {
+		return
+	}
+	rows, err := s.db.Query(r.Context(), `
+		SELECT e.id,e.event_id,e.asset_id,e.policy_result,e.comparison,e.created_at,r.decision,r.reviewer,r.created_at
+		FROM policy_evaluations e
+		LEFT JOIN policy_impact_reviews r ON r.policy_evaluation_id=e.id
+		WHERE e.policy_version=$1 AND e.policy_result->'event_signal'->>'status'='directional'
+		ORDER BY e.created_at DESC,e.id DESC LIMIT $2`, s.cfg.ResearchPolicyVersion, limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "policy evaluations query failed")
+		return
+	}
+	defer rows.Close()
+	items := make([]any, 0, limit)
+	for rows.Next() {
+		var id string
+		var eventID, assetID *string
+		var policyJSON, comparisonJSON []byte
+		var created time.Time
+		var decision, reviewer *string
+		var reviewedAt *time.Time
+		if err := rows.Scan(&id, &eventID, &assetID, &policyJSON, &comparisonJSON, &created, &decision, &reviewer, &reviewedAt); err != nil {
+			writeError(w, http.StatusInternalServerError, "policy evaluations decode failed")
+			return
+		}
+		policy, comparison := map[string]any{}, map[string]any{}
+		_ = json.Unmarshal(policyJSON, &policy)
+		_ = json.Unmarshal(comparisonJSON, &comparison)
+		item := map[string]any{"id": id, "event_id": nullablePolicyString(eventID), "asset_id": nullablePolicyString(assetID), "event_signal": policy["event_signal"], "evidence_quality": policy["evidence_quality"], "comparison": comparison, "created_at": created.UTC(), "decision": nullablePolicyString(decision), "reviewer": nullablePolicyString(reviewer), "reviewed_at": timeOrNil(reviewedAt)}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "policy evaluations query failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "policy": s.researchPolicySummary(r.Context())})
+}
+
+func nullablePolicyString(value *string) any {
+	if value == nil || strings.TrimSpace(*value) == "" {
+		return nil
+	}
+	return *value
 }
 
 type policyReviewRequest struct {
