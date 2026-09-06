@@ -110,7 +110,7 @@ FMP MCP 不可用时，Go provider 会按配置使用 Stable REST 接口。
 ```powershell
 Set-Location backend-go
 go run ./cmd/evaluation fixed-evidence --root ..
-go run ./cmd/evaluation walk-forward --root ..
+go run ./cmd/evaluation chronological_holdout --root ..
 go run ./cmd/evaluation probability-calibration --root ..
 go run ./cmd/evaluation compare-models --root ..
 ```

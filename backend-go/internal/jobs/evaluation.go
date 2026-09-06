@@ -2,7 +2,6 @@ package jobs
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -40,28 +39,6 @@ type frozenEventCase struct {
 	AsOf              string   `json:"as_of"`
 }
 
-type frozenPredictionDataset struct {
-	Version  int                    `json:"version"`
-	Dataset  string                 `json:"dataset"`
-	Minimums map[string]float64     `json:"minimums"`
-	Maximums map[string]float64     `json:"maximums"`
-	Cases    []frozenPredictionCase `json:"cases"`
-}
-
-type frozenPredictionCase struct {
-	ID                 string  `json:"id"`
-	BullProbability    float64 `json:"bull_probability"`
-	BaseProbability    float64 `json:"base_probability"`
-	BearProbability    float64 `json:"bear_probability"`
-	Direction          int     `json:"direction"`
-	Magnitude          float64 `json:"magnitude"`
-	Persistence        float64 `json:"persistence"`
-	Representativeness float64 `json:"representativeness"`
-	MarketConfirmation float64 `json:"market_confirmation"`
-	Score              int     `json:"score"`
-	Actual             string  `json:"actual"`
-}
-
 type evaluatedFrozenEvent struct {
 	record    frozenEventCase
 	eventType string
@@ -86,10 +63,10 @@ func RunOfflineEvaluation(root, suite, baselinePath, candidatePath string) (map[
 	switch suite {
 	case "fixed-evidence":
 		return frozenEvidenceEvaluation(root)
-	case "walk-forward", "chronological_holdout":
-		return frozenWalkForwardEvaluation(root)
+	case "chronological_holdout":
+		return frozenChronologicalHoldoutEvaluation(root)
 	case "probability-calibration":
-		return map[string]any{"status": "skipped", "reason": "uncalibrated_predictions", "passed": true}, nil
+		return map[string]any{"status": "skipped", "reason": "uncalibrated_predictions", "evaluation_type": "probability_calibration", "passed": true}, nil
 	case "research-quality":
 		return frozenResearchQualityEvaluation(root)
 	case "compare-models":
@@ -148,25 +125,39 @@ func evaluateResearchQualityCase(scenario string) (bool, string) {
 		return !verification.EvidenceComplete && containsEvaluationPrefix(verification.Missing, "unknown evidence id:"), "unknown evidence ids fail the evidence gate"
 	case "missing_transmission":
 		impact.TransmissionSteps = nil
-		draft := eventResearchDraft{Summary: "event", Impacts: []eventImpactDraft{impact}}
-		verification := verifyEventDraft(&draft, event, evidence, time.Time{})
-		return draft.Impacts[0].DirectionScore == 0 && !verification.EvidenceComplete, "unsupported direction is forced to zero"
+		public, verification := evaluateProductionImpact(event, evidence, impact)
+		signal := objectValue(public["event_signal"])
+		return int(numberValue(signal["direction_score"])) == 0 && stringValue(signal["status"]) == "insufficient_evidence" && !verification.EvidenceComplete, "production signal contract forces unsupported direction to zero"
 	case "weak_sources":
 		evidence[0].SourceQuality = "professional"
 		public := finalizeTargetEvaluation(impact, event, evidence, nil)
 		return public.EvidenceSufficiency.Score == 49, "single non-official source caps evidence sufficiency"
 	case "directional_positive":
-		draft := eventResearchDraft{Summary: "event", Impacts: []eventImpactDraft{impact}}
-		verification := verifyEventDraft(&draft, event, evidence, time.Time{})
-		return verification.EvidenceComplete && draft.Impacts[0].DirectionScore == 45, "fully supported positive direction is retained"
+		public, verification := evaluateProductionImpact(event, evidence, impact)
+		signal := objectValue(public["event_signal"])
+		return verification.EvidenceComplete && int(numberValue(signal["direction_score"])) == 45 && stringValue(signal["rating"]) == "bullish", "production signal contract retains a fully supported positive direction and policy rating"
 	case "directional_negative":
 		impact.DirectionScore = -45
-		draft := eventResearchDraft{Summary: "event", Impacts: []eventImpactDraft{impact}}
-		verification := verifyEventDraft(&draft, event, evidence, time.Time{})
-		return verification.EvidenceComplete && draft.Impacts[0].DirectionScore == -45, "fully supported negative direction is retained"
+		public, verification := evaluateProductionImpact(event, evidence, impact)
+		signal := objectValue(public["event_signal"])
+		return verification.EvidenceComplete && int(numberValue(signal["direction_score"])) == -45 && stringValue(signal["rating"]) == "bearish", "production signal contract retains a fully supported negative direction and policy rating"
 	default:
 		return false, "unknown scenario"
 	}
+}
+
+// evaluateProductionImpact intentionally reaches the same evidence verifier,
+// report finalizer, rating thresholds and event-signal contract used by a live
+// research run. Frozen fixtures must not validate a parallel score formula.
+func evaluateProductionImpact(event map[string]any, evidence []researchEvidence, impact eventImpactDraft) (map[string]any, draftVerification) {
+	draft := eventResearchDraft{Summary: "frozen production evaluation", Impacts: []eventImpactDraft{impact}}
+	verification := verifyEventDraft(&draft, event, evidence, time.Time{})
+	report := (&researchRuntime{}).finalizeEventReport(event, draft, evidence, verification)
+	impacts := anySlice(report["impacts"])
+	if len(impacts) == 0 {
+		return map[string]any{}, verification
+	}
+	return objectValue(impacts[0]), verification
 }
 
 func evaluationResearchInput(direction int) (map[string]any, []researchEvidence, eventImpactDraft) {
@@ -239,7 +230,7 @@ func frozenEvidenceEvaluation(root string) (map[string]any, error) {
 	return result, nil
 }
 
-func frozenWalkForwardEvaluation(root string) (map[string]any, error) {
+func frozenChronologicalHoldoutEvaluation(root string) (map[string]any, error) {
 	dataset, err := loadFrozenEventDataset(root)
 	if err != nil {
 		return nil, err
@@ -268,6 +259,7 @@ func frozenWalkForwardEvaluation(root string) (map[string]any, error) {
 	}
 	return map[string]any{
 		"version": dataset.Version, "dataset": dataset.Dataset,
+		"evaluation_type": "chronological_holdout", "prediction_evaluation": "skipped", "prediction_skip_reason": "uncalibrated_predictions",
 		"train_samples": len(train), "held_out_samples": len(heldOut),
 		"chronological_split": chronological, "train_metrics": trainMetrics, "held_out_metrics": heldOutMetrics,
 		"passed": chronological && len(heldOut) > 0 && evaluationMeetsMinimums(heldOutMetrics, minimums),
@@ -335,115 +327,6 @@ func frozenStageMetrics(dataset frozenEventDataset, records []frozenEventCase) (
 		"cluster_precision": roundEvaluation(clusterPrecision), "cluster_recall": roundEvaluation(clusterRecall),
 		"temporal_integrity": roundEvaluation(temporalIntegrity), "composite_score": roundEvaluation(composite),
 	}, nil
-}
-
-func frozenProbabilityEvaluation(root string) (map[string]any, error) {
-	dataset := frozenPredictionDataset{}
-	if err := readEvaluationJSON(filepath.Join(root, "evals", "golden_predictions.json"), &dataset); err != nil {
-		return nil, err
-	}
-	if len(dataset.Cases) == 0 {
-		return nil, errors.New("frozen probability evaluation requires at least one case")
-	}
-	labels := []string{"bull", "base", "bear"}
-	actualCounts := []int{0, 0, 0}
-	type forecast struct {
-		probabilities [3]float64
-		actual        int
-		confidence    float64
-		correct       bool
-	}
-	forecasts := make([]forecast, 0, len(dataset.Cases))
-	consistent := 0
-	for _, record := range dataset.Cases {
-		score := frozenShortTermScore(record)
-		probabilities := probabilitiesForEvaluation(score, record.BaseProbability)
-		actual := -1
-		for index, label := range labels {
-			if record.Actual == label {
-				actual = index
-				break
-			}
-		}
-		if actual < 0 {
-			return nil, fmt.Errorf("invalid actual label in frozen case %s", record.ID)
-		}
-		actualCounts[actual]++
-		predicted := 0
-		for index := 1; index < len(probabilities); index++ {
-			if probabilities[index] > probabilities[predicted] {
-				predicted = index
-			}
-		}
-		forecasts = append(forecasts, forecast{probabilities: probabilities, actual: actual, confidence: probabilities[predicted], correct: predicted == actual})
-		implied := int(math.Round(100 * (probabilities[0] - probabilities[2])))
-		if absInt(record.Score-score) <= 5 && absInt(score-implied) <= 1 {
-			consistent++
-		}
-	}
-	samples := float64(len(forecasts))
-	brier := 0.0
-	for _, item := range forecasts {
-		for index, probability := range item.probabilities {
-			target := 0.0
-			if index == item.actual {
-				target = 1
-			}
-			brier += math.Pow(probability-target, 2) / 3
-		}
-	}
-	brier /= samples
-	frequencies := [3]float64{float64(actualCounts[0]) / samples, float64(actualCounts[1]) / samples, float64(actualCounts[2]) / samples}
-	reference := 0.0
-	for _, item := range forecasts {
-		for index, frequency := range frequencies {
-			target := 0.0
-			if index == item.actual {
-				target = 1
-			}
-			reference += math.Pow(frequency-target, 2) / 3
-		}
-	}
-	reference /= samples
-	skill := 0.0
-	if reference > 0 {
-		skill = 1 - brier/reference
-	}
-	type calibrationBin struct {
-		confidence, correct float64
-		count               int
-	}
-	bins := map[int]calibrationBin{}
-	correct := 0
-	for _, item := range forecasts {
-		bucket := min(9, int(item.confidence*10))
-		bin := bins[bucket]
-		bin.confidence += item.confidence
-		if item.correct {
-			bin.correct++
-			correct++
-		}
-		bin.count++
-		bins[bucket] = bin
-	}
-	ece := 0.0
-	for _, bin := range bins {
-		ece += float64(bin.count) / samples * math.Abs(bin.correct/float64(bin.count)-bin.confidence/float64(bin.count))
-	}
-	result := map[string]any{
-		"version": dataset.Version, "dataset": dataset.Dataset, "samples": len(forecasts),
-		"brier_score": roundEvaluation(brier), "reference_brier_score": roundEvaluation(reference),
-		"brier_skill": roundEvaluation(skill), "expected_calibration_error": roundEvaluation(ece),
-		"top_label_accuracy":            roundEvaluation(float64(correct) / samples),
-		"score_probability_consistency": roundEvaluation(float64(consistent) / samples),
-	}
-	passed := evaluationMeetsMinimums(result, dataset.Minimums)
-	for name, maximum := range dataset.Maximums {
-		value, ok := numericMetric(result[name])
-		passed = passed && ok && value <= maximum
-	}
-	result["passed"] = passed
-	return result, nil
 }
 
 func compareEvaluationMetrics(baseline, candidate map[string]any, tolerance float64) map[string]any {
@@ -553,25 +436,6 @@ func frozenSameStory(left, right evaluatedFrozenEvent) bool {
 		return false
 	}
 	return similarity >= .92
-}
-
-func frozenShortTermScore(record frozenPredictionCase) int {
-	unit := func(value float64) float64 { return math.Max(0, math.Min(1, value)) }
-	total := float64(record.Direction) * (45*unit(record.Magnitude) + 25*unit(record.Persistence) + 15*unit(record.Representativeness) + 15*unit(record.MarketConfirmation))
-	if total >= 0 {
-		return min(100, int(math.Floor(total+.5)))
-	}
-	return max(-100, int(math.Ceil(total-.5)))
-}
-
-func probabilitiesForEvaluation(score int, baseProbability float64) [3]float64 {
-	edge := math.Max(-1, math.Min(1, float64(score)/100))
-	base := math.Max(0, math.Min(baseProbability, 1-math.Abs(edge)))
-	mass := 1 - base
-	bull := roundEvaluationPrecision((mass+edge)/2, 8)
-	bear := roundEvaluationPrecision((mass-edge)/2, 8)
-	base = roundEvaluationPrecision(1-bull-bear, 8)
-	return [3]float64{bull, base, bear}
 }
 
 func evaluationMeetsMinimums(metrics map[string]any, minimums map[string]float64) bool {

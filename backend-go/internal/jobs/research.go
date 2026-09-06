@@ -2188,15 +2188,6 @@ func ratingForScore(score int) string {
 	}
 	return "watch"
 }
-func probabilitiesForScore(score int) (float64, float64, float64) {
-	edge := math.Max(-1, math.Min(1, float64(score)/100))
-	base := math.Max(0, math.Min(.5, 1-math.Abs(edge)))
-	mass := 1 - base
-	bull, bear := (mass+edge)/2, (mass-edge)/2
-	total := bull + base + bear
-	return round4(bull / total), round4(base / total), round4(bear / total)
-}
-
 func mappingDistance(candidate map[string]any, path []string) int {
 	if candidate != nil {
 		switch strings.ToLower(stringValue(candidate["relationship"])) {

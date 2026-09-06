@@ -33,14 +33,17 @@ func TestFrozenEvidenceEvaluationMatchesBaseline(t *testing.T) {
 	}
 }
 
-func TestFrozenWalkForwardAndProbabilitySuitesPass(t *testing.T) {
+func TestChronologicalHoldoutAndProbabilitySuitesHaveAccurateSemantics(t *testing.T) {
 	root := evaluationRepositoryRoot(t)
 	walkForward, err := RunOfflineEvaluation(root, "chronological_holdout", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !EvaluationPassed(walkForward) || int(numberValue(walkForward["held_out_samples"])) != 4 {
-		t.Fatalf("unexpected walk-forward result: %v", walkForward)
+		t.Fatalf("unexpected chronological holdout result: %v", walkForward)
+	}
+	if stringValue(walkForward["evaluation_type"]) != "chronological_holdout" || stringValue(walkForward["prediction_evaluation"]) != "skipped" {
+		t.Fatalf("holdout incorrectly presented itself as a predictive walk-forward suite: %v", walkForward)
 	}
 	probability, err := RunOfflineEvaluation(root, "probability-calibration", "", "")
 	if err != nil {
@@ -48,6 +51,18 @@ func TestFrozenWalkForwardAndProbabilitySuitesPass(t *testing.T) {
 	}
 	if !EvaluationPassed(probability) || stringValue(probability["status"]) != "skipped" || stringValue(probability["reason"]) != "uncalibrated_predictions" {
 		t.Fatalf("unexpected probability result: %v", probability)
+	}
+	_, hasBrier := probability["brier_score"]
+	_, hasECE := probability["expected_calibration_error"]
+	if hasBrier || hasECE {
+		t.Fatalf("uncalibrated probability evaluation must not publish calibration metrics: %v", probability)
+	}
+}
+
+func TestOfflineEvaluationRejectsDeprecatedWalkForwardAlias(t *testing.T) {
+	_, err := RunOfflineEvaluation(evaluationRepositoryRoot(t), "walk-forward", "", "")
+	if err == nil {
+		t.Fatal("deprecated walk-forward alias was accepted")
 	}
 }
 

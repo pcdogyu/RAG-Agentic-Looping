@@ -374,7 +374,7 @@ func candidateCommandSpecs(root string) []candidateCommandSpec {
 		{"go_tests", goRoot, []string{"go", "test", "./..."}, 15 * time.Minute},
 		{"go_vet", goRoot, []string{"go", "vet", "./..."}, 15 * time.Minute},
 		{"fixed_evidence", goRoot, []string{"go", "run", "./cmd/evaluation", "fixed-evidence", "--root", root}, 15 * time.Minute},
-		{"walk_forward", goRoot, []string{"go", "run", "./cmd/evaluation", "walk-forward", "--root", root}, 15 * time.Minute},
+		{"chronological_holdout", goRoot, []string{"go", "run", "./cmd/evaluation", "chronological_holdout", "--root", root}, 15 * time.Minute},
 		{"probability_calibration", goRoot, []string{"go", "run", "./cmd/evaluation", "probability-calibration", "--root", root}, 15 * time.Minute},
 		{"dependency_verify", goRoot, []string{"go", "mod", "verify"}, 5 * time.Minute},
 		{"container_build", root, []string{"docker", "compose", "--profile", "go-shadow", "build", "go-api", "go-evolution-worker", "go-operations-worker"}, 30 * time.Minute},
