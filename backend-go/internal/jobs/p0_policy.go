@@ -9,6 +9,7 @@ import (
 )
 
 const p0PolicyAlgorithmVersion = "p0-evidence-v1"
+const p0TimeContractVersion = "p0-time-v1"
 
 func signalAvailableAt(event map[string]any, evidence []researchEvidence, generated time.Time) time.Time {
 	available := generated.UTC()
@@ -19,8 +20,10 @@ func signalAvailableAt(event map[string]any, evidence []researchEvidence, genera
 			}
 		}
 	}
-	if eventAsOf := parseTime(event["as_of"]); eventAsOf.After(available) {
-		available = eventAsOf
+	for _, stamp := range []time.Time{parseTime(event["published_at"]), parseTime(event["observed_at"]), parseTime(event["as_of"])} {
+		if stamp.After(available) {
+			available = stamp
+		}
 	}
 	return available
 }
@@ -36,7 +39,7 @@ func eventSignalContract(score int, rating, conclusion string, horizon int, asOf
 	return map[string]any{
 		"status": status, "direction_score": score, "rating": rating,
 		"horizon_days": horizon, "horizon_unit": "calendar_days", "as_of": iso(asOf),
-		"signal_available_at": iso(available), "algorithm_version": p0PolicyAlgorithmVersion,
+		"signal_available_at": iso(available), "algorithm_version": p0PolicyAlgorithmVersion, "time_contract_version": p0TimeContractVersion,
 	}
 }
 

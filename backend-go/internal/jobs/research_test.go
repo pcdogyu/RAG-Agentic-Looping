@@ -129,6 +129,38 @@ func TestHistoricalEvidenceDoesNotChangeCurrentNewsConfidence(t *testing.T) {
 	}
 }
 
+func TestEvidenceTimeBoundaryRejectsOnlyCitedTarget(t *testing.T) {
+	event, evidence, impact := researchQualityFixture()
+	cutoff := time.Date(2026, 9, 6, 10, 0, 0, 0, time.UTC)
+	evidence[0].PublishedAt, evidence[0].ObservedAt, evidence[0].AsOf = cutoff.Add(-2*time.Minute), cutoff.Add(-time.Minute), cutoff.Add(-2*time.Minute)
+	draft := eventResearchDraft{Summary: "订单事件", Impacts: []eventImpactDraft{impact}}
+	verification := verifyEventDraft(&draft, event, evidence, cutoff)
+	if !verification.EvidenceComplete || !draft.Impacts[0].Verification.EvidenceComplete {
+		t.Fatalf("valid point-in-time evidence was rejected: %#v / %#v", draft, verification)
+	}
+
+	evidence[0].ObservedAt = cutoff.Add(time.Minute)
+	draft = eventResearchDraft{Summary: "订单事件", Impacts: []eventImpactDraft{impact}}
+	verification = verifyEventDraft(&draft, event, evidence, cutoff)
+	if verification.EvidenceComplete || draft.Impacts[0].Verification.EvidenceComplete || draft.Impacts[0].DirectionScore != 0 || !containsPrefix(draft.Impacts[0].Verification.Contradictions, "point-in-time boundary violation:") {
+		t.Fatalf("future evidence was not confined and rejected for its cited target: %#v / %#v", draft, verification)
+	}
+}
+
+func TestEvidenceTimeValidationRejectsMissingAndNegativeCollectionTimes(t *testing.T) {
+	cutoff := time.Date(2026, 9, 6, 10, 0, 0, 0, time.UTC)
+	checks := validateEvidenceTimes([]researchEvidence{
+		{ID: "missing"},
+		{ID: "negative", PublishedAt: cutoff.Add(-time.Minute), ObservedAt: cutoff.Add(-2 * time.Minute), AsOf: cutoff.Add(-time.Minute)},
+	}, cutoff)
+	if !containsString(checks["missing"].Missing, "evidence_missing_published_at:missing") || !containsString(checks["missing"].Missing, "evidence_missing_observed_at:missing") || !containsString(checks["missing"].Missing, "evidence_missing_as_of:missing") {
+		t.Fatalf("missing evidence times were not explicit: %#v", checks)
+	}
+	if !containsString(checks["negative"].Contradictions, "evidence_observed_before_published:negative") {
+		t.Fatalf("negative collection delay was accepted: %#v", checks)
+	}
+}
+
 func TestPermanentResearchErrorIsTerminal(t *testing.T) {
 	value := permanentJobError{context.DeadlineExceeded}
 	var marker interface{ Permanent() bool }

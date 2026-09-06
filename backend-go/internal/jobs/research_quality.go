@@ -86,15 +86,8 @@ func verifyEventDraft(draft *eventResearchDraft, event map[string]any, evidence 
 		verification.StructurallyValid = false
 		verification.Missing = append(verification.Missing, "summary")
 	}
-	if !asOf.IsZero() {
-		for _, item := range evidence {
-			if item.PublishedAt.After(asOf) || item.ObservedAt.After(asOf) || item.AsOf.After(asOf) {
-				verification.Contradictions = append(verification.Contradictions, "point-in-time boundary violation")
-				break
-			}
-		}
-	}
-	globalContradiction := len(verification.Contradictions) > 0
+	timeChecks := validateEvidenceTimes(evidence, asOf)
+	globalContradiction := false
 
 	allowed := candidateAssets(event)
 	validEvidence := stringSet(evidenceIDs(evidence))
@@ -305,6 +298,16 @@ func verifyEventDraft(draft *eventResearchDraft, event map[string]any, evidence 
 			impactComplete = false
 			directionComplete = false
 		}
+		for _, evidenceID := range impactEvidenceIDs {
+			check := timeChecks[evidenceID]
+			if len(check.Missing)+len(check.Contradictions) == 0 {
+				continue
+			}
+			verification.Missing = append(verification.Missing, check.Missing...)
+			verification.Contradictions = append(verification.Contradictions, check.Contradictions...)
+			impactComplete = false
+			directionComplete = false
+		}
 		impactOfficial, impactGroups := citedSourceCoverage(impactEvidenceIDs, evidence)
 		if !impactOfficial && impactGroups < 2 {
 			verification.Missing = append(verification.Missing, "one official source or two independent sources:"+key)
@@ -392,6 +395,50 @@ func verifyEventDraft(draft *eventResearchDraft, event map[string]any, evidence 
 	verification.Contradictions = uniqueStrings(verification.Contradictions)
 	verification.EvidenceComplete = verification.StructurallyValid && allComplete && len(verification.Missing) == 0 && len(verification.Contradictions) == 0
 	return verification
+}
+
+type evidenceTimeCheck struct {
+	Missing        []string
+	Contradictions []string
+}
+
+// validateEvidenceTimes applies the same point-in-time boundary to both
+// current evidence and historical context. A timestamp issue is attached to
+// the target that actually cites the evidence, rather than poisoning every
+// independent impact in the report.
+func validateEvidenceTimes(evidence []researchEvidence, asOf time.Time) map[string]evidenceTimeCheck {
+	checks := make(map[string]evidenceTimeCheck, len(evidence))
+	if asOf.IsZero() {
+		return checks
+	}
+	for _, item := range evidence {
+		if strings.TrimSpace(item.ID) == "" {
+			continue
+		}
+		check := evidenceTimeCheck{}
+		if item.PublishedAt.IsZero() {
+			check.Missing = append(check.Missing, "evidence_missing_published_at:"+item.ID)
+		}
+		if item.ObservedAt.IsZero() {
+			check.Missing = append(check.Missing, "evidence_missing_observed_at:"+item.ID)
+		}
+		if item.AsOf.IsZero() {
+			check.Missing = append(check.Missing, "evidence_missing_as_of:"+item.ID)
+		}
+		if !item.PublishedAt.IsZero() && !item.ObservedAt.IsZero() && item.ObservedAt.Before(item.PublishedAt) {
+			check.Contradictions = append(check.Contradictions, "evidence_observed_before_published:"+item.ID)
+		}
+		if !item.AsOf.IsZero() && !item.ObservedAt.IsZero() && item.AsOf.After(item.ObservedAt) {
+			check.Contradictions = append(check.Contradictions, "evidence_as_of_after_observed:"+item.ID)
+		}
+		if (!item.PublishedAt.IsZero() && item.PublishedAt.After(asOf)) || (!item.ObservedAt.IsZero() && item.ObservedAt.After(asOf)) || (!item.AsOf.IsZero() && item.AsOf.After(asOf)) {
+			check.Contradictions = append(check.Contradictions, "point-in-time boundary violation:"+item.ID)
+		}
+		if len(check.Missing)+len(check.Contradictions) > 0 {
+			checks[item.ID] = check
+		}
+	}
+	return checks
 }
 
 func verifyAssetDraft(draft *assetResearchDraft, asset, event map[string]any, evidence []researchEvidence, asOf time.Time) draftVerification {

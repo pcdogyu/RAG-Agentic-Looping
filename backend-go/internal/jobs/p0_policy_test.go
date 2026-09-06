@@ -17,6 +17,24 @@ func TestP0ContractDoesNotPublishProbabilitiesOrFundamentalRating(t *testing.T) 
 	}
 }
 
+func TestSignalAvailableAtWaitsForEventObservationAndAllEvidence(t *testing.T) {
+	generated := time.Date(2026, 9, 6, 10, 0, 0, 0, time.UTC)
+	event := map[string]any{
+		"published_at": iso(generated.Add(-10 * time.Minute)),
+		"observed_at":  iso(generated.Add(5 * time.Minute)),
+		"as_of":        iso(generated.Add(-10 * time.Minute)),
+	}
+	evidence := []researchEvidence{{ID: "e-1", PublishedAt: generated.Add(-10 * time.Minute), ObservedAt: generated.Add(3 * time.Minute), AsOf: generated.Add(-10 * time.Minute)}}
+	available := signalAvailableAt(event, evidence, generated)
+	if !available.Equal(generated.Add(5 * time.Minute)) {
+		t.Fatalf("signal availability=%s want event observation %s", available, generated.Add(5*time.Minute))
+	}
+	contract := eventSignalContract(45, "bullish", "directional", 90, generated, available)
+	if contract["time_contract_version"] != p0TimeContractVersion {
+		t.Fatalf("event signal did not expose the time contract version: %#v", contract)
+	}
+}
+
 func TestImpactEligibilityAllowsVerifiedNegativeResearch(t *testing.T) {
 	asset := map[string]any{"asset_class": "equity"}
 	value := impactEligibility(asset, eventImpactDraft{ConclusionStatus: "directional", DirectionScore: -35}, true)

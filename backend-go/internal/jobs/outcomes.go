@@ -169,6 +169,12 @@ func (runtime *outcomeRuntime) evaluateRecommendation(
 	if start.IsZero() {
 		start = parseTime(objectValue(recommendation["event_signal"])["signal_available_at"])
 	}
+	if start.IsZero() && stringValue(objectValue(recommendation["event_signal"])["algorithm_version"]) == p0PolicyAlgorithmVersion {
+		// P0 recommendations must never silently fall back to the publisher or
+		// database timestamp. That would turn a delayed research result into a
+		// fictitious executable signal.
+		return nil, "skipped", nil
+	}
 	if start.IsZero() {
 		start = parseTime(recommendation["as_of"])
 	}

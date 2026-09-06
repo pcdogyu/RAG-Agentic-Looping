@@ -131,6 +131,19 @@ func TestOutcomeSignalStatusPreservesNewAndLegacyRules(t *testing.T) {
 	}
 }
 
+func TestP0OutcomeDoesNotFallbackWhenSignalAvailabilityIsMissing(t *testing.T) {
+	start := time.Date(2026, 9, 6, 10, 0, 0, 0, time.UTC)
+	recommendation := map[string]any{
+		"signal_status": "directional", "horizon_days": 1.0, "as_of": iso(start),
+		"event_signal": map[string]any{"algorithm_version": p0PolicyAlgorithmVersion},
+		"asset":        map[string]any{"asset_id": "equity:NYSE:ACME", "asset_class": "equity", "market": "US", "symbol": "ACME"},
+	}
+	outcome, state, err := (&outcomeRuntime{}).evaluateRecommendation(context.Background(), uuid.New(), start, recommendation, start.AddDate(0, 0, 10), map[string][]outcomePricePoint{})
+	if err != nil || state != "skipped" || outcome != nil {
+		t.Fatalf("P0 recommendation fell back to an invented entry time: outcome=%#v state=%s err=%v", outcome, state, err)
+	}
+}
+
 func TestEvaluateRecommendationOutcomeMath(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request map[string]any
