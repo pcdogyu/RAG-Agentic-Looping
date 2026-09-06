@@ -532,12 +532,16 @@ func TestAssetDraftUsesEvidenceFirstSystemPromptAndParsesSchema(t *testing.T) {
 	defer server.Close()
 
 	runtime := &researchRuntime{cfg: config.Config{ResearchModel: "qwen3:4b-thinking", ResearchURLs: []string{server.URL}}, client: server.Client()}
-	draft, err := runtime.generateAssetDraft(context.Background(), uuid.New(), map[string]any{"asset_id": "asset-1", "symbol": "ACME", "name": "Acme"}, map[string]any{"headline": "Acme received an order."}, []researchEvidence{{ID: "ev-1", Claim: "Acme received an order."}}, "research-0", "fast", "test")
+	fundamentalContext := map[string]any{"status": "available", "snapshot_id": "snapshot-1", "snapshots": []any{map[string]any{"snapshot_id": "snapshot-1", "metrics": map[string]any{"revenue": 100}}}}
+	draft, err := runtime.generateAssetDraft(context.Background(), uuid.New(), map[string]any{"asset_id": "asset-1", "symbol": "ACME", "name": "Acme"}, map[string]any{"headline": "Acme received an order."}, []researchEvidence{{ID: "ev-1", Claim: "Acme received an order."}}, fundamentalContext, "research-0", "fast", "test")
 	if err != nil {
 		t.Fatalf("generate asset draft: %v", err)
 	}
 	if len(request.Messages) != 2 || request.Messages[0]["role"] != "system" || request.Messages[0]["content"] != assetResearchSystemPrompt {
 		t.Fatalf("unexpected asset system message: %#v", request.Messages)
+	}
+	if !strings.Contains(request.Messages[1]["content"], "<fundamental_context>") || !strings.Contains(request.Messages[1]["content"], "snapshot-1") || !strings.Contains(request.Messages[1]["content"], "\"revenue\":100") {
+		t.Fatalf("fundamental context was not passed to asset research: %s", request.Messages[1]["content"])
 	}
 	if draft.DirectionScore != 35 || len(draft.TransmissionPath) != 2 || draft.EvidenceIDs[0] != "ev-1" {
 		t.Fatalf("asset draft did not parse expected schema: %#v", draft)

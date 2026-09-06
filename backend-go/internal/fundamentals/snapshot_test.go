@@ -70,3 +70,26 @@ func TestLatestAvailableExcludesFutureRevision(t *testing.T) {
 		t.Fatalf("latest revision was not selected: %#v", afterRestatement)
 	}
 }
+
+func TestBuildResearchContextKeepsOnlyCutoffVisibleSourceLinkedFacts(t *testing.T) {
+	period := time.Date(2026, 6, 30, 0, 0, 0, 0, time.UTC)
+	published := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	future := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	items := []Snapshot{
+		{ID: "income", AssetID: "equity:NYSE:ONE", StatementType: IncomeStatement, ReportPeriodEnd: period, PublishedAt: published, AvailableAt: published, Unit: "reported", AccountingStd: "us_gaap", SourceName: "FMP", SourceURL: "https://source.test/income", Metrics: map[string]any{"revenue": 10, "netIncome": 2, "madeUp": 99}},
+		{ID: "future", AssetID: "equity:NYSE:ONE", StatementType: IncomeStatement, ReportPeriodEnd: period, PublishedAt: future, AvailableAt: future, Unit: "reported", AccountingStd: "us_gaap", SourceName: "FMP", SourceURL: "https://source.test/future", Metrics: map[string]any{"revenue": 99}},
+	}
+	context := BuildResearchContext("equity:NYSE:ONE", time.Date(2026, 8, 15, 0, 0, 0, 0, time.UTC), items)
+	if context.Status != "partial" || len(context.Snapshots) != 1 || context.Snapshots[0].SnapshotID != "income" {
+		t.Fatalf("unexpected context: %#v", context)
+	}
+	if context.Snapshots[0].Metrics["revenue"] != 10 || context.Snapshots[0].Metrics["madeUp"] != nil || context.Snapshots[0].SourceURL == "" {
+		t.Fatalf("context leaked non-contract metric or source: %#v", context.Snapshots[0])
+	}
+}
+
+func TestIsFinancialInstitution(t *testing.T) {
+	if !IsFinancialInstitution("sector:financial_services") || IsFinancialInstitution("industry:semiconductors") {
+		t.Fatal("financial institution classification is incorrect")
+	}
+}
