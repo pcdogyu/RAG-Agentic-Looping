@@ -451,7 +451,7 @@ func (runtime *researchRuntime) researchAsset(ctx context.Context, job Job) (any
 		}
 		return nil, runtime.handleAssetError(ctx, job, run, err)
 	}
-	runtime.recordPolicyEvaluation(ctx, stringValue(run["event_id"]), assetID, run, map[string]any{"direction_score": recommendation["direction_score"], "rating": recommendation["rating"], "signal_status": recommendation["signal_status"]}, map[string]any{"event_signal": recommendation["event_signal"], "evidence_quality": recommendation["evidence_quality"], "fundamental_rating": recommendation["fundamental_rating"], "short_term_prediction": recommendation["short_term_prediction"]})
+	runtime.recordPolicyEvaluation(ctx, stringValue(run["event_id"]), assetID, run, map[string]any{"direction_score": recommendation["direction_score"], "rating": recommendation["rating"], "signal_status": recommendation["signal_status"]}, map[string]any{"event_signal": recommendation["event_signal"], "evidence_quality": recommendation["evidence_quality"], "claim_status": recommendation["claim_status"], "fundamental_rating": recommendation["fundamental_rating"], "short_term_prediction": recommendation["short_term_prediction"]})
 	runtime.finishResearchTracking(ctx, job.ID.String(), "completed", job.Attempt, assetID, stringValue(objectValue(run["asset"])["name"]), stringValue(objectValue(run["asset"])["symbol"]), "", map[string]any{"rating": recommendation["rating"], "score": recommendation["score"]})
 	return map[string]any{"status": "completed", "run_id": runID, "recommendation_id": recommendation["id"]}, nil
 }
@@ -1220,6 +1220,7 @@ func stringArraySchema() map[string]any {
 func (runtime *researchRuntime) finalizeEventReport(event map[string]any, draft eventResearchDraft, evidence []researchEvidence, verification draftVerification) map[string]any {
 	validIDs, _ := validEvidenceIDs(draft.EvidenceIDs, evidence)
 	newsConfidence, newsFactors := newsConfidence(event, evidence)
+	claimStatus := eventClaimStatus(event, evidence)
 	assets := candidateAssets(event)
 	impacts := make([]any, 0, len(draft.Impacts))
 	missingAll := append(append([]string{}, draft.MissingInformation...), verification.Missing...)
@@ -1279,10 +1280,11 @@ func (runtime *researchRuntime) finalizeEventReport(event map[string]any, draft 
 		"evidence_complete": verification.EvidenceComplete, "structurally_valid": verification.StructurallyValid, "scoring_version": "llm-direction-v3",
 		"prompt_version": eventResearchPromptVersion, "target_evaluation_version": targetEvaluationVersion, "report_confidence_version": reportConfidenceVersion,
 		"fact_confidence": newsConfidence, "news_confidence": newsConfidence, "news_credibility_score": int(math.Round(newsConfidence * 100)), "news_confidence_version": newsConfidenceVersion,
-		"news_confidence_factors": newsFactors, "rating_confidence_version": "system-rating-confidence-v3",
+		"news_confidence_factors": newsFactors, "claim_status": claimStatus, "rating_confidence_version": "system-rating-confidence-v3",
 		"macro_factors": []any{}, "impacts": impacts, "trade_status": tradeStatus, "missing_information": uniqueStrings(missingAll), "contradictions": nonNilStrings(verification.Contradictions),
 	}
 	result["policy"] = p0ResultContract(0, "watch", ternaryString(verification.EvidenceComplete, "neutral_supported", "insufficient_evidence"), eventHorizonDays(stringValue(event["event_type"])), parseTime(event["as_of"]), signalAvailableAt(event, evidence, generated), newsConfidence, verification)
+	objectValue(result["policy"])["claim_status"] = claimStatus
 	return result
 }
 
@@ -1290,6 +1292,7 @@ func (runtime *researchRuntime) finalizeAssetRecommendation(run, event map[strin
 	score := clampInt(draft.DirectionScore, -100, 100)
 	asset := objectValue(run["asset"])
 	newsValue, newsFactors := newsConfidence(event, evidence)
+	claimStatus := eventClaimStatus(event, evidence)
 	candidate := candidateForAsset(event, stringValue(asset["asset_id"]))
 	impactDraft := eventImpactFromAssetDraft(draft, asset)
 	publicEvaluation := finalizeTargetEvaluation(impactDraft, event, evidence, verification.Contradictions)
@@ -1334,7 +1337,7 @@ func (runtime *researchRuntime) finalizeAssetRecommendation(run, event map[strin
 		"horizon_days": eventHorizonDays(stringValue(event["event_type"])), "horizon_unit": "calendar_days",
 		"impact_factors": nil, "confidence_factors": nil,
 		"fact_confidence": newsValue, "news_confidence": newsValue, "news_credibility_score": int(math.Round(newsValue * 100)), "news_confidence_version": newsConfidenceVersion,
-		"news_confidence_factors": newsFactors, "rating_confidence_factors": nil, "mapping_distance": distance,
+		"news_confidence_factors": newsFactors, "claim_status": claimStatus, "rating_confidence_factors": nil, "mapping_distance": distance,
 		"score_source": "llm", "evidence_warnings": uniqueStrings(warnings), "valuation_low": nil, "valuation_high": nil,
 		"thesis":       map[string]any{"summary": draft.Summary, "historical_context": draft.HistoricalContext, "financials_and_growth": draft.FinancialsAndGrowth, "products_or_protocol": draft.ProductsOrProtocol, "competition": draft.Competition, "valuation_or_tokenomics": draft.ValuationOrTokenomics, "catalysts": nonNilStrings(draft.Catalysts), "risks": nonNilStrings(draft.Risks), "invalidation_conditions": nonNilStrings(draft.Invalidation), "evidence_ids": validIDs},
 		"generated_at": iso(generated), "as_of": run["as_of"], "signal_available_at": iso(signalAvailableAt(event, evidence, generated)), "evidence_complete": verification.EvidenceComplete, "structurally_valid": verification.StructurallyValid,
@@ -1362,6 +1365,12 @@ func newsConfidence(event map[string]any, evidence []researchEvidence) (float64,
 	originality := 0.0
 	for _, item := range evidence {
 		value := map[string]float64{"official": 1, "primary": 1, "professional": .7, "aggregator": .35, "social": .2}[item.SourceQuality]
+		if item.IndependentGroup == "" {
+			// A source that cannot be traced to a primary origin can still be
+			// useful evidence, but it must not receive first-hand originality
+			// credit merely because its host has a high editorial tier.
+			value = math.Min(value, .2)
+		}
 		originality = math.Max(originality, value)
 	}
 	groups := independentGroupCount(evidence)
@@ -1416,10 +1425,50 @@ func newsConfidence(event map[string]any, evidence []researchEvidence) (float64,
 	}
 	return confidence, map[string]any{
 		"source_reliability":      factor(source, "按事件新闻中的最高来源等级计算。"),
-		"originality":             factor(originality, "根据来源等级近似估算原创性；当前未提供完整转载血缘。"),
+		"originality":             factor(originality, "仅对可确认原始来源的证据给予原创性信用；来源血缘未知时保守降级。"),
 		"cross_verification":      factor(verification, fmt.Sprintf("去重后共有 %d 个独立来源组。", groups)),
 		"clarity":                 factor(clarity, "根据事件动作所处阶段计算。"),
 		"timeliness_completeness": factor(timely, fmt.Sprintf("必填信息覆盖率 %.0f%%，并计入发布时间到采集时间的延迟。", completeness*100)),
+	}
+}
+
+// eventClaimStatus keeps three different ideas apart. A documented statement
+// only proves that somebody made it; source corroboration concerns the claim's
+// factual support; and an action stage says whether the claimed action has
+// actually taken effect. None of these values is a return probability.
+func eventClaimStatus(event map[string]any, evidence []researchEvidence) map[string]any {
+	evidence = currentEventEvidence(evidence)
+	groups, unresolved := independentGroupCount(evidence), 0
+	for _, item := range evidence {
+		if strings.TrimSpace(item.IndependentGroup) == "" {
+			unresolved++
+		}
+	}
+	truth := "unverified"
+	if groups == 1 {
+		truth = "single_source"
+	} else if groups >= 2 {
+		truth = "corroborated"
+	}
+	stage, rank := "unknown", -1
+	stages := map[string]int{"unknown": 0, "statement": 1, "threat": 2, "announced": 3, "effective": 4, "realized": 5}
+	for _, raw := range anySlice(event["actions"]) {
+		candidate := stringValue(objectValue(raw)["action_stage"])
+		if value, ok := stages[candidate]; ok && value > rank {
+			stage, rank = candidate, value
+		}
+	}
+	statement := "unknown"
+	if len(evidence) > 0 {
+		statement = "documented"
+	}
+	return map[string]any{
+		"statement_occurrence":      statement,
+		"claimed_event_truth":       truth,
+		"realization_status":        stage,
+		"independent_source_groups": groups,
+		"unknown_lineage_evidence":  unresolved,
+		"claim_status_version":      p0PolicyAlgorithmVersion,
 	}
 }
 

@@ -1408,6 +1408,7 @@ export type Recommendation = {
     clarity: SystemConfidenceFactor;
     timeliness_completeness: SystemConfidenceFactor;
   };
+  claim_status?: ClaimStatus;
   rating_confidence_factors?: {
     mapping_strength: SystemConfidenceFactor;
     causality_certainty: SystemConfidenceFactor;
@@ -1466,6 +1467,14 @@ export type Recommendation = {
     risks: string[];
     invalidation_conditions: string[];
   };
+};
+
+export type ClaimStatus = {
+  statement_occurrence: "documented" | "unknown";
+  claimed_event_truth: "corroborated" | "single_source" | "unverified";
+  realization_status: "realized" | "effective" | "announced" | "threat" | "statement" | "unknown";
+  independent_source_groups: number;
+  unknown_lineage_evidence: number;
 };
 
 export type RatingState = {
@@ -1554,6 +1563,7 @@ export type EventConclusionDetail = {
     evidence_complete: boolean;
     news_confidence: number;
     news_credibility_score?: number;
+    claim_status?: ClaimStatus;
     prompt_version?: string;
     target_evaluation_version?: string;
     report_confidence_version?: string;
@@ -2020,6 +2030,21 @@ export function V3ConfidenceDetails({ recommendation }: { recommendation: Recomm
   </section>;
 }
 
+const claimStatusLabels: Record<string, string> = {
+  documented: "已记录声明", unknown: "声明状态未知",
+  corroborated: "多源印证", single_source: "单一可追溯来源", unverified: "来源血缘未确认",
+  realized: "已兑现", effective: "已生效", announced: "已宣布", threat: "威胁/拟议", statement: "仅声明", unknown: "行动阶段未知",
+};
+
+export function ClaimStatusDetails({ value }: { value?: ClaimStatus }) {
+  if (!value) return null;
+  return <section className="short-term-score-details">
+    <h3>事件事实状态</h3>
+    <p>声明：<strong>{claimStatusLabels[value.statement_occurrence] ?? value.statement_occurrence}</strong>；事实支持：<strong>{claimStatusLabels[value.claimed_event_truth] ?? value.claimed_event_truth}</strong>；行动兑现：<strong>{claimStatusLabels[value.realization_status] ?? value.realization_status}</strong></p>
+    <small>可确认独立来源组 {value.independent_source_groups} 个；血缘未知证据 {value.unknown_lineage_evidence} 条。声明被记录不等于行动已兑现。</small>
+  </section>;
+}
+
 const targetEvaluationLabels: Array<[keyof TargetEvaluation, string, number]> = [
   ["object_relevance", "对象相关性", 20],
   ["evidence_sufficiency", "证据充分度", 25],
@@ -2440,6 +2465,7 @@ export function ConclusionDetailModal({ detail, onClose }: { detail: ConclusionD
       {isV3
 		? <>
 		  <V3ConfidenceDetails recommendation={detail.recommendation} />
+		  <ClaimStatusDetails value={detail.recommendation.claim_status} />
 		  <TargetEvaluationDetails value={detail.recommendation.target_evaluation} modelValue={detail.recommendation.model_target_evaluation} score={detail.recommendation.target_evaluation_score} />
 		  <ResearchReasoningDetails claims={detail.recommendation.impact?.claims} steps={detail.recommendation.impact?.transmission_steps} />
 		  <div className="probability-grid"><span>短期预测 <strong>未校准</strong></span><span>概率 <strong>暂不显示</strong></span><span>基本面评级 <strong>未建立</strong></span></div>
@@ -2546,6 +2572,7 @@ export function EventConclusionDetailModal({ detail, onClose }: { detail: EventC
       </div>
       {!report.evidence_complete && <div className="page-message">该报告可追溯，但资料覆盖不足，不应视为可直接交易的确定性结论。</div>}
       <h3>事件结论</h3><p>{report.summary}</p>
+	  <ClaimStatusDetails value={report.claim_status} />
       {(report.affected_markets.length > 0 || report.affected_sectors.length > 0) && <div className="event-report-scope">
         <span>市场：{report.affected_markets.join("、") || "未明确"}</span>
         <span>行业：{report.affected_sectors.join("、") || "未明确"}</span>

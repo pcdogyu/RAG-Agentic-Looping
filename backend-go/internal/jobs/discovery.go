@@ -1021,9 +1021,6 @@ func (runtime *discoveryRuntime) persistForExtraction(ctx context.Context, scanT
 			canonical := fallbackString(stringValue(lineage["canonical_url"]), item.URL)
 			original := stringValue(lineage["original_source"])
 			status := ternaryString(original == "", "unknown", "resolved")
-			if original == "" {
-				original = stringValue(lineage["publisher_domain"])
-			}
 			chain, _ := json.Marshal([]any{map[string]any{"source": item.Source, "publisher": lineage["publisher_domain"], "url": canonical}})
 			payload, _ := json.Marshal(lineage)
 			_, err = tx.Exec(ctx, `INSERT INTO source_lineage(news_item_id,canonical_url,original_publisher,original_document_id,syndication_group,parse_status,source_chain,payload,created_at,updated_at) VALUES($1,$2,$3,NULL,$4,$5,$6,$7,now(),now()) ON CONFLICT(news_item_id) DO UPDATE SET canonical_url=excluded.canonical_url,original_publisher=excluded.original_publisher,syndication_group=excluded.syndication_group,parse_status=excluded.parse_status,source_chain=excluded.source_chain,payload=excluded.payload,updated_at=now()`, newsID, canonical, nullableString(original), nullableString(stringValue(lineage["syndication_group"])), status, chain, payload)
@@ -1163,7 +1160,14 @@ func enrichDiscoveryLineage(item discoveredNews) discoveredNews {
 	if publisher == "" {
 		publisher = normalizeDiscoveryText(item.Source)
 	}
-	original := publisher
+	// A hosting domain identifies where we saw a story, not necessarily who
+	// originated its factual claim. Treat it as an origin only for first-party
+	// material or a positively identified wire service; otherwise preserve the
+	// conservative unknown state.
+	original := ""
+	if item.SourceQuality == "official" || item.SourceQuality == "primary" {
+		original = publisher
+	}
 	combined := strings.ToLower(item.Source + " " + item.Title + " " + item.Summary)
 	for marker, value := range map[string]string{"reuters": "reuters", "路透": "reuters", "bloomberg": "bloomberg", "彭博": "bloomberg", "associated press": "associated-press", "新华社": "xinhua"} {
 		if strings.Contains(combined, marker) {
@@ -1173,7 +1177,11 @@ func enrichDiscoveryLineage(item discoveredNews) discoveredNews {
 	}
 	fingerprint := sha256.Sum256([]byte(normalizeDiscoveryText(item.Title) + "|" + normalizeDiscoveryText(item.Summary)))
 	metadata := cloneObject(item.Metadata)
-	metadata["source_lineage"] = map[string]any{"canonical_url": canonical, "publisher_domain": publisher, "original_source": original, "syndication_group": "origin:" + normalizeDiscoveryText(original), "content_fingerprint": hex.EncodeToString(fingerprint[:])}
+	group := ""
+	if original != "" {
+		group = "origin:" + normalizeDiscoveryText(original)
+	}
+	metadata["source_lineage"] = map[string]any{"canonical_url": canonical, "publisher_domain": publisher, "original_source": original, "syndication_group": group, "content_fingerprint": hex.EncodeToString(fingerprint[:])}
 	item.Metadata = metadata
 	return item
 }

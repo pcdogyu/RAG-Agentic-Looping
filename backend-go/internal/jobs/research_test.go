@@ -42,6 +42,31 @@ func TestRatingForScoreUsesFiveStableBands(t *testing.T) {
 	}
 }
 
+func TestEventClaimStatusSeparatesStatementTruthAndRealization(t *testing.T) {
+	event := map[string]any{"actions": []any{map[string]any{"action_stage": "statement"}}}
+	unknown := eventClaimStatus(event, []researchEvidence{{ID: "e-1", Claim: "issuer statement", SourceQuality: "professional"}})
+	if unknown["statement_occurrence"] != "documented" || unknown["claimed_event_truth"] != "unverified" || unknown["realization_status"] != "statement" || unknown["independent_source_groups"] != 0 {
+		t.Fatalf("unknown lineage was not kept separate from a documented statement: %#v", unknown)
+	}
+
+	event["actions"] = []any{map[string]any{"action_stage": "effective"}}
+	confirmed := eventClaimStatus(event, []researchEvidence{
+		{ID: "e-1", Claim: "issuer announcement", SourceQuality: "official", IndependentGroup: "origin:issuer"},
+		{ID: "e-2", Claim: "independent confirmation", SourceQuality: "professional", IndependentGroup: "origin:wire"},
+	})
+	if confirmed["claimed_event_truth"] != "corroborated" || confirmed["realization_status"] != "effective" || confirmed["unknown_lineage_evidence"] != 0 {
+		t.Fatalf("claim truth or realization state was not represented independently: %#v", confirmed)
+	}
+}
+
+func TestNewsConfidenceDoesNotAwardOriginalityToUnknownLineage(t *testing.T) {
+	event := map[string]any{"headline": "Event", "published_at": iso(time.Now().UTC()), "direct_impact": "statement", "actions": []any{map[string]any{"actor": "Issuer", "action": "statement", "object": "plan", "scope": "issuer plan", "action_stage": "statement"}}}
+	_, factors := newsConfidence(event, []researchEvidence{{ID: "e-1", Claim: "Issuer statement", SourceQuality: "professional", PublishedAt: time.Now().UTC(), ObservedAt: time.Now().UTC()}})
+	if numberValue(objectValue(factors["originality"])["value"]) != .2 {
+		t.Fatalf("unknown lineage received originality credit: %#v", factors)
+	}
+}
+
 func TestSanitizeEventImpactsRejectsVolumeAsMacroTarget(t *testing.T) {
 	event := map[string]any{"candidates": []any{map[string]any{"asset": map[string]any{"asset_id": "US:HOOD", "name": "Robinhood", "asset_class": "equity"}}}}
 	values := []eventImpactDraft{

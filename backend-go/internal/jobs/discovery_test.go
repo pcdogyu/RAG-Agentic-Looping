@@ -62,6 +62,26 @@ func TestDiscoveryTitleFilterSemantics(t *testing.T) {
 	}
 }
 
+func TestDiscoveryLineageDoesNotTreatPublisherDomainAsOriginalSource(t *testing.T) {
+	unknown := enrichDiscoveryLineage(discoveredNews{Source: "FMP Stock News", SourceQuality: "professional", Title: "Company update", URL: "https://example-news.test/story"})
+	unknownLineage := objectValue(unknown.Metadata["source_lineage"])
+	if stringValue(unknownLineage["original_source"]) != "" || stringValue(unknownLineage["syndication_group"]) != "" {
+		t.Fatalf("publisher domain was incorrectly treated as a proven origin: %#v", unknownLineage)
+	}
+
+	firstParty := enrichDiscoveryLineage(discoveredNews{Source: "Issuer IR", SourceQuality: "official", Title: "Company update", URL: "https://investor.example.com/news"})
+	firstPartyLineage := objectValue(firstParty.Metadata["source_lineage"])
+	if stringValue(firstPartyLineage["original_source"]) != "investor.example.com" || stringValue(firstPartyLineage["syndication_group"]) != "origin:investorexamplecom" {
+		t.Fatalf("first-party origin was not retained: %#v", firstPartyLineage)
+	}
+
+	wire := enrichDiscoveryLineage(discoveredNews{Source: "FMP Stock News", SourceQuality: "professional", Title: "Reuters: Company update", URL: "https://example-news.test/repost"})
+	wireLineage := objectValue(wire.Metadata["source_lineage"])
+	if stringValue(wireLineage["original_source"]) != "reuters" || stringValue(wireLineage["syndication_group"]) != "origin:reuters" {
+		t.Fatalf("explicit wire origin was not retained: %#v", wireLineage)
+	}
+}
+
 func TestDiscoveryWatermarkUsesPerSourceOverlap(t *testing.T) {
 	base := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
 	items := []discoveredNews{
