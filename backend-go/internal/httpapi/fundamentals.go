@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -13,7 +14,12 @@ import (
 // future P1 consumers. It intentionally returns no valuation, forecast or
 // fundamental-rating fields.
 func (s *Server) fundamentalsAt(w http.ResponseWriter, r *http.Request) {
-	assetID := strings.TrimSpace(chi.URLParam(r, "assetID"))
+	assetID, err := fundamentalAssetID(chi.URLParam(r, "assetID"))
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "asset_id path is invalid")
+		return
+	}
+	assetID = strings.TrimSpace(assetID)
 	if assetID == "" {
 		writeError(w, http.StatusUnprocessableEntity, "asset_id is required")
 		return
@@ -47,4 +53,12 @@ func (s *Server) fundamentalsAt(w http.ResponseWriter, r *http.Request) {
 		"fundamental_rating":    map[string]any{"status": "unavailable", "reason": "P1 financial facts are not a fundamental rating"},
 		"items":                 items,
 	})
+}
+
+func fundamentalAssetID(value string) (string, error) {
+	assetID, err := url.PathUnescape(value)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(assetID), nil
 }
