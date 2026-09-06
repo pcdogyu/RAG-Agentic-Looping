@@ -1257,16 +1257,19 @@ func stringArraySchema() map[string]any {
 
 func (runtime *researchRuntime) finalizeEventReport(event map[string]any, draft eventResearchDraft, evidence []researchEvidence, verification draftVerification) map[string]any {
 	validIDs, _ := validEvidenceIDs(draft.EvidenceIDs, evidence)
-	newsConfidence, newsFactors := newsConfidence(event, evidence)
+	reportNewsConfidence, newsFactors := newsConfidence(event, evidence)
 	claimStatus := eventClaimStatus(event, evidence)
 	assets := candidateAssets(event)
 	impacts := make([]any, 0, len(draft.Impacts))
 	missingAll := append(append([]string{}, criticalMissingInformation(draft.MissingInformation)...), verification.Missing...)
 	conditionalAll := append(conditionalMissingInformation(draft.MissingInformation), verification.Conditional...)
 	targetScores := make([]int, 0, len(draft.Impacts))
+	generated := time.Now().UTC()
 	for _, item := range draft.Impacts {
 		asset := assets[item.AssetID]
 		impactQuality := resolvedImpactVerification(item.Verification, verification)
+		targetEvidence := impactCurrentEvidence(item, evidence)
+		targetNewsConfidence, targetNewsFactors := newsConfidence(event, targetEvidence)
 		validImpactIDs, _ := validEvidenceIDs(item.EvidenceIDs, evidence)
 		missing := append(criticalMissingInformation(item.Missing), impactQuality.Missing...)
 		conditional := append(conditionalMissingInformation(item.Missing), impactQuality.Conditional...)
@@ -1282,7 +1285,7 @@ func (runtime *researchRuntime) finalizeEventReport(event map[string]any, draft 
 		publicEvaluation := finalizeTargetEvaluation(item, event, evidence, impactQuality.Contradictions)
 		targetScore := targetEvaluationScore(publicEvaluation)
 		targetScores = append(targetScores, targetScore)
-		confidence := round4(math.Min(newsConfidence, float64(targetScore)/100))
+		confidence := round4(math.Min(targetNewsConfidence, float64(targetScore)/100))
 		distance := mappingDistance(candidate, item.TransmissionPath)
 		eligibility := impactEligibility(asset, item, impactQuality.EvidenceComplete && len(missing) == 0)
 		tradeable := boolValue(eligibility["long_eligible"])
@@ -1290,6 +1293,7 @@ func (runtime *researchRuntime) finalizeEventReport(event map[string]any, draft 
 			"target_type": item.TargetType, "target_name": fallbackString(item.TargetName, stringValue(asset["name"])), "asset": nullableMap(asset),
 			"direction": sign(item.DirectionScore), "score": float64(item.DirectionScore) / 100, "direction_score": item.DirectionScore,
 			"rating": ratingForScore(item.DirectionScore), "confidence": confidence, "rating_confidence": confidence,
+			"news_confidence": targetNewsConfidence, "news_credibility_score": int(math.Round(targetNewsConfidence * 100)), "news_confidence_factors": targetNewsFactors,
 			"factors": zeroTransmissionFactors(), "confidence_factors": zeroTargetConfidenceFactors(),
 			"rating_confidence_factors": nil, "mapping_distance": distance, "score_source": "llm",
 			"horizon_days": eventHorizonDays(stringValue(event["event_type"])), "horizon_unit": "calendar_days", "macro_factor_ids": []any{},
@@ -1302,7 +1306,7 @@ func (runtime *researchRuntime) finalizeEventReport(event map[string]any, draft 
 			"execution_supported": boolValue(eligibility["execution_supported"]), "impact_verification": map[string]any{"relation": item.TargetRelation, "relation_verified": impactHasTargetSpecificEvidence(item, event, evidence), "transmission_continuous": transmissionPathContinuous(item), "economic_endpoint": impactHasEconomicEndpoint(item), "quality": publicImpactVerification(impactQuality)}, "eligibility": eligibility,
 			"technical_failure": false,
 		}
-		impact["event_signal"] = eventSignalContract(item.DirectionScore, ratingForScore(item.DirectionScore), item.ConclusionStatus, eventHorizonDays(stringValue(event["event_type"])), parseTime(event["as_of"]), signalAvailableAt(event, evidence, time.Now().UTC()))
+		impact["event_signal"] = eventSignalContract(item.DirectionScore, ratingForScore(item.DirectionScore), item.ConclusionStatus, eventHorizonDays(stringValue(event["event_type"])), parseTime(event["as_of"]), signalAvailableAt(event, targetEvidence, generated))
 		impacts = append(impacts, impact)
 		missingAll = append(missingAll, missing...)
 	}
@@ -1313,8 +1317,7 @@ func (runtime *researchRuntime) finalizeEventReport(event map[string]any, draft 
 			break
 		}
 	}
-	reportConfidence := reportConfidenceScore(newsConfidence, targetScores, verification)
-	generated := time.Now().UTC()
+	reportConfidence := reportConfidenceScore(reportNewsConfidence, targetScores, verification)
 	result := map[string]any{
 		"summary": draft.Summary, "affected_markets": nonNilStrings(draft.AffectedMarkets), "affected_sectors": nonNilStrings(draft.AffectedSectors),
 		"scenarios": nonNilStrings(draft.Scenarios), "catalysts": nonNilStrings(draft.Catalysts), "risks": nonNilStrings(draft.Risks),
@@ -1322,11 +1325,11 @@ func (runtime *researchRuntime) finalizeEventReport(event map[string]any, draft 
 		"confidence": reportConfidence, "report_confidence": reportConfidence, "report_confidence_score": int(math.Round(reportConfidence * 100)),
 		"evidence_complete": verification.EvidenceComplete, "structurally_valid": verification.StructurallyValid, "scoring_version": "llm-direction-v3",
 		"prompt_version": eventResearchPromptVersion, "target_evaluation_version": targetEvaluationVersion, "report_confidence_version": reportConfidenceVersion,
-		"fact_confidence": newsConfidence, "news_confidence": newsConfidence, "news_credibility_score": int(math.Round(newsConfidence * 100)), "news_confidence_version": newsConfidenceVersion,
+		"fact_confidence": reportNewsConfidence, "news_confidence": reportNewsConfidence, "news_credibility_score": int(math.Round(reportNewsConfidence * 100)), "news_confidence_version": newsConfidenceVersion,
 		"news_confidence_factors": newsFactors, "claim_status": claimStatus, "rating_confidence_version": "system-rating-confidence-v3",
 		"macro_factors": []any{}, "impacts": impacts, "trade_status": tradeStatus, "missing_information": uniqueStrings(missingAll), "conditional_information": uniqueStrings(conditionalAll), "contradictions": nonNilStrings(verification.Contradictions),
 	}
-	result["policy"] = p0ResultContract(0, "watch", ternaryString(verification.EvidenceComplete, "neutral_supported", "insufficient_evidence"), eventHorizonDays(stringValue(event["event_type"])), parseTime(event["as_of"]), signalAvailableAt(event, evidence, generated), newsConfidence, verification)
+	result["policy"] = p0ResultContract(0, "watch", ternaryString(verification.EvidenceComplete, "neutral_supported", "insufficient_evidence"), eventHorizonDays(stringValue(event["event_type"])), parseTime(event["as_of"]), signalAvailableAt(event, evidence, generated), reportNewsConfidence, verification)
 	objectValue(result["policy"])["claim_status"] = claimStatus
 	return result
 }
@@ -1334,15 +1337,16 @@ func (runtime *researchRuntime) finalizeEventReport(event map[string]any, draft 
 func (runtime *researchRuntime) finalizeAssetRecommendation(run, event map[string]any, draft assetResearchDraft, evidence []researchEvidence, verification draftVerification) map[string]any {
 	score := clampInt(draft.DirectionScore, -100, 100)
 	asset := objectValue(run["asset"])
-	newsValue, newsFactors := newsConfidence(event, evidence)
 	claimStatus := eventClaimStatus(event, evidence)
 	candidate := candidateForAsset(event, stringValue(asset["asset_id"]))
 	impactDraft := eventImpactFromAssetDraft(draft, asset)
 	impactQuality := resolvedImpactVerification(draft.Verification, verification)
+	targetEvidence := impactCurrentEvidence(impactDraft, evidence)
+	targetNewsValue, targetNewsFactors := newsConfidence(event, targetEvidence)
 	publicEvaluation := finalizeTargetEvaluation(impactDraft, event, evidence, impactQuality.Contradictions)
 	targetScore := targetEvaluationScore(publicEvaluation)
-	confidence := reportConfidenceScore(newsValue, []int{targetScore}, verification)
-	targetConfidence := round4(math.Min(newsValue, float64(targetScore)/100))
+	confidence := reportConfidenceScore(targetNewsValue, []int{targetScore}, verification)
+	targetConfidence := round4(math.Min(targetNewsValue, float64(targetScore)/100))
 	distance := mappingDistance(candidate, draft.TransmissionPath)
 	validIDs, _ := validEvidenceIDs(draft.EvidenceIDs, evidence)
 	warnings := uniqueStrings(append(append([]string{}, impactQuality.Missing...), impactQuality.Contradictions...))
@@ -1381,11 +1385,11 @@ func (runtime *researchRuntime) finalizeAssetRecommendation(run, event map[strin
 		"bull_probability": nil, "base_probability": nil, "bear_probability": nil,
 		"horizon_days": eventHorizonDays(stringValue(event["event_type"])), "horizon_unit": "calendar_days",
 		"impact_factors": nil, "confidence_factors": nil,
-		"fact_confidence": newsValue, "news_confidence": newsValue, "news_credibility_score": int(math.Round(newsValue * 100)), "news_confidence_version": newsConfidenceVersion,
-		"news_confidence_factors": newsFactors, "claim_status": claimStatus, "rating_confidence_factors": nil, "mapping_distance": distance,
+		"fact_confidence": targetNewsValue, "news_confidence": targetNewsValue, "news_credibility_score": int(math.Round(targetNewsValue * 100)), "news_confidence_version": newsConfidenceVersion,
+		"news_confidence_factors": targetNewsFactors, "claim_status": claimStatus, "rating_confidence_factors": nil, "mapping_distance": distance,
 		"score_source": "llm", "evidence_warnings": uniqueStrings(warnings), "valuation_low": nil, "valuation_high": nil,
 		"thesis":       map[string]any{"summary": draft.Summary, "historical_context": draft.HistoricalContext, "financials_and_growth": draft.FinancialsAndGrowth, "products_or_protocol": draft.ProductsOrProtocol, "competition": draft.Competition, "valuation_or_tokenomics": draft.ValuationOrTokenomics, "catalysts": nonNilStrings(draft.Catalysts), "risks": nonNilStrings(draft.Risks), "invalidation_conditions": nonNilStrings(draft.Invalidation), "evidence_ids": validIDs},
-		"generated_at": iso(generated), "as_of": run["as_of"], "signal_available_at": iso(signalAvailableAt(event, evidence, generated)), "evidence_complete": impactQuality.EvidenceComplete, "structurally_valid": impactQuality.StructurallyValid,
+		"generated_at": iso(generated), "as_of": run["as_of"], "signal_available_at": iso(signalAvailableAt(event, targetEvidence, generated)), "evidence_complete": impactQuality.EvidenceComplete, "structurally_valid": impactQuality.StructurallyValid,
 		"directional_evidence_complete": impactQuality.EvidenceComplete, "direction_verified": impactQuality.StructurallyValid, "signal_status": signalStatus,
 		"evidence_strength": evidenceStrength(evidence, validIDs), "mapping_confidence": mappingConfidence(candidate),
 		"claim_assessments": []any{}, "primary_gate_reason": nil, "gate_reasons": []any{},
@@ -1393,9 +1397,9 @@ func (runtime *researchRuntime) finalizeAssetRecommendation(run, event map[strin
 		"target_evaluation_version": targetEvaluationVersion, "report_confidence_version": reportConfidenceVersion,
 		"model_target_evaluation": draft.TargetEvaluation, "target_evaluation": publicEvaluation, "target_evaluation_score": targetScore, "impact": impact,
 	}
-	result["event_signal"] = eventSignalContract(score, rating, signalStatus, eventHorizonDays(stringValue(event["event_type"])), parseTime(run["as_of"]), signalAvailableAt(event, evidence, generated))
+	result["event_signal"] = eventSignalContract(score, rating, signalStatus, eventHorizonDays(stringValue(event["event_type"])), parseTime(run["as_of"]), signalAvailableAt(event, targetEvidence, generated))
 	result["event_signal_state"] = result["event_signal"]
-	result["evidence_quality"] = p0ResultContract(score, rating, signalStatus, eventHorizonDays(stringValue(event["event_type"])), parseTime(run["as_of"]), signalAvailableAt(event, evidence, generated), newsValue, verification)["evidence_quality"]
+	result["evidence_quality"] = p0ResultContract(score, rating, signalStatus, eventHorizonDays(stringValue(event["event_type"])), parseTime(run["as_of"]), signalAvailableAt(event, targetEvidence, generated), targetNewsValue, verification)["evidence_quality"]
 	result["fundamental_rating"] = map[string]any{"status": "unavailable", "rating": nil, "reason": "not_implemented_p0"}
 	result["short_term_prediction"] = map[string]any{"status": "uncalibrated", "probabilities": nil, "calibration": nil, "reason": "not_available_until_calibration"}
 	return result
@@ -1525,6 +1529,25 @@ func currentEventEvidence(values []researchEvidence) []researchEvidence {
 		}
 	}
 	return result
+}
+
+// impactNewsConfidence is intentionally narrower than report-level
+// newsConfidence. A strong but unrelated source may describe the same event,
+// but it cannot raise the evidence quality of a target that did not cite it.
+func impactCurrentEvidence(impact eventImpactDraft, evidence []researchEvidence) []researchEvidence {
+	evidenceIDs, _ := impactReferenceIDs(impact)
+	allowed := stringSet(evidenceIDs)
+	targetEvidence := make([]researchEvidence, 0, len(evidenceIDs))
+	for _, item := range evidence {
+		if allowed[item.ID] && (item.ContextRole == "" || item.ContextRole == "current_event") {
+			targetEvidence = append(targetEvidence, item)
+		}
+	}
+	return targetEvidence
+}
+
+func impactNewsConfidence(event map[string]any, impact eventImpactDraft, evidence []researchEvidence) (float64, map[string]any) {
+	return newsConfidence(event, impactCurrentEvidence(impact, evidence))
 }
 
 func evidenceRoleCounts(values []researchEvidence) (current, historical int) {

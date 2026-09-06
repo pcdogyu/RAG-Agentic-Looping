@@ -67,6 +67,24 @@ func TestNewsConfidenceDoesNotAwardOriginalityToUnknownLineage(t *testing.T) {
 	}
 }
 
+func TestImpactNewsConfidenceExcludesUnrelatedEventEvidence(t *testing.T) {
+	event, evidence, impact := researchQualityFixture()
+	event["headline"], event["published_at"], event["direct_impact"] = "Acme order", iso(time.Now().UTC()), "Acme order"
+	evidence[0].SourceQuality, evidence[0].IndependentGroup = "professional", "wire:acme"
+	evidence = append(evidence, researchEvidence{ID: "unrelated-official", Claim: "Unrelated official announcement", Excerpt: "No Acme reference", SourceQuality: "official", IndependentGroup: "issuer:unrelated", ContextRole: "current_event"})
+	targetConfidence, _ := impactNewsConfidence(event, impact, evidence)
+	eventConfidence, _ := newsConfidence(event, evidence)
+	if targetConfidence >= eventConfidence {
+		t.Fatalf("unrelated official evidence raised the target confidence: target=%v event=%v", targetConfidence, eventConfidence)
+	}
+	draft := eventResearchDraft{Summary: "Acme order", Impacts: []eventImpactDraft{impact}}
+	verification := verifyEventDraft(&draft, event, evidence, time.Time{})
+	public := objectValue(anySlice((&researchRuntime{}).finalizeEventReport(event, draft, evidence, verification)["impacts"])[0])
+	if numberValue(public["news_confidence"]) != targetConfidence || numberValue(public["news_confidence"]) >= eventConfidence {
+		t.Fatalf("public target confidence did not stay scoped to its citations: %#v", public)
+	}
+}
+
 func TestSanitizeEventImpactsRejectsVolumeAsMacroTarget(t *testing.T) {
 	event := map[string]any{"candidates": []any{map[string]any{"asset": map[string]any{"asset_id": "US:HOOD", "name": "Robinhood", "asset_class": "equity"}}}}
 	values := []eventImpactDraft{

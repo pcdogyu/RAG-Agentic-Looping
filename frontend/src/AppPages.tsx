@@ -1532,6 +1532,8 @@ export type EventTargetImpact = {
   direction_score: number;
   rating: string;
   rating_confidence: number;
+  news_confidence?: number;
+  news_credibility_score?: number;
   horizon_days: number;
   horizon_unit: string;
   transmission_path: string[];
@@ -2595,6 +2597,7 @@ export function EventConclusionDetailModal({ detail, onClose }: { detail: EventC
         <span>{targetTypeLabels[impact.target_type] ?? impact.target_type}{impact.asset?.symbol ? ` · ${impact.asset.symbol}` : ""}</span>
         <strong>{impact.target_name}</strong>
         <div><b>本次事件信号：{recommendationRatingLabel(impact.rating)}</b><b>{impact.direction_score > 0 ? "+" : ""}{impact.direction_score}</b><b>目标评价 {impact.target_evaluation_score ?? Math.round(impact.rating_confidence * 100)}/100</b></div>
+        {impact.news_credibility_score !== undefined && <small>目标证据可信度：{impact.news_credibility_score}/100</small>}
         {(impact.conclusion_status || impact.impact_channel) && <small>{conclusionStatusLabels[impact.conclusion_status ?? ""] ?? impact.conclusion_status ?? ""}{impact.impact_channel ? ` · ${impactChannelLabels[impact.impact_channel] ?? impact.impact_channel}` : ""}</small>}
         {impact.impact_verification?.quality && <small>目标证据门禁：{impact.impact_verification.quality.evidence_complete ? "通过" : "未通过"}</small>}
         <small>未来 {impact.horizon_days} 个自然日</small>
