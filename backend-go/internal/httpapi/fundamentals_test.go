@@ -53,3 +53,16 @@ func TestForecastCreateRequiresAdminToken(t *testing.T) {
 		t.Fatalf("status=%d want %d", response.Code, http.StatusUnauthorized)
 	}
 }
+
+func TestValuationCreateRequiresAdminToken(t *testing.T) {
+	server, err := New(config.Config{AdminAPIToken: "test-token"}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/go/valuations/equity%3ANYSE%3AVRT", nil)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("status=%d want %d", response.Code, http.StatusUnauthorized)
+	}
+}

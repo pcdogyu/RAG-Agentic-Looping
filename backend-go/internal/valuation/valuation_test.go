@@ -3,6 +3,7 @@ package valuation
 import (
 	"math"
 	"testing"
+	"time"
 )
 
 func facts() ForecastFacts {
@@ -42,5 +43,15 @@ func TestSensitivityKeepsInvalidCellsExplicit(t *testing.T) {
 	items := Sensitivity(facts(), DCFScenario{Name: "base", ProjectionYears: 5, CostOfCapitalEvidenceIDs: []string{"source"}}, []float64{.08}, []float64{.03, .08})
 	if len(items) != 2 || items[0].Status != "available" || items[1].Status != "unavailable" {
 		t.Fatalf("sensitivity=%#v", items)
+	}
+}
+
+func TestBuildRunUsesImmutableForecastFacts(t *testing.T) {
+	run, err := buildRun(Submission{AssetID: "equity:NYSE:VRT", AsOf: time.Date(2026, 9, 6, 0, 0, 0, 0, time.UTC), ForecastVersionID: "forecast-1", MultipleScenarios: []MultipleScenario{{Name: "base", PriceEarningsMultiple: 20, ComparableEvidenceIDs: []string{"source"}}}}, facts())
+	if err != nil || run.Status != "available" || run.ForecastVersionID != "forecast-1" {
+		t.Fatalf("run=%#v err=%v", run, err)
+	}
+	if run.InputSnapshot["forecast_version_id"] != "forecast-1" {
+		t.Fatalf("forecast provenance missing: %#v", run.InputSnapshot)
 	}
 }
