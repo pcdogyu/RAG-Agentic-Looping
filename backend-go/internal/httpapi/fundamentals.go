@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/fundamentals"
 )
 
@@ -52,6 +53,33 @@ func (s *Server) fundamentalsAt(w http.ResponseWriter, r *http.Request) {
 		"time_contract_version": fundamentals.TimeContractVersion,
 		"fundamental_rating":    map[string]any{"status": "unavailable", "reason": "P1 financial facts are not a fundamental rating"},
 		"items":                 items,
+	})
+}
+
+// syncFundamentals queues a bounded FMP refresh for one US equity. It is an
+// admin-only command and never turns financial statements into a rating.
+func (s *Server) syncFundamentals(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	assetID, err := fundamentalAssetID(chi.URLParam(r, "assetID"))
+	if err != nil || assetID == "" {
+		writeError(w, http.StatusUnprocessableEntity, "asset_id path is invalid")
+		return
+	}
+	limit, ok := intQuery(w, r.URL.Query(), "limit", 12, 1, 40)
+	if !ok {
+		return
+	}
+	taskID := uuid.NewString()
+	queuedID, err := s.enqueueGoModelJob(r.Context(), "masterdata", taskID, "market_loop.sync_fundamental_snapshots", []any{assetID}, map[string]any{"asset_id": assetID, "limit": limit}, 4, "fundamental-snapshot:"+assetID)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "fundamental snapshot sync could not be queued")
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"task_id": queuedID, "status": "queued", "asset_id": assetID, "limit": limit,
+		"source": "FMP", "time_contract_version": fundamentals.TimeContractVersion,
 	})
 }
 

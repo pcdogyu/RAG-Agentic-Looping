@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/config"
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/fundamentals"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -25,6 +26,7 @@ const (
 	refreshCryptoUniverseTask = "market_loop.refresh_crypto_universe"
 	refreshAssetUniverseTask  = "market_loop.refresh_asset_universe"
 	refreshMacroUniverseTask  = "market_loop.refresh_macro_universe"
+	syncFundamentalsTask      = "market_loop.sync_fundamental_snapshots"
 	masterdataLockTTL         = 2 * time.Hour
 )
 
@@ -85,7 +87,61 @@ func NewMasterdataHandlers(cfg config.Config, db *pgxpool.Pool, redisClient *red
 		refreshCryptoUniverseTask: runtime.refreshCryptoUniverse,
 		refreshAssetUniverseTask:  runtime.refreshAssetUniverse,
 		refreshMacroUniverseTask:  runtime.refreshMacroUniverse,
+		syncFundamentalsTask:      runtime.syncFundamentalSnapshots,
 	}
+}
+
+// syncFundamentalSnapshots is intentionally a per-asset, manually queued P1
+// operation. A full-universe financial sweep would create unnecessary FMP load
+// and is not required to establish a point-in-time factual record.
+func (runtime *masterdataRuntime) syncFundamentalSnapshots(ctx context.Context, job Job) (any, error) {
+	envelope := taskEnvelope{}
+	_ = json.Unmarshal(job.Payload, &envelope)
+	assetID := strings.TrimSpace(stringValue(envelope.Kwargs["asset_id"]))
+	if assetID == "" && len(envelope.Args) > 0 {
+		assetID = strings.TrimSpace(stringValue(envelope.Args[0]))
+	}
+	if assetID == "" {
+		return nil, errors.New("fundamental snapshot sync requires asset_id")
+	}
+	limit := int(numberValue(envelope.Kwargs["limit"]))
+	if limit == 0 {
+		limit = 12
+	}
+	if limit < 1 || limit > 40 {
+		return nil, errors.New("fundamental snapshot limit must be between 1 and 40")
+	}
+	var symbol, market, assetClass string
+	if err := runtime.db.QueryRow(ctx, `SELECT symbol,market,asset_class FROM assets WHERE id=$1 AND active=true`, assetID).Scan(&symbol, &market, &assetClass); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("active asset %q was not found", assetID)
+		}
+		return nil, err
+	}
+	if strings.ToUpper(market) != "US" || strings.ToLower(assetClass) != "equity" {
+		return nil, fmt.Errorf("fundamental snapshots currently support US equities only")
+	}
+	active := (&discoveryRuntime{cfg: runtime.cfg, db: runtime.db}).effectiveDiscoveryConfig(ctx)
+	client := fundamentals.FMPClient{BaseURL: active.FMPBaseURL, AccessToken: active.FMPAccessToken, HTTPClient: runtime.client}
+	items, err := client.FetchStatements(ctx, assetID, symbol, limit)
+	if err != nil {
+		return nil, err
+	}
+	store := fundamentals.NewStore(runtime.db)
+	inserted := 0
+	for _, item := range items {
+		created, err := store.Save(ctx, item)
+		if err != nil {
+			return nil, err
+		}
+		if created {
+			inserted++
+		}
+	}
+	return map[string]any{
+		"asset_id": assetID, "symbol": symbol, "source": "FMP", "statement_count": len(items), "inserted": inserted,
+		"unchanged": len(items) - inserted, "time_contract_version": fundamentals.TimeContractVersion,
+	}, nil
 }
 
 func (runtime *masterdataRuntime) refreshCryptoUniverse(ctx context.Context, job Job) (any, error) {
