@@ -80,9 +80,14 @@ func (runtime *researchRuntime) effectivePolicyMode(ctx context.Context) string 
 	if runtime.cfg.ResearchPolicyMode != "enforce" || runtime.db == nil {
 		return "shadow"
 	}
+	var approved bool
 	var reviewed int
 	var started time.Time
-	err := runtime.db.QueryRow(ctx, `SELECT reviewed_valid_impacts,shadow_started_at FROM policy_release_approvals WHERE policy_version=$1`, runtime.cfg.ResearchPolicyVersion).Scan(&reviewed, &started)
+	err := runtime.db.QueryRow(ctx, `SELECT true,shadow_started_at FROM policy_release_approvals WHERE policy_version=$1`, runtime.cfg.ResearchPolicyVersion).Scan(&approved, &started)
+	if err != nil || !approved {
+		return "shadow"
+	}
+	err = runtime.db.QueryRow(ctx, `SELECT count(*) FROM policy_impact_reviews r JOIN policy_evaluations e ON e.id=r.policy_evaluation_id WHERE e.policy_version=$1 AND r.decision='accepted' AND e.policy_result->'event_signal'->>'status'='directional'`, runtime.cfg.ResearchPolicyVersion).Scan(&reviewed)
 	if err != nil || reviewed < runtime.cfg.PolicyShadowMinReviewed || started.After(time.Now().UTC().AddDate(0, 0, -runtime.cfg.PolicyShadowMinDays)) {
 		return "shadow"
 	}

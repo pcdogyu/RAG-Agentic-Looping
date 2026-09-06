@@ -77,8 +77,15 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		"news_age_seconds": age, "data_fresh": dataFresh,
 		"telegram_configured": os.Getenv("TELEGRAM_BOT_TOKEN") != "" && os.Getenv("TELEGRAM_CHAT_ID") != "",
 		"evolution_enabled":   s.cfg.EvolutionEnabled, "evolution_auto_merge": s.cfg.EvolutionAutoMerge,
-		"as_of": time.Now().UTC(),
+		"research_policy": researchPolicySummaryOrDegraded(s, ctx),
+		"as_of":           time.Now().UTC(),
 	})
+}
+
+func researchPolicySummaryOrDegraded(s *Server, ctx context.Context) map[string]any {
+	policyCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+	return s.researchPolicySummary(policyCtx)
 }
 
 func probeOllama(ctx context.Context) ([]map[string]any, []string, map[string]map[string]bool) {
