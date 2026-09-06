@@ -46,7 +46,7 @@ func p0ResultContract(score int, rating, conclusion string, horizon int, asOf, a
 		"evidence_quality": map[string]any{
 			"score": newsScore, "status": ternaryString(verification.EvidenceComplete, "complete", "incomplete"),
 			"rule_version": p0PolicyAlgorithmVersion, "structurally_valid": verification.StructurallyValid,
-			"missing_information": nonNilStrings(verification.Missing), "contradictions": nonNilStrings(verification.Contradictions),
+			"missing_information": nonNilStrings(verification.Missing), "conditional_information": nonNilStrings(verification.Conditional), "contradictions": nonNilStrings(verification.Contradictions),
 		},
 		"fundamental_rating":    map[string]any{"status": "unavailable", "rating": nil, "reason": "not_implemented_p0"},
 		"short_term_prediction": map[string]any{"status": "uncalibrated", "probabilities": nil, "calibration": nil, "reason": "not_available_until_calibration"},

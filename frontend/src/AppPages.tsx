@@ -1437,6 +1437,8 @@ export type Recommendation = {
     target_evaluation?: TargetEvaluation;
     model_target_evaluation?: TargetEvaluation;
     applied_caps?: string[];
+    conditional_impact?: boolean;
+    conditional_information?: string[];
   };
   claim_assessments?: Array<{
     claim: string;
@@ -1535,6 +1537,8 @@ export type EventTargetImpact = {
   transmission_path: string[];
   rationale: string;
   missing_information: string[];
+  conditional_impact?: boolean;
+  conditional_information?: string[];
   conclusion_status?: "directional" | "neutral_supported" | "insufficient_evidence";
   impact_channel?: "supply" | "demand" | "revenue" | "cost" | "profit" | "cash_flow" | "valuation" | "risk_premium";
   claims?: ResearchClaim[];
@@ -1574,6 +1578,7 @@ export type EventConclusionDetail = {
     impacts: EventTargetImpact[];
     macro_factors: Array<{ id: string; name: string; description: string; strength: number }>;
     missing_information: string[];
+    conditional_information?: string[];
   };
   news: Array<{ id: string; title: string; url: string; source: string }>;
   evidence: Array<{ id: string; claim: string; source_name: string; source_url: string; excerpt: string }>;
@@ -2467,6 +2472,7 @@ export function ConclusionDetailModal({ detail, onClose }: { detail: ConclusionD
 		  <V3ConfidenceDetails recommendation={detail.recommendation} />
 		  <ClaimStatusDetails value={detail.recommendation.claim_status} />
 		  <TargetEvaluationDetails value={detail.recommendation.target_evaluation} modelValue={detail.recommendation.model_target_evaluation} score={detail.recommendation.target_evaluation_score} />
+		  {!!detail.recommendation.impact?.conditional_information?.length && <section className="short-term-score-details"><h3>条件与情景边界</h3><ul>{detail.recommendation.impact.conditional_information.map((item) => <li key={item}>{item}</li>)}</ul></section>}
 		  <ResearchReasoningDetails claims={detail.recommendation.impact?.claims} steps={detail.recommendation.impact?.transmission_steps} />
 		  <div className="probability-grid"><span>短期预测 <strong>未校准</strong></span><span>概率 <strong>暂不显示</strong></span><span>基本面评级 <strong>未建立</strong></span></div>
         </>
@@ -2588,6 +2594,7 @@ export function EventConclusionDetailModal({ detail, onClose }: { detail: EventC
         {!!impact.transmission_path.length && <ol>{impact.transmission_path.map((step, stepIndex) => <li key={`${step}-${stepIndex}`}>{step}</li>)}</ol>}
         <TargetEvaluationDetails value={impact.target_evaluation} modelValue={impact.model_target_evaluation} score={impact.target_evaluation_score} />
         <ResearchReasoningDetails claims={impact.claims} steps={impact.transmission_steps} />
+        {!!impact.conditional_information?.length && <small>条件 / Conditions：{impact.conditional_information.join("；")}</small>}
         {!!impact.missing_information.length && <small>缺失 / Missing：{impact.missing_information.map(describeMissingInformation).join("；")}</small>}
       </article>)}</div></>}
       {!!report.macro_factors.length && <><h3>宏观因子</h3><div className="macro-factor-list">{report.macro_factors.map((factor) => <article key={factor.id}><strong>{factor.name}</strong><span>{Math.round(factor.strength * 100)}%</span><p>{factor.description}</p></article>)}</div></>}
@@ -2595,6 +2602,7 @@ export function EventConclusionDetailModal({ detail, onClose }: { detail: EventC
       {!!report.catalysts.length && <><h3>催化剂</h3><ul>{report.catalysts.map((item) => <li key={item}>{item}</li>)}</ul></>}
       {!!report.risks.length && <><h3>风险</h3><ul>{report.risks.map((item) => <li key={item}>{item}</li>)}</ul></>}
       {!!report.unresolved_questions.length && <><h3>待确认问题</h3><ul>{report.unresolved_questions.map((item) => <li key={item}>{item}</li>)}</ul></>}
+      {!!report.conditional_information?.length && <><h3>条件与情景边界</h3><ul>{report.conditional_information.map((item) => <li key={item}>{item}</li>)}</ul></>}
       {!!report.missing_information.length && <><h3>缺失信息 / Missing information</h3><ul>{report.missing_information.map((item) => <li key={item}>{describeMissingInformation(item)}</li>)}</ul></>}
       <h3>新闻与证据</h3><div className="evidence-links">{conclusionReferences(detail).map((item) => <a key={`${item.url}-${item.label}`} href={item.url} target="_blank" rel="noreferrer"><strong>{item.label}</strong><span>{item.source}</span></a>)}</div>
     </article>

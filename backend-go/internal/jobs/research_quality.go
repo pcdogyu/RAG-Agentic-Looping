@@ -17,6 +17,66 @@ var economicEndpointTerms = map[string][]string{
 	"risk_premium": {"riskpremium", "risk premium", "风险溢价", "折现率"},
 }
 
+// Conditional missing information records a bounded uncertainty after the
+// event-to-target relation and transmission evidence have passed. Every other
+// missing item remains critical by default, so a model cannot downgrade a
+// missing issuer, citation, unit, period or transmission link into a harmless
+// scenario merely by adding a prefix.
+func conditionalMissingInformation(values []string) []string {
+	result := []string{}
+	for _, value := range values {
+		raw := strings.TrimSpace(value)
+		lower := strings.ToLower(raw)
+		if !strings.HasPrefix(lower, "conditional:") {
+			continue
+		}
+		detail := strings.TrimSpace(raw[len("conditional:"):])
+		if detail == "" || criticalMissingDetail(detail) {
+			continue
+		}
+		result = append(result, detail)
+	}
+	return uniqueStrings(result)
+}
+
+func criticalMissingInformation(values []string) []string {
+	result := []string{}
+	for _, value := range values {
+		raw := strings.TrimSpace(value)
+		if raw == "" {
+			continue
+		}
+		lower := strings.ToLower(raw)
+		if !strings.HasPrefix(lower, "conditional:") {
+			result = append(result, raw)
+			continue
+		}
+		detail := strings.TrimSpace(raw[len("conditional:"):])
+		if detail == "" || criticalMissingDetail(detail) {
+			result = append(result, fallbackString(detail, raw))
+		}
+	}
+	return uniqueStrings(result)
+}
+
+func criticalMissingDetail(value string) bool {
+	value = strings.ToLower(value)
+	for _, marker := range []string{
+		"target", "issuer", "security", "relation", "evidence", "citation", "action", "transmission", "endpoint", "economic",
+		"currency", "unit", "period", "scope", "标的", "发行", "证券", "关系", "证据", "引用", "动作", "传导", "终点", "币种", "单位", "期间", "口径", "范围",
+	} {
+		if strings.Contains(value, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func appendModelMissing(verification *draftVerification, values []string) {
+	verification.Missing = append(verification.Missing, criticalMissingInformation(values)...)
+	verification.Conditional = append(verification.Conditional, conditionalMissingInformation(values)...)
+}
+
 func verifyEventDraft(draft *eventResearchDraft, event map[string]any, evidence []researchEvidence, asOf time.Time) draftVerification {
 	verification := draftVerification{StructurallyValid: true}
 	if draft == nil {
@@ -111,7 +171,7 @@ func verifyEventDraft(draft *eventResearchDraft, event map[string]any, evidence 
 		}
 
 		impactComplete := true
-		directionComplete := len(item.Missing) == 0
+		directionComplete := len(criticalMissingInformation(item.Missing)) == 0
 		item.EvidenceIDs, verification.Missing = filterReferenceIDs(item.EvidenceIDs, validEvidence, "evidence", verification.Missing)
 		if item.ActionID != "" && !validActions[item.ActionID] {
 			verification.Missing = append(verification.Missing, "unknown action id: "+item.ActionID)
@@ -126,6 +186,9 @@ func verifyEventDraft(draft *eventResearchDraft, event map[string]any, evidence 
 		item.TargetRelation.EvidenceIDs, verification.Missing = filterReferenceIDs(item.TargetRelation.EvidenceIDs, validEvidence, "evidence", verification.Missing)
 		item.TargetRelation.ActionIDs, verification.Missing = filterReferenceIDs(item.TargetRelation.ActionIDs, validActions, "action", verification.Missing)
 		item.Missing = append(item.Missing, item.TargetRelation.MissingInformation...)
+		// Target relation uncertainty is always a hard gate: it establishes the
+		// first event-to-issuer link and cannot be merely scenario-labelled.
+		verification.Missing = append(verification.Missing, item.TargetRelation.MissingInformation...)
 		if strings.TrimSpace(item.TargetRelation.Subject) == "" || len(item.TargetRelation.EvidenceIDs)+len(item.TargetRelation.ActionIDs) == 0 {
 			verification.Missing = append(verification.Missing, "target_relation.evidence:"+key)
 			impactComplete, directionComplete = false, false
@@ -145,9 +208,10 @@ func verifyEventDraft(draft *eventResearchDraft, event map[string]any, evidence 
 				impactComplete = false
 				directionComplete = false
 			}
-			if len(claim.MissingInformation) > 0 {
+			if len(criticalMissingInformation(claim.MissingInformation)) > 0 {
 				directionComplete = false
 			}
+			appendModelMissing(&verification, claim.MissingInformation)
 			item.EvidenceIDs = append(item.EvidenceIDs, claim.EvidenceIDs...)
 			item.Missing = append(item.Missing, claim.MissingInformation...)
 		}
@@ -172,9 +236,10 @@ func verifyEventDraft(draft *eventResearchDraft, event map[string]any, evidence 
 				impactComplete = false
 				directionComplete = false
 			}
-			if len(step.MissingInformation) > 0 {
+			if len(criticalMissingInformation(step.MissingInformation)) > 0 {
 				directionComplete = false
 			}
+			appendModelMissing(&verification, step.MissingInformation)
 			item.EvidenceIDs = append(item.EvidenceIDs, step.EvidenceIDs...)
 			item.Missing = append(item.Missing, step.MissingInformation...)
 		}
@@ -217,6 +282,7 @@ func verifyEventDraft(draft *eventResearchDraft, event map[string]any, evidence 
 			}
 			item.EvidenceIDs = append(item.EvidenceIDs, validAssessmentEvidence...)
 			item.Missing = append(item.Missing, assessment.MissingInformation...)
+			appendModelMissing(&verification, assessment.MissingInformation)
 		}
 
 		item.EvidenceIDs = uniqueStrings(item.EvidenceIDs)
@@ -227,10 +293,12 @@ func verifyEventDraft(draft *eventResearchDraft, event map[string]any, evidence 
 			impactComplete = false
 			directionComplete = false
 		}
-		if len(item.Missing) > 0 {
+		if critical := criticalMissingInformation(item.Missing); len(critical) > 0 {
 			impactComplete = false
-			verification.Missing = append(verification.Missing, item.Missing...)
+			directionComplete = false
+			verification.Missing = append(verification.Missing, critical...)
 		}
+		verification.Conditional = append(verification.Conditional, conditionalMissingInformation(item.Missing)...)
 		hasEndpoint := impactHasEconomicEndpoint(item)
 		pathContinuous := transmissionPathContinuous(item)
 		if !pathContinuous {
@@ -276,18 +344,20 @@ func verifyEventDraft(draft *eventResearchDraft, event map[string]any, evidence 
 		if !containsString(draft.MissingInformation, "no_confirmed_target") {
 			draft.MissingInformation = append(draft.MissingInformation, "no_confirmed_target")
 		}
-		verification.Missing = append(verification.Missing, draft.MissingInformation...)
+		appendModelMissing(&verification, draft.MissingInformation)
 		verification.Missing = uniqueStrings(verification.Missing)
+		verification.Conditional = uniqueStrings(verification.Conditional)
 		verification.Contradictions = uniqueStrings(verification.Contradictions)
 		return verification
 	}
-	verification.Missing = append(verification.Missing, draft.MissingInformation...)
+	appendModelMissing(&verification, draft.MissingInformation)
 	official, groups := citedSourceCoverage(draft.EvidenceIDs, evidence)
 	if !official && groups < 2 {
 		verification.Missing = append(verification.Missing, "one official source or two independent sources")
 		allComplete = false
 	}
 	verification.Missing = uniqueStrings(verification.Missing)
+	verification.Conditional = uniqueStrings(verification.Conditional)
 	verification.Contradictions = uniqueStrings(verification.Contradictions)
 	verification.EvidenceComplete = verification.StructurallyValid && allComplete && len(verification.Missing) == 0 && len(verification.Contradictions) == 0
 	return verification
@@ -591,7 +661,7 @@ func finalizeTargetEvaluation(item eventImpactDraft, event map[string]any, evide
 
 func transmissionHasMissingInformation(steps []transmissionStepDraft) bool {
 	for _, step := range steps {
-		if len(step.MissingInformation) > 0 {
+		if len(criticalMissingInformation(step.MissingInformation)) > 0 {
 			return true
 		}
 	}

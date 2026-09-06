@@ -645,6 +645,32 @@ func TestMissingTransmissionConditionForcesZeroDirection(t *testing.T) {
 	}
 }
 
+func TestConditionalUncertaintyPreservesSupportedDirectionalImpact(t *testing.T) {
+	event, evidence, impact := researchQualityFixture()
+	impact.TransmissionSteps[0].MissingInformation = []string{"conditional: 订单毛利率对收入的敏感性尚待验证"}
+	draft := eventResearchDraft{Summary: "订单事件", Impacts: []eventImpactDraft{impact}}
+	verification := verifyEventDraft(&draft, event, evidence, time.Time{})
+	if !verification.EvidenceComplete || draft.Impacts[0].DirectionScore != 45 || draft.Impacts[0].ConclusionStatus != "directional" {
+		t.Fatalf("ordinary scenario uncertainty incorrectly blocked a supported impact: %#v / %#v", draft, verification)
+	}
+	if !containsString(verification.Conditional, "订单毛利率对收入的敏感性尚待验证") || len(verification.Missing) != 0 {
+		t.Fatalf("conditional uncertainty was not separated from critical gaps: %#v", verification)
+	}
+	if evaluation := finalizeTargetEvaluation(draft.Impacts[0], event, evidence, nil); evaluation.TransmissionCertainty.Score != 80 {
+		t.Fatalf("conditional uncertainty incorrectly applied the critical transmission cap: %#v", evaluation)
+	}
+}
+
+func TestConditionalPrefixCannotHideCriticalTargetRelationGap(t *testing.T) {
+	event, evidence, impact := researchQualityFixture()
+	impact.TargetRelation.MissingInformation = []string{"conditional: issuer relation evidence is missing"}
+	draft := eventResearchDraft{Summary: "订单事件", Impacts: []eventImpactDraft{impact}}
+	verification := verifyEventDraft(&draft, event, evidence, time.Time{})
+	if draft.Impacts[0].DirectionScore != 0 || draft.Impacts[0].ConclusionStatus != "insufficient_evidence" || verification.EvidenceComplete {
+		t.Fatalf("critical relation gap was incorrectly made conditional: %#v / %#v", draft, verification)
+	}
+}
+
 func TestNonzeroDirectionRequiresImpactEndpoint(t *testing.T) {
 	event, evidence, impact := researchQualityFixture()
 	impact.ImpactChannel = "valuation"
