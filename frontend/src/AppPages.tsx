@@ -1547,6 +1547,15 @@ export type EventTargetImpact = {
   target_evaluation?: TargetEvaluation;
   model_target_evaluation?: TargetEvaluation;
   applied_caps?: string[];
+  impact_verification?: {
+    quality?: {
+      structurally_valid: boolean;
+      evidence_complete: boolean;
+      missing_information: string[];
+      conditional_information: string[];
+      contradictions: string[];
+    };
+  };
 };
 
 export type EventConclusionDetail = {
@@ -2035,17 +2044,15 @@ export function V3ConfidenceDetails({ recommendation }: { recommendation: Recomm
   </section>;
 }
 
-const claimStatusLabels: Record<string, string> = {
-  documented: "已记录声明", unknown: "声明状态未知",
-  corroborated: "多源印证", single_source: "单一可追溯来源", unverified: "来源血缘未确认",
-  realized: "已兑现", effective: "已生效", announced: "已宣布", threat: "威胁/拟议", statement: "仅声明", unknown: "行动阶段未知",
-};
+const statementOccurrenceLabels: Record<string, string> = { documented: "已记录声明", unknown: "声明状态未知" };
+const claimedEventTruthLabels: Record<string, string> = { corroborated: "多源印证", single_source: "单一可追溯来源", unverified: "来源血缘未确认", unknown: "声明状态未知" };
+const realizationStatusLabels: Record<string, string> = { realized: "已兑现", effective: "已生效", announced: "已宣布", threat: "威胁/拟议", statement: "仅声明", unknown: "行动阶段未知" };
 
 export function ClaimStatusDetails({ value }: { value?: ClaimStatus }) {
   if (!value) return null;
   return <section className="short-term-score-details">
     <h3>事件事实状态</h3>
-    <p>声明：<strong>{claimStatusLabels[value.statement_occurrence] ?? value.statement_occurrence}</strong>；事实支持：<strong>{claimStatusLabels[value.claimed_event_truth] ?? value.claimed_event_truth}</strong>；行动兑现：<strong>{claimStatusLabels[value.realization_status] ?? value.realization_status}</strong></p>
+    <p>声明：<strong>{statementOccurrenceLabels[value.statement_occurrence] ?? value.statement_occurrence}</strong>；事实支持：<strong>{claimedEventTruthLabels[value.claimed_event_truth] ?? value.claimed_event_truth}</strong>；行动兑现：<strong>{realizationStatusLabels[value.realization_status] ?? value.realization_status}</strong></p>
     <small>可确认独立来源组 {value.independent_source_groups} 个；血缘未知证据 {value.unknown_lineage_evidence} 条。声明被记录不等于行动已兑现。</small>
   </section>;
 }
@@ -2589,6 +2596,7 @@ export function EventConclusionDetailModal({ detail, onClose }: { detail: EventC
         <strong>{impact.target_name}</strong>
         <div><b>本次事件信号：{recommendationRatingLabel(impact.rating)}</b><b>{impact.direction_score > 0 ? "+" : ""}{impact.direction_score}</b><b>目标评价 {impact.target_evaluation_score ?? Math.round(impact.rating_confidence * 100)}/100</b></div>
         {(impact.conclusion_status || impact.impact_channel) && <small>{conclusionStatusLabels[impact.conclusion_status ?? ""] ?? impact.conclusion_status ?? ""}{impact.impact_channel ? ` · ${impactChannelLabels[impact.impact_channel] ?? impact.impact_channel}` : ""}</small>}
+        {impact.impact_verification?.quality && <small>目标证据门禁：{impact.impact_verification.quality.evidence_complete ? "通过" : "未通过"}</small>}
         <small>未来 {impact.horizon_days} 个自然日</small>
         {impact.rationale && <p>{impact.rationale}</p>}
         {!!impact.transmission_path.length && <ol>{impact.transmission_path.map((step, stepIndex) => <li key={`${step}-${stepIndex}`}>{step}</li>)}</ol>}

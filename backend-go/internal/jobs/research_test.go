@@ -692,6 +692,49 @@ func TestCandidateIdentityIsNotTargetImpactEvidence(t *testing.T) {
 	}
 }
 
+func TestEventTargetVerificationIsolatedPerImpact(t *testing.T) {
+	event, evidence, impact := researchQualityFixture()
+	event["actions"] = append(anySlice(event["actions"]), map[string]any{"id": "action-2", "actor": "Bravo", "action": "获得订单", "object": "客户订单", "scope": "Bravo 获得客户订单", "action_stage": "effective"})
+	event["candidates"] = append(anySlice(event["candidates"]), map[string]any{"asset": map[string]any{"asset_id": "asset-2", "symbol": "BRAVO", "name": "Bravo", "asset_class": "equity"}, "relationship": "direct", "relevance": .95, "mapping_confidence": .98})
+	evidence = append(evidence, researchEvidence{ID: "ev-2", Claim: "Bravo 获得客户订单", Excerpt: "订单已正式生效", SourceQuality: "official", IndependentGroup: "bravo.example"})
+
+	unsupported := impact
+	unsupported.TargetRelation.EvidenceIDs, unsupported.TargetRelation.ActionIDs = nil, nil
+	unsupported.TargetRelation.MissingInformation = []string{"issuer relation evidence is missing"}
+
+	proven := impact
+	proven.AssetID, proven.TargetName, proven.ActionID = "asset-2", "Bravo", "action-2"
+	proven.Claims[0].Text, proven.Claims[0].EvidenceIDs, proven.Claims[0].ActionIDs = "Bravo 获得订单", []string{"ev-2"}, []string{"action-2"}
+	proven.TransmissionSteps[0].EvidenceIDs, proven.TransmissionSteps[0].ActionIDs = []string{"ev-2"}, []string{"action-2"}
+	proven.TargetRelation = targetRelationDraft{Kind: "direct", RelationshipType: "issuer", Subject: "Bravo", EvidenceIDs: []string{"ev-2"}, ActionIDs: []string{"action-2"}}
+	proven.EvidenceIDs = []string{"ev-2"}
+	assessment := evidenceAssessmentDraft{Score: 80, Reason: "有目标专属证据支持", EvidenceIDs: []string{"ev-2"}, ActionIDs: []string{"action-2"}}
+	proven.TargetEvaluation = targetEvaluationDraft{ObjectRelevance: assessment, EvidenceSufficiency: assessment, TransmissionCertainty: assessment, ImpactSupport: assessment, TimingPersistence: assessment}
+
+	draft := eventResearchDraft{Summary: "两个发行人分别获得订单", Impacts: []eventImpactDraft{unsupported, proven}}
+	verification := verifyEventDraft(&draft, event, evidence, time.Time{})
+	if verification.EvidenceComplete || len(draft.Impacts) != 2 {
+		t.Fatalf("the aggregate event should remain incomplete while retaining both targets: %#v / %#v", draft, verification)
+	}
+	if draft.Impacts[0].Verification.EvidenceComplete || !draft.Impacts[1].Verification.EvidenceComplete {
+		t.Fatalf("target evidence decisions leaked between impacts: %#v", draft.Impacts)
+	}
+
+	report := (&researchRuntime{}).finalizeEventReport(event, draft, evidence, verification)
+	impacts := anySlice(report["impacts"])
+	if len(impacts) != 2 {
+		t.Fatalf("expected two public impacts, got %#v", report)
+	}
+	bad := objectValue(impacts[0])
+	good := objectValue(impacts[1])
+	if boolValue(objectValue(bad["eligibility"])["research_eligible"]) || !boolValue(objectValue(good["eligibility"])["research_eligible"]) {
+		t.Fatalf("an unsupported target must not block an independently proven target: %#v", impacts)
+	}
+	if !boolValue(objectValue(objectValue(good["impact_verification"])["quality"])["evidence_complete"]) || containsString(stringSlice(good["missing_information"]), "evidence_gate") {
+		t.Fatalf("the proven target incorrectly inherited the aggregate evidence gate: %#v", good)
+	}
+}
+
 func TestBrokenTransmissionPathForcesConditionalSignal(t *testing.T) {
 	event, evidence, impact := researchQualityFixture()
 	impact.TransmissionPath = []string{"新订单", "错误节点"}

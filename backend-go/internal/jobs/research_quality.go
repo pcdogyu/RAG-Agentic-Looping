@@ -109,6 +109,10 @@ func verifyEventDraft(draft *eventResearchDraft, event map[string]any, evidence 
 
 	for _, original := range draft.Impacts {
 		item := original
+		missingStart := len(verification.Missing)
+		conditionalStart := len(verification.Conditional)
+		contradictionStart := len(verification.Contradictions)
+		impactStructurallyValid := true
 		if (item.AssetID == "" && matchesIdentityTerms(item.TargetName, excludedAssets)) || (item.TargetType == "sector" && matchesIdentityTerms(item.TargetName, excludedIndustries)) {
 			verification.Missing = append(verification.Missing, "excluded_target:"+item.TargetName)
 			allComplete = false
@@ -157,6 +161,7 @@ func verifyEventDraft(draft *eventResearchDraft, event map[string]any, evidence 
 		item.DirectionScore = clampInt(item.DirectionScore, -100, 100)
 		if !containsString(conclusionStatuses(), item.ConclusionStatus) {
 			verification.StructurallyValid = false
+			impactStructurallyValid = false
 			verification.Missing = append(verification.Missing, "invalid_conclusion_status:"+key)
 			delete(seen, key)
 			allComplete = false
@@ -164,6 +169,7 @@ func verifyEventDraft(draft *eventResearchDraft, event map[string]any, evidence 
 		}
 		if !containsString(impactChannels(), item.ImpactChannel) {
 			verification.StructurallyValid = false
+			impactStructurallyValid = false
 			verification.Missing = append(verification.Missing, "invalid_impact_channel:"+key)
 			delete(seen, key)
 			allComplete = false
@@ -197,6 +203,7 @@ func verifyEventDraft(draft *eventResearchDraft, event map[string]any, evidence 
 			claim := &item.Claims[index]
 			if strings.TrimSpace(claim.Text) == "" || (claim.ClaimType != "fact" && claim.ClaimType != "inference") {
 				verification.StructurallyValid = false
+				impactStructurallyValid = false
 				verification.Missing = append(verification.Missing, "invalid_claim:"+key)
 				impactComplete = false
 				directionComplete = false
@@ -217,6 +224,7 @@ func verifyEventDraft(draft *eventResearchDraft, event map[string]any, evidence 
 		}
 		if len(item.Claims) == 0 {
 			verification.StructurallyValid = false
+			impactStructurallyValid = false
 			verification.Missing = append(verification.Missing, "claims:"+key)
 			impactComplete = false
 			directionComplete = false
@@ -225,6 +233,7 @@ func verifyEventDraft(draft *eventResearchDraft, event map[string]any, evidence 
 			step := &item.TransmissionSteps[index]
 			if strings.TrimSpace(step.SourceNode) == "" || strings.TrimSpace(step.Mechanism) == "" || strings.TrimSpace(step.TargetNode) == "" || (step.BasisType != "fact" && step.BasisType != "inference") {
 				verification.StructurallyValid = false
+				impactStructurallyValid = false
 				verification.Missing = append(verification.Missing, "invalid_transmission_step:"+key)
 				impactComplete = false
 				directionComplete = false
@@ -249,11 +258,13 @@ func verifyEventDraft(draft *eventResearchDraft, event map[string]any, evidence 
 			directionComplete = false
 			if len(item.TransmissionSteps) > 3 {
 				verification.StructurallyValid = false
+				impactStructurallyValid = false
 				item.TransmissionSteps = item.TransmissionSteps[:3]
 			}
 		}
 		if len(item.TransmissionPath) < 2 || len(item.TransmissionPath) > 4 {
 			verification.StructurallyValid = false
+			impactStructurallyValid = false
 			verification.Missing = append(verification.Missing, "transmission_path:"+key)
 			impactComplete = false
 			directionComplete = false
@@ -266,6 +277,7 @@ func verifyEventDraft(draft *eventResearchDraft, event map[string]any, evidence 
 			name, assessment := named.Name, named.Value
 			if assessment.Score < 0 || assessment.Score > 100 || strings.TrimSpace(assessment.Reason) == "" {
 				verification.StructurallyValid = false
+				impactStructurallyValid = false
 				verification.Missing = append(verification.Missing, "target_evaluation."+name+":"+key)
 				impactComplete = false
 				directionComplete = false
@@ -290,6 +302,12 @@ func verifyEventDraft(draft *eventResearchDraft, event map[string]any, evidence 
 		impactEvidenceIDs, impactActionIDs := impactReferenceIDs(item)
 		if len(impactEvidenceIDs)+len(impactActionIDs) == 0 {
 			verification.Missing = append(verification.Missing, "impact_evidence:"+key)
+			impactComplete = false
+			directionComplete = false
+		}
+		impactOfficial, impactGroups := citedSourceCoverage(impactEvidenceIDs, evidence)
+		if !impactOfficial && impactGroups < 2 {
+			verification.Missing = append(verification.Missing, "one official source or two independent sources:"+key)
 			impactComplete = false
 			directionComplete = false
 		}
@@ -329,6 +347,19 @@ func verifyEventDraft(draft *eventResearchDraft, event map[string]any, evidence 
 		if item.ConclusionStatus == "directional" && item.DirectionScore == 0 {
 			verification.Contradictions = append(verification.Contradictions, "directional conclusion had zero direction:"+key)
 			item.ConclusionStatus = "insufficient_evidence"
+		}
+		itemMissing := uniqueStrings(append([]string{}, verification.Missing[missingStart:]...))
+		itemConditional := uniqueStrings(append([]string{}, verification.Conditional[conditionalStart:]...))
+		itemContradictions := uniqueStrings(append([]string{}, verification.Contradictions[contradictionStart:]...))
+		if globalContradiction {
+			itemContradictions = appendUnique(itemContradictions, "point-in-time boundary violation")
+		}
+		item.Verification = impactVerification{
+			StructurallyValid: impactStructurallyValid,
+			EvidenceComplete:  impactStructurallyValid && impactComplete && len(itemMissing) == 0 && len(itemContradictions) == 0,
+			Missing:           itemMissing,
+			Conditional:       itemConditional,
+			Contradictions:    itemContradictions,
 		}
 		allComplete = allComplete && impactComplete
 		allEvidence = append(allEvidence, item.EvidenceIDs...)
@@ -385,6 +416,7 @@ func verifyAssetDraft(draft *assetResearchDraft, asset, event map[string]any, ev
 		draft.DirectionScore, draft.ConclusionStatus, draft.ImpactChannel = impact.DirectionScore, impact.ConclusionStatus, impact.ImpactChannel
 		draft.Claims, draft.TransmissionSteps, draft.TransmissionPath, draft.TargetRelation = impact.Claims, impact.TransmissionSteps, impact.TransmissionPath, impact.TargetRelation
 		draft.EvidenceIDs, draft.MissingInformation = impact.EvidenceIDs, impact.Missing
+		draft.Verification = impact.Verification
 	} else {
 		draft.DirectionScore, draft.ConclusionStatus, draft.EvidenceIDs = 0, "insufficient_evidence", []string{}
 	}

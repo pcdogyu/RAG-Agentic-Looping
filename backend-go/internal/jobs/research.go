@@ -185,6 +185,7 @@ type assetResearchDraft struct {
 	TransmissionSteps     []transmissionStepDraft `json:"transmission_steps"`
 	TargetRelation        targetRelationDraft     `json:"target_relation"`
 	TargetEvaluation      targetEvaluationDraft   `json:"target_evaluation"`
+	Verification          impactVerification      `json:"-"`
 }
 
 type eventImpactDraft struct {
@@ -203,6 +204,7 @@ type eventImpactDraft struct {
 	Rationale         string                  `json:"rationale"`
 	EvidenceIDs       []string                `json:"evidence_ids"`
 	Missing           []string                `json:"missing_information"`
+	Verification      impactVerification      `json:"-"`
 }
 
 type eventResearchDraft struct {
@@ -224,6 +226,41 @@ type draftVerification struct {
 	Missing           []string
 	Conditional       []string
 	Contradictions    []string
+}
+
+// impactVerification keeps an evidence decision scoped to a single target.
+// The enclosing report remains conservative when any target is incomplete,
+// but one target's missing link must not invalidate an independently proven
+// target in the same event.
+type impactVerification struct {
+	StructurallyValid bool
+	EvidenceComplete  bool
+	Missing           []string
+	Conditional       []string
+	Contradictions    []string
+}
+
+func resolvedImpactVerification(value impactVerification, fallback draftVerification) impactVerification {
+	if value.StructurallyValid || value.EvidenceComplete || len(value.Missing) > 0 || len(value.Conditional) > 0 || len(value.Contradictions) > 0 {
+		return value
+	}
+	return impactVerification{
+		StructurallyValid: fallback.StructurallyValid,
+		EvidenceComplete:  fallback.EvidenceComplete,
+		Missing:           nonNilStrings(fallback.Missing),
+		Conditional:       nonNilStrings(fallback.Conditional),
+		Contradictions:    nonNilStrings(fallback.Contradictions),
+	}
+}
+
+func publicImpactVerification(value impactVerification) map[string]any {
+	return map[string]any{
+		"structurally_valid":      value.StructurallyValid,
+		"evidence_complete":       value.EvidenceComplete,
+		"missing_information":     nonNilStrings(value.Missing),
+		"conditional_information": nonNilStrings(value.Conditional),
+		"contradictions":          nonNilStrings(value.Contradictions),
+	}
 }
 
 func NewResearchHandlers(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) map[string]Handler {
@@ -1229,22 +1266,25 @@ func (runtime *researchRuntime) finalizeEventReport(event map[string]any, draft 
 	targetScores := make([]int, 0, len(draft.Impacts))
 	for _, item := range draft.Impacts {
 		asset := assets[item.AssetID]
+		impactQuality := resolvedImpactVerification(item.Verification, verification)
 		validImpactIDs, _ := validEvidenceIDs(item.EvidenceIDs, evidence)
-		missing := criticalMissingInformation(item.Missing)
-		conditional := conditionalMissingInformation(item.Missing)
+		missing := append(criticalMissingInformation(item.Missing), impactQuality.Missing...)
+		conditional := append(conditionalMissingInformation(item.Missing), impactQuality.Conditional...)
 		if len(validImpactIDs) == 0 {
 			missing = appendUnique(missing, "impact_evidence")
 		}
-		if !verification.EvidenceComplete {
+		if !impactQuality.EvidenceComplete {
 			missing = appendUnique(missing, "evidence_gate")
 		}
+		missing = uniqueStrings(missing)
+		conditional = uniqueStrings(conditional)
 		candidate := candidateForAsset(event, item.AssetID)
-		publicEvaluation := finalizeTargetEvaluation(item, event, evidence, verification.Contradictions)
+		publicEvaluation := finalizeTargetEvaluation(item, event, evidence, impactQuality.Contradictions)
 		targetScore := targetEvaluationScore(publicEvaluation)
 		targetScores = append(targetScores, targetScore)
 		confidence := round4(math.Min(newsConfidence, float64(targetScore)/100))
 		distance := mappingDistance(candidate, item.TransmissionPath)
-		eligibility := impactEligibility(asset, item, verification.EvidenceComplete && len(missing) == 0)
+		eligibility := impactEligibility(asset, item, impactQuality.EvidenceComplete && len(missing) == 0)
 		tradeable := boolValue(eligibility["long_eligible"])
 		impact := map[string]any{
 			"target_type": item.TargetType, "target_name": fallbackString(item.TargetName, stringValue(asset["name"])), "asset": nullableMap(asset),
@@ -1259,7 +1299,7 @@ func (runtime *researchRuntime) finalizeEventReport(event map[string]any, draft 
 			"model_target_evaluation": item.TargetEvaluation, "target_evaluation": publicEvaluation, "target_evaluation_score": targetScore,
 			"target_evaluation_version": targetEvaluationVersion, "applied_caps": targetEvaluationCapReasons(publicEvaluation),
 			"trade_status":        ternaryString(tradeable, "tradeable", "untradeable"),
-			"execution_supported": boolValue(eligibility["execution_supported"]), "impact_verification": map[string]any{"relation": item.TargetRelation, "relation_verified": impactHasTargetSpecificEvidence(item, event, evidence), "transmission_continuous": transmissionPathContinuous(item), "economic_endpoint": impactHasEconomicEndpoint(item)}, "eligibility": eligibility,
+			"execution_supported": boolValue(eligibility["execution_supported"]), "impact_verification": map[string]any{"relation": item.TargetRelation, "relation_verified": impactHasTargetSpecificEvidence(item, event, evidence), "transmission_continuous": transmissionPathContinuous(item), "economic_endpoint": impactHasEconomicEndpoint(item), "quality": publicImpactVerification(impactQuality)}, "eligibility": eligibility,
 			"technical_failure": false,
 		}
 		impact["event_signal"] = eventSignalContract(item.DirectionScore, ratingForScore(item.DirectionScore), item.ConclusionStatus, eventHorizonDays(stringValue(event["event_type"])), parseTime(event["as_of"]), signalAvailableAt(event, evidence, time.Now().UTC()))
@@ -1298,13 +1338,14 @@ func (runtime *researchRuntime) finalizeAssetRecommendation(run, event map[strin
 	claimStatus := eventClaimStatus(event, evidence)
 	candidate := candidateForAsset(event, stringValue(asset["asset_id"]))
 	impactDraft := eventImpactFromAssetDraft(draft, asset)
-	publicEvaluation := finalizeTargetEvaluation(impactDraft, event, evidence, verification.Contradictions)
+	impactQuality := resolvedImpactVerification(draft.Verification, verification)
+	publicEvaluation := finalizeTargetEvaluation(impactDraft, event, evidence, impactQuality.Contradictions)
 	targetScore := targetEvaluationScore(publicEvaluation)
 	confidence := reportConfidenceScore(newsValue, []int{targetScore}, verification)
 	targetConfidence := round4(math.Min(newsValue, float64(targetScore)/100))
 	distance := mappingDistance(candidate, draft.TransmissionPath)
 	validIDs, _ := validEvidenceIDs(draft.EvidenceIDs, evidence)
-	warnings := uniqueStrings(append(append([]string{}, verification.Missing...), verification.Contradictions...))
+	warnings := uniqueStrings(append(append([]string{}, impactQuality.Missing...), impactQuality.Contradictions...))
 	signalStatus := draft.ConclusionStatus
 	if signalStatus == "neutral_supported" {
 		signalStatus = "neutral"
@@ -1313,9 +1354,9 @@ func (runtime *researchRuntime) finalizeAssetRecommendation(run, event map[strin
 		signalStatus = ternaryString(absInt(score) < 30, "neutral", "directional")
 	}
 	rating := ratingForScore(score)
-	missing := uniqueStrings(append(append([]string{}, criticalMissingInformation(draft.MissingInformation)...), verification.Missing...))
-	conditional := uniqueStrings(append(conditionalMissingInformation(draft.MissingInformation), verification.Conditional...))
-	eligibility := impactEligibility(asset, impactDraft, verification.EvidenceComplete && len(missing) == 0)
+	missing := uniqueStrings(append(append([]string{}, criticalMissingInformation(draft.MissingInformation)...), impactQuality.Missing...))
+	conditional := uniqueStrings(append(conditionalMissingInformation(draft.MissingInformation), impactQuality.Conditional...))
+	eligibility := impactEligibility(asset, impactDraft, impactQuality.EvidenceComplete && len(missing) == 0)
 	impact := map[string]any{
 		"target_type": "tradable_asset", "target_name": asset["name"], "asset": asset,
 		"direction": sign(score), "score": float64(score) / 100, "direction_score": score, "rating": rating,
@@ -1328,7 +1369,7 @@ func (runtime *researchRuntime) finalizeAssetRecommendation(run, event map[strin
 		"model_target_evaluation": draft.TargetEvaluation, "target_evaluation": publicEvaluation, "target_evaluation_score": targetScore,
 		"target_evaluation_version": targetEvaluationVersion, "applied_caps": targetEvaluationCapReasons(publicEvaluation),
 		"trade_status":        ternaryString(boolValue(eligibility["long_eligible"]), "tradeable", "untradeable"),
-		"execution_supported": boolValue(eligibility["execution_supported"]), "impact_verification": map[string]any{"relation": draft.TargetRelation, "relation_verified": impactHasTargetSpecificEvidence(impactDraft, event, evidence), "transmission_continuous": transmissionPathContinuous(impactDraft), "economic_endpoint": impactHasEconomicEndpoint(impactDraft)}, "eligibility": eligibility, "technical_failure": false,
+		"execution_supported": boolValue(eligibility["execution_supported"]), "impact_verification": map[string]any{"relation": draft.TargetRelation, "relation_verified": impactHasTargetSpecificEvidence(impactDraft, event, evidence), "transmission_continuous": transmissionPathContinuous(impactDraft), "economic_endpoint": impactHasEconomicEndpoint(impactDraft), "quality": publicImpactVerification(impactQuality)}, "eligibility": eligibility, "technical_failure": false,
 	}
 	generated := time.Now().UTC()
 	result := map[string]any{
@@ -1344,8 +1385,8 @@ func (runtime *researchRuntime) finalizeAssetRecommendation(run, event map[strin
 		"news_confidence_factors": newsFactors, "claim_status": claimStatus, "rating_confidence_factors": nil, "mapping_distance": distance,
 		"score_source": "llm", "evidence_warnings": uniqueStrings(warnings), "valuation_low": nil, "valuation_high": nil,
 		"thesis":       map[string]any{"summary": draft.Summary, "historical_context": draft.HistoricalContext, "financials_and_growth": draft.FinancialsAndGrowth, "products_or_protocol": draft.ProductsOrProtocol, "competition": draft.Competition, "valuation_or_tokenomics": draft.ValuationOrTokenomics, "catalysts": nonNilStrings(draft.Catalysts), "risks": nonNilStrings(draft.Risks), "invalidation_conditions": nonNilStrings(draft.Invalidation), "evidence_ids": validIDs},
-		"generated_at": iso(generated), "as_of": run["as_of"], "signal_available_at": iso(signalAvailableAt(event, evidence, generated)), "evidence_complete": verification.EvidenceComplete, "structurally_valid": verification.StructurallyValid,
-		"directional_evidence_complete": verification.EvidenceComplete, "direction_verified": verification.StructurallyValid, "signal_status": signalStatus,
+		"generated_at": iso(generated), "as_of": run["as_of"], "signal_available_at": iso(signalAvailableAt(event, evidence, generated)), "evidence_complete": impactQuality.EvidenceComplete, "structurally_valid": impactQuality.StructurallyValid,
+		"directional_evidence_complete": impactQuality.EvidenceComplete, "direction_verified": impactQuality.StructurallyValid, "signal_status": signalStatus,
 		"evidence_strength": evidenceStrength(evidence, validIDs), "mapping_confidence": mappingConfidence(candidate),
 		"claim_assessments": []any{}, "primary_gate_reason": nil, "gate_reasons": []any{},
 		"scoring_version": "llm-direction-v3", "calibration_version": "uncalibrated", "prompt_version": assetResearchPromptVersion,
