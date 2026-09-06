@@ -64,6 +64,10 @@ func TestUpCreatesFreshGoRuntimeSchema(t *testing.T) {
 			t.Fatalf("Go runtime table %s was not created: exists=%v err=%v", table, exists, err)
 		}
 	}
+	var fundamentalSnapshots bool
+	if err := pool.QueryRow(ctx, `SELECT to_regclass($1) IS NOT NULL`, schema+".fundamental_snapshots").Scan(&fundamentalSnapshots); err != nil || !fundamentalSnapshots {
+		t.Fatalf("fundamental_snapshots was not created: exists=%v err=%v", fundamentalSnapshots, err)
+	}
 	for _, index := range legacyORMIndexes {
 		var exists bool
 		if err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_indexes WHERE schemaname=$1 AND indexname=$2)`, schema, index).Scan(&exists); err != nil || !exists {

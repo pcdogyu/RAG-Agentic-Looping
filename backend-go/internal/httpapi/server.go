@@ -37,6 +37,7 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) (*Serve
 	r.Use(requestLog, recoverer, etagMiddleware)
 	r.Get("/go/health", s.goHealth)
 	r.Get("/go/migration-status", s.migrationStatus)
+	r.Get("/go/fundamentals/{assetID}", s.fundamentalsAt)
 	r.Get("/go/research-policy", s.researchPolicyStatus)
 	r.Get("/go/research-policy/evaluations", s.researchPolicyEvaluations)
 	r.Post("/go/research-policy/reviews", s.reviewResearchPolicyImpact)
