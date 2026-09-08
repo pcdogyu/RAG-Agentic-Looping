@@ -33,6 +33,7 @@ import {
   type EventConclusionDetail,
   factSourceGroupDefinitions,
   formatQueueDuration,
+  FundamentalResearchPage,
   ModelInferenceQueuePanel,
   modelQueueRetryRequest,
   modelQueuePanelColumns,
@@ -678,6 +679,7 @@ describe("shared hash navigation", () => {
     expect(routeFromHash("#/source-filter")).toBe("source-filter");
     expect(routeFromHash("#/conclusions")).toBe("conclusions");
     expect(routeFromHash("#/targets")).toBe("targets");
+    expect(routeFromHash("#/fundamental")).toBe("fundamental");
     expect(routeFromHash("#/sources")).toBe("sources");
     expect(routeFromHash("#/asset-universe")).toBe("asset-universe");
     expect(routeFromHash("#/news")).toBe("news");
@@ -693,7 +695,7 @@ describe("shared hash navigation", () => {
 
   it("renders grouped menu links in order and exposes the current page accessibly", () => {
     expect(navigationGroups.left.map((item) => item.route)).toEqual([
-      "home", "source-filter", "sources", "news", "queue", "analysis", "conclusions", "targets",
+      "home", "source-filter", "sources", "news", "queue", "analysis", "conclusions", "targets", "fundamental",
     ]);
     expect(navigationGroups.right.map((item) => item.route)).toEqual([
       "model-logs", "policy", "asset-universe", "search", "weknora",
@@ -703,7 +705,7 @@ describe("shared hash navigation", () => {
     const queueMarkup = renderToStaticMarkup(createElement(TopNavigation, { current: "queue" }));
     const analysisMarkup = renderToStaticMarkup(createElement(TopNavigation, { current: "analysis" }));
     const targetsMarkup = renderToStaticMarkup(createElement(TopNavigation, { current: "targets" }));
-    expect((markup.match(/<a /g) || []).length).toBe(13);
+    expect((markup.match(/<a /g) || []).length).toBe(14);
     expect(markup).toContain('href="#/source-filter" aria-current="page"');
     expect(newsMarkup).toContain('href="#/news" aria-current="page"');
     expect(queueMarkup).toContain('href="#/queue" aria-current="page"');
@@ -721,6 +723,13 @@ describe("shared hash navigation", () => {
     expect(markup.indexOf("资产主数据")).toBeLessThan(markup.indexOf("搜索引擎"));
     expect(markup).toContain("搜索引擎");
     expect(markup).toContain("WeKnora");
+  });
+
+  it("renders the separate fundamental-rating and calibrated-prediction workbench", () => {
+    const markup = renderToStaticMarkup(createElement(FundamentalResearchPage, { apiBase: "" }));
+    expect(markup).toContain("基本面评级与短期预测");
+    expect(markup).toContain("未校准时不显示概率");
+    expect(markup).toContain("缺失字段保持为空，不按零处理");
   });
 });
 

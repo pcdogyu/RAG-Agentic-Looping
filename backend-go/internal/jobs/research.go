@@ -23,6 +23,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/config"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/fundamentals"
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/prediction"
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/rating"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -147,13 +149,24 @@ type claimDraft struct {
 }
 
 type transmissionStepDraft struct {
-	SourceNode         string   `json:"source_node"`
-	Mechanism          string   `json:"mechanism"`
-	TargetNode         string   `json:"target_node"`
-	BasisType          string   `json:"basis_type"`
-	EvidenceIDs        []string `json:"evidence_ids"`
-	ActionIDs          []string `json:"action_ids"`
-	MissingInformation []string `json:"missing_information"`
+	SourceNode         string              `json:"source_node"`
+	Mechanism          string              `json:"mechanism"`
+	TargetNode         string              `json:"target_node"`
+	BasisType          string              `json:"basis_type"`
+	EconomicValue      *economicValueDraft `json:"economic_value,omitempty"`
+	EvidenceIDs        []string            `json:"evidence_ids"`
+	ActionIDs          []string            `json:"action_ids"`
+	MissingInformation []string            `json:"missing_information"`
+}
+
+// economicValueDraft gives numeric transmission claims an explicit accounting
+// meaning. Amount alone is never sufficient evidence.
+type economicValueDraft struct {
+	Amount   *float64 `json:"amount"`
+	Currency string   `json:"currency"`
+	Unit     string   `json:"unit"`
+	Period   string   `json:"period"`
+	Basis    string   `json:"basis"`
 }
 
 // targetRelationDraft deliberately separates a mapped identity from evidence
@@ -488,6 +501,7 @@ func (runtime *researchRuntime) researchAsset(ctx context.Context, job Job) (any
 	validIDs, _ := validEvidenceIDs(draft.EvidenceIDs, evidence)
 	appendAnalysisStep(run, analysisStep("report_verification", ternaryString(verification.EvidenceComplete, "completed", "incomplete"), "go-evidence-check", fmt.Sprintf("证据质量核验完成：有效引用 %d 条、提示 %d 项。", len(validIDs), len(verification.Missing)+len(verification.Contradictions)), map[string]any{"structurally_valid": verification.StructurallyValid, "evidence_complete": verification.EvidenceComplete, "valid_citations": len(validIDs), "warnings": append(append([]string{}, verification.Missing...), verification.Contradictions...)}))
 	recommendation := runtime.finalizeAssetRecommendation(run, event, draft, evidence, verification)
+	runtime.attachPublishedInvestmentOutputs(softCtx, recommendation, assetID, stringValue(run["event_id"]), parseTime(recommendation["signal_available_at"]))
 	run["recommendation"], run["status"], run["error"], run["retryable_reason"] = recommendation, "completed", nil, nil
 	run["completed_at"], run["updated_at"] = iso(time.Now()), iso(time.Now())
 	appendAnalysisStep(run, analysisStep("finalization", "completed", "go-rating-engine", fmt.Sprintf("最终状态 %s，方向分 %+d，新闻可信度 %.0f%%，评级置信度 %.0f%%。", recommendation["signal_status"], int(numberValue(recommendation["score"])), numberValue(recommendation["news_confidence"])*100, numberValue(recommendation["rating_confidence"])*100), map[string]any{"rating": recommendation["rating"], "signal_status": recommendation["signal_status"], "direction_score": recommendation["score"], "news_confidence": recommendation["news_confidence"], "rating_confidence": recommendation["rating_confidence"], "score_source": "llm"}))
@@ -915,6 +929,68 @@ func fundamentalRatingContract(context map[string]any) map[string]any {
 	return map[string]any{"status": "unavailable", "rating": nil, "reason": reason, "financial_data_status": fallbackString(stringValue(context["status"]), "unavailable"), "time_contract_version": fundamentals.TimeContractVersion}
 }
 
+// attachPublishedInvestmentOutputs joins the independently governed rating and
+// prediction tracks back into the event-research result without using the
+// event direction score to manufacture either value. Future-dated state is
+// never attached to a historical or delayed research run.
+func (runtime *researchRuntime) attachPublishedInvestmentOutputs(ctx context.Context, recommendation map[string]any, assetID, eventID string, cutoff time.Time) {
+	if runtime.db == nil || recommendation == nil || strings.TrimSpace(assetID) == "" || cutoff.IsZero() {
+		return
+	}
+	if snapshots, err := rating.NewStore(runtime.db).Current(ctx, assetID); err == nil {
+		if selected := selectPublishedRating(snapshots, cutoff); selected != nil {
+			body, _ := json.Marshal(selected.Result)
+			contract := map[string]any{}
+			_ = json.Unmarshal(body, &contract)
+			contract["effective_at"] = iso(selected.State.EffectiveAt)
+			contract["revision_action"] = selected.Revision.Action
+			contract["reason_codes"] = selected.ReasonCodes
+			contract["evidence_ids"] = selected.EvidenceIDs
+			recommendation["fundamental_rating"] = contract
+		}
+	}
+	if runs, err := prediction.New(runtime.db).List(ctx, assetID, 100); err == nil {
+		if selected := selectPublishedPrediction(runs, eventID, cutoff); selected != nil {
+			var probabilities any
+			if selected.Status == "calibrated" && selected.Probability != nil {
+				probabilities = map[string]any{"up": *selected.Probability, "status": "calibrated"}
+			}
+			recommendation["short_term_prediction"] = map[string]any{
+				"status": selected.Status, "probability": selected.Probability, "probabilities": probabilities,
+				"model_version": selected.ModelVersion, "calibration_version": fallbackString(selected.CalibrationVersion, "uncalibrated"),
+				"horizon_sessions": selected.HorizonSessions, "signal_available_at": iso(selected.SignalAvailableAt),
+				"event_id": selected.EventID, "reason": selected.ExclusionReason,
+			}
+		}
+	}
+}
+
+func selectPublishedRating(values []rating.Snapshot, cutoff time.Time) *rating.Snapshot {
+	for index := range values {
+		if values[index].State != nil && !values[index].State.EffectiveAt.After(cutoff) {
+			return &values[index]
+		}
+	}
+	return nil
+}
+
+func selectPublishedPrediction(values []prediction.Run, eventID string, cutoff time.Time) *prediction.Run {
+	var assetWide *prediction.Run
+	for index := range values {
+		item := &values[index]
+		if item.SignalAvailableAt.After(cutoff) {
+			continue
+		}
+		if eventID == "" || item.EventID == eventID {
+			return item
+		}
+		if item.EventID == "" && assetWide == nil {
+			assetWide = item
+		}
+	}
+	return assetWide
+}
+
 func (runtime *researchRuntime) callResearchModel(ctx context.Context, entityID uuid.UUID, entityType, operation, system, prompt string, schema map[string]any, instanceID, profile, routeReason string, target any) error {
 	messages := []map[string]string{{"role": "system", "content": system}, {"role": "user", "content": prompt + "\n\n只返回符合format JSON Schema的JSON。"}}
 	matchedKeywords := []string{}
@@ -1271,9 +1347,13 @@ func claimsSchema() map[string]any {
 }
 
 func transmissionStepsSchema() map[string]any {
+	economicValue := map[string]any{"type": []string{"object", "null"}, "additionalProperties": false, "required": []string{"amount", "currency", "unit", "period", "basis"}, "properties": map[string]any{
+		"amount": map[string]any{"type": []string{"number", "null"}}, "currency": map[string]any{"type": "string"}, "unit": map[string]any{"type": "string"},
+		"period": map[string]any{"type": "string"}, "basis": map[string]any{"type": "string", "enum": []string{"stock", "flow", "total", "incremental", "revenue", "profit", "cost", "cash_flow"}},
+	}}
 	properties := map[string]any{
 		"source_node": map[string]any{"type": "string"}, "mechanism": map[string]any{"type": "string"}, "target_node": map[string]any{"type": "string"},
-		"basis_type": map[string]any{"type": "string", "enum": []string{"fact", "inference"}}, "evidence_ids": stringArraySchema(), "action_ids": stringArraySchema(), "missing_information": stringArraySchema(),
+		"basis_type": map[string]any{"type": "string", "enum": []string{"fact", "inference"}}, "economic_value": economicValue, "evidence_ids": stringArraySchema(), "action_ids": stringArraySchema(), "missing_information": stringArraySchema(),
 	}
 	return map[string]any{"type": "array", "minItems": 1, "maxItems": 3, "items": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"source_node", "mechanism", "target_node", "basis_type", "evidence_ids", "action_ids", "missing_information"}, "properties": properties}}
 }

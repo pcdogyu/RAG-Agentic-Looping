@@ -24,21 +24,17 @@ const (
 )
 
 type operationsRuntime struct {
-	cfg      config.Config
-	db       *pgxpool.Pool
-	redis    *redis.Client
-	store    *Store
-	client   *http.Client
-	rollback func(context.Context) error
+	cfg    config.Config
+	db     *pgxpool.Pool
+	redis  *redis.Client
+	store  *Store
+	client *http.Client
 }
 
 func NewOperationsHandlers(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) map[string]Handler {
 	runtime := &operationsRuntime{
 		cfg: cfg, db: db, redis: redisClient, store: NewStore(db),
 		client: &http.Client{Timeout: 3 * time.Second},
-	}
-	runtime.rollback = func(ctx context.Context) error {
-		return rollbackLastKnownGood(ctx, cfg, redisClient)
 	}
 	return map[string]Handler{
 		dispatchEvolutionTask: runtime.dispatchEvolution,
@@ -93,10 +89,11 @@ func (runtime *operationsRuntime) selectCodeInstance(ctx context.Context) string
 }
 
 type healthSnapshot struct {
-	FailureRate float64 `json:"failure_rate"`
-	Samples     int64   `json:"samples"`
-	DataStale   bool    `json:"data_stale"`
-	RolledBack  bool    `json:"rolled_back"`
+	FailureRate    float64 `json:"failure_rate"`
+	Samples        int64   `json:"samples"`
+	DataStale      bool    `json:"data_stale"`
+	RolledBack     bool    `json:"rolled_back"`
+	ReviewRequired bool    `json:"review_required"`
 }
 
 func calculateHealth(successes, failures int64, latestNews, now time.Time, scanInterval time.Duration) healthSnapshot {
@@ -131,15 +128,18 @@ func (runtime *operationsRuntime) monitorHealth(ctx context.Context, _ Job) (any
 		latestNews = *latestNewsValue
 	}
 	snapshot := calculateHealth(successes, failures, latestNews, time.Now().UTC(), runtime.cfg.ScanInterval)
-	if snapshot.unhealthy() && runtime.cfg.EvolutionEnabled && runtime.cfg.EvolutionAutoMerge {
-		if err := runtime.rollback(ctx); err != nil {
-			runtime.notify(ctx, "系统健康门禁触发，但自动回滚失败；请人工检查。")
-		} else {
-			snapshot.RolledBack = true
-			runtime.notify(ctx, fmt.Sprintf("系统已自动回滚：任务失败率 %.1f%%，数据过期：%s", snapshot.FailureRate*100, ternary(snapshot.DataStale, "是", "否")))
-		}
+	snapshot = applyEvolutionHealthPolicy(snapshot, runtime.cfg.EvolutionEnabled)
+	if snapshot.ReviewRequired {
+		runtime.notify(ctx, fmt.Sprintf("系统健康门禁触发，需要人工检查：任务失败率 %.1f%%，数据过期：%s", snapshot.FailureRate*100, ternary(snapshot.DataStale, "是", "否")))
 	}
 	return snapshot, nil
+}
+
+func applyEvolutionHealthPolicy(snapshot healthSnapshot, evolutionEnabled bool) healthSnapshot {
+	if snapshot.unhealthy() && evolutionEnabled {
+		snapshot.ReviewRequired = true
+	}
+	return snapshot
 }
 
 func (runtime *operationsRuntime) notify(ctx context.Context, message string) bool {

@@ -241,6 +241,11 @@ func verifyEventDraft(draft *eventResearchDraft, event map[string]any, evidence 
 			if len(criticalMissingInformation(step.MissingInformation)) > 0 {
 				directionComplete = false
 			}
+			if numericMissing := validateEconomicValue(step.EconomicValue, step.BasisType, step.EvidenceIDs, evidence); len(numericMissing) > 0 {
+				directionComplete = false
+				verification.Missing = append(verification.Missing, numericMissing...)
+				step.MissingInformation = append(step.MissingInformation, numericMissing...)
+			}
 			appendModelMissing(&verification, step.MissingInformation)
 			item.EvidenceIDs = append(item.EvidenceIDs, step.EvidenceIDs...)
 			item.Missing = append(item.Missing, step.MissingInformation...)
@@ -395,6 +400,54 @@ func verifyEventDraft(draft *eventResearchDraft, event map[string]any, evidence 
 	verification.Contradictions = uniqueStrings(verification.Contradictions)
 	verification.EvidenceComplete = verification.StructurallyValid && allComplete && len(verification.Missing) == 0 && len(verification.Contradictions) == 0
 	return verification
+}
+
+func validateEconomicValue(value *economicValueDraft, basisType string, evidenceIDs []string, evidence []researchEvidence) []string {
+	if value == nil {
+		return nil
+	}
+	missing := []string{}
+	if value.Amount == nil || math.IsNaN(pointerFloat(value.Amount)) || math.IsInf(pointerFloat(value.Amount), 0) {
+		missing = append(missing, "economic_value.amount")
+	}
+	if strings.TrimSpace(value.Currency) == "" {
+		missing = append(missing, "economic_value.currency")
+	}
+	if strings.TrimSpace(value.Unit) == "" {
+		missing = append(missing, "economic_value.unit")
+	}
+	if strings.TrimSpace(value.Period) == "" {
+		missing = append(missing, "economic_value.period")
+	}
+	if !containsString([]string{"stock", "flow", "total", "incremental", "revenue", "profit", "cost", "cash_flow"}, value.Basis) {
+		missing = append(missing, "economic_value.basis")
+	}
+	// A value presented as fact must match at least one cited structured value;
+	// otherwise it is an unsupported numeric assertion. Inferences may remain
+	// scenario values, but still require complete units and period semantics.
+	if basisType == "fact" && value.Amount != nil {
+		allowed, matched := stringSet(evidenceIDs), false
+		for _, item := range evidence {
+			if !allowed[item.ID] || item.NumericValue == nil {
+				continue
+			}
+			if math.Abs(*item.NumericValue-*value.Amount) <= math.Max(1e-9, math.Abs(*value.Amount)*1e-9) && strings.EqualFold(strings.TrimSpace(item.NumericUnit), strings.TrimSpace(value.Unit)) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			missing = append(missing, "economic_value.source_mismatch")
+		}
+	}
+	return uniqueStrings(missing)
+}
+
+func pointerFloat(value *float64) float64 {
+	if value == nil {
+		return math.NaN()
+	}
+	return *value
 }
 
 type evidenceTimeCheck struct {

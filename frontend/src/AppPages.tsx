@@ -4,7 +4,7 @@ import AnalysisPage, { type AnalysisLog } from "./AnalysisPage";
 import ModelLogsPage from "./ModelLogs";
 import { TargetTrendSummary, type TargetTrend } from "./TargetTrendSummary";
 
-export type AppRoute = "home" | "source-filter" | "sources" | "asset-universe" | "news" | "queue" | "analysis" | "conclusions" | "targets" | "model-logs" | "policy" | "search" | "weknora";
+export type AppRoute = "home" | "source-filter" | "sources" | "asset-universe" | "news" | "queue" | "analysis" | "conclusions" | "targets" | "fundamental" | "model-logs" | "policy" | "search" | "weknora";
 
 export const navigationGroups: Record<"left" | "right", Array<{ route: AppRoute; label: string }>> = {
   left: [
@@ -16,6 +16,7 @@ export const navigationGroups: Record<"left" | "right", Array<{ route: AppRoute;
     { route: "analysis", label: "分析链路" },
     { route: "conclusions", label: "结论" },
     { route: "targets", label: "标的" },
+    { route: "fundamental", label: "基本面与预测" },
   ],
   right: [
     { route: "model-logs", label: "模型日志" },
@@ -1456,8 +1457,8 @@ export type Recommendation = {
   event_signal?: { status: string; direction_score: number; rating: string; signal_available_at?: string };
   event_signal_state?: RatingState;
   evidence_quality?: { score: number; status: string; rule_version: string };
-  fundamental_rating?: { status: "unavailable"; rating: null; reason: string };
-  short_term_prediction?: { status: "uncalibrated"; probabilities: null; calibration: null; reason: string };
+  fundamental_rating?: { status: string; rating: string | null; reason?: string; policy_version?: string; effective_at?: string };
+  short_term_prediction?: { status: string; probability?: number | null; probabilities?: { up?: number; status?: string } | null; calibration?: unknown; calibration_version?: string; reason?: string };
   thesis: {
     summary: string;
     historical_context: string;
@@ -4030,11 +4031,94 @@ export function ResearchPolicyPage({ apiBase }: { apiBase: string }) {
       <span>人工复核<strong>{status?.reviewed_impacts ?? 0} / {status?.minimum_reviews ?? 100}</strong></span>
       <span>批准状态<strong>{status?.approved ? "已批准" : "待批准"}</strong></span>
     </div>
-    <p className="score-explanation">版本 {status?.version || "p0-evidence-v1"} · 概率预测为未校准，不显示数值；基本面评级尚未建立。</p>
+    <p className="score-explanation">版本 {status?.version || "p0-evidence-v1"} · 事件影响分不等于投资评级；短期概率仅在独立校准有效时显示。</p>
     <AdminUnlock token={token} onToken={setToken} />
     {token && <div className="integration-editor"><label>复核人<input value={reviewer} onChange={(event) => setReviewer(event.target.value)} placeholder="姓名或工号" /></label><button type="button" disabled={!status?.ready_for_approval} onClick={() => void approve()}>批准切换资格</button><small>批准只记录资格；仍需将服务配置显式改为 enforce 才会启用。</small></div>}
     {message && <div className="page-message">{message}</div>}
     {loading ? <div className="page-empty">正在读取影子评估…</div> : <div className="conclusion-list">{items.length === 0 ? <div className="page-empty">暂无可人工复核的有效定向影响。</div> : items.map((item) => <article className="conclusion-card" key={item.id}><span>{new Date(item.created_at).toLocaleString("zh-CN")} · {item.symbol || item.asset_id || item.event_id || "事件"}</span><h3>{item.headline || item.asset_name || "事件信号"}</h3><p>事件信号：{item.event_signal?.rating || "观望"} · {item.event_signal?.direction_score ?? 0}；证据状态：{item.evidence_quality?.status || "unknown"} · 质量 {Math.round((item.evidence_quality?.score || 0) * 100)}%</p>{item.evidence?.length > 0 && <details><summary>证据快照（最多 5 条）</summary>{item.evidence.map((evidence, index) => <p key={index}>{evidence.claim || evidence.excerpt || "证据"}{evidence.source_name ? ` · ${evidence.source_name}` : ""}</p>)}</details>}{item.decision ? <small>已由 {item.reviewer || "管理员"} 复核：{item.decision === "accepted" ? "接受" : "驳回"}</small> : token && <div><button type="button" onClick={() => void review(item.id, "accepted")}>接受</button><button type="button" onClick={() => void review(item.id, "rejected")}>驳回</button></div>}</article>)}</div>}
+  </section>;
+}
+
+type FundamentalBundle = {
+  fundamentals?: { items?: Array<{ id?: string; statement_type?: string; available_at?: string; source?: { provider?: string; url?: string } }> };
+  forecasts?: { items?: Array<{ id?: string; model_version?: string; status?: string; as_of?: string; assumptions?: unknown[] }> };
+  valuations?: { items?: Array<{ id?: string; model_version?: string; status?: string; as_of?: string; result?: { status?: string; reason?: string; currency?: string; range?: { low?: number; high?: number } } }> };
+  ratings?: { items?: Array<{
+    result?: { status?: string; rating?: string; reason?: string; horizon_days?: number; benchmark_id?: string; policy_version?: string; valuation_run_id?: string };
+    state?: { effective_at?: string };
+    revision?: { previous_rating?: string; current_rating?: string; action?: string; reason?: string };
+    reason_codes?: string[];
+    changed_assumptions?: Record<string, unknown>;
+    evidence_ids?: string[];
+  }> };
+  predictions?: { items?: Array<{ status?: string; probability?: number; signal_available_at?: string; horizon_sessions?: number; model_version?: string; calibration_version?: string; exclusion_reason?: string }> };
+};
+
+export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
+  const [assetID, setAssetID] = useState("equity:XNAS:AAPL");
+  const [bundle, setBundle] = useState<FundamentalBundle>({});
+  const [message, setMessage] = useState("输入规范 asset_id 后读取；缺失字段保持为空，不按零处理。");
+  const [loading, setLoading] = useState(false);
+  async function load(event?: FormEvent) {
+    event?.preventDefault();
+    const canonical = assetID.trim();
+    if (!canonical) return;
+    setLoading(true); setMessage("");
+    const path = encodeURIComponent(canonical);
+    const endpoints = ["fundamentals", "forecasts", "valuations", "ratings", "predictions"] as const;
+    try {
+      const responses = await Promise.all(endpoints.map((name) => fetch(`${apiBase}/go/${name}/${path}?limit=20`)));
+      const failed = responses.find((response) => !response.ok);
+      if (failed) throw new Error(`HTTP ${failed.status}`);
+      const values = await Promise.all(responses.map((response) => response.json()));
+      setBundle(Object.fromEntries(endpoints.map((name, index) => [name, values[index]])) as FundamentalBundle);
+    } catch (error) {
+      setMessage(`读取失败：${error instanceof Error ? error.message : "未知错误"}`);
+    } finally { setLoading(false); }
+  }
+  const rating = bundle.ratings?.items?.[0];
+  const prediction = bundle.predictions?.items?.[0];
+  const valuation = bundle.valuations?.items?.[0];
+  const forecast = bundle.forecasts?.items?.[0];
+  const valuationRange = valuation?.result?.range;
+  const changedAssumptions = Object.entries(rating?.changed_assumptions || {});
+  return <section className="app-page fundamental-page">
+    <PageHeading eyebrow="FUNDAMENTAL & SIGNAL WORKBENCH" title="基本面评级与短期预测" copy="事件信号、基本面评级和固定期限概率彼此独立；只有通过独立校准的概率才显示数值。" />
+    <form className="page-toolbar" onSubmit={load}>
+      <input aria-label="规范资产 ID" value={assetID} onChange={(event) => setAssetID(event.target.value)} />
+      <button type="submit" disabled={loading}>{loading ? "读取中…" : "读取"}</button>
+    </form>
+    {message && <div className="page-message">{message}</div>}
+    <div className="metric-grid">
+      <article><span>财务快照</span><strong>{bundle.fundamentals?.items?.length ?? 0}</strong><small>严格按 available_at 截止</small></article>
+      <article><span>预测版本</span><strong>{bundle.forecasts?.items?.length ?? 0}</strong><small>假设与证据可追溯</small></article>
+      <article><span>估值运行</span><strong>{bundle.valuations?.items?.length ?? 0}</strong><small>情景区间不是概率</small></article>
+      <article><span>基本面评级</span><strong>{rating?.result?.rating || rating?.result?.status || "不可用"}</strong><small>{rating?.result?.reason || rating?.state?.effective_at || "等待完整输入"}</small></article>
+      <article><span>短期预测</span><strong>{prediction?.status || "不可用"}</strong><small>{prediction?.status === "calibrated" && typeof prediction.probability === "number" ? `${Math.round(prediction.probability * 100)}%` : "未校准时不显示概率"}</small></article>
+    </div>
+    <div className="conclusion-list">
+      <article className="conclusion-card">
+        <span>基本面预测与估值</span>
+        <h3>{valuationRange && typeof valuationRange.low === "number" && typeof valuationRange.high === "number" ? `${valuationRange.low.toFixed(2)}—${valuationRange.high.toFixed(2)} ${valuation?.result?.currency || ""}` : valuation?.result?.reason || "暂无可复算估值区间"}</h3>
+        <p>估值模型：{valuation?.model_version || "不可用"} · 预测模型：{forecast?.model_version || "不可用"}</p>
+        <small>估值运行 {valuation?.id || "—"}；预测版本 {forecast?.id || "—"}；时点 {valuation?.as_of || forecast?.as_of || "—"}</small>
+      </article>
+      <article className="conclusion-card">
+        <span>基本面评级修订</span>
+        <h3>{rating?.revision?.previous_rating || "未评级"} → {rating?.revision?.current_rating || rating?.result?.rating || "不可用"}</h3>
+        <p>{rating?.revision?.reason || rating?.result?.reason || "等待评级输入"}</p>
+        <small>政策 {rating?.result?.policy_version || "—"} · 期限 {rating?.result?.horizon_days ?? "—"} 天 · 基准 {rating?.result?.benchmark_id || "—"}</small>
+        {rating?.reason_codes && rating.reason_codes.length > 0 && <p>原因码：{rating.reason_codes.join("、")}</p>}
+        {changedAssumptions.length > 0 && <details><summary>假设变化</summary>{changedAssumptions.map(([name, value]) => <p key={name}>{name}：{JSON.stringify(value)}</p>)}</details>}
+        {rating?.evidence_ids && rating.evidence_ids.length > 0 && <details><summary>证据 ID</summary><p>{rating.evidence_ids.join("、")}</p></details>}
+      </article>
+      <article className="conclusion-card">
+        <span>固定期限短期预测</span>
+        <h3>{prediction?.status === "calibrated" && typeof prediction.probability === "number" ? `上涨概率 ${Math.round(prediction.probability * 100)}%` : "概率不可用"}</h3>
+        <p>期限 {prediction?.horizon_sessions ?? "—"} 个交易日 · 模型 {prediction?.model_version || "—"}</p>
+        <small>校准版本 {prediction?.calibration_version || "无"} · 信号可用时间 {prediction?.signal_available_at || "—"}{prediction?.exclusion_reason ? ` · ${prediction.exclusion_reason}` : ""}</small>
+      </article>
+    </div>
   </section>;
 }
 
@@ -4057,6 +4141,7 @@ export function RoutedPage({
   if (route === "source-filter") return <SourceFilterPage apiBase={apiBase} />;
   if (route === "conclusions") return <ConclusionsPage apiBase={apiBase} />;
   if (route === "targets") return <ChangedTargetsPage apiBase={apiBase} />;
+  if (route === "fundamental") return <FundamentalResearchPage apiBase={apiBase} />;
   if (route === "sources") return <SourcesPage apiBase={apiBase} />;
   if (route === "asset-universe") return <AssetUniversePage apiBase={apiBase} />;
   if (route === "news") return <NewsPage apiBase={apiBase} />;

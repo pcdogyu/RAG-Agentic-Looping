@@ -84,6 +84,15 @@ func TestNormalizeOutcomePricesAcceptsProviderShapesAndDeduplicates(t *testing.T
 	}
 }
 
+func TestNormalizeOutcomePricesPrefersAdjustedClose(t *testing.T) {
+	boundary := time.Date(2026, 1, 4, 0, 0, 0, 0, time.UTC)
+	payload := map[string]any{"items": []any{map[string]any{"date": "2026-01-02", "close": 50.0, "adjClose": 100.0}}}
+	points := normalizeOutcomePrices(payload, boundary)
+	if len(points) != 1 || points[0].Close != 100 || !points[0].Adjusted {
+		t.Fatalf("points=%#v", points)
+	}
+}
+
 func TestOutcomeWindowDoesNotUseSameDayDateOnlyClose(t *testing.T) {
 	start := time.Date(2026, 1, 2, 10, 8, 0, 0, time.UTC)
 	points := []outcomePricePoint{

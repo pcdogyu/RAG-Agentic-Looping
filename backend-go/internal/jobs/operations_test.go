@@ -44,6 +44,14 @@ func TestOperationsScheduleMatchesLegacyCadenceWithoutImmediateEvolution(t *test
 	}
 }
 
+func TestUnhealthySnapshotRequiresReviewWithoutAutomaticRollback(t *testing.T) {
+	now := time.Now().UTC()
+	snapshot := applyEvolutionHealthPolicy(calculateHealth(80, 20, now, now, time.Minute), true)
+	if !snapshot.ReviewRequired || snapshot.RolledBack {
+		t.Fatalf("unhealthy evolution must require review without rollback: %+v", snapshot)
+	}
+}
+
 func TestCalculateHealthPreservesLegacyThresholds(t *testing.T) {
 	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 	fresh := now.Add(-29 * time.Minute)

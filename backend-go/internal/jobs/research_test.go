@@ -14,12 +14,59 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/config"
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/prediction"
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/rating"
 )
 
 func TestResearchHandlersCoverLaneManifest(t *testing.T) {
 	handlers := NewResearchHandlers(config.Config{}, nil, nil)
 	if handlers[researchEventTask] == nil || handlers[researchAssetTask] == nil {
 		t.Fatalf("research handlers are incomplete: %#v", handlers)
+	}
+}
+
+func TestEconomicValueRequiresCompleteAccountingSemantics(t *testing.T) {
+	amount := 42.05
+	missing := validateEconomicValue(&economicValueDraft{Amount: &amount, Currency: "USD", Unit: "millions", Period: "FY2026", Basis: "incremental"}, "fact", []string{"ev-1"}, []researchEvidence{{ID: "ev-1", NumericValue: &amount, NumericUnit: "millions"}})
+	if len(missing) != 0 {
+		t.Fatalf("valid numeric evidence rejected: %v", missing)
+	}
+	missing = validateEconomicValue(&economicValueDraft{Amount: &amount, Basis: "total"}, "inference", nil, nil)
+	for _, expected := range []string{"economic_value.currency", "economic_value.unit", "economic_value.period"} {
+		if !containsString(missing, expected) {
+			t.Fatalf("missing %s in %v", expected, missing)
+		}
+	}
+}
+
+func TestEconomicValueFactMustMatchCitedStructuredEvidence(t *testing.T) {
+	amount, source := 42.05, 42.5
+	missing := validateEconomicValue(&economicValueDraft{Amount: &amount, Currency: "USD", Unit: "millions", Period: "Q2-2026", Basis: "revenue"}, "fact", []string{"ev-1"}, []researchEvidence{{ID: "ev-1", NumericValue: &source, NumericUnit: "millions"}})
+	if !containsString(missing, "economic_value.source_mismatch") {
+		t.Fatalf("unsupported numeric fact was accepted: %v", missing)
+	}
+}
+
+func TestPublishedInvestmentOutputsRespectCutoffAndEvent(t *testing.T) {
+	cutoff := time.Date(2026, 9, 8, 4, 0, 0, 0, time.UTC)
+	ratings := []rating.Snapshot{
+		{State: &rating.State{EffectiveAt: cutoff.Add(time.Minute), Rating: "strong_buy"}},
+		{State: &rating.State{EffectiveAt: cutoff.Add(-time.Minute), Rating: "hold"}},
+	}
+	selectedRating := selectPublishedRating(ratings, cutoff)
+	if selectedRating == nil || selectedRating.State.Rating != "hold" {
+		t.Fatalf("future rating was selected: %#v", selectedRating)
+	}
+	probability := .7
+	predictions := []prediction.Run{
+		{EventID: "event-other", SignalAvailableAt: cutoff.Add(-time.Minute), Status: "calibrated", Probability: &probability},
+		{SignalAvailableAt: cutoff.Add(-time.Minute), Status: "calibrated", Probability: &probability},
+		{EventID: "event-current", SignalAvailableAt: cutoff.Add(time.Minute), Status: "calibrated", Probability: &probability},
+		{EventID: "event-current", SignalAvailableAt: cutoff.Add(-time.Minute), Status: "uncalibrated"},
+	}
+	selectedPrediction := selectPublishedPrediction(predictions, "event-current", cutoff)
+	if selectedPrediction == nil || selectedPrediction.Status != "uncalibrated" {
+		t.Fatalf("future or unrelated prediction was selected: %#v", selectedPrediction)
 	}
 }
 

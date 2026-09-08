@@ -64,7 +64,7 @@ func TestUpCreatesFreshGoRuntimeSchema(t *testing.T) {
 			t.Fatalf("Go runtime table %s was not created: exists=%v err=%v", table, exists, err)
 		}
 	}
-	for _, table := range []string{"fundamental_snapshots", "consensus_snapshots", "management_guidance_snapshots", "forecast_versions", "event_assumption_links"} {
+	for _, table := range []string{"fundamental_snapshots", "consensus_snapshots", "management_guidance_snapshots", "forecast_versions", "event_assumption_links", "valuation_runs", "fundamental_rating_states", "fundamental_rating_revisions", "rating_invalidation_rules", "prediction_models", "probability_calibrations", "prediction_runs", "outcome_records"} {
 		var exists bool
 		if err := pool.QueryRow(ctx, `SELECT to_regclass($1) IS NOT NULL`, schema+"."+table).Scan(&exists); err != nil || !exists {
 			t.Fatalf("%s was not created: exists=%v err=%v", table, exists, err)

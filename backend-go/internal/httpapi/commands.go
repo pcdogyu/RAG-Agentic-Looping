@@ -639,6 +639,9 @@ func (s *Server) proposeEvolution(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) executeEvolution(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
 	candidateID := chi.URLParam(r, "candidateID")
 	if _, err := uuid.Parse(candidateID); err != nil {
 		writeError(w, http.StatusUnprocessableEntity, "invalid candidate_id")
@@ -650,6 +653,24 @@ func (s *Server) executeEvolution(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	candidate, _ := decodeDefault(body, map[string]any{}).(map[string]any)
+	approval := struct {
+		ApprovedBy string `json:"approved_by"`
+	}{}
+	if !decodeJSONBody(w, r, &approval) {
+		return
+	}
+	approval.ApprovedBy = strings.TrimSpace(approval.ApprovedBy)
+	if approval.ApprovedBy == "" {
+		writeError(w, http.StatusUnprocessableEntity, "approved_by is required")
+		return
+	}
+	candidate["approved_by"], candidate["approved_at"], candidate["status"] = approval.ApprovedBy, time.Now().UTC(), "approved"
+	approvedBody, _ := json.Marshal(candidate)
+	tag, err := s.db.Exec(r.Context(), `UPDATE evolution_candidates SET status='approved',payload=$2 WHERE id=$1 AND status='proposed'`, candidateID, approvedBody)
+	if err != nil || tag.RowsAffected() != 1 {
+		writeError(w, http.StatusConflict, "evolution candidate approval failed")
+		return
+	}
 	background := true
 	if raw := r.URL.Query().Get("background"); raw != "" {
 		parsed, err := strconv.ParseBool(raw)
@@ -666,7 +687,7 @@ func (s *Server) executeEvolution(w http.ResponseWriter, r *http.Request) {
 	}
 	taskID := uuid.NewString()
 	s.trackModelTask(r.Context(), "code", taskID, "code_evolution", candidateID, stringValue(candidate["hypothesis"]), stringValue(candidate["target_metric"]), "manual", instanceID)
-	if err = s.publishEvolution(r.Context(), "market_loop.execute_evolution", taskID, []any{candidateID}, map[string]any{"model_instance_id": instanceID}, 5, "evolution-candidate:"+candidateID); err != nil {
+	if err = s.publishEvolution(r.Context(), "market_loop.execute_evolution", taskID, []any{candidateID}, map[string]any{"model_instance_id": instanceID, "approved_by": approval.ApprovedBy}, 5, "evolution-candidate:"+candidateID); err != nil {
 		writeError(w, http.StatusServiceUnavailable, "evolution execution could not be queued")
 		return
 	}

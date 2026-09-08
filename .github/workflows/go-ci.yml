@@ -44,7 +44,7 @@ jobs:
       - name: Run frozen Go evaluation gates
         run: |
           go run ./cmd/evaluation fixed-evidence --root ..
-          go run ./cmd/evaluation walk-forward --root ..
+          go run ./cmd/evaluation chronological_holdout --root ..
           go run ./cmd/evaluation probability-calibration --root ..
           go run ./cmd/evaluation research-quality --root ..
           go run ./cmd/evaluation compare-models --root ..
@@ -88,6 +88,8 @@ jobs:
           cache-dependency-path: backend-go/go.sum
       - name: Verify fresh and legacy migration contracts
         run: go test -race ./internal/migrate -run 'TestUp(Create|Upgrade)' -count=1 -v
+      - name: Verify prediction model and calibration lifecycle against PostgreSQL
+        run: go test -race ./internal/prediction -run '^TestPredictionLifecycleAgainstIsolatedPostgres$' -count=1 -v
       - name: Verify recent research filtering against PostgreSQL
         env:
           MAPPING_TEST_ISOLATED: "1"

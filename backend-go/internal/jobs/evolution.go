@@ -35,13 +35,16 @@ var (
 		regexp.MustCompile(`(?i)\b[0-9a-f]{32}\b`),
 	}
 	evolutionProtectedPaths = map[string]bool{
-		"backend-go/Dockerfile.evolution":             true,
-		"backend-go/cmd/evaluation/main.go":           true,
-		"backend-go/internal/jobs/evaluation.go":      true,
-		"backend-go/internal/jobs/evaluation_test.go": true,
-		"backend-go/internal/jobs/evolution.go":       true,
-		"backend-go/internal/jobs/evolution_test.go":  true,
+		"backend-go/Dockerfile.evolution":              true,
+		"backend-go/cmd/evaluation/main.go":            true,
+		"backend-go/internal/jobs/evaluation.go":       true,
+		"backend-go/internal/jobs/evaluation_test.go":  true,
+		"backend-go/internal/jobs/evolution.go":        true,
+		"backend-go/internal/jobs/evolution_test.go":   true,
+		"backend-go/internal/jobs/p0_policy.go":        true,
+		"backend-go/internal/jobs/research_quality.go": true,
 	}
+	evolutionProtectedPrefixes = []string{"backend-go/internal/calibration/", "backend-go/internal/evaluation/", "backend-go/internal/governance/", "backend-go/internal/rating/"}
 )
 
 type evolutionRuntime struct {
@@ -127,21 +130,10 @@ func (runtime *evolutionRuntime) runFailures(ctx context.Context, job Job, failu
 	if err != nil {
 		return nil, runtime.failTask(ctx, job, source, err)
 	}
-	runtime.updateTask(ctx, job, "testing", stringValue(candidate["id"]), stringValue(candidate["hypothesis"]), stringValue(candidate["target_metric"]), source, candidateMetrics(candidate))
-	result, err := runtime.executeCandidate(ctx, candidate)
-	if err != nil {
-		return nil, runtime.failTask(ctx, job, source, err)
-	}
-	status := stringValue(result["status"])
-	errorValue := ""
-	if status == "rejected" || status == "rolled_back" {
-		errorValue = "代码演进候选被拒绝或回滚。"
-	}
-	runtime.updateTask(ctx, job, status, stringValue(result["id"]), stringValue(result["hypothesis"]), stringValue(result["target_metric"]), source, candidateMetrics(result))
-	if errorValue != "" {
-		runtime.setTaskError(ctx, job.ID.String(), errorValue)
-	}
-	return result, nil
+	// Generation stops at a candidate patch. Execution always requires a later
+	// authenticated human approval through the explicit execute endpoint.
+	runtime.updateTask(ctx, job, "proposed", stringValue(candidate["id"]), stringValue(candidate["hypothesis"]), stringValue(candidate["target_metric"]), source, candidateMetrics(candidate))
+	return candidate, nil
 }
 
 func (runtime *evolutionRuntime) executeEvolution(ctx context.Context, job Job) (any, error) {
@@ -163,6 +155,10 @@ func (runtime *evolutionRuntime) executeEvolution(ctx context.Context, job Job) 
 	if err != nil {
 		return nil, runtime.failTask(ctx, job, "manual", fmt.Errorf("unknown evolution candidate: %s", candidateID))
 	}
+	approvedBy := strings.TrimSpace(stringValue(decodeEnvelopeKwargs(job.Payload)["approved_by"]))
+	if !validEvolutionApproval(candidate, approvedBy) {
+		return nil, runtime.failTask(ctx, job, "manual", errors.New("evolution candidate requires matching human approval"))
+	}
 	runtime.updateTask(ctx, job, "testing", candidateID.String(), stringValue(candidate["hypothesis"]), stringValue(candidate["target_metric"]), "manual", candidateMetrics(candidate))
 	result, err := runtime.executeCandidate(ctx, candidate)
 	if err != nil {
@@ -171,6 +167,12 @@ func (runtime *evolutionRuntime) executeEvolution(ctx context.Context, job Job) 
 	status := stringValue(result["status"])
 	runtime.updateTask(ctx, job, status, candidateID.String(), stringValue(result["hypothesis"]), stringValue(result["target_metric"]), "manual", candidateMetrics(result))
 	return result, nil
+}
+
+func validEvolutionApproval(candidate map[string]any, approvedBy string) bool {
+	return strings.TrimSpace(approvedBy) != "" &&
+		strings.TrimSpace(approvedBy) == strings.TrimSpace(stringValue(candidate["approved_by"])) &&
+		stringValue(candidate["status"]) == "approved"
 }
 
 func (runtime *evolutionRuntime) propose(ctx context.Context, failures []any, instanceID string) (map[string]any, error) {
@@ -271,6 +273,9 @@ func (runtime *evolutionRuntime) executeCandidate(ctx context.Context, candidate
 	if !runtime.cfg.EvolutionEnabled {
 		return nil, errors.New("EVOLUTION_ENABLED is false")
 	}
+	if strings.TrimSpace(stringValue(candidate["approved_by"])) == "" || stringValue(candidate["status"]) != "approved" {
+		return nil, errors.New("evolution candidate is not human-approved")
+	}
 	if strings.TrimSpace(runtime.root) == "" || runtime.root == "/" {
 		return nil, errors.New("invalid evolution repository root")
 	}
@@ -290,7 +295,6 @@ func (runtime *evolutionRuntime) executeCandidate(ctx context.Context, candidate
 	if _, err := runtime.run(ctx, 120*time.Second, "git", "switch", "-c", branch); err != nil {
 		return nil, err
 	}
-	rollbackTag := ""
 	defer func() {
 		cleanCtx := context.WithoutCancel(ctx)
 		current, _ := runtime.run(cleanCtx, 30*time.Second, "git", "branch", "--show-current")
@@ -331,26 +335,9 @@ func (runtime *evolutionRuntime) executeCandidate(ctx context.Context, candidate
 	if _, err := runtime.run(ctx, 120*time.Second, "git", "commit", "-m", "evolution: "+truncateRunes(stringValue(candidate["hypothesis"]), 72)); err != nil {
 		return nil, runtime.rejectCandidate(ctx, candidate, err)
 	}
-	if runtime.cfg.EvolutionAutoMerge {
-		if _, err := runtime.run(ctx, 60*time.Second, "git", "switch", runtime.cfg.EvolutionBaseBranch); err != nil {
-			return nil, runtime.rejectCandidate(ctx, candidate, err)
-		}
-		rollbackTag = "last-known-good-" + time.Now().UTC().Format("20060102-150405")
-		if _, err := runtime.run(ctx, 30*time.Second, "git", "tag", rollbackTag); err != nil {
-			return nil, runtime.rejectCandidate(ctx, candidate, err)
-		}
-		_, _ = runtime.run(ctx, 30*time.Second, "git", "tag", "-f", "last-known-good")
-		if _, err := runtime.run(ctx, 120*time.Second, "git", "merge", "--no-ff", branch, "-m", "merge "+branch); err != nil {
-			return nil, runtime.rollbackCandidate(ctx, candidate, rollbackTag, err)
-		}
-		deployment := runtime.deployAndVerify(ctx)
-		report["deployment"] = deployment
-		if deployment.Passed {
-			candidate["status"] = "merged"
-		} else {
-			return candidate, runtime.rollbackCandidate(ctx, candidate, rollbackTag, errors.New(deployment.Output))
-		}
-	}
+	// Candidate execution produces a tested commit only. Merging and deployment
+	// are separate operator-controlled workflows and never happen here.
+	candidate["status"] = "tested_candidate"
 	if err := runtime.saveCandidate(ctx, candidate); err != nil {
 		return nil, err
 	}
@@ -589,7 +576,11 @@ func evolutionCandidatePaths(patch string) (map[string]bool, error) {
 	}
 	protected := []string{}
 	for path := range paths {
-		if evolutionProtectedPaths[path] {
+		protectedPath := evolutionProtectedPaths[path]
+		for _, prefix := range evolutionProtectedPrefixes {
+			protectedPath = protectedPath || strings.HasPrefix(path, prefix)
+		}
+		if protectedPath {
 			protected = append(protected, path)
 		}
 	}

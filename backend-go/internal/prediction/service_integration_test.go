@@ -1,0 +1,99 @@
+package prediction
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/calibration"
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/governance"
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/migrate"
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/signals"
+)
+
+func TestPredictionLifecycleAgainstIsolatedPostgres(t *testing.T) {
+	dsn := strings.Replace(os.Getenv("TEST_DATABASE_URL"), "postgresql+psycopg://", "postgresql://", 1)
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	admin, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Close()
+	schema := "prediction_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	if _, err = admin.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = admin.Exec(context.Background(), "DROP SCHEMA "+schema+" CASCADE") }()
+	config, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.ConnConfig.RuntimeParams["search_path"] = schema
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err = migrate.Up(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	const assetID = "equity:XNAS:AAPL"
+	if _, err = pool.Exec(ctx, `INSERT INTO assets(id,asset_class,market,symbol,name,exchange_or_provider,currency,aliases,products,competitors,lot_size,active) VALUES($1,'equity','US','AAPL','Apple Inc.','XNAS','USD','[]','[]','[]',1,true)`, assetID); err != nil {
+		t.Fatal(err)
+	}
+
+	service := New(pool)
+	base := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	model := signals.BinaryModel{Version: "integration-model-v1", Objective: "excess_up", HorizonSessions: 5, TrainingCutoff: base, FeatureNames: []string{"surprise"}, Means: map[string]float64{"surprise": 0}, Scales: map[string]float64{"surprise": 1}, Coefficients: map[string]float64{"surprise": 1}, SampleCount: 100}
+	if err = service.RegisterModel(ctx, ModelRegistration{Model: model, Market: "US", Status: "shadow", ArtifactDigest: ModelArtifactDigest(model), Scope: map[string]any{"asset_class": "equity"}}); err != nil {
+		t.Fatal(err)
+	}
+	now := base.AddDate(1, 0, 0)
+	ece := .02
+	gate := governance.PromotionInput{HardCorrectnessPassed: true, IndependentSamples: 100, MinimumSamples: 30, ShadowStartedAt: now.AddDate(0, 0, -30), MinimumShadowDays: 14, ECE: &ece, MaximumECE: .1, ApprovedBy: "integration-reviewer"}
+	if decision, promoteErr := service.Promote(ctx, model.Version, gate, now); promoteErr != nil || decision.Status != "approved" {
+		t.Fatalf("model promotion decision=%#v err=%v", decision, promoteErr)
+	}
+	observations := make([]calibration.Observation, 40)
+	for index := range observations {
+		observations[index] = calibration.Observation{SampleID: fmt.Sprintf("sample-%d", index), EventCluster: fmt.Sprintf("cluster-%d", index), Score: float64(index-20) / 4, Label: index >= 20, ObservedAt: base.AddDate(0, 0, index)}
+	}
+	calibrator, err := service.RegisterCalibration(ctx, CalibrationRegistration{SourceModelVersion: model.Version, Observations: observations, Scope: calibration.Scope{Market: "US", HorizonSessions: 5, EventTypes: []string{"earnings"}}, Status: "shadow"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision, promoteErr := service.PromoteCalibration(ctx, calibrator.Version, gate, now); promoteErr != nil || decision.Status != "approved" {
+		t.Fatalf("calibration promotion decision=%#v err=%v", decision, promoteErr)
+	}
+
+	signalAt := now.Add(time.Hour)
+	featureValue := .4
+	input := Input{AssetID: assetID, SignalAvailableAt: signalAt, ModelVersion: model.Version, Market: "US", EventType: "earnings", Features: []signals.Feature{{Name: "surprise", Value: &featureValue, AvailableAt: signalAt.Add(-time.Minute), SourceIDs: []string{"consensus-1"}}}}
+	first, err := service.Predict(ctx, input)
+	if err != nil || !first.Created || first.Status != "calibrated" || first.Probability == nil || first.CalibrationVersion != calibrator.Version {
+		t.Fatalf("first prediction=%#v err=%v", first, err)
+	}
+	repeated, err := service.Predict(ctx, input)
+	if err != nil || repeated.Created || repeated.ID != first.ID {
+		t.Fatalf("repeated prediction=%#v err=%v", repeated, err)
+	}
+	changedValue := .8
+	input.Features[0].Value = &changedValue
+	changed, err := service.Predict(ctx, input)
+	if err != nil || !changed.Created || changed.ID == first.ID {
+		t.Fatalf("changed prediction=%#v err=%v", changed, err)
+	}
+	items, err := service.List(ctx, assetID, 20)
+	if err != nil || len(items) != 2 {
+		t.Fatalf("prediction list=%#v err=%v", items, err)
+	}
+}

@@ -41,6 +41,7 @@ type outcomeRuntime struct {
 type outcomePricePoint struct {
 	ObservedAt time.Time
 	Close      float64
+	Adjusted   bool
 	// SessionOnly means the provider supplied a calendar date without an
 	// intraday timestamp. It represents that day's close, not a price known at
 	// the beginning of the day.
@@ -515,15 +516,16 @@ func normalizeOutcomePrices(payload any, notAfter time.Time) []outcomePricePoint
 				break
 			}
 		}
-		close := 0.0
-		for _, key := range []string{"close", "adjClose", "price", "收盘"} {
+		close, adjusted := 0.0, false
+		for _, key := range []string{"adjClose", "adjusted_close", "close", "price", "收盘"} {
 			if item[key] != nil {
 				close = outcomeNumber(item[key])
+				adjusted = key == "adjClose" || key == "adjusted_close"
 				break
 			}
 		}
 		if !stamp.IsZero() && close > 0 && !stamp.After(notAfter) {
-			storeOutcomePricePoint(byTime, outcomePricePoint{ObservedAt: stamp, Close: close, SessionOnly: sessionOnly})
+			storeOutcomePricePoint(byTime, outcomePricePoint{ObservedAt: stamp, Close: close, Adjusted: adjusted, SessionOnly: sessionOnly})
 		}
 	}
 	result := make([]outcomePricePoint, 0, len(byTime))
@@ -539,7 +541,7 @@ func storeOutcomePricePoint(values map[int64]outcomePricePoint, candidate outcom
 	previous, exists := values[key]
 	// Prefer a provider record that carries an actual timestamp over an
 	// otherwise ambiguous date-only duplicate.
-	if !exists || candidate.SessionOnly == previous.SessionOnly || (previous.SessionOnly && !candidate.SessionOnly) {
+	if !exists || (candidate.Adjusted && !previous.Adjusted) || (candidate.Adjusted == previous.Adjusted && (candidate.SessionOnly == previous.SessionOnly || previous.SessionOnly && !candidate.SessionOnly)) {
 		values[key] = candidate
 	}
 }

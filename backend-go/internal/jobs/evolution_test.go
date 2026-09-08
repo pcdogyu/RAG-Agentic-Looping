@@ -29,6 +29,33 @@ func TestEvolutionRejectsSecretsAndProtectedFiles(t *testing.T) {
 	}
 }
 
+func TestEvolutionProtectsRatingAndCalibrationPolicy(t *testing.T) {
+	for _, path := range []string{
+		"backend-go/internal/rating/store.go",
+		"backend-go/internal/calibration/calibration.go",
+		"backend-go/internal/governance/governance.go",
+	} {
+		patch := "diff --git a/" + path + " b/" + path + "\n--- a/" + path + "\n+++ b/" + path + "\n"
+		if _, err := evolutionCandidatePaths(patch); err == nil || !strings.Contains(err.Error(), "protected") {
+			t.Fatalf("expected protected path rejection for %s, got %v", path, err)
+		}
+	}
+}
+
+func TestEvolutionExecutionRequiresMatchingApprovedIdentity(t *testing.T) {
+	candidate := map[string]any{"status": "approved", "approved_by": "operator@example.com"}
+	if validEvolutionApproval(candidate, "") || validEvolutionApproval(candidate, "other@example.com") {
+		t.Fatal("missing or mismatched approval was accepted")
+	}
+	if !validEvolutionApproval(candidate, " operator@example.com ") {
+		t.Fatal("matching approval was rejected")
+	}
+	candidate["status"] = "proposed"
+	if validEvolutionApproval(candidate, "operator@example.com") {
+		t.Fatal("unapproved candidate status was accepted")
+	}
+}
+
 func TestEvolutionCandidateScopeAcceptsMinimalPatchAndRejectsDelete(t *testing.T) {
 	patch := "diff --git a/backend-go/internal/jobs/example.go b/backend-go/internal/jobs/example.go\n--- a/backend-go/internal/jobs/example.go\n+++ b/backend-go/internal/jobs/example.go\n"
 	paths, err := evolutionCandidatePaths(patch)
