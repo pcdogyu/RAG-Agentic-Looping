@@ -167,9 +167,18 @@ func (fn scanJSON) Scan(value any) error { return fn(value) }
 
 func jsonValue(target any) scanJSON {
 	return func(value any) error {
-		raw, ok := value.([]byte)
-		if !ok {
-			return fmt.Errorf("valuation JSON is not bytes")
+		var raw []byte
+		switch typed := value.(type) {
+		case []byte:
+			raw = typed
+		case string:
+			raw = []byte(typed)
+		default:
+			var err error
+			raw, err = json.Marshal(typed)
+			if err != nil {
+				return fmt.Errorf("encode valuation JSON value: %w", err)
+			}
 		}
 		switch typed := target.(type) {
 		case *map[string]any:

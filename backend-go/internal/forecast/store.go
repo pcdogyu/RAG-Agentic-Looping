@@ -249,9 +249,18 @@ func hashID(prefix, value string) string {
 // of callers' API contracts.
 func jsonScan(target any) sql.Scanner {
 	return scannerFunc(func(value any) error {
-		bytes, ok := value.([]byte)
-		if !ok {
-			return fmt.Errorf("forecast JSON value is not bytes")
+		var bytes []byte
+		switch typed := value.(type) {
+		case []byte:
+			bytes = typed
+		case string:
+			bytes = []byte(typed)
+		default:
+			var err error
+			bytes, err = json.Marshal(typed)
+			if err != nil {
+				return fmt.Errorf("encode forecast JSON value: %w", err)
+			}
 		}
 		switch value := target.(type) {
 		case *map[string]any:
