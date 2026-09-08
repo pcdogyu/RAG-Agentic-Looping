@@ -91,6 +91,58 @@ func (s *Server) listPredictions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"asset_id": assetID, "items": items})
 }
 
+type shadowPredictionInput struct {
+	EventID               string            `json:"event_id,omitempty"`
+	SignalAvailableAt     time.Time         `json:"signal_available_at"`
+	IncumbentModelVersion string            `json:"incumbent_model_version"`
+	CandidateModelVersion string            `json:"candidate_model_version"`
+	Market                string            `json:"market"`
+	EventType             string            `json:"event_type"`
+	Features              []signals.Feature `json:"features"`
+	ExecutionAssumptions  map[string]any    `json:"execution_assumptions"`
+}
+
+func (s *Server) createShadowComparison(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	assetID, err := fundamentalAssetID(chi.URLParam(r, "assetID"))
+	if err != nil || assetID == "" {
+		writeError(w, http.StatusUnprocessableEntity, "asset_id path is invalid")
+		return
+	}
+	input := shadowPredictionInput{}
+	if !decodeJSONBody(w, r, &input) {
+		return
+	}
+	comparison, err := prediction.New(s.db).CompareShadow(r.Context(), prediction.ShadowInput{AssetID: assetID, EventID: input.EventID, SignalAvailableAt: input.SignalAvailableAt, IncumbentModelVersion: input.IncumbentModelVersion, CandidateModelVersion: input.CandidateModelVersion, Market: input.Market, EventType: input.EventType, Features: input.Features, ExecutionAssumptions: input.ExecutionAssumptions})
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	status := http.StatusOK
+	if comparison.Created {
+		status = http.StatusCreated
+	}
+	writeJSON(w, status, comparison)
+}
+
+func (s *Server) listGovernanceChecks(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	limit, ok := intQuery(w, r.URL.Query(), "limit", 50, 1, 200)
+	if !ok {
+		return
+	}
+	items, err := prediction.New(s.db).ListGovernanceChecks(r.Context(), limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "governance check query failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
 func (s *Server) promotionCheck(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return

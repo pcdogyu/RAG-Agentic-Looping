@@ -7,6 +7,15 @@ import (
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/signals"
 )
 
+func TestSourceOverlapDetectsLineageReplacement(t *testing.T) {
+	if got := setOverlap(map[string]bool{"sec": true, "fmp": true}, map[string]bool{"sec": true, "new-vendor": true}); got != 1.0/3.0 {
+		t.Fatalf("source overlap=%v", got)
+	}
+	if got := setOverlap(map[string]bool{}, map[string]bool{}); got != 1 {
+		t.Fatalf("empty lineage overlap=%v", got)
+	}
+}
+
 func TestPredictionRunIdentityIncludesModelCalibrationAndFeatures(t *testing.T) {
 	now := time.Date(2026, 9, 8, 4, 0, 0, 0, time.UTC)
 	value := .4

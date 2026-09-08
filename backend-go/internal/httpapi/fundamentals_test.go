@@ -87,7 +87,7 @@ func TestPredictionAndGovernanceWritesRequireAdminToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	paths := []string{"/go/prediction-models", "/go/calibrations", "/go/calibrations/platt-v1/promotion-check", "/go/predictions/equity%3ANYSE%3AVRT", "/go/model-governance/promotion-check", "/go/model-governance/drift-check"}
+	paths := []string{"/go/prediction-models", "/go/calibrations", "/go/calibrations/platt-v1/promotion-check", "/go/predictions/equity%3ANYSE%3AVRT", "/go/model-governance/shadow-runs/equity%3ANYSE%3AVRT", "/go/model-governance/promotion-check", "/go/model-governance/drift-check"}
 	for _, path := range paths {
 		request := httptest.NewRequest(http.MethodPost, path, nil)
 		response := httptest.NewRecorder()
@@ -95,5 +95,11 @@ func TestPredictionAndGovernanceWritesRequireAdminToken(t *testing.T) {
 		if response.Code != http.StatusUnauthorized {
 			t.Fatalf("path=%s status=%d", path, response.Code)
 		}
+	}
+	request := httptest.NewRequest(http.MethodGet, "/go/model-governance/checks", nil)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("governance history status=%d", response.Code)
 	}
 }

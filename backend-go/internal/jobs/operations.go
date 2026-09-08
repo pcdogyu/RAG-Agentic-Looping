@@ -15,12 +15,14 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/config"
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/prediction"
 	"github.com/redis/go-redis/v9"
 )
 
 const (
 	dispatchEvolutionTask = "market_loop.dispatch_evolve_from_outcomes"
 	monitorHealthTask     = "market_loop.monitor_health"
+	monitorModelsTask     = "market_loop.monitor_prediction_models"
 )
 
 type operationsRuntime struct {
@@ -39,7 +41,23 @@ func NewOperationsHandlers(cfg config.Config, db *pgxpool.Pool, redisClient *red
 	return map[string]Handler{
 		dispatchEvolutionTask: runtime.dispatchEvolution,
 		monitorHealthTask:     runtime.monitorHealth,
+		monitorModelsTask:     runtime.monitorModels,
 	}
+}
+
+func (runtime *operationsRuntime) monitorModels(ctx context.Context, _ Job) (any, error) {
+	checks, err := prediction.New(runtime.db).MonitorShadowModels(ctx, time.Now().UTC())
+	if err != nil {
+		return nil, err
+	}
+	reviewRequired := 0
+	for _, check := range checks {
+		if check.Status == "review_required" || check.Status == "drifted" {
+			reviewRequired++
+			runtime.notify(ctx, fmt.Sprintf("预测模型治理需要人工复核：候选 %s，对照 %s，原因 %s", check.SubjectVersion, check.ReferenceVersion, strings.Join(check.Reasons, ",")))
+		}
+	}
+	return map[string]any{"status": "completed", "checked_models": len(checks), "review_required": reviewRequired, "automatic_model_change": false}, nil
 }
 
 func (runtime *operationsRuntime) dispatchEvolution(ctx context.Context, _ Job) (any, error) {
@@ -174,6 +192,7 @@ type operationsSchedule struct {
 var operationsSchedules = []operationsSchedule{
 	{task: dispatchEvolutionTask, interval: 7 * 24 * time.Hour, startDelay: true},
 	{task: monitorHealthTask, interval: 5 * time.Minute},
+	{task: monitorModelsTask, interval: 15 * time.Minute},
 }
 
 type OperationsScheduler struct {
@@ -187,7 +206,7 @@ func NewOperationsScheduler(cfg config.Config, db *pgxpool.Pool, redisClient *re
 }
 
 func (scheduler *OperationsScheduler) Enabled() bool {
-	return scheduler.cfg.EvolutionEnabled
+	return true
 }
 
 func (scheduler *OperationsScheduler) Tick(ctx context.Context) error {
@@ -195,6 +214,9 @@ func (scheduler *OperationsScheduler) Tick(ctx context.Context) error {
 		return nil
 	}
 	for _, spec := range operationsSchedules {
+		if spec.task == dispatchEvolutionTask && !scheduler.cfg.EvolutionEnabled {
+			continue
+		}
 		key := "market-loop:go-schedule:" + spec.task
 		if spec.startDelay {
 			initialized, err := scheduler.redis.SetNX(ctx, key+":initialized", iso(time.Now()), 0).Result()

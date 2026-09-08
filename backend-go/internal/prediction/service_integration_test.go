@@ -96,4 +96,45 @@ func TestPredictionLifecycleAgainstIsolatedPostgres(t *testing.T) {
 	if err != nil || len(items) != 2 {
 		t.Fatalf("prediction list=%#v err=%v", items, err)
 	}
+
+	candidate := model
+	candidate.Version = "integration-candidate-v2"
+	candidate.Coefficients = map[string]float64{"surprise": 1.1}
+	if err = service.RegisterModel(ctx, ModelRegistration{Model: candidate, Market: "US", Status: "shadow", ArtifactDigest: ModelArtifactDigest(candidate), Scope: map[string]any{"asset_class": "equity"}}); err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 20; index++ {
+		value := float64(index-10) / 10
+		at := signalAt.Add(time.Duration(index+1) * time.Hour)
+		comparison, compareErr := service.CompareShadow(ctx, ShadowInput{AssetID: assetID, SignalAvailableAt: at, IncumbentModelVersion: model.Version, CandidateModelVersion: candidate.Version, Market: "US", EventType: "earnings", Features: []signals.Feature{{Name: "surprise", Value: &value, AvailableAt: at.Add(-time.Minute), SourceIDs: []string{"consensus-forward"}}}, ExecutionAssumptions: map[string]any{"entry": "next_session_open", "cost_bps": 10}})
+		if compareErr != nil || !comparison.Created || !comparison.Incumbent.SignalAvailableAt.Equal(comparison.Candidate.SignalAvailableAt) {
+			t.Fatalf("shadow comparison %d=%#v err=%v", index, comparison, compareErr)
+		}
+	}
+	checks, err := service.MonitorShadowModels(ctx, signalAt.AddDate(0, 0, 1))
+	if err != nil || len(checks) != 1 || checks[0].Status != "review_required" || checks[0].Action != "alert_and_review" {
+		t.Fatalf("shadow checks=%#v err=%v", checks, err)
+	}
+	var candidateStatus string
+	if err = pool.QueryRow(ctx, `SELECT status FROM prediction_models WHERE version=$1`, candidate.Version).Scan(&candidateStatus); err != nil || candidateStatus != "shadow" {
+		t.Fatalf("monitor must not automatically switch candidate: status=%q err=%v", candidateStatus, err)
+	}
+	blockedGate := gate
+	blockedGate.HardCorrectnessPassed = false
+	if decision, promoteErr := service.Promote(ctx, candidate.Version, blockedGate, signalAt.AddDate(0, 0, 2)); promoteErr != nil || decision.Status != "blocked" {
+		t.Fatalf("blocked promotion decision=%#v err=%v", decision, promoteErr)
+	}
+	history, err := service.ListGovernanceChecks(ctx, 20)
+	if err != nil || len(history) < 4 {
+		t.Fatalf("governance history=%#v err=%v", history, err)
+	}
+	foundBlocked := false
+	for _, check := range history {
+		if check.SubjectVersion == candidate.Version && check.CheckType == "promotion" && check.Status == "blocked" {
+			foundBlocked = true
+		}
+	}
+	if !foundBlocked {
+		t.Fatal("blocked promotion was not durably audited")
+	}
 }

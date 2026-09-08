@@ -53,6 +53,8 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) (*Serve
 	r.Post("/go/calibrations/{version}/promotion-check", s.calibrationPromotionCheck)
 	r.Get("/go/predictions/{assetID}", s.listPredictions)
 	r.Post("/go/predictions/{assetID}", s.createPrediction)
+	r.Post("/go/model-governance/shadow-runs/{assetID}", s.createShadowComparison)
+	r.Get("/go/model-governance/checks", s.listGovernanceChecks)
 	r.Post("/go/model-governance/promotion-check", s.promotionCheck)
 	r.Post("/go/model-governance/drift-check", s.driftCheck)
 	r.Get("/go/research-policy", s.researchPolicyStatus)

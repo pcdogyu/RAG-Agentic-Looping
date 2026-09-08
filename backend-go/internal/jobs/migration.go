@@ -54,7 +54,7 @@ var workerLaneDefinitions = []MigrationLane{
 		"market_loop.refresh_macro_universe", "market_loop.sync_fundamental_snapshots",
 	}},
 	{ID: "operations", Order: 9, GoQueue: "operations", TaskTypes: []string{
-		"market_loop.dispatch_evolve_from_outcomes", "market_loop.monitor_health",
+		"market_loop.dispatch_evolve_from_outcomes", "market_loop.monitor_health", "market_loop.monitor_prediction_models",
 	}},
 	{ID: "backfill", Order: 10, GoQueue: "backfill", TaskTypes: []string{
 		"market_loop.backfill_asset_mappings",

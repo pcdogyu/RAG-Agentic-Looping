@@ -95,21 +95,29 @@ func (s *Service) RegisterModel(ctx context.Context, input ModelRegistration) er
 }
 
 func (s *Service) Promote(ctx context.Context, modelVersion string, input governance.PromotionInput, now time.Time) (governance.Decision, error) {
+	if s.db == nil || strings.TrimSpace(modelVersion) == "" {
+		return governance.Decision{}, fmt.Errorf("prediction store and model_version are required")
+	}
 	decision := governance.PromotionDecision(input, now)
 	if decision.Status != "approved" {
-		return decision, nil
+		return decision, s.RecordPromotionDecision(ctx, "model", modelVersion, input, decision, now)
 	}
-	if s.db == nil || strings.TrimSpace(modelVersion) == "" {
-		return decision, fmt.Errorf("prediction store and model_version are required")
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return decision, err
 	}
-	tag, err := s.db.Exec(ctx, `UPDATE prediction_models SET status='approved',approved_by=$2,approved_at=$3 WHERE version=$1 AND status='shadow'`, strings.TrimSpace(modelVersion), strings.TrimSpace(input.ApprovedBy), now.UTC())
+	defer tx.Rollback(ctx) //nolint:errcheck
+	tag, err := tx.Exec(ctx, `UPDATE prediction_models SET status='approved',approved_by=$2,approved_at=$3 WHERE version=$1 AND status='shadow'`, strings.TrimSpace(modelVersion), strings.TrimSpace(input.ApprovedBy), now.UTC())
 	if err != nil {
 		return decision, err
 	}
 	if tag.RowsAffected() != 1 {
 		return decision, fmt.Errorf("shadow prediction model was not found or was already promoted")
 	}
-	return decision, nil
+	if err = recordPromotionDecisionWith(ctx, tx, "model", modelVersion, input, decision, now); err != nil {
+		return decision, err
+	}
+	return decision, tx.Commit(ctx)
 }
 
 func (s *Service) RegisterCalibration(ctx context.Context, input CalibrationRegistration) (calibration.Model, error) {
@@ -166,12 +174,12 @@ func validateModel(model signals.BinaryModel) error {
 }
 
 func (s *Service) PromoteCalibration(ctx context.Context, version string, input governance.PromotionInput, now time.Time) (governance.Decision, error) {
+	if s.db == nil || strings.TrimSpace(version) == "" {
+		return governance.Decision{}, fmt.Errorf("prediction store and calibration version are required")
+	}
 	decision := governance.PromotionDecision(input, now)
 	if decision.Status != "approved" {
-		return decision, nil
-	}
-	if s.db == nil || strings.TrimSpace(version) == "" {
-		return decision, fmt.Errorf("prediction store and calibration version are required")
+		return decision, s.RecordPromotionDecision(ctx, "calibration", version, input, decision, now)
 	}
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
@@ -189,6 +197,9 @@ func (s *Service) PromoteCalibration(ctx context.Context, version string, input 
 		return decision, err
 	}
 	if _, err = tx.Exec(ctx, `UPDATE probability_calibrations SET status='active' WHERE version=$1`, strings.TrimSpace(version)); err != nil {
+		return decision, err
+	}
+	if err = recordPromotionDecisionWith(ctx, tx, "calibration", version, input, decision, now); err != nil {
 		return decision, err
 	}
 	if err = tx.Commit(ctx); err != nil {

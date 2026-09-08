@@ -17,17 +17,14 @@ func TestOperationsHandlersCoverLane(t *testing.T) {
 	}
 }
 
-func TestOperationsSchedulerRequiresEvolution(t *testing.T) {
-	if NewOperationsScheduler(config.Config{}, nil, nil).Enabled() {
-		t.Fatal("operations scheduler enabled while evolution is disabled")
-	}
-	if !NewOperationsScheduler(config.Config{EvolutionEnabled: true}, nil, nil).Enabled() {
-		t.Fatal("operations scheduler did not enable with evolution")
+func TestOperationsSchedulerIsEnabledWithoutCodeEvolution(t *testing.T) {
+	if !NewOperationsScheduler(config.Config{}, nil, nil).Enabled() {
+		t.Fatal("model governance monitoring must not depend on code evolution")
 	}
 }
 
 func TestOperationsScheduleMatchesLegacyCadenceWithoutImmediateEvolution(t *testing.T) {
-	want := map[string]time.Duration{dispatchEvolutionTask: 7 * 24 * time.Hour, monitorHealthTask: 5 * time.Minute}
+	want := map[string]time.Duration{dispatchEvolutionTask: 7 * 24 * time.Hour, monitorHealthTask: 5 * time.Minute, monitorModelsTask: 15 * time.Minute}
 	if len(operationsSchedules) != len(want) {
 		t.Fatalf("got %d schedules, want %d", len(operationsSchedules), len(want))
 	}
