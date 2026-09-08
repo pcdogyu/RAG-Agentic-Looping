@@ -6,12 +6,68 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+func TestUpCreatesSchemaUnderConcurrentStartup(t *testing.T) {
+	dsn := strings.Replace(os.Getenv("TEST_DATABASE_URL"), "postgresql+psycopg://", "postgresql://", 1)
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	admin, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Close()
+	schema := "concurrent_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	if _, err = admin.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = admin.Exec(context.Background(), "DROP SCHEMA "+schema+" CASCADE") }()
+	config, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.MaxConns = 8
+	config.ConnConfig.RuntimeParams["search_path"] = schema
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+
+	start := make(chan struct{})
+	errors := make(chan error, 8)
+	var workers sync.WaitGroup
+	for index := 0; index < 8; index++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			<-start
+			errors <- Up(ctx, pool)
+		}()
+	}
+	close(start)
+	workers.Wait()
+	close(errors)
+	for migrationErr := range errors {
+		if migrationErr != nil {
+			t.Fatalf("concurrent migration failed: %v", migrationErr)
+		}
+	}
+	var count int
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.tables WHERE table_schema=$1 AND table_name IN ('assets','prediction_models','outcome_records')`, schema).Scan(&count); err != nil || count != 3 {
+		t.Fatalf("concurrent migration schema count=%d err=%v", count, err)
+	}
+}
 
 func TestUpCreatesFreshGoRuntimeSchema(t *testing.T) {
 	dsn := strings.Replace(os.Getenv("TEST_DATABASE_URL"), "postgresql+psycopg://", "postgresql://", 1)
