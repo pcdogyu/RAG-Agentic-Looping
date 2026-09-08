@@ -28,6 +28,19 @@ func TestFundamentalSyncRequiresAdminToken(t *testing.T) {
 	}
 }
 
+func TestFundamentalResearchRequiresAdminToken(t *testing.T) {
+	server, err := New(config.Config{AdminAPIToken: "test-token"}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/go/fundamental-research/equity%3ANYSE%3AVRT", nil)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("status=%d", response.Code)
+	}
+}
+
 func TestConsensusImportRequiresAdminToken(t *testing.T) {
 	server, err := New(config.Config{AdminAPIToken: "test-token"}, nil, nil)
 	if err != nil {

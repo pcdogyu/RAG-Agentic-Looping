@@ -730,6 +730,7 @@ describe("shared hash navigation", () => {
     expect(markup).toContain("基本面评级与短期预测");
     expect(markup).toContain("未校准时不显示概率");
     expect(markup).toContain("缺失字段保持为空，不按零处理");
+    expect(markup).toContain("管理员令牌");
   });
 });
 

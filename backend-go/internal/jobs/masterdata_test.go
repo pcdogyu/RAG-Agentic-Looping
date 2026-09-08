@@ -25,9 +25,10 @@ func TestMasterdataSchedulerIsEnabledForGoRuntime(t *testing.T) {
 
 func TestMasterdataScheduleMatchesLegacyCadence(t *testing.T) {
 	want := map[string]time.Duration{
-		refreshCryptoUniverseTask: 6 * time.Hour,
-		refreshAssetUniverseTask:  24 * time.Hour,
-		refreshMacroUniverseTask:  24 * time.Hour,
+		refreshCryptoUniverseTask:      6 * time.Hour,
+		refreshAssetUniverseTask:       24 * time.Hour,
+		refreshMacroUniverseTask:       24 * time.Hour,
+		refreshTrackedFundamentalsTask: 24 * time.Hour,
 	}
 	if len(masterdataSchedules) != len(want) {
 		t.Fatalf("got %d schedules, want %d", len(masterdataSchedules), len(want))

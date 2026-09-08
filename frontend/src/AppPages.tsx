@@ -4059,6 +4059,8 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
   const [bundle, setBundle] = useState<FundamentalBundle>({});
   const [message, setMessage] = useState("输入规范 asset_id 后读取；缺失字段保持为空，不按零处理。");
   const [loading, setLoading] = useState(false);
+  const [token, setToken] = useState(readToken);
+  const [workflowJSON, setWorkflowJSON] = useState("");
   async function load(event?: FormEvent) {
     event?.preventDefault();
     const canonical = assetID.trim();
@@ -4076,6 +4078,21 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
       setMessage(`读取失败：${error instanceof Error ? error.message : "未知错误"}`);
     } finally { setLoading(false); }
   }
+  async function runWorkflow() {
+    const canonical = assetID.trim();
+    if (!canonical || !token || !workflowJSON.trim()) return;
+    setLoading(true); setMessage("");
+    try {
+      const body = JSON.parse(workflowJSON) as Record<string, unknown>;
+      const response = await fetch(`${apiBase}/go/fundamental-research/${encodeURIComponent(canonical)}`, { method: "POST", headers: { "Content-Type": "application/json", "X-Admin-Token": token }, body: JSON.stringify(body) });
+      const payload = await response.json() as { status?: string; reason?: string; detail?: string };
+      if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
+      setMessage(payload.status === "available" ? "基本面研究工作流已完成并保存预测、估值和评级。" : `工作流未生成结论：${payload.reason || payload.status || "数据不足"}`);
+      await load();
+    } catch (error) {
+      setMessage(`工作流失败：${error instanceof Error ? error.message : "JSON 或请求无效"}`);
+    } finally { setLoading(false); }
+  }
   const rating = bundle.ratings?.items?.[0];
   const prediction = bundle.predictions?.items?.[0];
   const valuation = bundle.valuations?.items?.[0];
@@ -4088,6 +4105,12 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
       <input aria-label="规范资产 ID" value={assetID} onChange={(event) => setAssetID(event.target.value)} />
       <button type="submit" disabled={loading}>{loading ? "读取中…" : "读取"}</button>
     </form>
+    <AdminUnlock token={token} onToken={setToken} />
+    {token && <div className="integration-editor">
+      <label>无新闻基本面研究输入<textarea aria-label="基本面研究 JSON" rows={8} value={workflowJSON} onChange={(event) => setWorkflowJSON(event.target.value)} placeholder='粘贴含 as_of、forecast、valuation、rating 的证据化 JSON；不会自动补造假设或价格。' /></label>
+      <button type="button" disabled={loading || !workflowJSON.trim()} onClick={() => void runWorkflow()}>运行基本面研究</button>
+      <small>已进入预测或评级流程的美股会每日刷新财务快照；估值与评级仍只使用此处明确提交并获证据支持的假设。</small>
+    </div>}
     {message && <div className="page-message">{message}</div>}
     <div className="metric-grid">
       <article><span>财务快照</span><strong>{bundle.fundamentals?.items?.length ?? 0}</strong><small>严格按 available_at 截止</small></article>

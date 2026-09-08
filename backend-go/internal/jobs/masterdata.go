@@ -23,11 +23,12 @@ import (
 )
 
 const (
-	refreshCryptoUniverseTask = "market_loop.refresh_crypto_universe"
-	refreshAssetUniverseTask  = "market_loop.refresh_asset_universe"
-	refreshMacroUniverseTask  = "market_loop.refresh_macro_universe"
-	syncFundamentalsTask      = "market_loop.sync_fundamental_snapshots"
-	masterdataLockTTL         = 2 * time.Hour
+	refreshCryptoUniverseTask      = "market_loop.refresh_crypto_universe"
+	refreshAssetUniverseTask       = "market_loop.refresh_asset_universe"
+	refreshMacroUniverseTask       = "market_loop.refresh_macro_universe"
+	syncFundamentalsTask           = "market_loop.sync_fundamental_snapshots"
+	refreshTrackedFundamentalsTask = "market_loop.refresh_tracked_fundamentals"
+	masterdataLockTTL              = 2 * time.Hour
 )
 
 var (
@@ -84,10 +85,11 @@ type taxonomyRule struct {
 func NewMasterdataHandlers(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) map[string]Handler {
 	runtime := &masterdataRuntime{cfg: cfg, db: db, redis: redisClient, client: &http.Client{Timeout: 90 * time.Second}}
 	return map[string]Handler{
-		refreshCryptoUniverseTask: runtime.refreshCryptoUniverse,
-		refreshAssetUniverseTask:  runtime.refreshAssetUniverse,
-		refreshMacroUniverseTask:  runtime.refreshMacroUniverse,
-		syncFundamentalsTask:      runtime.syncFundamentalSnapshots,
+		refreshCryptoUniverseTask:      runtime.refreshCryptoUniverse,
+		refreshAssetUniverseTask:       runtime.refreshAssetUniverse,
+		refreshMacroUniverseTask:       runtime.refreshMacroUniverse,
+		syncFundamentalsTask:           runtime.syncFundamentalSnapshots,
+		refreshTrackedFundamentalsTask: runtime.refreshTrackedFundamentals,
 	}
 }
 
@@ -111,6 +113,10 @@ func (runtime *masterdataRuntime) syncFundamentalSnapshots(ctx context.Context, 
 	if limit < 1 || limit > 40 {
 		return nil, errors.New("fundamental snapshot limit must be between 1 and 40")
 	}
+	return runtime.syncAssetFundamentals(ctx, assetID, limit)
+}
+
+func (runtime *masterdataRuntime) syncAssetFundamentals(ctx context.Context, assetID string, limit int) (any, error) {
 	var symbol, market, assetClass string
 	if err := runtime.db.QueryRow(ctx, `SELECT symbol,market,asset_class FROM assets WHERE id=$1 AND active=true`, assetID).Scan(&symbol, &market, &assetClass); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -142,6 +148,41 @@ func (runtime *masterdataRuntime) syncFundamentalSnapshots(ctx context.Context, 
 		"asset_id": assetID, "symbol": symbol, "source": "FMP", "statement_count": len(items), "inserted": inserted,
 		"unchanged": len(items) - inserted, "time_contract_version": fundamentals.TimeContractVersion,
 	}, nil
+}
+
+// refreshTrackedFundamentals keeps the bounded set of assets that already has
+// an explicit forecast or rating current without needing a news event. It does
+// not create assumptions, valuations, or ratings on behalf of an analyst.
+func (runtime *masterdataRuntime) refreshTrackedFundamentals(ctx context.Context, _ Job) (any, error) {
+	rows, err := runtime.db.Query(ctx, `SELECT a.id FROM assets a LEFT JOIN fundamental_snapshots snapshot ON snapshot.asset_id=a.id WHERE a.active=true AND upper(a.market)='US' AND lower(a.asset_class)='equity' AND (EXISTS(SELECT 1 FROM forecast_versions forecast WHERE forecast.asset_id=a.id) OR EXISTS(SELECT 1 FROM fundamental_rating_states rating WHERE rating.asset_id=a.id)) GROUP BY a.id ORDER BY max(snapshot.available_at) ASC NULLS FIRST,a.id LIMIT 10`)
+	if err != nil {
+		return nil, err
+	}
+	assetIDs := []string{}
+	for rows.Next() {
+		var assetID string
+		if err := rows.Scan(&assetID); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		assetIDs = append(assetIDs, assetID)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	results := map[string]any{}
+	succeeded := 0
+	for _, assetID := range assetIDs {
+		result, syncErr := runtime.syncAssetFundamentals(ctx, assetID, 12)
+		if syncErr != nil {
+			results[assetID] = map[string]any{"status": "failed", "error": syncErr.Error()}
+			continue
+		}
+		results[assetID] = result
+		succeeded++
+	}
+	return map[string]any{"status": "completed", "selected": len(assetIDs), "succeeded": succeeded, "results": results, "automatic_assumptions": false}, nil
 }
 
 func (runtime *masterdataRuntime) refreshCryptoUniverse(ctx context.Context, job Job) (any, error) {
@@ -803,6 +844,7 @@ var masterdataSchedules = []masterdataSchedule{
 	{task: refreshAssetUniverseTask, interval: 24 * time.Hour},
 	{task: refreshCryptoUniverseTask, interval: 6 * time.Hour},
 	{task: refreshMacroUniverseTask, interval: 24 * time.Hour},
+	{task: refreshTrackedFundamentalsTask, interval: 24 * time.Hour},
 }
 
 type MasterdataScheduler struct {
