@@ -59,7 +59,7 @@ func (s *Store) Create(ctx context.Context, submission Submission) (Version, boo
 		return Version{}, false, err
 	}
 	var existing Version
-	if err := s.db.QueryRow(ctx, `SELECT id,asset_id,parent_version_id,model_version,status,as_of,input_snapshot::jsonb,assumptions::jsonb,projection::jsonb,created_at FROM forecast_versions WHERE id=$1`, version.ID).Scan(
+	if err := s.db.QueryRow(ctx, `SELECT id,asset_id,coalesce(parent_version_id,''),model_version,status,as_of,input_snapshot::jsonb,assumptions::jsonb,projection::jsonb,created_at FROM forecast_versions WHERE id=$1`, version.ID).Scan(
 		&existing.ID, &existing.AssetID, &existing.ParentVersionID, &existing.ModelVersion, &existing.Status, &existing.AsOf, jsonScan(&existing.InputSnapshot), jsonScan(&existing.Assumptions), jsonScan(&existing.Projection), &existing.CreatedAt); err == nil {
 		return existing, false, nil
 	} else if err != pgx.ErrNoRows {
@@ -112,7 +112,7 @@ func (s *Store) List(ctx context.Context, assetID string, asOf time.Time, limit 
 	if assetID == "" || asOf.IsZero() || limit < 1 || limit > 100 {
 		return nil, fmt.Errorf("invalid forecast version query")
 	}
-	rows, err := s.db.Query(ctx, `SELECT id,asset_id,parent_version_id,model_version,status,as_of,input_snapshot::jsonb,assumptions::jsonb,projection::jsonb,created_at
+	rows, err := s.db.Query(ctx, `SELECT id,asset_id,coalesce(parent_version_id,''),model_version,status,as_of,input_snapshot::jsonb,assumptions::jsonb,projection::jsonb,created_at
         FROM forecast_versions WHERE asset_id=$1 AND as_of <= $2 ORDER BY as_of DESC,created_at DESC,id DESC LIMIT $3`, assetID, asOf.UTC(), limit)
 	if err != nil {
 		return nil, fmt.Errorf("list forecast versions: %w", err)
