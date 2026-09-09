@@ -113,6 +113,18 @@ func TestBatchThreeCommandsAgainstIsolatedServices(t *testing.T) {
 
 	assertStatus(http.StatusAccepted, http.MethodPost, "/api/v1/admin/asset-universe/refresh", `{}`, true)
 	assertStatus(http.StatusAccepted, http.MethodPost, "/api/v1/admin/asset-universe/backfill?days=3", `{}`, true)
+	outcomeEvaluation := assertStatus(http.StatusAccepted, http.MethodPost, "/go/outcome-labels/evaluate", `{}`, true)
+	var outcomeQueue, outcomeType string
+	if err = pool.QueryRow(ctx, `SELECT queue,task_type FROM go_jobs WHERE id=$1`, stringValue(outcomeEvaluation["task_id"])).Scan(&outcomeQueue, &outcomeType); err != nil {
+		t.Fatal(err)
+	}
+	if outcomeQueue != "outcomes" || outcomeType != "market_loop.evaluate_outcomes" || outcomeEvaluation["early_maturity_allowed"] != false {
+		t.Fatalf("outcome evaluation was not routed to the frozen Go task: queue=%s type=%s payload=%v", outcomeQueue, outcomeType, outcomeEvaluation)
+	}
+	repeatedOutcomeEvaluation := assertStatus(http.StatusAccepted, http.MethodPost, "/go/outcome-labels/evaluate", `{}`, true)
+	if repeatedOutcomeEvaluation["task_id"] != outcomeEvaluation["task_id"] {
+		t.Fatalf("active outcome evaluation was not idempotent: first=%v repeated=%v", outcomeEvaluation, repeatedOutcomeEvaluation)
+	}
 	goBackfill := assertStatus(http.StatusAccepted, http.MethodPost, "/api/v1/admin/asset-universe/backfill?days=4", `{}`, true)
 	var backfillQueue, backfillType string
 	if err = pool.QueryRow(ctx, `SELECT queue,task_type FROM go_jobs WHERE id=$1`, stringValue(goBackfill["task_id"])).Scan(&backfillQueue, &backfillType); err != nil {

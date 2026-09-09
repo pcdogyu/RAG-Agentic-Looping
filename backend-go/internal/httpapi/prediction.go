@@ -7,11 +7,32 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/governance"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/marketpolicy"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/prediction"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/signals"
 )
+
+// evaluatePredictionOutcomes enqueues the same production task used by the
+// daily outcome scheduler. It is an operator cold-start trigger, not an
+// alternate evaluator: pending horizons remain pending and every label still
+// uses the frozen point-in-time price and benchmark contract.
+func (s *Server) evaluatePredictionOutcomes(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	taskID := uuid.NewString()
+	queuedID, err := s.enqueueGoModelJob(r.Context(), "outcomes", taskID, "market_loop.evaluate_outcomes", nil, map[string]any{}, 5, "scheduled:market_loop.evaluate_outcomes")
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "prediction outcome evaluation could not be queued")
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"task_id": queuedID, "status": "queued", "task_type": "market_loop.evaluate_outcomes",
+		"label_definition_version": "prediction-outcome-label-v1", "early_maturity_allowed": false,
+	})
+}
 
 func (s *Server) registerPredictionModel(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
