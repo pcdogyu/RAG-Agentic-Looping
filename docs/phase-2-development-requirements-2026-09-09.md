@@ -126,6 +126,7 @@
 | 2.19 | 前瞻结果标签冷启动触发与幂等调度 | 已完成（生产真实任务与未成熟门禁已验收） |
 | 2.20 | A 股复权行情端点与来源语义修复 | 已完成（生产回填与残余失败分层已验收） |
 | 2.21 | 美股基准资产身份统一 | 已完成（生产策略回读与 Worker 平滑替换已验收） |
+| 2.22 | 规范基准资产复权行情冷启动 | 已完成美股样板（A/H 股规范指数身份与行情适配仍待补齐） |
 
 ### 当前真实验收缺口
 
@@ -350,3 +351,12 @@
 - 自动化验收：Go CI `34407125324` 通过全量竞态、冻结评估和全部隔离 PostgreSQL/Redis 回归。生产提交 `2f526a3` 部署后，管理员就绪接口对美股股票返回 `benchmark_id=equity:AMEX:SPY`、`benchmark_policy=approved_point_in_time_mapping`，同时仍如实显示成熟结果与同范围校准样本不足、自动发布关闭；生产主数据可读回该精确 SPY 资产。
 - 本次策略代码影响 API、主数据、演进和研究路径。API、masterdata worker 与 evolution worker 完成更新后，旧 research worker `8dd3b1fd5e67` 收到 SIGTERM 即停止领取新任务，并用约 148 秒排空在途任务后退出；原任务 `93b064ec-388c-4e28-95eb-1fd3b9c24d32` 没有被强杀，最终以 `output_limit_invalid_json` 显式失败。新版 research worker `a832f1a55f52` 随后启动并继续处理持久队列，排队和重试记录未被删除。
 - 生产 API 健康返回 200，数据库与 Redis 均正常；网页返回 200。此步骤解除未来美股基准审批的身份阻断，但没有替代人工审批，也不改变第二期尚未完成的结论。
+
+### 2.22 规范基准资产复权行情冷启动
+
+- 审计发现管理员行情同步和 masterdata worker 只接受 `active=true` 的资产，但规范 SPY 基准为避免进入普通股票研究池而保持 `active=false`。因此即使策略身份已经修正，操作员仍无法在批准映射前验证或预热基准复权行情。
+- 市场策略集中冻结 US、CN、HK 和加密资产的精确基准 ID，并提供规范基准身份判定。单标的行情同步现在只接受两类资产：活跃研究资产，或代码中明确冻结的规范基准资产；普通 inactive、退市或排除资产仍被拒绝。
+- 同步结果增加 `asset_active` 和 `selection_reason`。规范基准只写不可变价格事实，不改变资产 active 状态，不创建基准映射、预测、估值、评级、计划或概率；人工审批边界保持不变。
+- 自动化验收：本地 `go test ./...`、`go vet ./...` 和五项冻结评估通过；Go CI `34409062373` 通过全量竞态、不可变行情与无新闻流程 PostgreSQL 集成测试、Redis 队列测试和冻结门禁。集成测试同时覆盖 inactive 规范 SPY 可以同步、普通 inactive 股票必须拒绝、重复同步幂等。
+- 生产验收（2026-09-10 北京时间）：提交 `dda9589` 只重建并替换 masterdata worker，research worker 未重启。SPY 首次任务 `ec20a592-8cb3-47e6-b9de-0715f6c9f76a` 一次完成，保存 10 条 FMP `adjusted_close`；API 读回 `equity:AMEX:SPY`、USD、`daily_close`、去凭据来源 URL 和不可变证据 ID。重复任务 `f0c38bde-b556-40cc-b099-a752c21a694f` 返回 `inserted=0`、`stored_total=10`。
+- SPY 仍为 inactive，生产基准映射、该资产的预测、估值、评级修订和研究计划计数均为 0；API 与网页均返回 200。生产当前仍不存在 `index:CN:000300` 和 `index:HK:HSI` 主数据身份，所以本步骤只验收美股样板，不声称 A/H 股规范指数行情已经完成。
