@@ -64,11 +64,20 @@ func TestStorePersistsFirstAvailabilityIdempotently(t *testing.T) {
 		t.Fatalf("stored count=%d available_at=%s", count, storedAvailable)
 	}
 	value.Price = 651.00
+	value.AvailableAt = firstAvailable.Add(time.Hour)
 	created, err = NewStore(pool).Save(ctx, value)
 	if err != nil || !created {
 		t.Fatalf("provider revision created=%v err=%v", created, err)
 	}
 	if err = pool.QueryRow(ctx, `SELECT count(*) FROM market_price_observations WHERE asset_id=$1`, value.AssetID).Scan(&count); err != nil || count != 2 {
 		t.Fatalf("provider revision count=%d err=%v", count, err)
+	}
+	beforeRevision, err := NewStore(pool).ListAvailable(ctx, value.AssetID, observed, firstAvailable, "adjusted_close", 10)
+	if err != nil || len(beforeRevision) != 1 || beforeRevision[0].Price != 650.25 {
+		t.Fatalf("historical cutoff leaked revision: items=%#v err=%v", beforeRevision, err)
+	}
+	afterRevision, err := NewStore(pool).ListAvailable(ctx, value.AssetID, observed, firstAvailable.Add(time.Hour), "adjusted_close", 10)
+	if err != nil || len(afterRevision) != 1 || afterRevision[0].Price != 651 {
+		t.Fatalf("latest available revision was not selected: items=%#v err=%v", afterRevision, err)
 	}
 }
