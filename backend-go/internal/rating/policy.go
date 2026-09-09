@@ -6,6 +6,8 @@ package rating
 import (
 	"fmt"
 	"strings"
+
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/marketpolicy"
 )
 
 const PolicyVersion = "fundamental-rating-v1"
@@ -47,7 +49,7 @@ type Result struct {
 }
 
 func DefaultUSPolicy() Policy {
-	return Policy{Version: PolicyVersion, Market: "US", AssetClass: "equity", HorizonDays: 365, BenchmarkID: "equity:US:SPY", RelativeRequired: true, StrongBuyFloor: .20, BuyFloor: .05, SellCeiling: -.05, StrongSellCeiling: -.20}
+	return Policy{Version: PolicyVersion, Market: "US", AssetClass: "equity", HorizonDays: 365, BenchmarkID: marketpolicy.USBenchmarkAssetID, RelativeRequired: true, StrongBuyFloor: .20, BuyFloor: .05, SellCeiling: -.05, StrongSellCeiling: -.20}
 }
 
 func Evaluate(input Input) Result {

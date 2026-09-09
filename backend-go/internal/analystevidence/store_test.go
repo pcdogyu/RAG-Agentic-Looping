@@ -22,7 +22,7 @@ func TestValidateSubmissionRequiresTypedValuesAndPointInTimeApproval(t *testing.
 	cases := []Submission{
 		validSubmission(ValuationMultiple, map[string]any{"selected_multiple": 20.0}),
 		validSubmission(CostOfCapital, map[string]any{"wacc": .1}),
-		validSubmission(BenchmarkExpectation, map[string]any{"benchmark_id": "equity:US:SPY", "expected_return": .05}),
+		validSubmission(BenchmarkExpectation, map[string]any{"benchmark_id": "equity:AMEX:SPY", "expected_return": .05}),
 		validSubmission(ForecastAssumption, map[string]any{"field": "revenue_growth", "value": .1}),
 		validSubmission(RatingRationale, map[string]any{"reason_codes": []any{"analyst_review"}}),
 		validSubmission(InvalidationRule, map[string]any{"rule_type": "revenue_growth"}),
@@ -36,7 +36,7 @@ func TestValidateSubmissionRequiresTypedValuesAndPointInTimeApproval(t *testing.
 			t.Fatalf("source URL was not sanitized: %s", input.SourceURL)
 		}
 	}
-	invalid := validSubmission(BenchmarkExpectation, map[string]any{"benchmark_id": "equity:US:SPY"})
+	invalid := validSubmission(BenchmarkExpectation, map[string]any{"benchmark_id": "equity:AMEX:SPY"})
 	if err := validateSubmission(normalizeSubmission(invalid), approved); err == nil {
 		t.Fatal("benchmark evidence without expected_return was accepted")
 	}

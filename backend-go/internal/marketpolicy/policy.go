@@ -7,6 +7,8 @@ import (
 	"strings"
 )
 
+const USBenchmarkAssetID = "equity:AMEX:SPY"
+
 type Policy struct {
 	Version              string   `json:"version"`
 	AssetClass           string   `json:"asset_class"`
@@ -33,7 +35,7 @@ func Resolve(assetClass, market string) Policy {
 		OutcomePriceField: "adjusted_close", BenchmarkPolicy: "approved_point_in_time_mapping", RequiredInputs: []string{}, ExecutionConstraints: []string{}}
 	switch {
 	case assetClass == "equity" && market == "US":
-		base.Currency, base.TimeZone, base.Calendar, base.BenchmarkID, base.FundamentalMethod = "USD", "America/New_York", "XNYS", "equity:US:SPY", "fcff_wacc_or_pe"
+		base.Currency, base.TimeZone, base.Calendar, base.BenchmarkID, base.FundamentalMethod = "USD", "America/New_York", "XNYS", USBenchmarkAssetID, "fcff_wacc_or_pe"
 	case assetClass == "equity" && market == "CN":
 		base.Currency, base.TimeZone, base.Calendar, base.BenchmarkID, base.FundamentalMethod = "CNY", "Asia/Shanghai", "XSHG", "index:CN:000300", "fcff_wacc_or_pe"
 	case assetClass == "equity" && market == "HK":

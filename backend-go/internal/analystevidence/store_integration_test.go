@@ -47,7 +47,7 @@ func TestStorePersistsImmutableTypedEvidenceAgainstIsolatedPostgres(t *testing.T
 		t.Fatal(err)
 	}
 	approved := time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC)
-	input := validSubmission(BenchmarkExpectation, map[string]any{"benchmark_id": "equity:US:SPY", "expected_return": .05})
+	input := validSubmission(BenchmarkExpectation, map[string]any{"benchmark_id": "equity:AMEX:SPY", "expected_return": .05})
 	input.AssetID = assetID
 	store := NewStore(pool)
 	created, wasCreated, err := store.Create(ctx, input, approved)
@@ -59,7 +59,7 @@ func TestStorePersistsImmutableTypedEvidenceAgainstIsolatedPostgres(t *testing.T
 		t.Fatalf("repeated=%#v wasCreated=%v err=%v", repeated, wasCreated, err)
 	}
 	changed := input
-	changed.Values = map[string]any{"benchmark_id": "equity:US:SPY", "expected_return": .06}
+	changed.Values = map[string]any{"benchmark_id": "equity:AMEX:SPY", "expected_return": .06}
 	if _, _, err = store.Create(ctx, changed, approved); err == nil {
 		t.Fatal("idempotency key accepted different evidence")
 	}
