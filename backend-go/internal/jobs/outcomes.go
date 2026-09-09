@@ -45,6 +45,9 @@ type outcomePricePoint struct {
 	ObservedAt time.Time
 	Close      float64
 	Adjusted   bool
+	SourceName string
+	SourceURL  string
+	SourceID   string
 	// SessionOnly means the provider supplied a calendar date without an
 	// intraday timestamp. It represents that day's close, not a price known at
 	// the beginning of the day.
@@ -474,6 +477,16 @@ func (runtime *outcomeRuntime) persistPriceObservations(ctx context.Context, ass
 	}
 	store := marketdata.NewStore(runtime.db)
 	for _, point := range points {
+		pointSourceName, pointSourceURL, pointSourceID := sourceName, sourceURL, "price-series:"+assetID
+		if strings.TrimSpace(point.SourceName) != "" {
+			pointSourceName = strings.TrimSpace(point.SourceName)
+		}
+		if strings.TrimSpace(point.SourceURL) != "" {
+			pointSourceURL = marketPriceSourceURL(point.SourceURL, "")
+		}
+		if strings.TrimSpace(point.SourceID) != "" {
+			pointSourceID = strings.TrimSpace(point.SourceID)
+		}
 		field := "close"
 		if point.Adjusted {
 			field = "adjusted_close"
@@ -485,7 +498,7 @@ func (runtime *outcomeRuntime) persistPriceObservations(ctx context.Context, ass
 		observation := marketdata.PriceObservation{
 			AssetID: assetID, Market: market, Currency: currency, ObservedAt: point.ObservedAt,
 			AvailableAt: availableAt, Price: point.Close, PriceField: field, TimePrecision: precision,
-			SourceName: sourceName, SourceDocumentID: "price-series:" + assetID, SourceURL: sourceURL,
+			SourceName: pointSourceName, SourceDocumentID: pointSourceID, SourceURL: pointSourceURL,
 			Metadata: map[string]any{"symbol": stringValue(asset["symbol"]), "outcome_price_contract": "outcome-price-v2"},
 		}
 		if _, err := store.Save(ctx, observation); err != nil {
@@ -645,7 +658,10 @@ func normalizeOutcomePrices(payload any, notAfter time.Time) []outcomePricePoint
 			}
 		}
 		if !stamp.IsZero() && close > 0 && !stamp.After(notAfter) {
-			storeOutcomePricePoint(byTime, outcomePricePoint{ObservedAt: stamp, Close: close, Adjusted: adjusted, SessionOnly: sessionOnly})
+			storeOutcomePricePoint(byTime, outcomePricePoint{
+				ObservedAt: stamp, Close: close, Adjusted: adjusted, SessionOnly: sessionOnly,
+				SourceName: stringValue(item["source_name"]), SourceURL: stringValue(item["source_url"]), SourceID: stringValue(item["source_document_id"]),
+			})
 		}
 	}
 	result := make([]outcomePricePoint, 0, len(byTime))

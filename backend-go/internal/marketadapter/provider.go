@@ -28,7 +28,7 @@ type ProviderConfig struct {
 func DefaultProviderConfig() ProviderConfig {
 	return ProviderConfig{
 		SinaUniverseURL: "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php",
-		TencentChinaURL: "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get",
+		TencentChinaURL: "https://web.ifzq.gtimg.cn/appstock/app/newfqkline/get",
 		TencentHKURL:    "https://web.ifzq.gtimg.cn/appstock/app/hkfqkline/get",
 		FundamentalsURL: "https://datacenter-web.eastmoney.com/api/data/v1/get",
 		NewsURL:         "https://np-weblist.eastmoney.com/comm/web/getFastNewsList",
@@ -223,6 +223,7 @@ func (p *EastAsiaProvider) Prices(ctx context.Context, request PriceRequest) ([]
 		return nil, fmt.Errorf("Tencent price payload: %w", err)
 	}
 	raw := series["qfqday"]
+	adjusted := len(raw) > 0
 	if len(raw) == 0 {
 		raw = series["day"]
 	}
@@ -241,13 +242,34 @@ func (p *EastAsiaProvider) Prices(ctx context.Context, request PriceRequest) ([]
 		if err != nil || day.Before(start) || day.After(end) {
 			continue
 		}
-		items = append(items, map[string]any{
+		item := map[string]any{
 			"date": day.Format("2006-01-02"), "symbol": request.Symbol,
-			"open": numberValue(row[1]), "close": numberValue(row[2]), "high": numberValue(row[3]),
+			"open": numberValue(row[1]), "high": numberValue(row[3]),
 			"low": numberValue(row[4]), "volume": numberValue(row[5]),
-		})
+			"source_name": "Tencent Finance", "source_url": providerSourceURL(endpoint),
+			"source_document_id": "tencent-kline:" + key,
+		}
+		if adjusted {
+			item["adjusted_close"] = numberValue(row[2])
+			item["price_field"] = "adjusted_close"
+		} else {
+			item["close"] = numberValue(row[2])
+			item["price_field"] = "close"
+		}
+		items = append(items, item)
 	}
 	return items, nil
+}
+
+func providerSourceURL(raw string) string {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return ""
+	}
+	parsed.User = nil
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String()
 }
 
 func (p *EastAsiaProvider) Fundamentals(ctx context.Context, symbol, market string) ([]map[string]any, bool, error) {

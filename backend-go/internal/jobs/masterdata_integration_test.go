@@ -143,12 +143,30 @@ func TestManualMarketPriceSyncPersistsOnlyProviderObservationsAgainstIsolatedPos
 		t.Fatal(err)
 	}
 	const assetID = "equity:NASDAQ:PRICE"
+	const cnAssetID = "equity:XSHG:600000"
 	if _, err = pool.Exec(ctx, `INSERT INTO assets(id,asset_class,market,symbol,name,exchange_or_provider,currency,aliases,products,competitors,lot_size,active)
 		VALUES($1,'equity','US','PRICE','Price Test','NASDAQ','USD','[]','[]','[]',1,true)`, assetID); err != nil {
 		t.Fatal(err)
 	}
+	if _, err = pool.Exec(ctx, `INSERT INTO assets(id,asset_class,market,symbol,name,exchange_or_provider,currency,aliases,products,competitors,lot_size,active)
+		VALUES($1,'equity','CN','600000','CN Price Test','XSHG','CNY','[]','[]','[]',100,true)`, cnAssetID); err != nil {
+		t.Fatal(err)
+	}
 	prior, earlier := time.Now().UTC().AddDate(0, 0, -1).Format("2006-01-02"), time.Now().UTC().AddDate(0, 0, -2).Format("2006-01-02")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/v1/prices" {
+			request := map[string]any{}
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil || request["symbol"] != "600000" || request["market"] != "CN" {
+				t.Errorf("unexpected CN price request: request=%#v err=%v", request, err)
+				http.Error(w, "unexpected request", http.StatusBadRequest)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{{
+				"date": prior, "adjusted_close": 9.35, "price_field": "adjusted_close",
+				"source_name": "Tencent Finance", "source_url": "https://example.test/newfqkline/get?token=secret", "source_document_id": "tencent-kline:sh600000",
+			}}})
+			return
+		}
 		if r.Header.Get("apikey") != "isolated-price" || r.URL.Path != "/historical-price-eod/dividend-adjusted" || r.URL.Query().Get("symbol") != "PRICE" {
 			t.Errorf("unexpected FMP price request: path=%s symbol=%q apikey=%q", r.URL.Path, r.URL.Query().Get("symbol"), r.Header.Get("apikey"))
 			http.Error(w, "unexpected request", http.StatusBadRequest)
@@ -161,7 +179,7 @@ func TestManualMarketPriceSyncPersistsOnlyProviderObservationsAgainstIsolatedPos
 	}))
 	defer server.Close()
 	payload, _ := json.Marshal(taskEnvelope{Args: []any{assetID}, Kwargs: map[string]any{"asset_id": assetID, "lookback_days": 14}})
-	runtime := &masterdataRuntime{cfg: config.Config{FMPBaseURL: server.URL, FMPAccessToken: "isolated-price", FMPRateLimit: 100000}, db: pool, client: server.Client()}
+	runtime := &masterdataRuntime{cfg: config.Config{FMPBaseURL: server.URL, FMPAccessToken: "isolated-price", FMPRateLimit: 100000, MarketAdapterURL: server.URL}, db: pool, client: server.Client()}
 	before := time.Now().UTC()
 	result, err := runtime.syncMarketPriceObservations(ctx, Job{ID: uuid.New(), Payload: payload})
 	if err != nil {
@@ -183,6 +201,18 @@ func TestManualMarketPriceSyncPersistsOnlyProviderObservationsAgainstIsolatedPos
 	repeated, err := runtime.syncMarketPriceObservations(ctx, Job{ID: uuid.New(), Payload: payload})
 	if err != nil || repeated.(map[string]any)["inserted"] != 0 {
 		t.Fatalf("price sync was not idempotent: result=%#v err=%v", repeated, err)
+	}
+	cnPayload, _ := json.Marshal(taskEnvelope{Args: []any{cnAssetID}, Kwargs: map[string]any{"asset_id": cnAssetID, "lookback_days": 14}})
+	cnResult, err := runtime.syncMarketPriceObservations(ctx, Job{ID: uuid.New(), Payload: cnPayload})
+	if err != nil || cnResult.(map[string]any)["adjusted_close_received"] != 1 || cnResult.(map[string]any)["inserted"] != 1 {
+		t.Fatalf("CN adjusted price sync failed: result=%#v err=%v", cnResult, err)
+	}
+	var cnField, cnSourceName, cnSourceURL, cnSourceID string
+	if err = pool.QueryRow(ctx, `SELECT price_field,source_name,source_url,source_document_id FROM market_price_observations WHERE asset_id=$1`, cnAssetID).Scan(&cnField, &cnSourceName, &cnSourceURL, &cnSourceID); err != nil {
+		t.Fatal(err)
+	}
+	if cnField != "adjusted_close" || cnSourceName != "Tencent Finance" || cnSourceURL != "https://example.test/newfqkline/get" || cnSourceID != "tencent-kline:sh600000" {
+		t.Fatalf("CN price lineage is invalid: field=%s source=%s url=%s document=%s", cnField, cnSourceName, cnSourceURL, cnSourceID)
 	}
 	if err = pool.QueryRow(ctx, `SELECT count(*) FROM forecast_versions WHERE asset_id=$1`, assetID).Scan(&count); err != nil || count != 0 {
 		t.Fatalf("price sync created forecast data: count=%d err=%v", count, err)

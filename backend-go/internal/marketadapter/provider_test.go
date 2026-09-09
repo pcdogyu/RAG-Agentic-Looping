@@ -61,8 +61,11 @@ func TestProviderNormalizesUniversePricesFundamentalsAndNews(t *testing.T) {
 	}
 
 	prices, err := provider.Prices(context.Background(), PriceRequest{Symbol: "600000", Market: "CN", Start: "2026-09-01", End: "2026-09-01"})
-	if err != nil || len(prices) != 1 || prices[0]["close"] != 9.35 {
+	if err != nil || len(prices) != 1 || prices[0]["adjusted_close"] != 9.35 || prices[0]["price_field"] != "adjusted_close" {
 		t.Fatalf("prices=%#v error=%v", prices, err)
+	}
+	if prices[0]["source_name"] != "Tencent Finance" || prices[0]["source_url"] != server.URL+"/prices-cn" || prices[0]["source_document_id"] != "tencent-kline:sh600000" {
+		t.Fatalf("price source lineage is incomplete: %#v", prices[0])
 	}
 
 	fundamentals, unsupported, err := provider.Fundamentals(context.Background(), "600000", "CN")
@@ -84,5 +87,15 @@ func TestProviderNormalizesUniversePricesFundamentalsAndNews(t *testing.T) {
 func TestNormalizeSinaAssetRejectsInvalidRows(t *testing.T) {
 	if _, ok := normalizeSinaAsset(map[string]any{"code": "not-a-code", "name": "invalid"}, "CN"); ok {
 		t.Fatal("invalid security code accepted")
+	}
+}
+
+func TestProviderSourceURLRemovesCredentialsAndQuery(t *testing.T) {
+	got := providerSourceURL("https://user:secret@example.test/prices?token=secret#fragment")
+	if got != "https://example.test/prices" {
+		t.Fatalf("unsafe provider source URL: %s", got)
+	}
+	if endpoint := DefaultProviderConfig().TencentChinaURL; !strings.HasSuffix(endpoint, "/appstock/app/newfqkline/get") {
+		t.Fatalf("stale Tencent China price endpoint: %s", endpoint)
 	}
 }

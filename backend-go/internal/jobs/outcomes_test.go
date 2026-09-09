@@ -97,10 +97,16 @@ func TestNormalizeOutcomePricesAcceptsProviderShapesAndDeduplicates(t *testing.T
 
 func TestNormalizeOutcomePricesPrefersAdjustedClose(t *testing.T) {
 	boundary := time.Date(2026, 1, 4, 0, 0, 0, 0, time.UTC)
-	payload := map[string]any{"items": []any{map[string]any{"date": "2026-01-02", "close": 50.0, "adjClose": 100.0}}}
+	payload := map[string]any{"items": []any{map[string]any{
+		"date": "2026-01-02", "close": 50.0, "adjClose": 100.0,
+		"source_name": "test-provider", "source_url": "https://example.test/prices", "source_document_id": "series-1",
+	}}}
 	points := normalizeOutcomePrices(payload, boundary)
 	if len(points) != 1 || points[0].Close != 100 || !points[0].Adjusted {
 		t.Fatalf("points=%#v", points)
+	}
+	if points[0].SourceName != "test-provider" || points[0].SourceURL != "https://example.test/prices" || points[0].SourceID != "series-1" {
+		t.Fatalf("price source lineage was lost: %#v", points[0])
 	}
 }
 
