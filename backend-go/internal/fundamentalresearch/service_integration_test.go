@@ -78,6 +78,53 @@ func TestWorkflowCompletesWithoutNewsAgainstIsolatedPostgres(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	assumptionEvidence, _, err := evidenceStore.Create(ctx, workflowEvidenceSubmission(assetID, analystevidence.ForecastAssumption, "workflow-assumption", map[string]any{"field": "revenue_growth", "value": .1}, asOf), asOf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capitalEvidence, _, err := evidenceStore.Create(ctx, workflowEvidenceSubmission(assetID, analystevidence.CostOfCapital, "workflow-capital-cost", map[string]any{"wacc": .1}, asOf), asOf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalidationEvidence, _, err := evidenceStore.Create(ctx, workflowEvidenceSubmission(assetID, analystevidence.InvalidationRule, "workflow-invalidation", map[string]any{"rule_type": "revenue_growth"}, asOf), asOf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directForecast := forecast.Submission{AssetID: assetID, AsOf: asOf, Inputs: forecast.Inputs{Currency: "USD", Unit: "millions", Revenue: &revenue, OperatingMargin: &margin, TaxRate: &tax, Depreciation: &depreciation, Capex: &capex, ChangeNWC: &nwc, DilutedShares: &shares}, FundamentalSnapshotIDs: []string{snapshotID}, Assumptions: []forecast.Assumption{{Field: "revenue_growth", Value: .1, EvidenceIDs: []string{assumptionEvidence.ID}, Approved: true}}}
+	if err = ValidateForecastSubmissionEvidence(ctx, pool, directForecast); err != nil {
+		t.Fatalf("registered direct forecast evidence was rejected: %v", err)
+	}
+	invalidForecast := directForecast
+	invalidForecast.Assumptions = append([]forecast.Assumption{}, directForecast.Assumptions...)
+	invalidForecast.Assumptions[0].EvidenceIDs = []string{"arbitrary-string"}
+	if err = ValidateForecastSubmissionEvidence(ctx, pool, invalidForecast); err == nil {
+		t.Fatal("unregistered direct forecast evidence was accepted")
+	}
+	directValuation := valuation.Submission{AssetID: assetID, AsOf: asOf, NetDebtSnapshotID: snapshotID, DCFScenarios: []valuation.DCFScenario{{Name: "base-dcf", WACC: .1, TerminalGrowth: .03, ProjectionYears: 5, CostOfCapitalEvidenceIDs: []string{capitalEvidence.ID}}}, MultipleScenarios: []valuation.MultipleScenario{{Name: "base-multiple", PriceEarningsMultiple: 20, ComparableEvidenceIDs: []string{comparable.ID}}}}
+	if err = ValidateValuationSubmissionEvidence(ctx, pool, directValuation); err != nil {
+		t.Fatalf("registered direct valuation evidence was rejected: %v", err)
+	}
+	invalidValuation := directValuation
+	invalidValuation.MultipleScenarios = append([]valuation.MultipleScenario{}, directValuation.MultipleScenarios...)
+	invalidValuation.MultipleScenarios[0].ComparableEvidenceIDs = []string{"arbitrary-string"}
+	if err = ValidateValuationSubmissionEvidence(ctx, pool, invalidValuation); err == nil {
+		t.Fatal("unregistered direct valuation evidence was accepted")
+	}
+	directRating := rating.Submission{AssetID: assetID, Policy: rating.DefaultUSPolicy(), AsOfPrice: &price, AsOfPriceEvidenceID: priceRecord.ID, BenchmarkReturn: &benchmark, BenchmarkEvidenceID: benchmarkEvidence.ID, EffectiveAt: asOf, ReasonCodes: []string{"scheduled_fundamental_review"}, EvidenceIDs: []string{snapshotID, rationale.ID}, InvalidationRules: []rating.InvalidationRule{{RuleType: "revenue_growth", Operator: "lt", Threshold: 0, EvidenceIDs: []string{invalidationEvidence.ID}}}}
+	if err = ValidateRatingSubmissionEvidence(ctx, pool, directRating); err != nil {
+		t.Fatalf("registered direct rating evidence was rejected: %v", err)
+	}
+	invalidRating := directRating
+	invalidRating.EvidenceIDs = []string{snapshotID, "arbitrary-string"}
+	if err = ValidateRatingSubmissionEvidence(ctx, pool, invalidRating); err == nil {
+		t.Fatal("unregistered direct rating evidence was accepted")
+	}
+	defaultPolicyRating := directRating
+	defaultPolicyRating.Policy = rating.Policy{}
+	defaultPolicyRating.BenchmarkEvidenceID = "arbitrary-string"
+	if err = ValidateRatingSubmissionEvidence(ctx, pool, defaultPolicyRating); err == nil {
+		t.Fatal("default relative policy bypassed benchmark evidence validation")
+	}
 	input := Input{AssetID: assetID, AsOf: asOf, Forecast: ForecastPlan{Inputs: forecast.Inputs{Currency: "USD", Unit: "millions", Revenue: &revenue, OperatingMargin: &margin, TaxRate: &tax, Depreciation: &depreciation, Capex: &capex, ChangeNWC: &nwc, DilutedShares: &shares}, FundamentalSnapshotIDs: []string{snapshotID}}, Valuation: ValuationPlan{MultipleScenarios: []valuation.MultipleScenario{{Name: "base", PriceEarningsMultiple: 20, ComparableEvidenceIDs: []string{comparable.ID}}}}, Rating: RatingPlan{Policy: rating.DefaultUSPolicy(), AsOfPrice: &price, AsOfPriceEvidenceID: priceRecord.ID, BenchmarkReturn: &benchmark, BenchmarkEvidenceID: benchmarkEvidence.ID, ReasonCodes: []string{"scheduled_fundamental_review"}, EvidenceIDs: []string{snapshotID, rationale.ID}}}
 	wrongPrice := price + 1
 	wrong := input

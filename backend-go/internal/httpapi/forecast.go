@@ -7,6 +7,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/forecast"
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/fundamentalresearch"
 )
 
 type forecastSubmissionInput struct {
@@ -65,10 +66,15 @@ func (s *Server) createForecastVersion(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSONBody(w, r, &input) {
 		return
 	}
-	version, created, err := forecast.NewStore(s.db).Create(r.Context(), forecast.Submission{
+	submission := forecast.Submission{
 		AssetID: assetID, AsOf: input.AsOf, ParentVersionID: strings.TrimSpace(input.ParentVersionID), Inputs: input.Inputs,
 		FundamentalSnapshotIDs: input.FundamentalSnapshotIDs, Assumptions: input.Assumptions,
-	})
+	}
+	if err := fundamentalresearch.ValidateForecastSubmissionEvidence(r.Context(), s.db, submission); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "evidence gate: "+err.Error())
+		return
+	}
+	version, created, err := forecast.NewStore(s.db).Create(r.Context(), submission)
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return

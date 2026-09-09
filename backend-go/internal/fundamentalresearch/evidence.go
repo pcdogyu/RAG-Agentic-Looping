@@ -12,7 +12,60 @@ import (
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/analystevidence"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/forecast"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/rating"
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/valuation"
 )
+
+// ValidateForecastSubmissionEvidence applies the governed evidence contract to
+// direct forecast writes. Baseline financial snapshots remain validated by the
+// forecast store; every explicit assumption must additionally resolve to a
+// matching human-approved analyst record.
+func ValidateForecastSubmissionEvidence(ctx context.Context, db *pgxpool.Pool, submission forecast.Submission) error {
+	if db == nil || strings.TrimSpace(submission.AssetID) == "" || submission.AsOf.IsZero() {
+		return fmt.Errorf("forecast evidence asset_id and as_of are required")
+	}
+	return validateAssumptionEvidence(ctx, db, strings.TrimSpace(submission.AssetID), submission.Assumptions, submission.AsOf.UTC())
+}
+
+// ValidateValuationSubmissionEvidence prevents direct valuation writes from
+// treating non-empty comparable or capital-cost strings as evidence.
+func ValidateValuationSubmissionEvidence(ctx context.Context, db *pgxpool.Pool, submission valuation.Submission) error {
+	if db == nil || strings.TrimSpace(submission.AssetID) == "" || submission.AsOf.IsZero() {
+		return fmt.Errorf("valuation evidence asset_id and as_of are required")
+	}
+	return validateValuationEvidence(ctx, db, strings.TrimSpace(submission.AssetID), ValuationPlan{
+		NetDebtSnapshotID: submission.NetDebtSnapshotID,
+		DCFScenarios:      submission.DCFScenarios,
+		MultipleScenarios: submission.MultipleScenarios,
+		SensitivityWACC:   submission.SensitivityWACC,
+		SensitivityGrowth: submission.SensitivityGrowth,
+	}, submission.AsOf.UTC())
+}
+
+// ValidateRatingSubmissionEvidence applies price, benchmark, rationale and
+// invalidation provenance checks before a direct rating revision is written.
+func ValidateRatingSubmissionEvidence(ctx context.Context, db *pgxpool.Pool, submission rating.Submission) error {
+	if db == nil || strings.TrimSpace(submission.AssetID) == "" || submission.EffectiveAt.IsZero() {
+		return fmt.Errorf("rating evidence asset_id and effective_at are required")
+	}
+	policy := submission.Policy
+	if policy.Version == "" {
+		policy = rating.DefaultUSPolicy()
+	}
+	cutoff := submission.EffectiveAt.UTC()
+	assetID := strings.TrimSpace(submission.AssetID)
+	if err := validateManualPriceEvidence(ctx, db, assetID, submission.AsOfPriceEvidenceID, submission.AsOfPrice, cutoff); err != nil {
+		return err
+	}
+	if policy.RelativeRequired {
+		if err := validateBenchmarkEvidence(ctx, db, assetID, policy.BenchmarkID, submission.BenchmarkEvidenceID, submission.BenchmarkReturn, cutoff); err != nil {
+			return err
+		}
+	}
+	if err := validateReasonEvidence(ctx, db, assetID, submission.ReasonCodes, submission.EvidenceIDs, cutoff); err != nil {
+		return err
+	}
+	return validateInvalidationEvidence(ctx, db, assetID, submission.InvalidationRules, cutoff)
+}
 
 func validateManualResearchEvidence(ctx context.Context, db *pgxpool.Pool, input Input) error {
 	if err := validateManualPriceEvidence(ctx, db, input.AssetID, input.Rating.AsOfPriceEvidenceID, input.Rating.AsOfPrice, input.AsOf); err != nil {

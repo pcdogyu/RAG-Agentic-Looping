@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/fundamentalresearch"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/valuation"
 )
 
@@ -63,10 +64,15 @@ func (s *Server) createValuationRun(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSONBody(w, r, &input) {
 		return
 	}
-	run, created, err := valuation.NewStore(s.db).Create(r.Context(), valuation.Submission{
+	submission := valuation.Submission{
 		AssetID: assetID, AsOf: input.AsOf, ForecastVersionID: input.ForecastVersionID, NetDebtSnapshotID: input.NetDebtSnapshotID,
 		DCFScenarios: input.DCFScenarios, MultipleScenarios: input.MultipleScenarios, SensitivityWACC: input.SensitivityWACC, SensitivityGrowth: input.SensitivityGrowth,
-	})
+	}
+	if err := fundamentalresearch.ValidateValuationSubmissionEvidence(r.Context(), s.db, submission); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "evidence gate: "+err.Error())
+		return
+	}
+	run, created, err := valuation.NewStore(s.db).Create(r.Context(), submission)
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return

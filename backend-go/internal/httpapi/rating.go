@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/fundamentalresearch"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/rating"
 )
 
@@ -50,12 +51,17 @@ func (s *Server) createFundamentalRating(w http.ResponseWriter, r *http.Request)
 	if !decodeJSONBody(w, r, &input) {
 		return
 	}
-	result, err := rating.NewStore(s.db).EvaluateAndPersist(r.Context(), rating.Submission{
+	submission := rating.Submission{
 		AssetID: assetID, Policy: input.Policy, ValuationRunID: input.ValuationRunID, AsOfPrice: input.AsOfPrice,
 		AsOfPriceEvidenceID: input.AsOfPriceEvidenceID, ExpectedDividend: input.ExpectedDividend, BenchmarkReturn: input.BenchmarkReturn,
 		BenchmarkEvidenceID: input.BenchmarkEvidenceID, EffectiveAt: input.EffectiveAt, ReasonCodes: input.ReasonCodes,
 		ChangedAssumptions: input.ChangedAssumptions, EvidenceIDs: input.EvidenceIDs, InvalidationRules: input.InvalidationRules,
-	})
+	}
+	if err := fundamentalresearch.ValidateRatingSubmissionEvidence(r.Context(), s.db, submission); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "evidence gate: "+err.Error())
+		return
+	}
+	result, err := rating.NewStore(s.db).EvaluateAndPersist(r.Context(), submission)
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
