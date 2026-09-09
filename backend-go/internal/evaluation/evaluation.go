@@ -58,6 +58,11 @@ type PricePoint struct {
 	AdjustedClose           *float64  `json:"adjusted_close,omitempty"`
 	Currency                string    `json:"currency"`
 	CorporateActionAdjusted bool      `json:"corporate_action_adjusted"`
+	// TradabilityStatus is independent from the existence of a close. A daily
+	// price alone cannot prove that an order could be filled, especially around
+	// suspensions and price limits. Only an explicit "tradable" observation may
+	// unlock execution simulation; blank and unrecognised values stay unknown.
+	TradabilityStatus string `json:"tradability_status,omitempty"`
 }
 
 type OutcomeLabel struct {
@@ -188,14 +193,20 @@ func BuildOutcomeLabel(signalAvailableAt time.Time, asset, benchmark []PricePoin
 		result.ObjectiveLabel = result.RelativeLabel
 	}
 	if policy.ExecutionEnabled {
-		gross := raw
-		if strings.EqualFold(policy.ExecutionSide, "short") {
-			gross = -raw
+		if normalizedTradability(entry.TradabilityStatus) != "tradable" || normalizedTradability(exit.TradabilityStatus) != "tradable" {
+			// Preserve the mature research label, but do not manufacture a trade
+			// from a close that has no explicit fill/tradability evidence.
+			result.SimulationStatus = "unavailable_tradability_evidence"
+		} else {
+			gross := raw
+			if strings.EqualFold(policy.ExecutionSide, "short") {
+				gross = -raw
+			}
+			cost := policy.ExecutionCostBPS + policy.SlippageBPS + policy.BorrowBPS + policy.FundingBPS
+			net := gross - cost/10000
+			result.GrossStrategyReturn, result.NetReturn, result.ExecutionCostBPS = &gross, &net, &cost
+			result.SimulationStatus, result.ResearchResultOnly = "simulated_with_pre_registered_assumptions", false
 		}
-		cost := policy.ExecutionCostBPS + policy.SlippageBPS + policy.BorrowBPS + policy.FundingBPS
-		net := gross - cost/10000
-		result.GrossStrategyReturn, result.NetReturn, result.ExecutionCostBPS = &gross, &net, &cost
-		result.SimulationStatus, result.ResearchResultOnly = "simulated_with_pre_registered_assumptions", false
 	}
 	result.Status = "mature"
 	return result
@@ -244,6 +255,15 @@ func selectedPrice(point PricePoint, field string) (float64, bool) {
 		return 0, false
 	}
 	return *point.Close, true
+}
+
+func normalizedTradability(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "tradable", "suspended", "limit_up", "limit_down":
+		return strings.ToLower(strings.TrimSpace(value))
+	default:
+		return "unknown"
+	}
 }
 
 type PredictionResult struct {

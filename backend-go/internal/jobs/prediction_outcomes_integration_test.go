@@ -49,6 +49,7 @@ func TestPredictionOutcomesMatureFiveSessionsWithoutAdvancingTwentyAgainstIsolat
 	for _, values := range [][]string{
 		{"equity:XNAS:TARGET", "TARGET", "Target Inc."},
 		{"etf:ARCX:BENCH", "BENCH", "Benchmark ETF"},
+		{"equity:XNAS:DELIST", "DELIST", "Delisted Inc."},
 	} {
 		if _, err = pool.Exec(ctx, `INSERT INTO assets(id,asset_class,market,symbol,name,exchange_or_provider,currency,aliases,products,competitors,lot_size,active)
             VALUES($1,'equity','US',$2,$3,'XNAS','USD','[]','[]','[]',1,true)`, values[0], values[1], values[2]); err != nil {
@@ -74,6 +75,25 @@ func TestPredictionOutcomesMatureFiveSessionsWithoutAdvancingTwentyAgainstIsolat
             VALUES($1,'equity:XNAS:TARGET','equity',$2,$3,'excess_up',$4,'uncalibrated','shadow',0.8,'{}','',$1)`, "prediction-horizon-"+version, signalAt, horizon, version); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if _, err = pool.Exec(ctx, `INSERT INTO prediction_models(version,objective,market,horizon_sessions,feature_schema,model_payload,training_cutoff,artifact_digest,status,scope)
+		VALUES('label-model-execution','absolute_up','US',1,'{}','{}',$1,'label-model-execution','shadow','{"asset_class":"equity","outcome_label_definition_version":"prediction-outcome-label-v1","execution_assumptions":{"enabled":true,"side":"long","round_trip_cost_bps":10}}')`, signalAt.AddDate(0, 0, -30)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, `INSERT INTO prediction_runs(id,asset_id,asset_class,signal_available_at,horizon_sessions,objective,model_version,status,model_status,raw_score,feature_snapshot,exclusion_reason,idempotency_key)
+		VALUES('prediction-execution','equity:XNAS:TARGET','equity',$1,1,'absolute_up','label-model-execution','uncalibrated','shadow',0.8,'{}','','prediction-execution')`, signalAt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, `INSERT INTO prediction_runs(id,asset_id,asset_class,signal_available_at,horizon_sessions,objective,model_version,status,model_status,raw_score,feature_snapshot,exclusion_reason,idempotency_key)
+		VALUES('prediction-delisted','equity:XNAS:DELIST','equity',$1,20,'excess_up','label-model-20','uncalibrated','shadow',0.8,'{}','','prediction-delisted')`, signalAt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = marketdata.NewStore(pool).SaveCorporateAction(ctx, marketdata.CorporateActionObservation{
+		AssetID: "equity:XNAS:DELIST", Market: "US", Currency: "USD", ActionType: marketdata.Delisting,
+		EffectiveAt: signalAt.AddDate(0, 0, 3), ObservedAt: signalAt.AddDate(0, 0, 2), AvailableAt: signalAt.AddDate(0, 0, 2),
+		TimePrecision: "date_only", SourceName: "isolated exchange notice", SourceDocumentID: "delist-notice-1",
+	}); err != nil {
+		t.Fatal(err)
 	}
 	if _, err = pool.Exec(ctx, `INSERT INTO prediction_models(version,objective,market,horizon_sessions,feature_schema,model_payload,training_cutoff,artifact_digest,status,scope)
 		VALUES('label-model-legacy','excess_up','US',1,'{}','{}',$1,'label-model-legacy','shadow','{"asset_class":"equity"}')`, signalAt.AddDate(0, 0, -30)); err != nil {
@@ -105,18 +125,22 @@ func TestPredictionOutcomesMatureFiveSessionsWithoutAdvancingTwentyAgainstIsolat
 	runtime := &outcomeRuntime{cfg: config.Config{FMPBaseURL: server.URL, FMPAccessToken: "isolated", FMPRateLimit: 100000}, db: pool, client: server.Client()}
 	now := time.Date(2026, 1, 10, 12, 0, 0, 0, time.UTC)
 	summary, err := runtime.evaluatePredictionOutcomes(ctx, now, map[string][]outcomePricePoint{})
-	if err != nil || summary["selected"] != 3 || summary["matured"] != 1 || summary["pending"] != 1 || summary["excluded"] != 1 || summary["failed"] != 0 {
+	if err != nil || summary["selected"] != 5 || summary["matured"] != 2 || summary["pending"] != 1 || summary["unavailable"] != 1 || summary["excluded"] != 1 || summary["failed"] != 0 {
 		t.Fatalf("unexpected first maturity summary=%#v err=%v", summary, err)
 	}
 	items, err := evaluation.NewOutcomeStore(pool).ListByAsset(ctx, "equity:XNAS:TARGET", 10)
-	if err != nil || len(items) != 2 {
+	if err != nil || len(items) != 3 {
 		t.Fatalf("stored outcomes=%#v err=%v", items, err)
 	}
 	var label evaluation.OutcomeLabel
+	var executionLabel evaluation.OutcomeLabel
 	legacyExcluded := false
 	for _, item := range items {
-		if item.Label.Status == "mature" {
+		if item.PredictionRunID == "prediction-horizon-label-model-5" {
 			label = item.Label
+		}
+		if item.PredictionRunID == "prediction-execution" {
+			executionLabel = item.Label
 		}
 		if item.PredictionRunID == "prediction-legacy" && item.Label.Status == "excluded" && item.ExclusionReason == "outcome_label_definition_not_pre_registered" {
 			legacyExcluded = true
@@ -130,6 +154,16 @@ func TestPredictionOutcomesMatureFiveSessionsWithoutAdvancingTwentyAgainstIsolat
 	}
 	if label.PriceField != "adjusted_close" || label.TimePrecision != "daily_close" || label.AlphaDefinition != "arithmetic_asset_total_return_minus_benchmark_total_return" || label.RiskAdjustmentStatus != "not_configured" {
 		t.Fatalf("stored label lost its frozen data and risk contract: %#v", label)
+	}
+	if executionLabel.Status != "mature" || executionLabel.RawReturn == nil || executionLabel.NetReturn != nil || executionLabel.GrossStrategyReturn != nil || executionLabel.SimulationStatus != "unavailable_tradability_evidence" || !executionLabel.ResearchResultOnly {
+		t.Fatalf("provider close was incorrectly presented as executable: %#v", executionLabel)
+	}
+	delisted, err := evaluation.NewOutcomeStore(pool).ListByAsset(ctx, "equity:XNAS:DELIST", 10)
+	if err != nil || len(delisted) != 1 || delisted[0].Label.Status != "unavailable" || delisted[0].ExclusionReason != "delisting_before_horizon_exit" {
+		t.Fatalf("terminal delisting sample was not retained: items=%#v err=%v", delisted, err)
+	}
+	if delisted[0].DataQuality["terminal_reason"] != "delisting_before_horizon_exit" || delisted[0].DataQuality["corporate_action_status"] != "observations_present" {
+		t.Fatalf("delisting audit evidence missing: %#v", delisted[0].DataQuality)
 	}
 	repeated, err := runtime.evaluatePredictionOutcomes(ctx, now, map[string][]outcomePricePoint{})
 	if err != nil || repeated["selected"] != 1 || repeated["matured"] != 0 || repeated["pending"] != 1 {

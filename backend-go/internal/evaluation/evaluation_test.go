@@ -24,6 +24,7 @@ func outcomePolicy(t *testing.T, objective string, horizon int) HorizonPolicy {
 func TestOutcomeStartsAfterSignalAndKeepsAbsoluteRelativeAndNetReturns(t *testing.T) {
 	asset := []PricePoint{price(100, 2, true), price(105, 3, true), price(110, 4, true)}
 	benchmark := []PricePoint{price(100, 2, true), price(102, 3, true), price(103, 4, true)}
+	asset[0].TradabilityStatus, asset[1].TradabilityStatus = "tradable", "tradable"
 	policy := outcomePolicy(t, "excess_up", 1)
 	policy.ExecutionEnabled, policy.ExecutionSide, policy.ExecutionCostBPS = true, "long", 10
 	result := BuildOutcomeLabel(time.Date(2025, 1, 2, 20, 0, 0, 0, time.UTC), asset, benchmark, policy)
@@ -102,9 +103,36 @@ func TestExecutionSimulationRequiresExplicitApplicableCostAssumptions(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	result := BuildOutcomeLabel(time.Date(2025, 1, 1, 23, 0, 0, 0, time.UTC), []PricePoint{price(100, 2, true), price(102, 3, true)}, nil, policy)
+	asset := []PricePoint{price(100, 2, true), price(102, 3, true)}
+	asset[0].TradabilityStatus, asset[1].TradabilityStatus = "tradable", "tradable"
+	result := BuildOutcomeLabel(time.Date(2025, 1, 1, 23, 0, 0, 0, time.UTC), asset, nil, policy)
 	if result.Status != "mature" || result.GrossStrategyReturn == nil || math.Abs(*result.GrossStrategyReturn+.02) > 1e-12 || result.NetReturn == nil || math.Abs(*result.NetReturn+.022) > 1e-12 || result.ExecutionCostBPS == nil || *result.ExecutionCostBPS != 20 {
 		t.Fatalf("explicit short costs were not applied independently: %#v", result)
+	}
+}
+
+func TestExecutionSimulationRequiresExplicitEntryAndExitTradability(t *testing.T) {
+	policy, err := WithExecutionAssumptions(outcomePolicy(t, "absolute_up", 1), ExecutionAssumptions{Enabled: true, Side: "long", RoundTripCostBPS: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name, entry, exit string
+	}{
+		{name: "unknown entry", entry: "", exit: "tradable"},
+		{name: "unknown exit", entry: "tradable", exit: "unknown"},
+		{name: "suspended entry", entry: "suspended", exit: "tradable"},
+		{name: "limit up entry", entry: "limit_up", exit: "tradable"},
+		{name: "limit down exit", entry: "tradable", exit: "limit_down"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			asset := []PricePoint{price(100, 2, true), price(102, 3, true)}
+			asset[0].TradabilityStatus, asset[1].TradabilityStatus = test.entry, test.exit
+			result := BuildOutcomeLabel(time.Date(2025, 1, 1, 23, 0, 0, 0, time.UTC), asset, nil, policy)
+			if result.Status != "mature" || result.RawReturn == nil || result.NetReturn != nil || result.GrossStrategyReturn != nil || result.ExecutionCostBPS != nil || result.SimulationStatus != "unavailable_tradability_evidence" || !result.ResearchResultOnly {
+				t.Fatalf("non-tradable close became an executable result: %#v", result)
+			}
+		})
 	}
 }
 

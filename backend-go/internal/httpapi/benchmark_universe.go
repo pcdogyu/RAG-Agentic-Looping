@@ -207,6 +207,9 @@ func (s *Server) marketDataQuality(w http.ResponseWriter, r *http.Request) {
 		"mature_prediction_labels":      `SELECT count(*)::int FROM outcome_records WHERE label_definition_version='prediction-outcome-label-v1' AND status='mature' AND label_available_at<=$1`,
 		"unavailable_prediction_labels": `SELECT count(*)::int FROM outcome_records WHERE label_definition_version='prediction-outcome-label-v1' AND status='unavailable' AND label_available_at<=$1`,
 		"excluded_prediction_labels":    `SELECT count(*)::int FROM outcome_records WHERE label_definition_version='prediction-outcome-label-v1' AND status='excluded' AND label_available_at<=$1`,
+		"delisted_prediction_labels":    `SELECT count(*)::int FROM outcome_records WHERE label_definition_version='prediction-outcome-label-v1' AND status='unavailable' AND exclusion_reason IN ('asset_delisted_at_signal','delisting_before_horizon_exit') AND label_available_at<=$1`,
+		"symbol_change_unavailable":     `SELECT count(*)::int FROM outcome_records WHERE label_definition_version='prediction-outcome-label-v1' AND status='unavailable' AND exclusion_reason='symbol_change_price_continuity_unavailable' AND label_available_at<=$1`,
+		"execution_tradability_missing": `SELECT count(*)::int FROM outcome_records WHERE label_definition_version='prediction-outcome-label-v1' AND status='mature' AND simulation_status='unavailable_tradability_evidence' AND label_available_at<=$1`,
 		"pending_prediction_labels":     `SELECT count(*)::int FROM prediction_runs p JOIN prediction_models m ON m.version=p.model_version WHERE m.scope->>'outcome_label_definition_version'='prediction-outcome-label-v1' AND p.signal_available_at<=$1 AND NOT EXISTS(SELECT 1 FROM outcome_records o WHERE o.prediction_run_id=p.id)`,
 	} {
 		var value int
@@ -223,7 +226,12 @@ func (s *Server) marketDataQuality(w http.ResponseWriter, r *http.Request) {
 		"handling": map[string]any{
 			"missing_benchmark":       "relative_return_unavailable_and_excluded_from_relative_aggregates",
 			"provider_member_missing": "excluded_not_assumed_delisted", "provider_failure": "retained_without_deactivating_assets",
-			"delisting": "requires_explicit_provider_status", "historical_industry": "must_be_supplied_from_point_in_time_context",
+			"delisting":             "explicit_terminal_samples_retained_as_unavailable_not_deleted",
+			"symbol_change":         "missing_price_continuity_becomes_unavailable_after_horizon_specific_grace",
+			"suspension":            "trading_session_horizon_remains_pending_until_sessions_resume",
+			"price_limit_execution": "net_return_unavailable_without_explicit_entry_and_exit_tradability_evidence",
+			"historical_industry":   "must_be_supplied_from_point_in_time_context",
+			"historical_membership": "resolved_at_signal_cutoff_not_from_current_classification",
 		},
 	})
 }
