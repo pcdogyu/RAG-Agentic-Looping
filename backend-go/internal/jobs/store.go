@@ -175,7 +175,13 @@ func (s *Store) ClaimResearch(ctx context.Context, workerID string, queues []str
 				WHERE d.job_id=j.id AND parent.status <> 'completed'
 			  )
 			ORDER BY
-				CASE WHEN $4::text='preferred' AND j.task_type='market_loop.research_asset' THEN 0 ELSE 1 END,
+				CASE
+					WHEN $4::text='preferred'
+						AND j.task_type='market_loop.research_asset'
+						AND split_part(coalesce(j.payload->'args'->>0,''),':',2) IN ('NASDAQ','NYSE','AMEX') THEN 0
+					WHEN $4::text='preferred' AND j.task_type='market_loop.research_asset' THEN 1
+					ELSE 2
+				END,
 				CASE WHEN $4::text='preferred' AND coalesce(nullif(j.payload->'kwargs'->>'research_profile',''),CASE WHEN j.task_type='market_loop.research_asset' THEN 'deep' ELSE 'fast' END)='deep' THEN 0 ELSE 1 END,
 				j.priority ASC,j.available_at,j.created_at
 			FOR UPDATE SKIP LOCKED

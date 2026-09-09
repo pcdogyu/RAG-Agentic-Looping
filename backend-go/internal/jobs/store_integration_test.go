@@ -93,20 +93,28 @@ func TestClaimResearchUsesFastAndDeepPreferredLanesAgainstPostgres(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	assetID, err := store.Enqueue(ctx, EnqueueParams{Queue: queue, TaskType: researchAssetTask, Payload: taskEnvelope{Args: []any{"asset", "event", "run"}, Kwargs: map[string]any{"research_profile": "deep"}}, Priority: 9, MaxAttempts: 1})
+	assetID, err := store.Enqueue(ctx, EnqueueParams{Queue: queue, TaskType: researchAssetTask, Payload: taskEnvelope{Args: []any{"equity:XSHG:600000", "event", "run"}, Kwargs: map[string]any{"research_profile": "deep"}}, Priority: 1, MaxAttempts: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	collectionAssetID, err := store.Enqueue(ctx, EnqueueParams{Queue: queue, TaskType: researchAssetTask, Payload: taskEnvelope{Args: []any{"equity:NASDAQ:NVDA", "event", "run"}, Kwargs: map[string]any{"research_profile": "deep"}}, Priority: 9, MaxAttempts: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() {
-		_, _ = pool.Exec(context.Background(), `DELETE FROM go_jobs WHERE id=ANY($1)`, []uuid.UUID{fastID, deepID, assetID})
+		_, _ = pool.Exec(context.Background(), `DELETE FROM go_jobs WHERE id=ANY($1)`, []uuid.UUID{fastID, deepID, assetID, collectionAssetID})
 	}()
 	fast, err := store.ClaimResearch(ctx, "fast-worker", []string{queue}, time.Minute, "fast")
 	if err != nil || fast.ID != fastID {
 		t.Fatalf("fast lane claimed %#v: %v", fast, err)
 	}
 	asset, err := store.ClaimResearch(ctx, "preferred-worker", []string{queue}, time.Minute, "preferred")
+	if err != nil || asset.ID != collectionAssetID {
+		t.Fatalf("preferred lane did not claim the forward-collection asset first: %#v err=%v", asset, err)
+	}
+	asset, err = store.ClaimResearch(ctx, "preferred-worker", []string{queue}, time.Minute, "preferred")
 	if err != nil || asset.ID != assetID {
-		t.Fatalf("preferred lane did not complete the downstream asset first: %#v err=%v", asset, err)
+		t.Fatalf("preferred lane did not resume the remaining downstream asset: %#v err=%v", asset, err)
 	}
 	deep, err := store.ClaimResearch(ctx, "preferred-worker", []string{queue}, time.Minute, "preferred")
 	if err != nil || deep.ID != deepID {
