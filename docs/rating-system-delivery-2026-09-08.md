@@ -17,6 +17,7 @@
 - 事件研究继续使用原有研究队列；`direction_score` 只表示启发式事件影响，不是收益率或概率。
 - `GET/POST /go/ratings/{assetID}` 读取或创建基本面评级；评级依赖已保存的估值运行、可追溯价格、基准和政策版本。
 - `POST /go/fundamental-research/{assetID}` 在同一 `as_of` 下依次保存财务预测、估值和基本面评级；不依赖新闻事件，任一阶段数据不足时停止后续阶段并返回明确原因。前端工作台提供管理员 JSON 入口。
+- `PUT/GET/DELETE /go/fundamental-research/{assetID}/schedule` 管理显式批准的定时研究计划。调度运行只复用批准的预测和估值情景，并从真实行情观测读取复权价；新财报、计划过期或价格不可用会停止自动评级并给出原因。
 - `POST /go/ratings/{assetID}/invalidation-check` 用显式观测值检查论点失效规则，缺失值不会转成零。
 - `POST /go/prediction-models` 注册可解释模型；`POST /go/calibrations` 只用独立样本注册 shadow Platt 校准器；`POST /go/calibrations/{version}/promotion-check` 通过正确性、样本、影子期、校准质量和人工批准门禁后才激活。
 - `GET/POST /go/predictions/{assetID}` 读取或产生固定期限预测。没有有效且适用的校准器时，概率为 `null`，状态为 `uncalibrated` 或 `unavailable`。

@@ -41,6 +41,14 @@ func TestFundamentalResearchRequiresAdminToken(t *testing.T) {
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("status=%d", response.Code)
 	}
+	for _, method := range []string{http.MethodPut, http.MethodDelete} {
+		request = httptest.NewRequest(method, "/go/fundamental-research/equity%3ANYSE%3AVRT/schedule", nil)
+		response = httptest.NewRecorder()
+		server.Handler().ServeHTTP(response, request)
+		if response.Code != http.StatusUnauthorized {
+			t.Fatalf("schedule method=%s status=%d", method, response.Code)
+		}
+	}
 }
 
 func TestConsensusImportRequiresAdminToken(t *testing.T) {

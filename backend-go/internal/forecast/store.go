@@ -129,6 +129,25 @@ func (s *Store) List(ctx context.Context, assetID string, asOf time.Time, limit 
 	return items, rows.Err()
 }
 
+func (s *Store) Get(ctx context.Context, assetID, versionID string) (Version, error) {
+	assetID, versionID = strings.TrimSpace(assetID), strings.TrimSpace(versionID)
+	if s.db == nil || assetID == "" || versionID == "" {
+		return Version{}, fmt.Errorf("invalid forecast version lookup")
+	}
+	var value Version
+	err := s.db.QueryRow(ctx, `SELECT id,asset_id,coalesce(parent_version_id,''),model_version,status,as_of,input_snapshot::jsonb,assumptions::jsonb,projection::jsonb,created_at
+        FROM forecast_versions WHERE id=$1 AND asset_id=$2`, versionID, assetID).Scan(
+		&value.ID, &value.AssetID, &value.ParentVersionID, &value.ModelVersion, &value.Status, &value.AsOf,
+		jsonScan(&value.InputSnapshot), jsonScan(&value.Assumptions), jsonScan(&value.Projection), &value.CreatedAt)
+	if err == pgx.ErrNoRows {
+		return Version{}, fmt.Errorf("forecast version was not found for asset")
+	}
+	if err != nil {
+		return Version{}, fmt.Errorf("load forecast version: %w", err)
+	}
+	return value, nil
+}
+
 func buildVersion(submission Submission) (Version, error) {
 	submission.AssetID = strings.TrimSpace(submission.AssetID)
 	if submission.AssetID == "" || submission.AsOf.IsZero() {

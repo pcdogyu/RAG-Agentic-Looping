@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/config"
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/fundamentalresearch"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/fundamentals"
 	"github.com/redis/go-redis/v9"
 )
@@ -28,6 +29,7 @@ const (
 	refreshMacroUniverseTask       = "market_loop.refresh_macro_universe"
 	syncFundamentalsTask           = "market_loop.sync_fundamental_snapshots"
 	refreshTrackedFundamentalsTask = "market_loop.refresh_tracked_fundamentals"
+	runScheduledFundamentalTask    = "market_loop.run_scheduled_fundamental_research"
 	masterdataLockTTL              = 2 * time.Hour
 )
 
@@ -90,6 +92,7 @@ func NewMasterdataHandlers(cfg config.Config, db *pgxpool.Pool, redisClient *red
 		refreshMacroUniverseTask:       runtime.refreshMacroUniverse,
 		syncFundamentalsTask:           runtime.syncFundamentalSnapshots,
 		refreshTrackedFundamentalsTask: runtime.refreshTrackedFundamentals,
+		runScheduledFundamentalTask:    runtime.runScheduledFundamentalResearch,
 	}
 }
 
@@ -183,6 +186,71 @@ func (runtime *masterdataRuntime) refreshTrackedFundamentals(ctx context.Context
 		succeeded++
 	}
 	return map[string]any{"status": "completed", "selected": len(assetIDs), "succeeded": succeeded, "results": results, "automatic_assumptions": false}, nil
+}
+
+// runScheduledFundamentalResearch revalues only explicitly approved plans.
+// New financial disclosures stop the plan for review; the scheduler never
+// invents forecast assumptions or silently rolls them onto new statements.
+func (runtime *masterdataRuntime) runScheduledFundamentalResearch(ctx context.Context, _ Job) (any, error) {
+	now := time.Now().UTC()
+	store := fundamentalresearch.NewPlanStore(runtime.db)
+	plans, err := store.Due(ctx, now, 10)
+	if err != nil {
+		return nil, err
+	}
+	results := map[string]any{}
+	completed, blocked, failed := 0, 0, 0
+	for _, plan := range plans {
+		result := fundamentalresearch.ScheduledResult{Version: fundamentalresearch.ScheduledResearchVersion, PlanID: plan.ID, AssetID: plan.AssetID, Status: "data_refresh_failed", AsOf: now, ForecastVersionID: plan.ForecastVersionID}
+		if _, syncErr := runtime.syncAssetFundamentals(ctx, plan.AssetID, 12); syncErr != nil {
+			result.Reason = syncErr.Error()
+			if recordErr := store.Record(ctx, plan, result, time.Now().UTC()); recordErr != nil {
+				return nil, recordErr
+			}
+			results[plan.AssetID] = result
+			failed++
+			continue
+		}
+		asset := map[string]any{}
+		var assetID, assetClass, market, symbol, currency string
+		if queryErr := runtime.db.QueryRow(ctx, `SELECT id,asset_class,market,symbol,currency FROM assets WHERE id=$1 AND active=true`, plan.AssetID).Scan(&assetID, &assetClass, &market, &symbol, &currency); queryErr != nil {
+			result.Reason = queryErr.Error()
+			if recordErr := store.Record(ctx, plan, result, time.Now().UTC()); recordErr != nil {
+				return nil, recordErr
+			}
+			results[plan.AssetID] = result
+			failed++
+			continue
+		}
+		asset["asset_id"], asset["asset_class"], asset["market"], asset["symbol"], asset["currency"] = assetID, assetClass, market, symbol, currency
+		priceRuntime := &outcomeRuntime{cfg: runtime.cfg, db: runtime.db, redis: runtime.redis, client: runtime.client}
+		if _, priceErr := priceRuntime.cachedPrices(ctx, asset, now.AddDate(0, 0, -14), now, map[string][]outcomePricePoint{}); priceErr != nil {
+			result.Reason = priceErr.Error()
+			if recordErr := store.Record(ctx, plan, result, time.Now().UTC()); recordErr != nil {
+				return nil, recordErr
+			}
+			results[plan.AssetID] = result
+			failed++
+			continue
+		}
+		result, runErr := store.Run(ctx, plan, time.Now().UTC())
+		if runErr != nil {
+			result.Status, result.Reason = "technical_failure", runErr.Error()
+		}
+		if recordErr := store.Record(ctx, plan, result, time.Now().UTC()); recordErr != nil {
+			return nil, recordErr
+		}
+		results[plan.AssetID] = result
+		switch result.Status {
+		case "completed":
+			completed++
+		case "technical_failure", "data_refresh_failed":
+			failed++
+		default:
+			blocked++
+		}
+	}
+	return map[string]any{"status": "completed", "selected": len(plans), "completed": completed, "blocked": blocked, "failed": failed, "results": results, "automatic_assumptions": false}, nil
 }
 
 func (runtime *masterdataRuntime) refreshCryptoUniverse(ctx context.Context, job Job) (any, error) {
@@ -845,6 +913,7 @@ var masterdataSchedules = []masterdataSchedule{
 	{task: refreshCryptoUniverseTask, interval: 6 * time.Hour},
 	{task: refreshMacroUniverseTask, interval: 24 * time.Hour},
 	{task: refreshTrackedFundamentalsTask, interval: 24 * time.Hour},
+	{task: runScheduledFundamentalTask, interval: time.Hour},
 }
 
 type MasterdataScheduler struct {

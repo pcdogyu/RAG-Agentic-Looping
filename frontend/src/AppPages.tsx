@@ -4066,6 +4066,7 @@ type FundamentalBundle = {
   }> };
   predictions?: { items?: Array<{ status?: string; probability?: number; signal_available_at?: string; horizon_sessions?: number; model_version?: string; calibration_version?: string; exclusion_reason?: string }> };
 	marketPolicy?: { asset_class?: string; market?: string; currency?: string; policy?: { version?: string; fundamental_method?: string; fundamental_supported?: boolean; prediction_supported?: boolean; prediction_scope?: string; reason?: string; required_inputs?: string[] } };
+  schedule?: { items?: Array<{ id?: string; status?: string; forecast_version_id?: string; cadence_hours?: number; next_run_at?: string; last_run_status?: string; last_run_reason?: string; approved_by?: string; approved_at?: string }> };
 };
 
 export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
@@ -4075,6 +4076,8 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
   const [loading, setLoading] = useState(false);
   const [token, setToken] = useState(readToken);
   const [workflowJSON, setWorkflowJSON] = useState("");
+  const [scheduleJSON, setScheduleJSON] = useState("");
+  const [scheduleRequestID, setScheduleRequestID] = useState(() => globalThis.crypto?.randomUUID?.() || `fundamental-schedule-${Date.now()}`);
   async function load(event?: FormEvent) {
     event?.preventDefault();
     const canonical = assetID.trim();
@@ -4085,9 +4088,10 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 			{ key: "fundamentals", route: "fundamentals" }, { key: "forecasts", route: "forecasts" },
 			{ key: "valuations", route: "valuations" }, { key: "ratings", route: "ratings" },
 			{ key: "predictions", route: "predictions" }, { key: "marketPolicy", route: "market-policies" },
+			{ key: "schedule", route: "fundamental-research", suffix: "/schedule" },
 		] as const;
     try {
-			const responses = await Promise.all(endpoints.map((item) => fetch(`${apiBase}/go/${item.route}/${path}?limit=20`)));
+			const responses = await Promise.all(endpoints.map((item) => fetch(`${apiBase}/go/${item.route}/${path}${"suffix" in item ? item.suffix : ""}?limit=20`)));
       const failed = responses.find((response) => !response.ok);
       if (failed) throw new Error(`HTTP ${failed.status}`);
       const values = await Promise.all(responses.map((response) => response.json()));
@@ -4111,10 +4115,39 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
       setMessage(`工作流失败：${error instanceof Error ? error.message : "JSON 或请求无效"}`);
     } finally { setLoading(false); }
   }
+  async function approveSchedule() {
+    const canonical = assetID.trim();
+    if (!canonical || !token || !scheduleJSON.trim()) return;
+    setLoading(true); setMessage("");
+    try {
+      const body = JSON.parse(scheduleJSON) as Record<string, unknown>;
+      const response = await fetch(`${apiBase}/go/fundamental-research/${encodeURIComponent(canonical)}/schedule`, { method: "PUT", headers: { "Content-Type": "application/json", "X-Admin-Token": token, "Idempotency-Key": scheduleRequestID }, body: JSON.stringify(body) });
+      const payload = await response.json() as { detail?: string };
+      if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
+      setMessage("定时基本面研究计划已批准；系统只复用显式批准的预测和估值参数。");
+      setScheduleRequestID(globalThis.crypto?.randomUUID?.() || `fundamental-schedule-${Date.now()}`);
+      await load();
+    } catch (error) {
+      setMessage(`计划批准失败：${error instanceof Error ? error.message : "JSON 或请求无效"}`);
+    } finally { setLoading(false); }
+  }
+  async function pauseSchedule() {
+    const canonical = assetID.trim();
+    if (!canonical || !token) return;
+    setLoading(true); setMessage("");
+    try {
+      const response = await fetch(`${apiBase}/go/fundamental-research/${encodeURIComponent(canonical)}/schedule`, { method: "DELETE", headers: { "X-Admin-Token": token } });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      setMessage("定时基本面研究计划已暂停。");
+      await load();
+    } catch (error) { setMessage(`暂停失败：${error instanceof Error ? error.message : "未知错误"}`); }
+    finally { setLoading(false); }
+  }
   const rating = bundle.ratings?.items?.[0];
   const prediction = bundle.predictions?.items?.[0];
   const valuation = bundle.valuations?.items?.[0];
   const forecast = bundle.forecasts?.items?.[0];
+  const schedule = bundle.schedule?.items?.[0];
   const valuationRange = valuation?.result?.range;
   const changedAssumptions = Object.entries(rating?.changed_assumptions || {});
   return <section className="app-page fundamental-page">
@@ -4127,7 +4160,10 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
     {token && <div className="integration-editor">
       <label>无新闻基本面研究输入<textarea aria-label="基本面研究 JSON" rows={8} value={workflowJSON} onChange={(event) => setWorkflowJSON(event.target.value)} placeholder='粘贴含 as_of、forecast、valuation、rating 的证据化 JSON；不会自动补造假设或价格。' /></label>
       <button type="button" disabled={loading || !workflowJSON.trim()} onClick={() => void runWorkflow()}>运行基本面研究</button>
-      <small>已进入预测或评级流程的美股会每日刷新财务快照；估值与评级仍只使用此处明确提交并获证据支持的假设。</small>
+      <label>定时研究批准计划<textarea aria-label="定时基本面研究计划 JSON" rows={8} value={scheduleJSON} onChange={(event) => { setScheduleJSON(event.target.value); setScheduleRequestID(globalThis.crypto?.randomUUID?.() || `fundamental-schedule-${Date.now()}`); }} placeholder='粘贴 forecast_version_id、valuation、rating、approved_by 和可选 cadence_hours；价格由运行时读取真实复权价。' /></label>
+      <button type="button" disabled={loading || !scheduleJSON.trim()} onClick={() => void approveSchedule()}>批准定时研究</button>
+      <button type="button" disabled={loading || schedule?.status !== "approved"} onClick={() => void pauseSchedule()}>暂停定时研究</button>
+      <small>计划只复用明确批准的预测与估值参数；出现新财报、计划过期或缺少复权价时自动停止并等待复核。</small>
     </div>}
     {message && <div className="page-message">{message}</div>}
     <div className="metric-grid">
@@ -4137,6 +4173,7 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
       <article><span>基本面评级</span><strong>{rating?.result?.rating || rating?.result?.status || "不可用"}</strong><small>{rating?.result?.reason || rating?.state?.effective_at || "等待完整输入"}</small></article>
 		<article><span>短期预测</span><strong>{prediction?.status || "不可用"}</strong><small>{prediction?.status === "calibrated" && typeof prediction.probability === "number" ? `${Math.round(prediction.probability * 100)}%` : "未校准时不显示概率"}</small></article>
 		<article><span>资产政策</span><strong>{bundle.marketPolicy?.asset_class || "不可用"} · {bundle.marketPolicy?.market || "—"}</strong><small>{bundle.marketPolicy?.policy?.fundamental_supported ? "基本面可用" : "基本面不适用"} · {bundle.marketPolicy?.policy?.prediction_supported ? "短期预测可用" : "短期预测不适用"}</small></article>
+      <article><span>定时研究</span><strong>{schedule?.status || "未配置"}</strong><small>{schedule?.last_run_reason || schedule?.last_run_status || schedule?.next_run_at || "需要管理员显式批准"}</small></article>
     </div>
     <div className="conclusion-list">
 		<article className="conclusion-card">

@@ -29,6 +29,7 @@ func TestMasterdataScheduleMatchesLegacyCadence(t *testing.T) {
 		refreshAssetUniverseTask:       24 * time.Hour,
 		refreshMacroUniverseTask:       24 * time.Hour,
 		refreshTrackedFundamentalsTask: 24 * time.Hour,
+		runScheduledFundamentalTask:    time.Hour,
 	}
 	if len(masterdataSchedules) != len(want) {
 		t.Fatalf("got %d schedules, want %d", len(masterdataSchedules), len(want))
