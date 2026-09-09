@@ -64,13 +64,13 @@ func TestScheduledWorkflowRevaluesApprovedForecastAgainstIsolatedPostgres(t *tes
 	if err != nil || forecastVersion.Status != "available" {
 		t.Fatalf("forecast=%#v err=%v", forecastVersion, err)
 	}
-	price := marketdata.PriceObservation{AssetID: assetID, Market: "US", Currency: "USD", ObservedAt: base.Add(30 * time.Minute), AvailableAt: base.Add(time.Hour), Price: 20, PriceField: "adjusted_close", TimePrecision: "timestamped", SourceName: "test-market", SourceDocumentID: "price-series:" + assetID}
+	price := marketdata.PriceObservation{AssetID: assetID, Market: "US", Currency: "USD", ObservedAt: base.Add(-30 * time.Minute), AvailableAt: base, Price: 20, PriceField: "adjusted_close", TimePrecision: "timestamped", SourceName: "test-market", SourceDocumentID: "price-series:" + assetID}
 	if _, err = marketdata.NewStore(pool).Save(ctx, price); err != nil {
 		t.Fatal(err)
 	}
 	benchmark := .05
 	submission := PlanSubmission{AssetID: assetID, ForecastVersionID: forecastVersion.ID, Valuation: ValuationPlan{MultipleScenarios: []valuation.MultipleScenario{{Name: "base", PriceEarningsMultiple: 20, ComparableEvidenceIDs: []string{"comparable-set-1"}}}}, Rating: ScheduledRatingPlan{Policy: rating.DefaultUSPolicy(), BenchmarkReturn: &benchmark, BenchmarkEvidenceID: "benchmark-expectation-1", ReasonCodes: []string{"approved_periodic_review"}, EvidenceIDs: []string{incomeID, balanceID, cashFlowID}}, CadenceHours: 24, MaxPriceAgeHours: 120, MaxPlanAgeDays: 90, ApprovedBy: "integration-test", IdempotencyKey: "scheduled-plan-request-1"}
-	approvedAt := base.Add(90 * time.Minute)
+	approvedAt := base
 	plan, created, err := NewPlanStore(pool).Approve(ctx, submission, approvedAt)
 	if err != nil || !created || plan.Status != "approved" {
 		t.Fatalf("plan=%#v created=%v err=%v", plan, created, err)
@@ -86,6 +86,26 @@ func TestScheduledWorkflowRevaluesApprovedForecastAgainstIsolatedPostgres(t *tes
 	result, err := NewPlanStore(pool).Run(ctx, plan, approvedAt.Add(30*time.Minute))
 	if err != nil || result.Status != "completed" || result.Valuation == nil || result.Rating == nil || result.Price == nil {
 		t.Fatalf("scheduled result=%#v err=%v", result, err)
+	}
+	manual, err := New(pool).Run(ctx, Input{
+		AssetID: assetID,
+		AsOf:    result.AsOf,
+		Forecast: ForecastPlan{
+			Inputs:                 forecast.Inputs{Currency: "USD", Unit: "millions", Revenue: &revenue, OperatingMargin: &margin, TaxRate: &tax, Depreciation: &depreciation, Capex: &capex, ChangeNWC: &nwc, DilutedShares: &shares},
+			FundamentalSnapshotIDs: []string{incomeID, balanceID, cashFlowID},
+		},
+		Valuation: ValuationPlan{MultipleScenarios: []valuation.MultipleScenario{{Name: "base", PriceEarningsMultiple: 20, ComparableEvidenceIDs: []string{"comparable-set-1"}}}},
+		Rating: RatingPlan{
+			Policy: rating.DefaultUSPolicy(), AsOfPrice: &result.Price.Price, AsOfPriceEvidenceID: result.Price.ID,
+			BenchmarkReturn: &benchmark, BenchmarkEvidenceID: "benchmark-expectation-1",
+			ReasonCodes: []string{"scheduled_fundamental_review", "approved_periodic_review"}, EvidenceIDs: []string{incomeID, balanceID, cashFlowID},
+		},
+	})
+	if err != nil || manual.Status != "available" || manual.Valuation == nil || manual.Rating == nil {
+		t.Fatalf("manual parity result=%#v err=%v", manual, err)
+	}
+	if manual.Forecast.ID != result.ForecastVersionID || manual.Valuation.ID != result.Valuation.ID || manual.Rating.Created || manual.Rating.State == nil || result.Rating.State == nil || manual.Rating.State.ValuationRunID != result.Rating.State.ValuationRunID {
+		t.Fatalf("manual and scheduled paths diverged: manual=%#v scheduled=%#v", manual, result)
 	}
 	if err = NewPlanStore(pool).Record(ctx, plan, result, approvedAt.Add(30*time.Minute)); err != nil {
 		t.Fatal(err)
