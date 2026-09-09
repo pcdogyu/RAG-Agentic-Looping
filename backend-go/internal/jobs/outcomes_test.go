@@ -104,6 +104,23 @@ func TestNormalizeOutcomePricesPrefersAdjustedClose(t *testing.T) {
 	}
 }
 
+func TestCompletedOutcomePricesRejectsOpenSessionDateOnlyClose(t *testing.T) {
+	points := []outcomePricePoint{
+		{ObservedAt: time.Date(2026, 9, 8, 0, 0, 0, 0, time.UTC), Close: 100, Adjusted: true, SessionOnly: true},
+		{ObservedAt: time.Date(2026, 9, 9, 0, 0, 0, 0, time.UTC), Close: 101, Adjusted: true, SessionOnly: true},
+	}
+	duringSession := time.Date(2026, 9, 9, 19, 30, 0, 0, time.UTC)
+	filtered := completedOutcomePrices(points, "US", duringSession)
+	if len(filtered) != 1 || filtered[0].ObservedAt.Day() != 8 {
+		t.Fatalf("open-session row was accepted as a final close: %#v", filtered)
+	}
+	afterPublicationBuffer := time.Date(2026, 9, 9, 20, 20, 0, 0, time.UTC)
+	filtered = completedOutcomePrices(points, "US", afterPublicationBuffer)
+	if len(filtered) != 2 {
+		t.Fatalf("completed session was rejected: %#v", filtered)
+	}
+}
+
 func TestOutcomeWindowDoesNotUseSameDayDateOnlyClose(t *testing.T) {
 	start := time.Date(2026, 1, 2, 10, 8, 0, 0, time.UTC)
 	points := []outcomePricePoint{

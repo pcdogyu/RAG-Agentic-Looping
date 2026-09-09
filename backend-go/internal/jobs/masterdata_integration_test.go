@@ -147,7 +147,7 @@ func TestManualMarketPriceSyncPersistsOnlyProviderObservationsAgainstIsolatedPos
 		VALUES($1,'equity','US','PRICE','Price Test','NASDAQ','USD','[]','[]','[]',1,true)`, assetID); err != nil {
 		t.Fatal(err)
 	}
-	today, prior := time.Now().UTC().Format("2006-01-02"), time.Now().UTC().AddDate(0, 0, -1).Format("2006-01-02")
+	prior, earlier := time.Now().UTC().AddDate(0, 0, -1).Format("2006-01-02"), time.Now().UTC().AddDate(0, 0, -2).Format("2006-01-02")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("apikey") != "isolated-price" || r.URL.Path != "/historical-price-eod/dividend-adjusted" || r.URL.Query().Get("symbol") != "PRICE" {
 			t.Errorf("unexpected FMP price request: path=%s symbol=%q apikey=%q", r.URL.Path, r.URL.Query().Get("symbol"), r.Header.Get("apikey"))
@@ -155,8 +155,8 @@ func TestManualMarketPriceSyncPersistsOnlyProviderObservationsAgainstIsolatedPos
 			return
 		}
 		_ = json.NewEncoder(w).Encode([]map[string]any{
+			{"date": earlier, "close": 48.0, "adjClose": 49.0},
 			{"date": prior, "close": 49.0, "adjClose": 50.0},
-			{"date": today, "close": 50.0, "adjClose": 51.0},
 		})
 	}))
 	defer server.Close()

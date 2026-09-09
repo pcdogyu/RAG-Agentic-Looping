@@ -281,6 +281,7 @@
 
 - 新增管理员限定的 `POST /go/market-prices/{assetID}/sync`，把单标的最近 1—90 日真实供应商行情排入主数据 Worker；默认同步最近 14 日。美股明确使用 FMP `historical-price-eod/dividend-adjusted`，因为 `historical-price-eod/full` 只提供普通 OHLC，不能满足复权标签契约。该入口与定时研究和真实结果标签复用同一价格适配器、标准化逻辑与 `market_price_observations` 不可变存储，不建立第二套价格口径。
 - 同步结果分别报告供应商返回数、复权收盘价数、新增数和累计数；没有可靠 `adjusted_close` 时返回明确 `unavailable`，普通收盘价不能冒充复权价格证据。
+- 供应商在交易时段内可能提前返回仍会变化的当日 EOD 行。日期型行情必须经过市场本地收盘时间门禁，并额外保留 15 分钟发布缓冲；美股、A 股和港股分别按各自本地时区判断，收盘前的当日行不写入 `daily_close`。
 - 同步只写行情事实，响应和 Worker 结果明确 `automatic_assumptions=false`、`automatic_valuation=false`、`automatic_rating=false`；不会因为取得价格而生成预测、估值、评级或概率。
 - “基本面与预测”页面可显式同步并读取最近复权价格，展示价格观测 ID，供人工填写的研究输入引用。财务事实模板仍不自动把价格写入审批内容，分析师必须确认价格时点与证据适用性。
 - PostgreSQL 隔离回归覆盖真实适配器形状、复权价优先、来源 URL 去凭据、首次可获得时间、重复同步幂等，以及没有预测/评级副作用；生产验收需要对样板标的同步并读回非零不可变价格观测。

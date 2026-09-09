@@ -410,12 +410,44 @@ func (runtime *outcomeRuntime) cachedPrices(
 	if err != nil {
 		return nil, err
 	}
-	points := normalizeOutcomePrices(payload, end)
+	points := completedOutcomePrices(normalizeOutcomePrices(payload, end), stringValue(asset["market"]), end)
 	if err := runtime.persistPriceObservations(ctx, asset, points, time.Now().UTC()); err != nil {
 		return nil, err
 	}
 	cache[key] = points
 	return points, nil
+}
+
+// completedOutcomePrices prevents a provider's changing same-day EOD row from
+// being persisted as a final daily close. Date-only observations are admitted
+// only after the exchange's local close plus a small publication buffer.
+func completedOutcomePrices(points []outcomePricePoint, market string, asOf time.Time) []outcomePricePoint {
+	market = strings.ToUpper(strings.TrimSpace(market))
+	locationName, closeHour, closeMinute := "UTC", 0, 0
+	switch market {
+	case "US", "NASDAQ", "NYSE", "AMEX", "OTC":
+		locationName, closeHour, closeMinute = "America/New_York", 16, 15
+	case "CN", "XSHG", "XSHE":
+		locationName, closeHour, closeMinute = "Asia/Shanghai", 15, 15
+	case "HK", "XHKG":
+		locationName, closeHour, closeMinute = "Asia/Hong_Kong", 16, 15
+	}
+	location, err := time.LoadLocation(locationName)
+	if err != nil {
+		location = time.UTC
+		closeHour, closeMinute = 24, 0
+	}
+	localAsOf := asOf.UTC().In(location)
+	currentSessionDate := localAsOf.Format("2006-01-02")
+	closeAt := time.Date(localAsOf.Year(), localAsOf.Month(), localAsOf.Day(), closeHour, closeMinute, 0, 0, location)
+	result := make([]outcomePricePoint, 0, len(points))
+	for _, point := range points {
+		if point.SessionOnly && point.ObservedAt.UTC().Format("2006-01-02") == currentSessionDate && localAsOf.Before(closeAt) {
+			continue
+		}
+		result = append(result, point)
+	}
+	return result
 }
 
 func (runtime *outcomeRuntime) persistPriceObservations(ctx context.Context, asset map[string]any, points []outcomePricePoint, availableAt time.Time) error {
