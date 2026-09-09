@@ -115,6 +115,10 @@
 | 2.8 | 反方研究与新增资产模型验收 | 已完成工程门禁（功能默认关闭，真实分市场样本待积累） |
 | 2.9 | 真实生产数据冷启动 | 已完成事实数据接线（分析师假设、模型训练与真实成熟样本待积累） |
 | 2.10 | 前瞻规则基线样本采集 | 已完成工程接线（仅采集新研究，真实结果待自然成熟） |
+| 2.11 | 无新闻基本面人工准备包 | 已完成（真实分析师假设与批准仍不可自动生成） |
+| 2.12 | 一致预期首次观测与前瞻修订历史 | 已完成工程接线（真实修订序列从首次观测后积累） |
+| 2.13 | 公告语义与管理层指引修订 | 已完成工程接线（生产真实指引修订待可靠来源积累） |
+| 2.14 | SEC 原始披露候选与管理层指引人工确认 | 已完成工程接线（生产 SEC 身份与真实人工核验待配置） |
 
 ## 5. 第二期完成定义
 
@@ -258,3 +262,15 @@
 - 一致预期只从供应商汇总快照计算修订方向、绝对幅度和样本数变化，并明确 `individual_analyst_behavior_status=unavailable_aggregate_snapshots_only`，不得推断单个分析师行为。
 - `GET /go/consensus/{assetID}/guidance` 按可用时点读回管理层指引旧值、新值、区间、适用期间和来源，并计算上调/下调、区间收窄/扩大及变动边界；响应明确 `guidance_is_consensus=false`。
 - PostgreSQL 隔离回归覆盖指引修订前截止、旧/新区间持久化和修订方向；单元回归覆盖“同比增长但低于预期”“同比下降但好于预期”、非正上期值以及聚合预期修订边界。
+
+### 2.14 SEC 原始披露候选与管理层指引人工确认
+
+- 新增 SEC EDGAR 官方披露适配器。它先从官方公司代码目录解析 CIK，再读取公司 submissions JSON，只把 `8-K`、`10-Q`、`10-K`、`6-K`、`20-F`、`40-F` 及其修订表单保存为“可能含指引的待核验文档”；遵循 SEC 自动访问要求并强制配置可识别的 `SEC_IDENTITY`，无身份时明确不可用。
+- `guidance_source_documents` 不可变保存 CIK、accession number、表单、报告日、申报日、SEC 接收时间、首次本地观测时间、申报索引页、主文档和原始元数据。SEC 明确说明接收时间到网页可访问通常仍有 1—3 分钟且不保证，因此 `accepted_at` 保留官方时间，`source_available_at` 保守使用首次本地观测时间；历史截止早于首次观测时文档不可见，不做事后倒填。
+- 文档候选明确标记 `candidate_is_guidance=false`、`automatic_extraction=false`。发现财报或 8-K 不会自动生成指引、假设、评级或概率，也不会把申报表中的任意前瞻叙述猜成数值区间。
+- `GET /go/consensus/{assetID}/guidance-sources` 按时点返回候选和最新人工核验状态；`POST .../guidance-sources/sync` 仅排队官方文档同步；`POST .../guidance-sources/{documentID}/reviews` 保存幂等的 `confirmed_guidance`、`no_guidance` 或 `needs_follow_up` 审核。
+- 只有 `confirmed_guidance` 且人工提供适用期间、指标、币种、单位、会计口径、原文摘录、披露位置、同一 accession 目录中的证据 URL 和审核人时，才在同一数据库事务内生成管理层指引快照。`published_at` 和来源身份由 SEC 候选强制覆盖客户端值，`available_at` 使用人工核验完成时间；事后人工提取不会回灌到核验前的历史回放。
+- 每日受跟踪美股事实刷新在 SEC 身份已配置时同步披露候选；身份缺失只报告 `sec_identity_not_configured`，不影响已有财务、一致预期和公司行动刷新。生产当前尚未配置 SEC 身份，因此真实候选数和人工确认数仍必须保持为零/不可用，不能据此声称 P1-02 已通过真实指引历史验收。
+- 单元回归覆盖 User-Agent、CIK 解析、平行数组完整性、支持表单、官方时间语义和跨 accession 证据 URL 拒绝；PostgreSQL 回归覆盖候选幂等、公告前截止、人工确认、来源字段强制覆盖、核验幂等冲突以及无评级副作用。
+
+官方数据契约参考：[SEC EDGAR 数据 API](https://www.sec.gov/search-filings/edgar-application-programming-interfaces) 与 [SEC EDGAR 访问说明](https://www.sec.gov/search-filings/edgar-search-assistance)。

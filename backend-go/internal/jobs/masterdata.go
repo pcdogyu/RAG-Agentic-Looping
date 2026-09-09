@@ -32,6 +32,7 @@ const (
 	refreshMacroUniverseTask       = "market_loop.refresh_macro_universe"
 	syncFundamentalsTask           = "market_loop.sync_fundamental_snapshots"
 	syncConsensusTask              = "market_loop.sync_consensus_snapshots"
+	syncGuidanceSourcesTask        = "market_loop.sync_guidance_source_documents"
 	syncCorporateActionsTask       = "market_loop.sync_corporate_actions"
 	refreshTrackedFundamentalsTask = "market_loop.refresh_tracked_fundamentals"
 	runScheduledFundamentalTask    = "market_loop.run_scheduled_fundamental_research"
@@ -102,10 +103,94 @@ func NewMasterdataHandlers(cfg config.Config, db *pgxpool.Pool, redisClient *red
 		refreshMacroUniverseTask:       runtime.refreshMacroUniverse,
 		syncFundamentalsTask:           runtime.syncFundamentalSnapshots,
 		syncConsensusTask:              runtime.syncConsensusSnapshots,
+		syncGuidanceSourcesTask:        runtime.syncGuidanceSourceDocuments,
 		syncCorporateActionsTask:       runtime.syncCorporateActions,
 		refreshTrackedFundamentalsTask: runtime.refreshTrackedFundamentals,
 		runScheduledFundamentalTask:    runtime.runScheduledFundamentalResearch,
 	}
+}
+
+var errSECIdentityMissing = errors.New("SEC identity is not configured")
+
+func (runtime *masterdataRuntime) syncGuidanceSourceDocuments(ctx context.Context, job Job) (any, error) {
+	envelope := taskEnvelope{}
+	_ = json.Unmarshal(job.Payload, &envelope)
+	assetID := strings.TrimSpace(stringValue(envelope.Kwargs["asset_id"]))
+	if assetID == "" && len(envelope.Args) > 0 {
+		assetID = strings.TrimSpace(stringValue(envelope.Args[0]))
+	}
+	if assetID == "" {
+		return nil, errors.New("guidance source document sync requires asset_id")
+	}
+	limit := int(numberValue(envelope.Kwargs["limit"]))
+	if limit == 0 {
+		limit = 40
+	}
+	if limit < 1 || limit > 200 {
+		return nil, errors.New("guidance source document limit must be between 1 and 200")
+	}
+	return runtime.syncAssetGuidanceSources(ctx, assetID, limit)
+}
+
+func (runtime *masterdataRuntime) syncAssetGuidanceSources(ctx context.Context, assetID string, limit int) (any, error) {
+	var symbol, market, assetClass string
+	if err := runtime.db.QueryRow(ctx, `SELECT symbol,market,asset_class FROM assets WHERE id=$1 AND active=true`, assetID).Scan(&symbol, &market, &assetClass); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("active asset %q was not found", assetID)
+		}
+		return nil, err
+	}
+	if strings.ToUpper(market) != "US" || strings.ToLower(assetClass) != "equity" {
+		return nil, errors.New("guidance source documents currently support US equities only")
+	}
+	identity := runtime.effectiveSECIdentity(ctx)
+	if identity == "" {
+		return nil, errSECIdentityMissing
+	}
+	observedAt := time.Now().UTC()
+	client := consensus.SECClient{Identity: identity, HTTPClient: runtime.client}
+	items, err := client.FetchGuidanceSources(ctx, assetID, symbol, limit, observedAt)
+	if err != nil {
+		return nil, err
+	}
+	store := consensus.NewStore(runtime.db)
+	inserted := 0
+	forms := map[string]int{}
+	for _, item := range items {
+		created, saveErr := store.SaveGuidanceSource(ctx, item)
+		if saveErr != nil {
+			return nil, saveErr
+		}
+		forms[item.Form]++
+		if created {
+			inserted++
+		}
+	}
+	return map[string]any{
+		"asset_id": assetID, "symbol": symbol, "source": "SEC EDGAR", "candidate_count": len(items), "inserted": inserted,
+		"unchanged": len(items) - inserted, "forms": forms, "contract_version": consensus.SECDisclosureContractVersion,
+		"provider_publication_time_available": true, "provider_dissemination_time_available": false, "source_available_at_basis": "first_observed_at",
+		"historical_backfill":  false,
+		"automatic_extraction": false, "automatic_guidance": false, "automatic_rating": false, "human_review_required": true,
+	}, nil
+}
+
+func (runtime *masterdataRuntime) effectiveSECIdentity(ctx context.Context) string {
+	identity := strings.TrimSpace(runtime.cfg.SECIdentity)
+	if runtime.db == nil {
+		return identity
+	}
+	var body []byte
+	if err := runtime.db.QueryRow(ctx, `SELECT payload::jsonb FROM integration_settings WHERE key='fact-source:sec'`).Scan(&body); err != nil {
+		return identity
+	}
+	stored := map[string]any{}
+	if json.Unmarshal(body, &stored) == nil {
+		if value := strings.TrimSpace(stringValue(stored["identity"])); value != "" {
+			return value
+		}
+	}
+	return identity
 }
 
 func (runtime *masterdataRuntime) syncConsensusSnapshots(ctx context.Context, job Job) (any, error) {
@@ -366,8 +451,13 @@ func (runtime *masterdataRuntime) refreshTrackedFundamentals(ctx context.Context
 		fundamentalResult, fundamentalErr := runtime.syncAssetFundamentals(ctx, candidate.AssetID, 12)
 		consensusResult, consensusErr := runtime.syncAssetConsensus(ctx, candidate.AssetID, 10)
 		actionResult, actionErr := runtime.syncAssetCorporateActions(ctx, candidate.AssetID, 500)
-		if fundamentalErr != nil || consensusErr != nil || actionErr != nil {
-			entry := map[string]any{"status": "partial", "selection_reason": candidate.SelectionReason, "fundamentals": fundamentalResult, "consensus": consensusResult, "corporate_actions": actionResult}
+		guidanceSourceResult, guidanceSourceErr := runtime.syncAssetGuidanceSources(ctx, candidate.AssetID, 40)
+		if errors.Is(guidanceSourceErr, errSECIdentityMissing) {
+			guidanceSourceResult = map[string]any{"status": "unavailable", "reason": "sec_identity_not_configured", "automatic_guidance": false}
+			guidanceSourceErr = nil
+		}
+		if fundamentalErr != nil || consensusErr != nil || actionErr != nil || guidanceSourceErr != nil {
+			entry := map[string]any{"status": "partial", "selection_reason": candidate.SelectionReason, "fundamentals": fundamentalResult, "consensus": consensusResult, "corporate_actions": actionResult, "guidance_sources": guidanceSourceResult}
 			if fundamentalErr != nil {
 				entry["fundamental_error"] = fundamentalErr.Error()
 			}
@@ -377,10 +467,13 @@ func (runtime *masterdataRuntime) refreshTrackedFundamentals(ctx context.Context
 			if actionErr != nil {
 				entry["corporate_action_error"] = actionErr.Error()
 			}
+			if guidanceSourceErr != nil {
+				entry["guidance_source_error"] = guidanceSourceErr.Error()
+			}
 			results[candidate.AssetID] = entry
 			continue
 		}
-		results[candidate.AssetID] = map[string]any{"status": "completed", "selection_reason": candidate.SelectionReason, "fundamentals": fundamentalResult, "consensus": consensusResult, "corporate_actions": actionResult}
+		results[candidate.AssetID] = map[string]any{"status": "completed", "selection_reason": candidate.SelectionReason, "fundamentals": fundamentalResult, "consensus": consensusResult, "corporate_actions": actionResult, "guidance_sources": guidanceSourceResult}
 		succeeded++
 	}
 	return map[string]any{

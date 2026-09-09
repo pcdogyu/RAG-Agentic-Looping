@@ -20,6 +20,16 @@ type guidanceSnapshotInput struct {
 	Guidance consensus.Guidance `json:"guidance"`
 }
 
+type guidanceSourceReviewInput struct {
+	Decision         string              `json:"decision"`
+	Guidance         *consensus.Guidance `json:"guidance,omitempty"`
+	EvidenceURL      string              `json:"evidence_url,omitempty"`
+	EvidenceLocation string              `json:"evidence_location,omitempty"`
+	EvidenceExcerpt  string              `json:"evidence_excerpt,omitempty"`
+	Notes            string              `json:"notes,omitempty"`
+	ReviewedBy       string              `json:"reviewed_by"`
+}
+
 type announcementAssessmentInput struct {
 	CurrentActual  consensus.Actual `json:"current_actual"`
 	PreviousActual consensus.Actual `json:"previous_actual"`
@@ -97,6 +107,124 @@ func (s *Server) guidanceAt(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"asset_id": assetID, "as_of": cutoff.UTC(), "items": items, "revisions": consensus.BuildGuidanceRevisions(history),
 		"time_contract_version": consensus.TimeContractVersion, "guidance_is_consensus": false, "automatic_rating": false,
+	})
+}
+
+func (s *Server) guidanceSourcesAt(w http.ResponseWriter, r *http.Request) {
+	assetID, err := fundamentalAssetID(chi.URLParam(r, "assetID"))
+	if err != nil || strings.TrimSpace(assetID) == "" {
+		writeError(w, http.StatusUnprocessableEntity, "asset_id path is invalid")
+		return
+	}
+	cutoffValue, ok := optionalTimeQuery(w, r, "as_of")
+	if !ok {
+		return
+	}
+	cutoff := time.Now().UTC()
+	if cutoffValue != nil {
+		cutoff = cutoffValue.(time.Time)
+	}
+	limit, ok := intQuery(w, r.URL.Query(), "limit", 40, 1, 200)
+	if !ok {
+		return
+	}
+	includePayload := strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("include_source_payload")), "true")
+	items, err := consensus.NewStore(s.db).GuidanceSources(r.Context(), assetID, cutoff, limit, includePayload)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "guidance source document query failed")
+		return
+	}
+	statuses := map[string]int{"unreviewed": 0, "confirmed_guidance": 0, "no_guidance": 0, "needs_follow_up": 0}
+	for _, item := range items {
+		status := "unreviewed"
+		if item.LatestReview != nil {
+			status = item.LatestReview.Decision
+		}
+		statuses[status]++
+	}
+	syncStatus, syncReason := "ready", ""
+	if secConfig, _, configErr := s.factGroupConfig(r, "sec"); configErr != nil {
+		syncStatus, syncReason = "unavailable", "sec_configuration_unreadable"
+	} else if consensus.ValidateSECIdentity(stringValue(secConfig["identity"])) != nil {
+		syncStatus, syncReason = "unavailable", "sec_identity_not_configured"
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"asset_id": assetID, "as_of": cutoff.UTC(), "items": items, "review_status_counts": statuses,
+		"contract_version": consensus.SECDisclosureContractVersion, "source": "SEC EDGAR",
+		"provider_publication_time_available": true, "provider_dissemination_time_available": false, "source_available_at_basis": "first_observed_at", "historical_backfill": false,
+		"candidate_is_guidance": false, "human_review_required": true, "automatic_extraction": false,
+		"automatic_guidance": false, "automatic_rating": false, "sync_status": syncStatus, "sync_reason": syncReason,
+	})
+}
+
+func (s *Server) syncGuidanceSources(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	assetID, err := fundamentalAssetID(chi.URLParam(r, "assetID"))
+	if err != nil || strings.TrimSpace(assetID) == "" {
+		writeError(w, http.StatusUnprocessableEntity, "asset_id path is invalid")
+		return
+	}
+	if !s.consensusAssetExists(w, r, assetID) {
+		return
+	}
+	secConfig, _, err := s.factGroupConfig(r, "sec")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "SEC source configuration could not be read")
+		return
+	}
+	if err := consensus.ValidateSECIdentity(stringValue(secConfig["identity"])); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	limit, ok := intQuery(w, r.URL.Query(), "limit", 40, 1, 200)
+	if !ok {
+		return
+	}
+	taskID := uuid.NewString()
+	queuedID, err := s.enqueueGoModelJob(r.Context(), "masterdata", taskID, "market_loop.sync_guidance_source_documents", []any{assetID}, map[string]any{"asset_id": assetID, "limit": limit}, 4, "guidance-source-documents:"+assetID)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "guidance source document sync could not be queued")
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"task_id": queuedID, "status": "queued", "asset_id": assetID, "limit": limit, "source": "SEC EDGAR",
+		"contract_version": consensus.SECDisclosureContractVersion, "human_review_required": true,
+		"automatic_extraction": false, "automatic_guidance": false, "automatic_rating": false,
+	})
+}
+
+func (s *Server) reviewGuidanceSource(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	assetID, err := fundamentalAssetID(chi.URLParam(r, "assetID"))
+	documentID := strings.TrimSpace(chi.URLParam(r, "documentID"))
+	if err != nil || strings.TrimSpace(assetID) == "" || documentID == "" {
+		writeError(w, http.StatusUnprocessableEntity, "asset_id and guidance source document paths are required")
+		return
+	}
+	input := guidanceSourceReviewInput{}
+	if !decodeJSONBody(w, r, &input) {
+		return
+	}
+	result, err := consensus.NewStore(s.db).ReviewGuidanceSource(r.Context(), consensus.GuidanceSourceReviewSubmission{
+		AssetID: assetID, SourceDocumentID: documentID, Decision: input.Decision, Guidance: input.Guidance,
+		EvidenceURL: input.EvidenceURL, EvidenceLocation: input.EvidenceLocation, EvidenceExcerpt: input.EvidenceExcerpt,
+		Notes: input.Notes, ReviewedBy: input.ReviewedBy, IdempotencyKey: r.Header.Get("Idempotency-Key"), ReviewedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	status := http.StatusCreated
+	if !result.Created {
+		status = http.StatusOK
+	}
+	writeJSON(w, status, map[string]any{
+		"asset_id": assetID, "source_document_id": documentID, "result": result,
+		"contract_version": consensus.SECDisclosureContractVersion, "automatic_extraction": false, "automatic_rating": false,
 	})
 }
 

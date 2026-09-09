@@ -74,3 +74,107 @@ func TestGuidanceHistoryPreservesPointInTimeOldAndNewRangesAgainstIsolatedPostgr
 		t.Fatalf("guidance revisions=%#v", revisions)
 	}
 }
+
+func TestSECSourceReviewCreatesOnlyHumanConfirmedGuidanceAgainstIsolatedPostgres(t *testing.T) {
+	dsn := strings.Replace(os.Getenv("TEST_DATABASE_URL"), "postgresql+psycopg://", "postgresql://", 1)
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	admin, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Close()
+	schema := "guidance_sources_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	if _, err = admin.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = admin.Exec(context.Background(), "DROP SCHEMA "+schema+" CASCADE") }()
+	config, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.ConnConfig.RuntimeParams["search_path"] = schema
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err = migrate.Up(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	assetID := "equity:NASDAQ:SEC-GUIDANCE"
+	if _, err = pool.Exec(ctx, `INSERT INTO assets(id,asset_class,market,symbol,name,exchange_or_provider,currency,aliases,products,competitors,lot_size,active)
+		VALUES($1,'equity','US','SECG','SEC Guidance Test','NASDAQ','USD','[]','[]','[]',1,true)`, assetID); err != nil {
+		t.Fatal(err)
+	}
+	acceptedAt := time.Date(2026, 8, 27, 16, 20, 22, 0, time.UTC)
+	observedAt := time.Date(2026, 9, 10, 1, 2, 3, 0, time.UTC)
+	document := GuidanceSourceDocument{
+		AssetID: assetID, Provider: "sec_edgar", CIK: "0001045810", AccessionNumber: "0001045810-26-000111", Form: "8-K",
+		FilingDate: time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC), AcceptedAt: acceptedAt, SourceAvailableAt: observedAt,
+		FirstObservedAt: observedAt, FilingIndexURL: "https://www.sec.gov/Archives/edgar/data/1045810/000104581026000111/0001045810-26-000111-index.html",
+		PrimaryDocument: "nvda-20260827.htm", PrimaryDocumentURL: "https://www.sec.gov/Archives/edgar/data/1045810/000104581026000111/nvda-20260827.htm",
+		SourcePayload: map[string]any{"automatic_guidance": false},
+	}
+	store := NewStore(pool)
+	created, err := store.SaveGuidanceSource(ctx, document)
+	if err != nil || !created {
+		t.Fatalf("save source created=%v err=%v", created, err)
+	}
+	if duplicate, duplicateErr := store.SaveGuidanceSource(ctx, document); duplicateErr != nil || duplicate {
+		t.Fatalf("duplicate source created=%v err=%v", duplicate, duplicateErr)
+	}
+	document.ID = consensusID(assetID, "sec_edgar", document.AccessionNumber)
+	before, err := store.GuidanceSources(ctx, assetID, acceptedAt.Add(-time.Nanosecond), 10, false)
+	if err != nil || len(before) != 0 {
+		t.Fatalf("SEC filing leaked before acceptance: items=%#v err=%v", before, err)
+	}
+	available, err := store.GuidanceSources(ctx, assetID, observedAt, 10, true)
+	if err != nil || len(available) != 1 || !available[0].FirstObservedAt.Equal(observedAt) || available[0].SourcePayload["automatic_guidance"] != false || available[0].LatestReview != nil {
+		t.Fatalf("unexpected source history: items=%#v err=%v", available, err)
+	}
+
+	low, high := 28000.0, 29000.0
+	periodEnd := time.Date(2026, 10, 25, 0, 0, 0, 0, time.UTC)
+	maliciousTime := acceptedAt.Add(24 * time.Hour)
+	guidance := Guidance{Metric: "revenue", FiscalPeriod: "Q3", FiscalPeriodEnd: periodEnd, AccountingBasis: "us_gaap", LowValue: &low, HighValue: &high, Currency: "USD", Unit: "millions", PublishedAt: maliciousTime, AvailableAt: maliciousTime, SourceName: "untrusted", SourceURL: "https://example.test/fake", SourceDocumentID: "fake"}
+	input := GuidanceSourceReviewSubmission{
+		AssetID: assetID, SourceDocumentID: document.ID, Decision: "confirmed_guidance", Guidance: &guidance,
+		EvidenceURL: "https://www.sec.gov/Archives/edgar/data/1045810/000104581026000111/ex99-1.htm", EvidenceLocation: "Exhibit 99.1, Outlook table",
+		EvidenceExcerpt: "Revenue is expected to be between 28 and 29 billion dollars.", Notes: "Range transcribed without conversion beyond stated units.",
+		ReviewedBy: "analyst-42", IdempotencyKey: "sec-guidance-review-1", ReviewedAt: observedAt.Add(time.Hour),
+	}
+	result, err := store.ReviewGuidanceSource(ctx, input)
+	if err != nil || !result.Created || result.GuidanceSnapshot == nil {
+		t.Fatalf("confirm guidance result=%#v err=%v", result, err)
+	}
+	if !result.GuidanceSnapshot.PublishedAt.Equal(acceptedAt) || !result.GuidanceSnapshot.AvailableAt.Equal(input.ReviewedAt) || result.GuidanceSnapshot.SourceDocumentID != document.AccessionNumber || result.GuidanceSnapshot.SourceName != "SEC EDGAR issuer disclosure" {
+		t.Fatalf("client source metadata was not replaced: %#v", result.GuidanceSnapshot)
+	}
+	if duplicate, duplicateErr := store.ReviewGuidanceSource(ctx, input); duplicateErr != nil || duplicate.Created {
+		t.Fatalf("idempotent review=%#v err=%v", duplicate, duplicateErr)
+	}
+	changed := input
+	changed.Notes = "different request"
+	if _, conflictErr := store.ReviewGuidanceSource(ctx, changed); conflictErr == nil || !strings.Contains(conflictErr.Error(), "different guidance review") {
+		t.Fatalf("idempotency conflict error=%v", conflictErr)
+	}
+	if beforeReview, beforeReviewErr := store.GuidanceHistory(ctx, assetID, input.ReviewedAt.Add(-time.Nanosecond), 10); beforeReviewErr != nil || len(beforeReview) != 0 {
+		t.Fatalf("later human extraction leaked into earlier replay: items=%#v err=%v", beforeReview, beforeReviewErr)
+	}
+	history, err := store.GuidanceHistory(ctx, assetID, input.ReviewedAt, 10)
+	if err != nil || len(history) != 1 || history[0].SourcePayload["analyst_confirmed"] != true || history[0].SourcePayload["automatic_extraction"] != false {
+		t.Fatalf("confirmed guidance history=%#v err=%v", history, err)
+	}
+	available, err = store.GuidanceSources(ctx, assetID, observedAt.Add(2*time.Hour), 10, false)
+	if err != nil || len(available) != 1 || available[0].LatestReview == nil || available[0].LatestReview.Decision != "confirmed_guidance" || available[0].LatestReview.GuidanceSnapshotID == nil {
+		t.Fatalf("latest source review=%#v err=%v", available, err)
+	}
+	var ratingCount int
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM fundamental_rating_states WHERE asset_id=$1`, assetID).Scan(&ratingCount); err != nil || ratingCount != 0 {
+		t.Fatalf("source review created rating count=%d err=%v", ratingCount, err)
+	}
+}

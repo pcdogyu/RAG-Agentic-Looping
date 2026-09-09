@@ -91,7 +91,7 @@ jobs:
       - name: Verify prediction model and calibration lifecycle against PostgreSQL
         run: go test -race ./internal/prediction -run '^TestPredictionLifecycleAgainstIsolatedPostgres$' -count=1 -v
       - name: Verify consensus semantics and guidance history against PostgreSQL
-        run: go test -race ./internal/consensus -run '^TestGuidanceHistoryPreservesPointInTimeOldAndNewRangesAgainstIsolatedPostgres$' -count=1 -v
+        run: go test -race ./internal/consensus -run '^(TestGuidanceHistoryPreservesPointInTimeOldAndNewRangesAgainstIsolatedPostgres|TestSECSourceReviewCreatesOnlyHumanConfirmedGuidanceAgainstIsolatedPostgres)$' -count=1 -v
       - name: Verify no-news fundamental workflow and preparation against PostgreSQL
         run: go test -race ./internal/fundamentalresearch -run '^(TestWorkflowCompletesWithoutNewsAgainstIsolatedPostgres|TestScheduledWorkflowRevaluesApprovedForecastAgainstIsolatedPostgres|TestPreparationBuildsSourceLinkedFactsWithoutInventingApprovalAgainstPostgres)$' -count=1 -v
       - name: Verify immutable market-data observations against PostgreSQL

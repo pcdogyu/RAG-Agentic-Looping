@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/consensus"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/jobs"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/sourcefilter"
 )
@@ -415,6 +416,11 @@ func (s *Server) validateFactGroupInput(ctx context.Context, group string, input
 			}
 		}
 	}
+	if group == "sec" {
+		if err := consensus.ValidateSECIdentity(stringValue(stored["identity"])); err != nil {
+			return nil, err
+		}
+	}
 	for _, key := range []string{"base_url", "coingecko_base_url", "defillama_base_url"} {
 		if value, ok := stored[key]; ok && !validHTTPURL(stringValue(value)) {
 			return nil, fmt.Errorf("%s must be an HTTP URL", key)
@@ -436,8 +442,8 @@ func (s *Server) probeNativeFactGroup(r *http.Request, group string) map[string]
 		target = strings.TrimRight(stringValue(config["base_url"]), "/") + "/quote?symbol=AAPL"
 		headers["apikey"] = s.cfg.FMPAccessToken
 	case "sec":
-		if stringValue(config["identity"]) == "" {
-			return map[string]any{"ok": false, "status": "pending", "detail": "SEC Identity 未配置"}
+		if err := consensus.ValidateSECIdentity(stringValue(config["identity"])); err != nil {
+			return map[string]any{"ok": false, "status": "pending", "detail": err.Error()}
 		}
 		target = "https://data.sec.gov/submissions/CIK0000320193.json"
 		headers["User-Agent"] = stringValue(config["identity"])
@@ -482,7 +488,7 @@ func factGroupStatus(group string, config map[string]any, sources []map[string]a
 	case "fmp":
 		ready = boolValue(config["access_token_configured"])
 	case "sec":
-		ready = stringValue(config["identity"]) != ""
+		ready = consensus.ValidateSECIdentity(stringValue(config["identity"])) == nil
 	case "cn_news":
 		ready = boolValue(config["akshare_asset_master_enabled"]) || sliceLen(config["rss_feed_urls"]) > 0 || sliceLen(config["official_rss_feed_urls"]) > 0
 	case "crypto":

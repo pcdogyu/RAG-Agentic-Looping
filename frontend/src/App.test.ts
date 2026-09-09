@@ -738,6 +738,9 @@ describe("shared hash navigation", () => {
 		expect(markup).toContain("数据不会倒填到首次观测之前");
 		expect(markup).toContain("管理层指引修订");
 		expect(markup).toContain("不会用一致预期代替");
+		expect(markup).toContain("SEC 指引证据候选");
+		expect(markup).toContain("候选不等于管理层指引");
+		expect(markup).toContain("自动抽取");
     expect(markup).toContain("管理员令牌");
   });
 });

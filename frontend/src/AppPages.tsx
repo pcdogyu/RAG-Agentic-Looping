@@ -4067,6 +4067,15 @@ type FundamentalBundle = {
 		guidance_is_consensus?: boolean;
 		automatic_rating?: boolean;
 	};
+	guidanceSources?: {
+		items?: Array<{ id?: string; accession_number?: string; form?: string; filing_date?: string; report_date?: string; accepted_at?: string; filing_index_url?: string; primary_document_url?: string; latest_review?: { decision?: string; reviewed_by?: string; reviewed_at?: string; guidance_snapshot_id?: string } }>;
+		review_status_counts?: Record<string, number>;
+		candidate_is_guidance?: boolean;
+		human_review_required?: boolean;
+		automatic_extraction?: boolean;
+		sync_status?: string;
+		sync_reason?: string;
+	};
 	preparation?: {
 		status?: string;
 		reason?: string;
@@ -4102,6 +4111,8 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
   const [token, setToken] = useState(readToken);
   const [workflowJSON, setWorkflowJSON] = useState("");
   const [scheduleJSON, setScheduleJSON] = useState("");
+	const [guidanceReviewJSON, setGuidanceReviewJSON] = useState("");
+	const [guidanceReviewRequestID, setGuidanceReviewRequestID] = useState(() => globalThis.crypto?.randomUUID?.() || `guidance-review-${Date.now()}`);
   const [scheduleRequestID, setScheduleRequestID] = useState(() => globalThis.crypto?.randomUUID?.() || `fundamental-schedule-${Date.now()}`);
   async function load(event?: FormEvent) {
     event?.preventDefault();
@@ -4113,6 +4124,7 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 			{ key: "fundamentals", route: "fundamentals" }, { key: "preparation", route: "fundamental-research", suffix: "/preparation" },
 			{ key: "consensus", route: "consensus" },
 			{ key: "guidance", route: "consensus", suffix: "/guidance" },
+			{ key: "guidanceSources", route: "consensus", suffix: "/guidance-sources" },
 			{ key: "forecasts", route: "forecasts" },
 			{ key: "valuations", route: "valuations" }, { key: "ratings", route: "ratings" },
 			{ key: "predictions", route: "predictions" }, { key: "marketPolicy", route: "market-policies" },
@@ -4139,6 +4151,38 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 			setMessage(`一致预期首次观测任务已排队：${payload.task_id || "等待 Worker"}。完成后重新读取即可查看；不会倒填历史。`);
 		} catch (error) {
 			setMessage(`一致预期同步失败：${error instanceof Error ? error.message : "未知错误"}`);
+		} finally { setLoading(false); }
+	}
+	async function syncGuidanceSources() {
+		const canonical = assetID.trim();
+		if (!canonical || !token) return;
+		setLoading(true); setMessage("");
+		try {
+			const response = await fetch(`${apiBase}/go/consensus/${encodeURIComponent(canonical)}/guidance-sources/sync?limit=40`, { method: "POST", headers: { "X-Admin-Token": token } });
+			const payload = await response.json() as { task_id?: string; detail?: string };
+			if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
+			setMessage(`SEC 官方披露候选同步任务已排队：${payload.task_id || "等待 Worker"}。候选不会自动变成管理层指引。`);
+		} catch (error) {
+			setMessage(`SEC 披露同步失败：${error instanceof Error ? error.message : "未知错误"}`);
+		} finally { setLoading(false); }
+	}
+	async function reviewGuidanceSource() {
+		const canonical = assetID.trim();
+		if (!canonical || !token || !guidanceReviewJSON.trim()) return;
+		setLoading(true); setMessage("");
+		try {
+			const body = JSON.parse(guidanceReviewJSON) as Record<string, unknown>;
+			const sourceDocumentID = typeof body.source_document_id === "string" ? body.source_document_id.trim() : "";
+			if (!sourceDocumentID) throw new Error("source_document_id 不能为空");
+			delete body.source_document_id;
+			const response = await fetch(`${apiBase}/go/consensus/${encodeURIComponent(canonical)}/guidance-sources/${encodeURIComponent(sourceDocumentID)}/reviews`, { method: "POST", headers: { "Content-Type": "application/json", "X-Admin-Token": token, "Idempotency-Key": guidanceReviewRequestID }, body: JSON.stringify(body) });
+			const payload = await response.json() as { detail?: string };
+			if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
+			setMessage("披露候选核验已保存；只有 confirmed_guidance 才会生成来源化指引快照。");
+			setGuidanceReviewRequestID(globalThis.crypto?.randomUUID?.() || `guidance-review-${Date.now()}`);
+			await load();
+		} catch (error) {
+			setMessage(`指引核验失败：${error instanceof Error ? error.message : "JSON 或请求无效"}`);
 		} finally { setLoading(false); }
 	}
   async function runWorkflow() {
@@ -4203,6 +4247,8 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 	const consensusItems = consensus?.items || [];
 	const guidance = bundle.guidance;
 	const guidanceItems = guidance?.items || [];
+	const guidanceSources = bundle.guidanceSources;
+	const guidanceSourceItems = guidanceSources?.items || [];
   const valuationRange = valuation?.result?.range;
   const changedAssumptions = Object.entries(rating?.changed_assumptions || {});
   return <section className="app-page fundamental-page">
@@ -4216,6 +4262,9 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
       <label>无新闻基本面研究输入<textarea aria-label="基本面研究 JSON" rows={8} value={workflowJSON} onChange={(event) => setWorkflowJSON(event.target.value)} placeholder='粘贴含 as_of、forecast、valuation、rating 的证据化 JSON；不会自动补造假设或价格。' /></label>
 		<button type="button" disabled={loading || !preparation?.workflow_template} onClick={loadPreparationTemplate}>载入财务事实模板</button>
 		<button type="button" disabled={loading} onClick={() => void syncConsensus()}>同步一致预期</button>
+		<button type="button" disabled={loading} onClick={() => void syncGuidanceSources()}>同步 SEC 披露候选</button>
+		<label>管理层指引人工核验<textarea aria-label="管理层指引核验 JSON" rows={8} value={guidanceReviewJSON} onChange={(event) => { setGuidanceReviewJSON(event.target.value); setGuidanceReviewRequestID(globalThis.crypto?.randomUUID?.() || `guidance-review-${Date.now()}`); }} placeholder='粘贴 source_document_id、decision、reviewed_by；确认指引时另填 guidance、evidence_url、evidence_location、evidence_excerpt。' /></label>
+		<button type="button" disabled={loading || !guidanceReviewJSON.trim()} onClick={() => void reviewGuidanceSource()}>保存指引核验</button>
       <button type="button" disabled={loading || !workflowJSON.trim()} onClick={() => void runWorkflow()}>运行基本面研究</button>
       <label>定时研究批准计划<textarea aria-label="定时基本面研究计划 JSON" rows={8} value={scheduleJSON} onChange={(event) => { setScheduleJSON(event.target.value); setScheduleRequestID(globalThis.crypto?.randomUUID?.() || `fundamental-schedule-${Date.now()}`); }} placeholder='粘贴 forecast_version_id、valuation、rating、approved_by 和可选 cadence_hours；价格由运行时读取真实复权价。' /></label>
       <button type="button" disabled={loading || !scheduleJSON.trim()} onClick={() => void approveSchedule()}>批准定时研究</button>
@@ -4227,6 +4276,7 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
       <article><span>财务快照</span><strong>{bundle.fundamentals?.items?.length ?? 0}</strong><small>严格按 available_at 截止</small></article>
 		<article><span>一致预期返回</span><strong>{consensusItems.length}</strong><small>仅返回首次观测后可用的数据</small></article>
 		<article><span>管理层指引</span><strong>{guidanceItems.length}</strong><small>与分析师一致预期分开保存</small></article>
+		<article><span>官方披露候选</span><strong>{guidanceSourceItems.length}</strong><small>候选不等于管理层指引</small></article>
 		<article><span>分析准备</span><strong>{preparation?.status === "analyst_review_required" ? "待人工审核" : preparation?.status || "不可用"}</strong><small>{preparation?.statement_period_end || preparation?.reason || "等待同报告期财务表"}</small></article>
       <article><span>预测版本</span><strong>{bundle.forecasts?.items?.length ?? 0}</strong><small>假设与证据可追溯</small></article>
       <article><span>估值运行</span><strong>{bundle.valuations?.items?.length ?? 0}</strong><small>情景区间不是概率</small></article>
@@ -4252,6 +4302,13 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 			<small>供应商发布时间不可用：{consensus?.provider_publication_time_available === false ? "是" : "未确认"} · 历史倒填：{consensus?.historical_backfill === false ? "关闭" : "未确认"} · 自动评级：{consensus?.automatic_rating === false ? "关闭" : "未确认"}</small>
 			{consensusItems.length > 0 && <details><summary>观测明细（最多 12 条）</summary>{consensusItems.slice(0, 12).map((item) => <p key={item.id}>{item.metric || "指标"} · {item.statistic || "统计"} · {typeof item.estimate_value === "number" ? item.estimate_value : "—"} {item.currency || ""} · {item.fiscal_period_end || "—"}{item.analyst_count ? ` · ${item.analyst_count} 位分析师` : ""}</p>)}</details>}
 			{!!consensus?.revisions?.length && <details><summary>聚合预期修订</summary>{consensus.revisions.slice(0, 10).map((item) => <p key={item.current_id}>{item.metric || "指标"} · {item.statistic || "统计"} · {item.direction || "—"} {typeof item.absolute_change === "number" ? item.absolute_change : "—"} · 不推断单个分析师行为</p>)}</details>}
+		</article>
+		<article className="conclusion-card">
+			<span>SEC 指引证据候选</span>
+			<h3>{guidanceSourceItems.length > 0 ? `${guidanceSourceItems.length} 份官方披露待核验` : guidanceSources?.sync_reason === "sec_identity_not_configured" ? "SEC 身份尚未配置" : "尚无 SEC 披露候选"}</h3>
+			<p>已确认 {guidanceSources?.review_status_counts?.confirmed_guidance ?? 0} · 无指引 {guidanceSources?.review_status_counts?.no_guidance ?? 0} · 待跟进 {guidanceSources?.review_status_counts?.needs_follow_up ?? 0} · 未核验 {guidanceSources?.review_status_counts?.unreviewed ?? 0}</p>
+			<small>候选即指引：{guidanceSources?.candidate_is_guidance === false ? "否" : "未确认"} · 人工核验：{guidanceSources?.human_review_required ? "必需" : "未确认"} · 自动抽取：{guidanceSources?.automatic_extraction === false ? "关闭" : "未确认"}</small>
+			{guidanceSourceItems.length > 0 && <details><summary>官方披露明细</summary>{guidanceSourceItems.map((item) => <p key={item.id}><a href={item.filing_index_url} target="_blank" rel="noreferrer">{item.form || "SEC"} · {item.accession_number || item.id}</a> · 接收 {item.accepted_at ? new Date(item.accepted_at).toLocaleString("zh-CN") : "—"} · {item.latest_review?.decision || "unreviewed"}</p>)}</details>}
 		</article>
 		<article className="conclusion-card">
 			<span>管理层指引修订</span>
