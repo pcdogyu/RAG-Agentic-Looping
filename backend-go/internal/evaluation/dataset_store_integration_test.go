@@ -148,6 +148,47 @@ func TestDatasetStorePersistsReproducibleWalkForwardAndSealedHoldoutAgainstIsola
 	if err != nil || created || repeatedExperiment.Experiment.ID != experiment.Experiment.ID {
 		t.Fatalf("experiment was not idempotent: %#v created=%v err=%v", repeatedExperiment, created, err)
 	}
+	if _, err = pool.Exec(ctx, `INSERT INTO research_runs(id,event_id,asset_id,status,payload,created_at,updated_at)
+		VALUES('wf-research',NULL,'equity:XNAS:WF','completed','{}',$1,$1)`, start.AddDate(0, 0, 60)); err != nil {
+		t.Fatal(err)
+	}
+	trueValue, falseValue := true, false
+	qualityStore := NewResearchQualityReviewStore(pool)
+	qualityReview, created, err := qualityStore.Create(ctx, ResearchQualityReviewInput{ResearchRunID: "wf-research", FactCorrect: &trueValue,
+		RelationshipCorrect: &falseValue, CitationSupported: &trueValue, RefusalAppropriate: &trueValue,
+		Reviewer: "isolated reviewer", Note: "dimension labels", IdempotencyKey: "wf-research-quality-v1"}, start.AddDate(0, 0, 181))
+	if err != nil || !created || qualityReview.ID == "" {
+		t.Fatalf("research quality review=%#v created=%v err=%v", qualityReview, created, err)
+	}
+	reportStore := NewPerformanceReportStore(pool)
+	report, created, err := reportStore.Materialize(ctx, PerformanceReportInput{ExperimentID: experiment.Experiment.ID,
+		CreatedBy: "isolated reporter", IdempotencyKey: "wf-performance-v1"}, start.AddDate(0, 0, 182))
+	if err != nil || !created || report.Report.FinalHoldoutAccessed || report.Report.SelectionDecision != "no_automatic_model_selection" {
+		t.Fatalf("performance report=%#v created=%v err=%v", report, created, err)
+	}
+	if report.Report.Research.CandidatePredictions == 0 || report.Report.Research.MissingResearch == 0 || len(report.Report.Signal.Folds) == 0 {
+		t.Fatalf("performance report omitted candidates, missing research, or time folds: %#v", report.Report)
+	}
+	if metric := report.Report.Research.DimensionMetrics["relationship_accuracy"]; metric.Accuracy == nil || *metric.Accuracy != 0 || metric.AccuracyLow95 == nil {
+		t.Fatalf("dimension-specific research accuracy and uncertainty are absent: %#v", report.Report.Research.DimensionMetrics)
+	}
+	if report.Report.Execution.Status != "unavailable" || report.Report.Execution.DrawdownStatus != "unavailable_without_strategy_equity_curve" {
+		t.Fatalf("research-only outcomes were presented as strategy performance: %#v", report.Report.Execution)
+	}
+	repeatedReport, created, err := reportStore.Materialize(ctx, PerformanceReportInput{ExperimentID: experiment.Experiment.ID,
+		CreatedBy: "isolated reporter", IdempotencyKey: "wf-performance-v1"}, start.AddDate(0, 0, 182))
+	if err != nil || created || repeatedReport.Report.ID != report.Report.ID {
+		t.Fatalf("performance report was not idempotent: %#v created=%v err=%v", repeatedReport, created, err)
+	}
+	var sealedReportSamples int
+	if err = pool.QueryRow(ctx, `SELECT count(*)::int FROM evaluation_dataset_samples sample
+		JOIN evaluation_performance_reports report ON report.dataset_id=sample.dataset_id
+		WHERE report.id=$1 AND sample.fold_index=-1 AND sample.sealed=false`, report.Report.ID).Scan(&sealedReportSamples); err != nil {
+		t.Fatal(err)
+	}
+	if sealedReportSamples != 0 {
+		t.Fatalf("performance report exposed %d unsealed final holdout samples", sealedReportSamples)
+	}
 }
 
 func experimentVariantByName(values []ExperimentVariant, name string) ExperimentVariant {

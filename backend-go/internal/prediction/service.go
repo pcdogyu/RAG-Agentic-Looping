@@ -29,6 +29,14 @@ type ModelRegistration struct {
 	ApprovedBy     string              `json:"approved_by,omitempty"`
 }
 
+type PreregisteredPromotionPolicy struct {
+	MinimumSamples    int       `json:"minimum_samples"`
+	MinimumShadowDays int       `json:"minimum_shadow_days"`
+	MaximumECE        float64   `json:"maximum_ece"`
+	ShadowStartedAt   time.Time `json:"shadow_started_at"`
+	RollbackTriggers  []string  `json:"rollback_triggers"`
+}
+
 type CalibrationRegistration struct {
 	SourceModelVersion string                    `json:"source_model_version"`
 	Observations       []calibration.Observation `json:"observations"`
@@ -117,15 +125,41 @@ func (s *Service) RegisterModel(ctx context.Context, input ModelRegistration) er
 		}
 	}
 	input.Scope["outcome_label_definition_version"] = evaluation.OutcomeLabelDefinitionVersion
+	if _, err := promotionPolicyFromScope(input.Scope); err != nil {
+		return err
+	}
 	scope, _ := json.Marshal(input.Scope)
-	_, err := s.db.Exec(ctx, `INSERT INTO prediction_models(version,objective,market,horizon_sessions,feature_schema,model_payload,training_cutoff,artifact_digest,status,scope) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(version) DO NOTHING`, input.Model.Version, input.Model.Objective, strings.ToUpper(input.Market), input.Model.HorizonSessions, featureSchema, payload, input.Model.TrainingCutoff, input.ArtifactDigest, status, scope)
-	return err
+	tag, err := s.db.Exec(ctx, `INSERT INTO prediction_models(version,objective,market,horizon_sessions,feature_schema,model_payload,training_cutoff,artifact_digest,status,scope) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(version) DO NOTHING`, input.Model.Version, input.Model.Objective, strings.ToUpper(input.Market), input.Model.HorizonSessions, featureSchema, payload, input.Model.TrainingCutoff, input.ArtifactDigest, status, scope)
+	if err != nil || tag.RowsAffected() == 1 {
+		return err
+	}
+	var identical bool
+	if err = s.db.QueryRow(ctx, `SELECT artifact_digest=$2 AND scope=$3::jsonb FROM prediction_models WHERE version=$1`, input.Model.Version, input.ArtifactDigest, scope).Scan(&identical); err != nil {
+		return err
+	}
+	if !identical {
+		return fmt.Errorf("model version is already bound to different artifact or governance policy")
+	}
+	return nil
 }
 
 func (s *Service) Promote(ctx context.Context, modelVersion string, input governance.PromotionInput, now time.Time) (governance.Decision, error) {
 	if s.db == nil || strings.TrimSpace(modelVersion) == "" {
 		return governance.Decision{}, fmt.Errorf("prediction store and model_version are required")
 	}
+	var policyScope []byte
+	if err := s.db.QueryRow(ctx, `SELECT scope::jsonb FROM prediction_models WHERE version=$1 AND status='shadow'`, strings.TrimSpace(modelVersion)).Scan(&policyScope); err != nil {
+		return governance.Decision{}, fmt.Errorf("load shadow prediction model policy: %w", err)
+	}
+	policyMap := map[string]any{}
+	if err := json.Unmarshal(policyScope, &policyMap); err != nil {
+		return governance.Decision{}, err
+	}
+	policy, err := promotionPolicyFromScope(policyMap)
+	if err != nil {
+		return governance.Decision{}, err
+	}
+	input.MinimumSamples, input.MinimumShadowDays, input.MaximumECE, input.ShadowStartedAt = policy.MinimumSamples, policy.MinimumShadowDays, policy.MaximumECE, policy.ShadowStartedAt
 	decision := governance.PromotionDecision(input, now)
 	if decision.Status != "approved" {
 		return decision, s.RecordPromotionDecision(ctx, "model", modelVersion, input, decision, now)
@@ -135,6 +169,15 @@ func (s *Service) Promote(ctx context.Context, modelVersion string, input govern
 		return decision, err
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
+	var objective, market, assetClass string
+	var horizon int
+	if err = tx.QueryRow(ctx, `SELECT objective,market,horizon_sessions,coalesce(scope->>'asset_class','equity') FROM prediction_models WHERE version=$1 AND status='shadow' FOR UPDATE`, strings.TrimSpace(modelVersion)).Scan(&objective, &market, &horizon, &assetClass); err != nil {
+		return decision, fmt.Errorf("load shadow prediction model: %w", err)
+	}
+	if _, err = tx.Exec(ctx, `UPDATE prediction_models SET status='superseded' WHERE version<>$1 AND status='approved' AND objective=$2 AND market=$3 AND horizon_sessions=$4 AND coalesce(scope->>'asset_class','equity')=$5`,
+		strings.TrimSpace(modelVersion), objective, market, horizon, assetClass); err != nil {
+		return decision, err
+	}
 	tag, err := tx.Exec(ctx, `UPDATE prediction_models SET status='approved',approved_by=$2,approved_at=$3 WHERE version=$1 AND status='shadow'`, strings.TrimSpace(modelVersion), strings.TrimSpace(input.ApprovedBy), now.UTC())
 	if err != nil {
 		return decision, err
@@ -225,10 +268,38 @@ func validateModel(model signals.BinaryModel) error {
 	return nil
 }
 
+func promotionPolicyFromScope(scope map[string]any) (PreregisteredPromotionPolicy, error) {
+	body, err := json.Marshal(scope["promotion_policy"])
+	if err != nil || string(body) == "null" {
+		return PreregisteredPromotionPolicy{}, fmt.Errorf("a preregistered promotion_policy is required")
+	}
+	policy := PreregisteredPromotionPolicy{}
+	if err = json.Unmarshal(body, &policy); err != nil {
+		return policy, fmt.Errorf("promotion_policy is invalid")
+	}
+	if policy.MinimumSamples < 30 || policy.MinimumShadowDays < 1 || policy.MaximumECE <= 0 || policy.MaximumECE > 1 || policy.ShadowStartedAt.IsZero() || len(policy.RollbackTriggers) == 0 {
+		return policy, fmt.Errorf("promotion_policy requires at least 30 samples, a shadow period, maximum ECE, shadow start and rollback triggers")
+	}
+	return policy, nil
+}
+
 func (s *Service) PromoteCalibration(ctx context.Context, version string, input governance.PromotionInput, now time.Time) (governance.Decision, error) {
 	if s.db == nil || strings.TrimSpace(version) == "" {
 		return governance.Decision{}, fmt.Errorf("prediction store and calibration version are required")
 	}
+	var policyScope []byte
+	if err := s.db.QueryRow(ctx, `SELECT model.scope::jsonb FROM probability_calibrations calibration JOIN prediction_models model ON model.version=calibration.model_version WHERE calibration.version=$1 AND calibration.status='shadow'`, strings.TrimSpace(version)).Scan(&policyScope); err != nil {
+		return governance.Decision{}, fmt.Errorf("load shadow calibration policy: %w", err)
+	}
+	policyMap := map[string]any{}
+	if err := json.Unmarshal(policyScope, &policyMap); err != nil {
+		return governance.Decision{}, err
+	}
+	policy, err := promotionPolicyFromScope(policyMap)
+	if err != nil {
+		return governance.Decision{}, err
+	}
+	input.MinimumSamples, input.MinimumShadowDays, input.MaximumECE, input.ShadowStartedAt = policy.MinimumSamples, policy.MinimumShadowDays, policy.MaximumECE, policy.ShadowStartedAt
 	decision := governance.PromotionDecision(input, now)
 	if decision.Status != "approved" {
 		return decision, s.RecordPromotionDecision(ctx, "calibration", version, input, decision, now)

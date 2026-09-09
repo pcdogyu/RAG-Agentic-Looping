@@ -231,3 +231,66 @@ func (s *Server) driftCheck(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, result)
 }
+
+func (s *Server) rollbackPredictionModel(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	input := prediction.RollbackInput{}
+	if !decodeJSONBody(w, r, &input) {
+		return
+	}
+	input.IdempotencyKey = strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if input.IdempotencyKey == "" {
+		writeError(w, http.StatusUnprocessableEntity, "Idempotency-Key header is required")
+		return
+	}
+	check, err := prediction.New(s.db).Rollback(r.Context(), input, time.Now().UTC())
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, check)
+}
+
+func (s *Server) executeFailureDrill(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	input := prediction.FailureDrillInput{}
+	if !decodeJSONBody(w, r, &input) {
+		return
+	}
+	input.IdempotencyKey = strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if input.IdempotencyKey == "" {
+		writeError(w, http.StatusUnprocessableEntity, "Idempotency-Key header is required")
+		return
+	}
+	result, err := prediction.New(s.db).ExecuteFailureDrill(r.Context(), input, time.Now().UTC())
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	status := http.StatusOK
+	if result.Created {
+		status = http.StatusCreated
+	}
+	writeJSON(w, status, result)
+}
+
+func (s *Server) listFailureDrills(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	limit, ok := intQuery(w, r.URL.Query(), "limit", 50, 1, 200)
+	if !ok {
+		return
+	}
+	items, err := prediction.New(s.db).ListFailureDrills(r.Context(), limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failure drill query failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"contract_version": prediction.FailureDrillContractVersion,
+		"production_state_changed": false, "items": items})
+}

@@ -10,7 +10,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/calibration"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/governance"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/signals"
 )
@@ -52,6 +54,14 @@ type GovernanceCheck struct {
 	Reasons          []string       `json:"reasons"`
 	ApprovedBy       string         `json:"approved_by,omitempty"`
 	CreatedAt        time.Time      `json:"created_at"`
+}
+
+type RollbackInput struct {
+	CurrentModelVersion string `json:"current_model_version"`
+	TargetModelVersion  string `json:"target_model_version"`
+	ApprovedBy          string `json:"approved_by"`
+	Reason              string `json:"reason"`
+	IdempotencyKey      string `json:"-"`
 }
 
 type governanceExecer interface {
@@ -115,7 +125,7 @@ func (s *Service) MonitorShadowModels(ctx context.Context, now time.Time) ([]Gov
 	if s.db == nil {
 		return nil, fmt.Errorf("prediction store is unavailable")
 	}
-	rows, err := s.db.Query(ctx, `SELECT candidate.version,coalesce((SELECT incumbent.version FROM prediction_models incumbent WHERE incumbent.status='approved' AND incumbent.objective=candidate.objective AND incumbent.market=candidate.market AND incumbent.horizon_sessions=candidate.horizon_sessions ORDER BY incumbent.approved_at DESC NULLS LAST,incumbent.created_at DESC LIMIT 1),'') FROM prediction_models candidate WHERE candidate.status='shadow' ORDER BY candidate.version`)
+	rows, err := s.db.Query(ctx, `SELECT candidate.version,coalesce((SELECT incumbent.version FROM prediction_models incumbent WHERE incumbent.status='approved' AND incumbent.objective=candidate.objective AND incumbent.market=candidate.market AND incumbent.horizon_sessions=candidate.horizon_sessions AND coalesce(incumbent.scope->>'asset_class','equity')=coalesce(candidate.scope->>'asset_class','equity') ORDER BY incumbent.approved_at DESC NULLS LAST,incumbent.created_at DESC LIMIT 1),'') FROM prediction_models candidate WHERE candidate.status='shadow' ORDER BY candidate.version`)
 	if err != nil {
 		return nil, err
 	}
@@ -148,7 +158,14 @@ func (s *Service) monitorShadowModel(ctx context.Context, candidate, incumbent s
 		check.Reasons = []string{"approved_incumbent_unavailable"}
 		return check, s.recordGovernanceCheck(ctx, &check, "scheduled:"+candidate+":"+now.Format("2006-01-02T15"))
 	}
-	rows, err := s.db.Query(ctx, `SELECT candidate.raw_score,incumbent.raw_score,c.signal_available_at,c.created_at,candidate.feature_snapshot::jsonb,oc.excess_return,oi.excess_return FROM shadow_prediction_comparisons c JOIN prediction_runs candidate ON candidate.id=c.candidate_run_id JOIN prediction_runs incumbent ON incumbent.id=c.incumbent_run_id LEFT JOIN outcome_records oc ON oc.prediction_run_id=c.candidate_run_id AND oc.status='mature' LEFT JOIN outcome_records oi ON oi.prediction_run_id=c.incumbent_run_id AND oi.status='mature' WHERE c.candidate_model_version=$1 AND c.incumbent_model_version=$2 ORDER BY c.signal_available_at DESC LIMIT 200`, candidate, incumbent)
+	rows, err := s.db.Query(ctx, `SELECT candidate.raw_score,incumbent.raw_score,c.signal_available_at,c.created_at,candidate.feature_snapshot::jsonb,
+		oc.excess_return,oi.excess_return,(candidate.probabilities->>'up')::double precision,(incumbent.probabilities->>'up')::double precision,
+		coalesce(oc.objective_label,'')
+		FROM shadow_prediction_comparisons c JOIN prediction_runs candidate ON candidate.id=c.candidate_run_id
+		JOIN prediction_runs incumbent ON incumbent.id=c.incumbent_run_id
+		LEFT JOIN outcome_records oc ON oc.prediction_run_id=c.candidate_run_id AND oc.status='mature'
+		LEFT JOIN outcome_records oi ON oi.prediction_run_id=c.incumbent_run_id AND oi.status='mature'
+		WHERE c.candidate_model_version=$1 AND c.incumbent_model_version=$2 ORDER BY c.signal_available_at DESC LIMIT 200`, candidate, incumbent)
 	if err != nil {
 		return check, err
 	}
@@ -158,11 +175,15 @@ func (s *Service) monitorShadowModel(ctx context.Context, candidate, incumbent s
 		signal, created                  time.Time
 		featureSnapshot                  []byte
 		candidateReturn, incumbentReturn *float64
+		candidateProbability             *float64
+		incumbentProbability             *float64
+		objectiveLabel                   string
 	}
 	samples := []sample{}
 	for rows.Next() {
 		var item sample
-		if err := rows.Scan(&item.candidate, &item.incumbent, &item.signal, &item.created, &item.featureSnapshot, &item.candidateReturn, &item.incumbentReturn); err != nil {
+		if err := rows.Scan(&item.candidate, &item.incumbent, &item.signal, &item.created, &item.featureSnapshot, &item.candidateReturn,
+			&item.incumbentReturn, &item.candidateProbability, &item.incumbentProbability, &item.objectiveLabel); err != nil {
 			return check, err
 		}
 		samples = append(samples, item)
@@ -172,6 +193,7 @@ func (s *Service) monitorShadowModel(ctx context.Context, candidate, incumbent s
 	}
 	valid, positive, mature := 0, 0, 0
 	deltas, latencies := []float64{}, []float64{}
+	candidateProbabilities, incumbentProbabilities, probabilityLabels := []float64{}, []float64{}, []bool{}
 	returns := 0.0
 	for _, item := range samples {
 		latencies = append(latencies, math.Max(0, item.created.Sub(item.signal).Seconds()))
@@ -186,6 +208,11 @@ func (s *Service) monitorShadowModel(ctx context.Context, candidate, incumbent s
 			mature++
 			returns += *item.candidateReturn - *item.incumbentReturn
 		}
+		if item.candidateProbability != nil && item.incumbentProbability != nil && item.objectiveLabel != "" {
+			candidateProbabilities = append(candidateProbabilities, *item.candidateProbability)
+			incumbentProbabilities = append(incumbentProbabilities, *item.incumbentProbability)
+			probabilityLabels = append(probabilityLabels, item.objectiveLabel == "up" || item.objectiveLabel == "outperform")
+		}
 	}
 	coverage, directionShare := 0.0, 0.0
 	if len(samples) > 0 {
@@ -197,6 +224,16 @@ func (s *Service) monitorShadowModel(ctx context.Context, candidate, incumbent s
 	check.Metrics = map[string]any{"paired_samples": len(samples), "valid_pairs": valid, "coverage": coverage, "candidate_positive_share": directionShare, "mean_raw_score_delta": mean(deltas), "mean_latency_seconds": mean(latencies), "mature_pairs": mature}
 	if mature > 0 {
 		check.Metrics["mean_excess_return_delta"] = returns / float64(mature)
+	}
+	check.Metrics["mature_calibrated_pairs"] = len(probabilityLabels)
+	if len(probabilityLabels) > 0 {
+		candidateCalibration, candidateErr := calibration.Evaluate(candidateProbabilities, probabilityLabels, 10)
+		incumbentCalibration, incumbentErr := calibration.Evaluate(incumbentProbabilities, probabilityLabels, 10)
+		if candidateErr == nil && incumbentErr == nil {
+			check.Metrics["candidate_ece"] = candidateCalibration.ECE
+			check.Metrics["incumbent_ece"] = incumbentCalibration.ECE
+			check.Metrics["ece_delta"] = candidateCalibration.ECE - incumbentCalibration.ECE
+		}
 	}
 	if len(samples) > 0 {
 		start, end := samples[len(samples)-1].signal.UTC(), samples[0].signal.UTC()
@@ -234,6 +271,7 @@ func (s *Service) monitorShadowModel(ctx context.Context, candidate, incumbent s
 	}
 	if len(samples) >= 20 {
 		recentSources, referenceSources := map[string]bool{}, map[string]bool{}
+		recentFeatures, referenceFeatures := map[string][]float64{}, map[string][]float64{}
 		for index, item := range samples {
 			target := recentSources
 			if index >= len(samples)/2 {
@@ -241,6 +279,15 @@ func (s *Service) monitorShadowModel(ctx context.Context, candidate, incumbent s
 			}
 			var snapshot signals.Snapshot
 			if json.Unmarshal(item.featureSnapshot, &snapshot) == nil {
+				featureTarget := recentFeatures
+				if index >= len(samples)/2 {
+					featureTarget = referenceFeatures
+				}
+				for name, value := range snapshot.Values {
+					if value != nil {
+						featureTarget[name] = append(featureTarget[name], *value)
+					}
+				}
 				for _, ids := range snapshot.SourceIDs {
 					for _, id := range ids {
 						if id = strings.TrimSpace(id); id != "" {
@@ -255,6 +302,21 @@ func (s *Service) monitorShadowModel(ctx context.Context, candidate, incumbent s
 		if len(referenceSources) > 0 && len(recentSources) > 0 && sourceOverlap < .5 {
 			check.Reasons = append(check.Reasons, "source_lineage_changed")
 		}
+		featurePSI := map[string]float64{}
+		for name, reference := range referenceFeatures {
+			current := recentFeatures[name]
+			if len(reference) < 20 || len(current) < 20 {
+				continue
+			}
+			drift, driftErr := governance.PopulationStability(governance.DriftInput{Reference: reference, Current: current, Bins: 10, WarningThreshold: .2})
+			if driftErr == nil && drift.PSI != nil {
+				featurePSI[name] = *drift.PSI
+				if drift.Status == "drifted" {
+					check.Reasons = append(check.Reasons, "feature_distribution_drift:"+name)
+				}
+			}
+		}
+		check.Metrics["feature_psi"] = featurePSI
 		if len(check.Reasons) == 0 {
 			check.Status, check.Action = "stable", "observe"
 		} else {
@@ -267,6 +329,85 @@ func (s *Service) monitorShadowModel(ctx context.Context, candidate, incumbent s
 
 func (s *Service) RecordPromotionDecision(ctx context.Context, subjectType, version string, input governance.PromotionInput, decision governance.Decision, now time.Time) error {
 	return recordPromotionDecisionWith(ctx, s.db, subjectType, version, input, decision, now)
+}
+
+// Rollback is an explicit, human-approved model swap. Monitoring and failure
+// drills can recommend it, but they never call this method automatically.
+func (s *Service) Rollback(ctx context.Context, input RollbackInput, now time.Time) (GovernanceCheck, error) {
+	input.CurrentModelVersion = strings.TrimSpace(input.CurrentModelVersion)
+	input.TargetModelVersion = strings.TrimSpace(input.TargetModelVersion)
+	input.ApprovedBy = strings.TrimSpace(input.ApprovedBy)
+	input.Reason = strings.TrimSpace(input.Reason)
+	input.IdempotencyKey = strings.TrimSpace(input.IdempotencyKey)
+	if s.db == nil || input.CurrentModelVersion == "" || input.TargetModelVersion == "" || input.CurrentModelVersion == input.TargetModelVersion ||
+		input.ApprovedBy == "" || input.Reason == "" || input.IdempotencyKey == "" {
+		return GovernanceCheck{}, fmt.Errorf("distinct current/target models, approved_by, reason and idempotency key are required")
+	}
+	existing := GovernanceCheck{}
+	var metrics, reasons []byte
+	err := s.db.QueryRow(ctx, `SELECT id,subject_type,subject_version,coalesce(reference_version,''),check_type,status,action,metrics::jsonb,reasons::jsonb,
+		coalesce(approved_by,''),created_at FROM model_governance_checks WHERE idempotency_key=$1`, "rollback:"+input.IdempotencyKey).
+		Scan(&existing.ID, &existing.SubjectType, &existing.SubjectVersion, &existing.ReferenceVersion, &existing.CheckType, &existing.Status,
+			&existing.Action, &metrics, &reasons, &existing.ApprovedBy, &existing.CreatedAt)
+	if err == nil {
+		_ = json.Unmarshal(metrics, &existing.Metrics)
+		_ = json.Unmarshal(reasons, &existing.Reasons)
+		if existing.SubjectVersion != input.TargetModelVersion || existing.ReferenceVersion != input.CurrentModelVersion ||
+			existing.ApprovedBy != input.ApprovedBy || fmt.Sprint(existing.Metrics["reason"]) != input.Reason {
+			return GovernanceCheck{}, fmt.Errorf("idempotency key is already bound to a different rollback")
+		}
+		return existing, nil
+	}
+	if err != pgx.ErrNoRows {
+		return GovernanceCheck{}, err
+	}
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return GovernanceCheck{}, err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	type modelState struct {
+		status, objective, market string
+		horizon                   int
+		approvedAt                *time.Time
+		assetClass                string
+	}
+	load := func(version string) (modelState, error) {
+		var state modelState
+		err := tx.QueryRow(ctx, `SELECT status,objective,market,horizon_sessions,approved_at,coalesce(scope->>'asset_class','equity') FROM prediction_models WHERE version=$1 FOR UPDATE`, version).
+			Scan(&state.status, &state.objective, &state.market, &state.horizon, &state.approvedAt, &state.assetClass)
+		return state, err
+	}
+	current, err := load(input.CurrentModelVersion)
+	if err != nil {
+		return GovernanceCheck{}, fmt.Errorf("load current prediction model: %w", err)
+	}
+	target, err := load(input.TargetModelVersion)
+	if err != nil {
+		return GovernanceCheck{}, fmt.Errorf("load rollback target: %w", err)
+	}
+	if current.status != "approved" || target.status != "superseded" || target.approvedAt == nil {
+		return GovernanceCheck{}, fmt.Errorf("rollback requires an approved current model and a previously approved superseded target")
+	}
+	if current.objective != target.objective || current.market != target.market || current.horizon != target.horizon || current.assetClass != target.assetClass {
+		return GovernanceCheck{}, fmt.Errorf("rollback model scope must match")
+	}
+	if _, err = tx.Exec(ctx, `UPDATE prediction_models SET status='superseded' WHERE version=$1`, input.CurrentModelVersion); err != nil {
+		return GovernanceCheck{}, err
+	}
+	if _, err = tx.Exec(ctx, `UPDATE prediction_models SET status='approved',approved_by=$2,approved_at=$3 WHERE version=$1`, input.TargetModelVersion, input.ApprovedBy, now.UTC()); err != nil {
+		return GovernanceCheck{}, err
+	}
+	check := GovernanceCheck{SubjectType: "model", SubjectVersion: input.TargetModelVersion, ReferenceVersion: input.CurrentModelVersion,
+		CheckType: "rollback", Status: "approved", Action: "rollback", Metrics: map[string]any{"reason": input.Reason, "automatic": false},
+		Reasons: []string{}, ApprovedBy: input.ApprovedBy, CreatedAt: now.UTC()}
+	if err = recordGovernanceCheckWith(ctx, tx, &check, "rollback:"+input.IdempotencyKey); err != nil {
+		return GovernanceCheck{}, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return GovernanceCheck{}, err
+	}
+	return check, nil
 }
 
 func recordPromotionDecisionWith(ctx context.Context, execer governanceExecer, subjectType, version string, input governance.PromotionInput, decision governance.Decision, now time.Time) error {

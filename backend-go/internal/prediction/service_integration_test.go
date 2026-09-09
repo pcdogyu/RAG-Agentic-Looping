@@ -54,7 +54,9 @@ func TestPredictionLifecycleAgainstIsolatedPostgres(t *testing.T) {
 	service := New(pool)
 	base := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	model := signals.BinaryModel{Version: "integration-model-v1", Objective: "excess_up", HorizonSessions: 5, TrainingCutoff: base, FeatureNames: []string{"surprise"}, Means: map[string]float64{"surprise": 0}, Scales: map[string]float64{"surprise": 1}, Coefficients: map[string]float64{"surprise": 1}, SampleCount: 100}
-	if err = service.RegisterModel(ctx, ModelRegistration{Model: model, Market: "US", Status: "shadow", ArtifactDigest: ModelArtifactDigest(model), Scope: map[string]any{"asset_class": "equity"}}); err != nil {
+	promotionPolicy := PreregisteredPromotionPolicy{MinimumSamples: 30, MinimumShadowDays: 14, MaximumECE: .1,
+		ShadowStartedAt: base.AddDate(0, 10, 0), RollbackTriggers: []string{"source_failure", "forward_quality_decline"}}
+	if err = service.RegisterModel(ctx, ModelRegistration{Model: model, Market: "US", Status: "shadow", ArtifactDigest: ModelArtifactDigest(model), Scope: map[string]any{"asset_class": "equity", "promotion_policy": promotionPolicy}}); err != nil {
 		t.Fatal(err)
 	}
 	now := base.AddDate(1, 0, 0)
@@ -114,7 +116,7 @@ func TestPredictionLifecycleAgainstIsolatedPostgres(t *testing.T) {
 	candidate := model
 	candidate.Version = "integration-candidate-v2"
 	candidate.Coefficients = map[string]float64{"surprise": 1.1}
-	if err = service.RegisterModel(ctx, ModelRegistration{Model: candidate, Market: "US", Status: "shadow", ArtifactDigest: ModelArtifactDigest(candidate), Scope: map[string]any{"asset_class": "equity"}}); err != nil {
+	if err = service.RegisterModel(ctx, ModelRegistration{Model: candidate, Market: "US", Status: "shadow", ArtifactDigest: ModelArtifactDigest(candidate), Scope: map[string]any{"asset_class": "equity", "promotion_policy": promotionPolicy}}); err != nil {
 		t.Fatal(err)
 	}
 	for index := 0; index < 20; index++ {
@@ -138,17 +140,48 @@ func TestPredictionLifecycleAgainstIsolatedPostgres(t *testing.T) {
 	if decision, promoteErr := service.Promote(ctx, candidate.Version, blockedGate, signalAt.AddDate(0, 0, 2)); promoteErr != nil || decision.Status != "blocked" {
 		t.Fatalf("blocked promotion decision=%#v err=%v", decision, promoteErr)
 	}
+	promotedAt := signalAt.AddDate(0, 0, 3)
+	if decision, promoteErr := service.Promote(ctx, candidate.Version, gate, promotedAt); promoteErr != nil || decision.Status != "approved" {
+		t.Fatalf("candidate promotion decision=%#v err=%v", decision, promoteErr)
+	}
+	var incumbentStatus string
+	if err = pool.QueryRow(ctx, `SELECT status FROM prediction_models WHERE version=$1`, model.Version).Scan(&incumbentStatus); err != nil || incumbentStatus != "superseded" {
+		t.Fatalf("promoted candidate did not supersede incumbent: status=%q err=%v", incumbentStatus, err)
+	}
+	rollback, rollbackErr := service.Rollback(ctx, RollbackInput{CurrentModelVersion: candidate.Version, TargetModelVersion: model.Version,
+		ApprovedBy: "integration-reviewer", Reason: "simulated forward quality decline", IdempotencyKey: "prediction-rollback-v1"}, promotedAt.Add(time.Hour))
+	if rollbackErr != nil || rollback.Status != "approved" || rollback.Action != "rollback" {
+		t.Fatalf("rollback=%#v err=%v", rollback, rollbackErr)
+	}
+	if err = pool.QueryRow(ctx, `SELECT status FROM prediction_models WHERE version=$1`, model.Version).Scan(&incumbentStatus); err != nil || incumbentStatus != "approved" {
+		t.Fatalf("rollback target was not restored: status=%q err=%v", incumbentStatus, err)
+	}
+	if err = pool.QueryRow(ctx, `SELECT status FROM prediction_models WHERE version=$1`, candidate.Version).Scan(&candidateStatus); err != nil || candidateStatus != "superseded" {
+		t.Fatalf("rolled back candidate remains eligible: status=%q err=%v", candidateStatus, err)
+	}
+	drill, drillErr := service.ExecuteFailureDrill(ctx, FailureDrillInput{Scenario: "feature_distribution_drift", CreatedBy: "integration-reviewer",
+		IdempotencyKey: "prediction-drift-drill-v1"}, promotedAt.Add(2*time.Hour))
+	if drillErr != nil || !drill.Created || !drill.Passed || drill.ProductionStateChanged {
+		t.Fatalf("failure drill=%#v err=%v", drill, drillErr)
+	}
 	history, err := service.ListGovernanceChecks(ctx, 20)
 	if err != nil || len(history) < 4 {
 		t.Fatalf("governance history=%#v err=%v", history, err)
 	}
 	foundBlocked := false
+	foundRollback := false
 	for _, check := range history {
 		if check.SubjectVersion == candidate.Version && check.CheckType == "promotion" && check.Status == "blocked" {
 			foundBlocked = true
 		}
+		if check.SubjectVersion == model.Version && check.CheckType == "rollback" && check.Action == "rollback" {
+			foundRollback = true
+		}
 	}
 	if !foundBlocked {
 		t.Fatal("blocked promotion was not durably audited")
+	}
+	if !foundRollback {
+		t.Fatal("rollback was not durably audited")
 	}
 }
