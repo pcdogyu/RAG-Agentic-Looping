@@ -1,5 +1,7 @@
 # RAG Agentic Looping
 
+第二期评级与真实数据闭环的范围、顺序和验收状态见 [`docs/phase-2-development-requirements-2026-09-09.md`](docs/phase-2-development-requirements-2026-09-09.md)。
+
 面向跨市场新闻的证据优先研究系统。第一方 API、调度器、任务 worker、市场适配器、搜索 MCP 和离线评估门禁均使用 Go；Web 使用 React/Vite。
 
 ## 运行架构

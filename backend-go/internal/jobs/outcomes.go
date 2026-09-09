@@ -19,6 +19,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/config"
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/marketdata"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -383,8 +384,68 @@ func (runtime *outcomeRuntime) cachedPrices(
 		return nil, err
 	}
 	points := normalizeOutcomePrices(payload, end)
+	if err := runtime.persistPriceObservations(ctx, asset, points, time.Now().UTC()); err != nil {
+		return nil, err
+	}
 	cache[key] = points
 	return points, nil
+}
+
+func (runtime *outcomeRuntime) persistPriceObservations(ctx context.Context, asset map[string]any, points []outcomePricePoint, availableAt time.Time) error {
+	// Pure outcome math tests intentionally run without persistence. Production
+	// handlers always receive the shared PostgreSQL pool from platform.Open.
+	if runtime.db == nil {
+		return nil
+	}
+	assetID := strings.TrimSpace(stringValue(asset["asset_id"]))
+	market := strings.ToUpper(strings.TrimSpace(stringValue(asset["market"])))
+	currency := strings.ToUpper(strings.TrimSpace(stringValue(asset["currency"])))
+	if currency == "" {
+		currency = map[string]string{"US": "USD", "CN": "CNY", "HK": "HKD", "CRYPTO": "USD"}[market]
+	}
+	fmpBaseURL := runtime.cfg.FMPBaseURL
+	if runtime.db != nil {
+		fmpBaseURL = (&discoveryRuntime{cfg: runtime.cfg, db: runtime.db}).effectiveDiscoveryConfig(ctx).FMPBaseURL
+	}
+	sourceName, sourceURL := "FMP", marketPriceSourceURL(fmpBaseURL, "/historical-price-eod/full")
+	if market == "CN" || market == "HK" {
+		sourceName, sourceURL = "market-adapter", marketPriceSourceURL(runtime.cfg.MarketAdapterURL, "/v1/prices")
+	} else if market == "CRYPTO" || strings.EqualFold(stringValue(asset["asset_class"]), "crypto") {
+		sourceName, sourceURL = "CoinGecko", marketPriceSourceURL(runtime.cfg.CoinGeckoURL, "/coins/{asset}/market_chart")
+	}
+	store := marketdata.NewStore(runtime.db)
+	for _, point := range points {
+		field := "close"
+		if point.Adjusted {
+			field = "adjusted_close"
+		}
+		precision := "timestamped"
+		if point.SessionOnly {
+			precision = "daily_close"
+		}
+		observation := marketdata.PriceObservation{
+			AssetID: assetID, Market: market, Currency: currency, ObservedAt: point.ObservedAt,
+			AvailableAt: availableAt, Price: point.Close, PriceField: field, TimePrecision: precision,
+			SourceName: sourceName, SourceDocumentID: "price-series:" + assetID, SourceURL: sourceURL,
+			Metadata: map[string]any{"symbol": stringValue(asset["symbol"]), "outcome_price_contract": "outcome-price-v2"},
+		}
+		if _, err := store.Save(ctx, observation); err != nil {
+			return fmt.Errorf("persist market price observation for %s: %w", assetID, err)
+		}
+	}
+	return nil
+}
+
+func marketPriceSourceURL(baseURL, endpoint string) string {
+	parsed, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return ""
+	}
+	parsed.User = nil
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	parsed.Path = strings.TrimRight(parsed.Path, "/") + endpoint
+	return parsed.String()
 }
 
 func (runtime *outcomeRuntime) fetchPrices(ctx context.Context, asset map[string]any, start, end time.Time) (any, error) {
