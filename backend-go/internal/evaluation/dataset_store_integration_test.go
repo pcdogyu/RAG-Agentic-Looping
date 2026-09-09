@@ -46,8 +46,8 @@ func TestDatasetStorePersistsReproducibleWalkForwardAndSealedHoldoutAgainstIsola
 		VALUES('equity:XNAS:WF','equity','US','WF','Walk Forward Inc.','XNAS','USD','[]','[]','[]',1,true)`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = pool.Exec(ctx, `INSERT INTO security_universe_snapshots(id,universe_id,market,provider,criteria_version,criteria,observed_at,available_at,status,asset_count,included_count,excluded_count,delisted_count,failure_detail,source_identity)
-		VALUES('wf-snapshot','market:US','US','test','wf-v1','{}',$1,$1,'completed',1,1,0,0,'','{}')`, start.AddDate(0, 0, -2)); err != nil {
+	if _, err = pool.Exec(ctx, `INSERT INTO security_universe_snapshots(id,universe_id,market,status,observed_at,available_at,source_name,source_document_id,eligibility_policy,asset_count,included_count,excluded_count,delisted_count,failure_detail,metadata)
+		VALUES('wf-snapshot','market:US','US','completed',$1,$1,'test','wf-v1','{}',1,1,0,0,'','{}')`, start.AddDate(0, 0, -2)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = pool.Exec(ctx, `INSERT INTO security_universe_memberships(snapshot_id,asset_id,membership_status,effective_at,available_at,reason_codes,source_identity)

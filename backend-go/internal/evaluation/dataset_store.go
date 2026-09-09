@@ -228,20 +228,20 @@ func (s *DatasetStore) loadRecords(ctx context.Context, reservation HoldoutReser
 		coalesce(o.objective,''),coalesce(o.horizon_sessions,0),coalesce(o.objective_label,''),o.raw_return,o.excess_return,
 		coalesce(m.scope->>'outcome_label_definition_version',''),coalesce(u.membership_status,''),
 		coalesce((SELECT jsonb_agg(DISTINCT sl.syndication_group) FROM news_events e
-			CROSS JOIN LATERAL jsonb_array_elements_text(coalesce(e.payload->'news_item_ids','[]'::jsonb)) member(news_id)
+			CROSS JOIN LATERAL jsonb_array_elements_text(coalesce(e.payload::jsonb->'news_item_ids','[]'::jsonb)) member(news_id)
 			JOIN source_lineage sl ON sl.news_item_id::text=member.news_id
 			WHERE e.id=p.event_id AND nullif(sl.syndication_group,'') IS NOT NULL),'[]'::jsonb)
 		FROM prediction_runs p JOIN prediction_models m ON m.version=p.model_version JOIN assets a ON a.id=p.asset_id
-		LEFT JOIN outcome_records o ON o.prediction_run_id=p.id AND o.label_available_at<=$7
+		LEFT JOIN outcome_records o ON o.prediction_run_id=p.id AND o.label_available_at<=$9
 		LEFT JOIN LATERAL (SELECT membership.membership_status FROM security_universe_memberships membership
 			JOIN security_universe_snapshots snapshot ON snapshot.id=membership.snapshot_id
 			WHERE membership.asset_id=p.asset_id AND snapshot.universe_id='market:'||a.market
 				AND membership.effective_at<=p.signal_available_at AND membership.available_at<=p.signal_available_at
 			ORDER BY membership.effective_at DESC,membership.available_at DESC,membership.snapshot_id DESC LIMIT 1) u ON true
 		WHERE p.asset_class=$1 AND a.market=$2 AND p.objective=$3 AND p.horizon_sessions=$4
-			AND p.signal_available_at>=$5 AND p.signal_available_at<$6
+			AND ((p.signal_available_at>=$5 AND p.signal_available_at<$6) OR (p.signal_available_at>=$7 AND p.signal_available_at<$8))
 		ORDER BY p.signal_available_at,p.id`, reservation.AssetClass, reservation.Market, reservation.Objective, reservation.HorizonSessions,
-		config.DevelopmentStart, config.FinalHoldoutEnd, config.SourceAvailableAsOf)
+		config.DevelopmentStart, config.DevelopmentEnd, config.FinalHoldoutStart, config.FinalHoldoutEnd, config.SourceAvailableAsOf)
 	if err != nil {
 		return nil, fmt.Errorf("load evaluation dataset candidates: %w", err)
 	}
