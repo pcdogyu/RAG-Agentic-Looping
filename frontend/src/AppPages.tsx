@@ -4054,6 +4054,18 @@ export function ResearchPolicyPage({ apiBase }: { apiBase: string }) {
 
 type FundamentalBundle = {
   fundamentals?: { items?: Array<{ id?: string; statement_type?: string; available_at?: string; source?: { provider?: string; url?: string } }> };
+	preparation?: {
+		status?: string;
+		reason?: string;
+		statement_period_end?: string;
+		fundamental_snapshot_ids?: string[];
+		missing_fields?: string[];
+		analyst_inputs_required?: string[];
+		factual_inputs?: Record<string, unknown>;
+		field_lineage?: Record<string, { snapshot_id?: string; metrics?: string[]; transform?: string }>;
+		workflow_template?: Record<string, unknown>;
+		controls?: { automatic_assumptions?: boolean; automatic_valuation?: boolean; automatic_rating?: boolean; analyst_approval_required?: boolean };
+	};
   forecasts?: { items?: Array<{ id?: string; model_version?: string; status?: string; as_of?: string; assumptions?: unknown[] }> };
   valuations?: { items?: Array<{ id?: string; model_version?: string; status?: string; as_of?: string; result?: { status?: string; reason?: string; currency?: string; range?: { low?: number; high?: number } } }> };
   ratings?: { items?: Array<{
@@ -4085,7 +4097,8 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
     setLoading(true); setMessage("");
     const path = encodeURIComponent(canonical);
 		const endpoints = [
-			{ key: "fundamentals", route: "fundamentals" }, { key: "forecasts", route: "forecasts" },
+			{ key: "fundamentals", route: "fundamentals" }, { key: "preparation", route: "fundamental-research", suffix: "/preparation" },
+			{ key: "forecasts", route: "forecasts" },
 			{ key: "valuations", route: "valuations" }, { key: "ratings", route: "ratings" },
 			{ key: "predictions", route: "predictions" }, { key: "marketPolicy", route: "market-policies" },
 			{ key: "schedule", route: "fundamental-research", suffix: "/schedule" },
@@ -4115,6 +4128,15 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
       setMessage(`工作流失败：${error instanceof Error ? error.message : "JSON 或请求无效"}`);
     } finally { setLoading(false); }
   }
+	function loadPreparationTemplate() {
+		const template = bundle.preparation?.workflow_template;
+		if (!template) {
+			setMessage("当前没有可用的事实准备包；请先同步并读取同一报告期的三张财务表。");
+			return;
+		}
+		setWorkflowJSON(JSON.stringify(template, null, 2));
+		setMessage("已载入事实模板；估值情景、基准预期、原因码和失效规则仍需分析师补充并审核。");
+	}
   async function approveSchedule() {
     const canonical = assetID.trim();
     if (!canonical || !token || !scheduleJSON.trim()) return;
@@ -4148,6 +4170,7 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
   const valuation = bundle.valuations?.items?.[0];
   const forecast = bundle.forecasts?.items?.[0];
   const schedule = bundle.schedule?.items?.[0];
+	const preparation = bundle.preparation;
   const valuationRange = valuation?.result?.range;
   const changedAssumptions = Object.entries(rating?.changed_assumptions || {});
   return <section className="app-page fundamental-page">
@@ -4159,6 +4182,7 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
     <AdminUnlock token={token} onToken={setToken} />
     {token && <div className="integration-editor">
       <label>无新闻基本面研究输入<textarea aria-label="基本面研究 JSON" rows={8} value={workflowJSON} onChange={(event) => setWorkflowJSON(event.target.value)} placeholder='粘贴含 as_of、forecast、valuation、rating 的证据化 JSON；不会自动补造假设或价格。' /></label>
+		<button type="button" disabled={loading || !preparation?.workflow_template} onClick={loadPreparationTemplate}>载入财务事实模板</button>
       <button type="button" disabled={loading || !workflowJSON.trim()} onClick={() => void runWorkflow()}>运行基本面研究</button>
       <label>定时研究批准计划<textarea aria-label="定时基本面研究计划 JSON" rows={8} value={scheduleJSON} onChange={(event) => { setScheduleJSON(event.target.value); setScheduleRequestID(globalThis.crypto?.randomUUID?.() || `fundamental-schedule-${Date.now()}`); }} placeholder='粘贴 forecast_version_id、valuation、rating、approved_by 和可选 cadence_hours；价格由运行时读取真实复权价。' /></label>
       <button type="button" disabled={loading || !scheduleJSON.trim()} onClick={() => void approveSchedule()}>批准定时研究</button>
@@ -4168,6 +4192,7 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
     {message && <div className="page-message">{message}</div>}
     <div className="metric-grid">
       <article><span>财务快照</span><strong>{bundle.fundamentals?.items?.length ?? 0}</strong><small>严格按 available_at 截止</small></article>
+		<article><span>分析准备</span><strong>{preparation?.status === "analyst_review_required" ? "待人工审核" : preparation?.status || "不可用"}</strong><small>{preparation?.statement_period_end || preparation?.reason || "等待同报告期财务表"}</small></article>
       <article><span>预测版本</span><strong>{bundle.forecasts?.items?.length ?? 0}</strong><small>假设与证据可追溯</small></article>
       <article><span>估值运行</span><strong>{bundle.valuations?.items?.length ?? 0}</strong><small>情景区间不是概率</small></article>
       <article><span>基本面评级</span><strong>{rating?.result?.rating || rating?.result?.status || "不可用"}</strong><small>{rating?.result?.reason || rating?.state?.effective_at || "等待完整输入"}</small></article>
@@ -4176,6 +4201,15 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
       <article><span>定时研究</span><strong>{schedule?.status || "未配置"}</strong><small>{schedule?.last_run_reason || schedule?.last_run_status || schedule?.next_run_at || "需要管理员显式批准"}</small></article>
     </div>
     <div className="conclusion-list">
+		<article className="conclusion-card">
+			<span>无新闻研究准备包</span>
+			<h3>{preparation?.status === "analyst_review_required" ? "财务事实已齐，等待分析师输入" : "事实输入尚未就绪"}</h3>
+			<p>{preparation?.reason || "请读取标的以检查准备状态"}</p>
+			<small>不会自动生成假设、估值或评级；{preparation?.controls?.analyst_approval_required ? "必须人工批准" : "尚未确认批准门禁"}</small>
+			{!!preparation?.missing_fields?.length && <p>缺失字段：{preparation.missing_fields.join("、")}</p>}
+			{!!preparation?.analyst_inputs_required?.length && <details><summary>仍需人工填写</summary><p>{preparation.analyst_inputs_required.join("、")}</p></details>}
+			{!!preparation?.field_lineage && Object.keys(preparation.field_lineage).length > 0 && <details><summary>事实字段来源</summary>{Object.entries(preparation.field_lineage).map(([field, source]) => <p key={field}>{field}：{source.snapshot_id || "—"} · {(source.metrics || []).join("+")} · {source.transform || "identity"}</p>)}</details>}
+		</article>
 		<article className="conclusion-card">
 			<span>分市场研究方法</span>
 			<h3>{bundle.marketPolicy?.policy?.fundamental_method || "未配置"}</h3>

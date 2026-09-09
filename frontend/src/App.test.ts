@@ -732,6 +732,8 @@ describe("shared hash navigation", () => {
 		expect(markup).toContain("分市场研究方法");
     expect(markup).toContain("未校准时不显示概率");
     expect(markup).toContain("缺失字段保持为空，不按零处理");
+		expect(markup).toContain("无新闻研究准备包");
+		expect(markup).toContain("不会自动生成假设、估值或评级");
     expect(markup).toContain("管理员令牌");
   });
 });

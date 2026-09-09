@@ -61,6 +61,7 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) (*Serve
 	r.Get("/go/research-quality-reviews", s.listResearchQualityReviews)
 	r.Post("/go/research-quality-reviews", s.createResearchQualityReview)
 	r.Post("/go/fundamentals/{assetID}/sync", s.syncFundamentals)
+	r.Get("/go/fundamental-research/{assetID}/preparation", s.prepareFundamentalResearch)
 	r.Post("/go/fundamental-research/{assetID}", s.runFundamentalResearch)
 	r.Get("/go/fundamental-research/{assetID}/schedule", s.fundamentalResearchSchedule)
 	r.Put("/go/fundamental-research/{assetID}/schedule", s.approveFundamentalResearchSchedule)
