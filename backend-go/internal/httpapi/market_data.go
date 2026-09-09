@@ -78,3 +78,38 @@ func (s *Server) syncMarketPrices(w http.ResponseWriter, r *http.Request) {
 		"automatic_assumptions": false, "automatic_valuation": false, "automatic_rating": false,
 	})
 }
+
+func (s *Server) importLicensedBenchmarkPrices(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	assetID, err := fundamentalAssetID(chi.URLParam(r, "assetID"))
+	if err != nil || assetID == "" {
+		writeError(w, http.StatusUnprocessableEntity, "asset_id path is invalid")
+		return
+	}
+	input := marketdata.LicensedBenchmarkPriceImport{}
+	if !decodeJSONBody(w, r, &input) {
+		return
+	}
+	input.IdempotencyKey = strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if input.IdempotencyKey == "" {
+		writeError(w, http.StatusUnprocessableEntity, "Idempotency-Key header is required")
+		return
+	}
+	receipt, created, err := marketdata.NewStore(s.db).ImportLicensedBenchmarkPrices(r.Context(), assetID, input, time.Now().UTC())
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	status := http.StatusOK
+	if created {
+		status = http.StatusCreated
+	}
+	writeJSON(w, status, map[string]any{
+		"created": created, "receipt": receipt,
+		"price_field": "adjusted_close", "return_series_kind": "gross_total_return_index",
+		"available_at_authority": "server_ingestion_time", "automatic_benchmark_mapping": false,
+		"automatic_prediction": false, "automatic_valuation": false, "automatic_rating": false,
+	})
+}
