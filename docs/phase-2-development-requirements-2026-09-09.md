@@ -381,3 +381,13 @@
 - 自动化验收：本地全量 `go test ./...`、`go vet ./...`、格式检查和五项冻结评估通过；Compose CI `34412119502` 通过配置与镜像构建，Go CI `34412119768` 通过全量竞态、迁移以及 PostgreSQL/Redis 集成回归。测试覆盖官方响应形状、身份错配拒绝、规范资产迁移、inactive 基准同步、来源去凭据、总回报元数据和结果计算使用新身份。
 - 生产验收（2026-09-10 北京时间）：提交 `1b040de` 部署后，CN/HK 样板策略分别返回 v4、`index:CSI:H00300`/CNY 与 `index:HSI:HSIDV`/HKD，数据库读回两个 inactive 总回报身份。中证首次任务 `2bc8247a-401b-4149-a4e1-6c3ccfa6413f` 一次完成，新增 23 条官方全收益观测；最新 2026-09-09 点位为 6857.95，读回 `daily_close`、官方来源、去参数 URL、不可变 ID 与 `gross_total_return_index` 元数据。重复任务 `b4efa2b5-5af0-4ce8-a6f5-f3e65ea421ec` 返回 `inserted=0,stored_total=23`。
 - 恒指任务 `0b9c618e-c011-4f7f-b7b0-5dc2bb58ca7c` 明确返回 `adjusted_close_unavailable`、零观测和零写入。全库基准映射仍为 0，两个基准身份对应的预测、估值、评级修订和研究计划均为 0；48 条前瞻标签继续 pending、成熟标签为 0。部署时原研究任务 `0b59589c-4878-4ffe-82bc-49d2dcd2e3d6` 在旧 Worker 中完成后才启动新 Worker `12cb3f487f60`，没有强杀或丢失在途任务；API、Market Adapter 与网页均返回健康状态。
+
+### 2.25 持牌恒指总回报行情导入门禁
+
+- 继续核验恒生官方 [INdex360 历史数据页面](https://www.hsi.com.hk/index360/eng/indexes?id=00001.00) 后确认：页面的 `dailyClose`/`valueHistory` 数据请求依赖登录后保存在客户端的 `ACCESS_TOKEN`，未认证请求返回 401。项目不能代替数据使用方注册、接受许可条款或猜测平台内部 `HSIDV` 代码，因此不绕过认证，也不把公开 HSI 价格指数或 ETF 收盘价降级冒充毛总回报历史。
+- 新增管理员限定的 `POST /go/market-prices/{assetID}/licensed-import` 和 `licensed-benchmark-price-import-v1`。入口只接受市场策略冻结的规范基准，并进一步要求主数据同时满足 `asset_class=index`、`instrument_type=gross_total_return_index`；`vendor_code` 必须精确匹配主代码或官方别名。普通指数、ETF、活跃研究证券和不存在的身份均被拒绝。
+- 单次可提交 1—1000 条 `YYYY-MM-DD` 交易日与正有限 `adjusted_close`。价格字段、日线精度、市场、币种和 `return_series_kind=gross_total_return_index` 均由服务器从规范身份强制确定；`available_at` 只能使用服务器实际接收时间，客户端不能把事后取得的历史文件倒填为过去已知。
+- 来源名称、文档 ID、绝对 HTTPS URL、许可证引用、审批人和 `Idempotency-Key` 必填。来源 URL 在持久化前去除用户名、查询参数和片段；许可证引用和审批人只保存在管理员回执，不复制到公开行情元数据。公开观测只保留不含凭据的来源与审计回执 ID。
+- 回执预约、全部行情写入和回执完成在同一 PostgreSQL 事务内执行。同一幂等键对等价但顺序不同的交易日列表返回原回执；内容变化复用同一键会整笔回滚。导入不自动建立 PIT 基准映射，不生成预测、估值、评级、研究计划或概率。
+- 自动化验收：提交 `4117a09` 的 Go CI `34414976447` 通过全量竞态、五项冻结评估、迁移重放及隔离 PostgreSQL 回归；回归覆盖两日原子导入、规范身份与别名、服务器首次可得时间、URL 去凭据、敏感审批字段不进入公开元数据、顺序无关幂等、冲突回滚、错误代码拒绝和无下游副作用。
+- 生产验收（2026-09-10 北京时间）：仅替换 Go API 为容器 `d358b2b1679a` 并执行迁移；research worker `12cb3f487f60`、masterdata worker `daaa4be35827`、Market Adapter `d73e94790f0a` 和 Web `cab7fe6ed484` 均未重启。API 与网页返回 200，未授权导入返回 401；新回执表存在且回执数为 0，`index:HSI:HSIDV` 行情数和全库已批准基准映射数仍为 0。该状态表示持牌数据接入能力已就绪，不表示许可证或真实恒指毛总回报历史已经取得；获得授权文件和真实审批后才能执行首次生产导入。
