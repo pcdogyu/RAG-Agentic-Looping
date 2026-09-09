@@ -2,8 +2,11 @@ package jobs
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -11,8 +14,103 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/config"
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/consensus"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/migrate"
 )
+
+func TestConsensusSyncCapturesOnlyFirstObservedFMPHistoryAgainstIsolatedPostgres(t *testing.T) {
+	dsn := strings.Replace(os.Getenv("TEST_DATABASE_URL"), "postgresql+psycopg://", "postgresql://", 1)
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	admin, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Close()
+	schema := "consensus_sync_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	if _, err = admin.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = admin.Exec(context.Background(), "DROP SCHEMA "+schema+" CASCADE") }()
+	dbConfig, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbConfig.ConnConfig.RuntimeParams["search_path"] = schema
+	pool, err := pgxpool.NewWithConfig(ctx, dbConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err = migrate.Up(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	assetID := "equity:XNAS:CONSENSUS"
+	if _, err = pool.Exec(ctx, `INSERT INTO assets(id,asset_class,market,symbol,name,exchange_or_provider,currency,aliases,products,competitors,lot_size,active)
+		VALUES($1,'equity','US','CONSENSUS','Consensus Test','NASDAQ','USD','[]','[]','[]',1,true)`, assetID); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("apikey") != "isolated" || r.URL.Path != "/analyst-estimates" {
+			t.Fatalf("unexpected FMP request: path=%s apikey=%q", r.URL.Path, r.Header.Get("apikey"))
+		}
+		_ = json.NewEncoder(w).Encode([]map[string]any{{
+			"symbol": "CONSENSUS", "date": "2027-12-31",
+			"revenueLow": 90.0, "revenueAvg": 100.0, "revenueHigh": 110.0, "numAnalystsRevenue": 7.0,
+			"epsLow": 1.0, "epsAvg": 2.0, "epsHigh": 3.0, "numAnalystsEps": 5.0,
+		}})
+	}))
+	defer server.Close()
+	before := time.Now().UTC()
+	runtime := &masterdataRuntime{cfg: config.Config{FMPBaseURL: server.URL, FMPAccessToken: "isolated", FMPRateLimit: 100000}, db: pool, client: server.Client()}
+	result, err := runtime.syncAssetConsensus(ctx, assetID, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.(map[string]any)["historical_backfill"] != false || result.(map[string]any)["automatic_rating"] != false {
+		t.Fatalf("unsafe sync controls: %#v", result)
+	}
+	after := time.Now().UTC()
+	items, err := consensus.NewStore(pool).ListAvailable(ctx, assetID, after.Add(time.Second), 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 6 {
+		t.Fatalf("got %d persisted estimates, want six", len(items))
+	}
+	repeated, err := runtime.syncAssetConsensus(ctx, assetID, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repeated.(map[string]any)["inserted"] != 0 {
+		t.Fatalf("unchanged provider record created another revision: %#v", repeated)
+	}
+	var persistedCount int
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM consensus_snapshots WHERE asset_id=$1`, assetID).Scan(&persistedCount); err != nil || persistedCount != 6 {
+		t.Fatalf("idempotent observation count=%d err=%v", persistedCount, err)
+	}
+	for _, item := range items {
+		if item.AvailableAt.Before(before) || item.AvailableAt.After(after) || item.SourceName != "FMP analyst estimates" || strings.Contains(item.SourceURL, "isolated") {
+			t.Fatalf("invalid first-observed snapshot: %#v", item)
+		}
+		contract, ok := item.SourcePayload["observation_contract"].(map[string]any)
+		if !ok || contract["historical_backfill"] != false || contract["provider_publication_time_available"] != false {
+			t.Fatalf("missing observation contract: %#v", item.SourcePayload)
+		}
+	}
+	prior, err := consensus.NewStore(pool).ListAvailable(ctx, assetID, before.Add(-time.Nanosecond), 20)
+	if err != nil || len(prior) != 0 {
+		t.Fatalf("first observation leaked into history: count=%d err=%v", len(prior), err)
+	}
+	var ratingCount int
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM fundamental_rating_states WHERE asset_id=$1`, assetID).Scan(&ratingCount); err != nil || ratingCount != 0 {
+		t.Fatalf("consensus sync created a rating: count=%d err=%v", ratingCount, err)
+	}
+}
 
 func TestMasterdataPersistencePreservesOverridesAndDeactivatesMissing(t *testing.T) {
 	dsn := os.Getenv("TEST_DATABASE_URL")

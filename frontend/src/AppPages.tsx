@@ -4054,6 +4054,12 @@ export function ResearchPolicyPage({ apiBase }: { apiBase: string }) {
 
 type FundamentalBundle = {
   fundamentals?: { items?: Array<{ id?: string; statement_type?: string; available_at?: string; source?: { provider?: string; url?: string } }> };
+	consensus?: {
+		items?: Array<{ id?: string; metric?: string; fiscal_period_end?: string; statistic?: string; estimate_value?: number; analyst_count?: number; currency?: string; available_at?: string; source_name?: string }>;
+		provider_publication_time_available?: boolean;
+		historical_backfill?: boolean;
+		automatic_rating?: boolean;
+	};
 	preparation?: {
 		status?: string;
 		reason?: string;
@@ -4098,6 +4104,7 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
     const path = encodeURIComponent(canonical);
 		const endpoints = [
 			{ key: "fundamentals", route: "fundamentals" }, { key: "preparation", route: "fundamental-research", suffix: "/preparation" },
+			{ key: "consensus", route: "consensus" },
 			{ key: "forecasts", route: "forecasts" },
 			{ key: "valuations", route: "valuations" }, { key: "ratings", route: "ratings" },
 			{ key: "predictions", route: "predictions" }, { key: "marketPolicy", route: "market-policies" },
@@ -4113,6 +4120,19 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
       setMessage(`读取失败：${error instanceof Error ? error.message : "未知错误"}`);
     } finally { setLoading(false); }
   }
+	async function syncConsensus() {
+		const canonical = assetID.trim();
+		if (!canonical || !token) return;
+		setLoading(true); setMessage("");
+		try {
+			const response = await fetch(`${apiBase}/go/consensus/${encodeURIComponent(canonical)}/sync?limit=10`, { method: "POST", headers: { "X-Admin-Token": token } });
+			const payload = await response.json() as { task_id?: string; detail?: string };
+			if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
+			setMessage(`一致预期首次观测任务已排队：${payload.task_id || "等待 Worker"}。完成后重新读取即可查看；不会倒填历史。`);
+		} catch (error) {
+			setMessage(`一致预期同步失败：${error instanceof Error ? error.message : "未知错误"}`);
+		} finally { setLoading(false); }
+	}
   async function runWorkflow() {
     const canonical = assetID.trim();
     if (!canonical || !token || !workflowJSON.trim()) return;
@@ -4171,6 +4191,8 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
   const forecast = bundle.forecasts?.items?.[0];
   const schedule = bundle.schedule?.items?.[0];
 	const preparation = bundle.preparation;
+	const consensus = bundle.consensus;
+	const consensusItems = consensus?.items || [];
   const valuationRange = valuation?.result?.range;
   const changedAssumptions = Object.entries(rating?.changed_assumptions || {});
   return <section className="app-page fundamental-page">
@@ -4183,6 +4205,7 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
     {token && <div className="integration-editor">
       <label>无新闻基本面研究输入<textarea aria-label="基本面研究 JSON" rows={8} value={workflowJSON} onChange={(event) => setWorkflowJSON(event.target.value)} placeholder='粘贴含 as_of、forecast、valuation、rating 的证据化 JSON；不会自动补造假设或价格。' /></label>
 		<button type="button" disabled={loading || !preparation?.workflow_template} onClick={loadPreparationTemplate}>载入财务事实模板</button>
+		<button type="button" disabled={loading} onClick={() => void syncConsensus()}>同步一致预期</button>
       <button type="button" disabled={loading || !workflowJSON.trim()} onClick={() => void runWorkflow()}>运行基本面研究</button>
       <label>定时研究批准计划<textarea aria-label="定时基本面研究计划 JSON" rows={8} value={scheduleJSON} onChange={(event) => { setScheduleJSON(event.target.value); setScheduleRequestID(globalThis.crypto?.randomUUID?.() || `fundamental-schedule-${Date.now()}`); }} placeholder='粘贴 forecast_version_id、valuation、rating、approved_by 和可选 cadence_hours；价格由运行时读取真实复权价。' /></label>
       <button type="button" disabled={loading || !scheduleJSON.trim()} onClick={() => void approveSchedule()}>批准定时研究</button>
@@ -4192,6 +4215,7 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
     {message && <div className="page-message">{message}</div>}
     <div className="metric-grid">
       <article><span>财务快照</span><strong>{bundle.fundamentals?.items?.length ?? 0}</strong><small>严格按 available_at 截止</small></article>
+		<article><span>一致预期返回</span><strong>{consensusItems.length}</strong><small>仅返回首次观测后可用的数据</small></article>
 		<article><span>分析准备</span><strong>{preparation?.status === "analyst_review_required" ? "待人工审核" : preparation?.status || "不可用"}</strong><small>{preparation?.statement_period_end || preparation?.reason || "等待同报告期财务表"}</small></article>
       <article><span>预测版本</span><strong>{bundle.forecasts?.items?.length ?? 0}</strong><small>假设与证据可追溯</small></article>
       <article><span>估值运行</span><strong>{bundle.valuations?.items?.length ?? 0}</strong><small>情景区间不是概率</small></article>
@@ -4209,6 +4233,13 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 			{!!preparation?.missing_fields?.length && <p>缺失字段：{preparation.missing_fields.join("、")}</p>}
 			{!!preparation?.analyst_inputs_required?.length && <details><summary>仍需人工填写</summary><p>{preparation.analyst_inputs_required.join("、")}</p></details>}
 			{!!preparation?.field_lineage && Object.keys(preparation.field_lineage).length > 0 && <details><summary>事实字段来源</summary>{Object.entries(preparation.field_lineage).map(([field, source]) => <p key={field}>{field}：{source.snapshot_id || "—"} · {(source.metrics || []).join("+")} · {source.transform || "identity"}</p>)}</details>}
+		</article>
+		<article className="conclusion-card">
+			<span>分析师一致预期</span>
+			<h3>{consensusItems.length > 0 ? `${consensusItems.length} 条最近观测` : "尚无可用观测"}</h3>
+			<p>{consensusItems[0]?.available_at ? `最近观测：${new Date(consensusItems[0].available_at).toLocaleString("zh-CN")}` : "管理员可启动单标的 FMP 同步；数据不会倒填到首次观测之前。"}</p>
+			<small>供应商发布时间不可用：{consensus?.provider_publication_time_available === false ? "是" : "未确认"} · 历史倒填：{consensus?.historical_backfill === false ? "关闭" : "未确认"} · 自动评级：{consensus?.automatic_rating === false ? "关闭" : "未确认"}</small>
+			{consensusItems.length > 0 && <details><summary>观测明细（最多 12 条）</summary>{consensusItems.slice(0, 12).map((item) => <p key={item.id}>{item.metric || "指标"} · {item.statistic || "统计"} · {typeof item.estimate_value === "number" ? item.estimate_value : "—"} {item.currency || ""} · {item.fiscal_period_end || "—"}{item.analyst_count ? ` · ${item.analyst_count} 位分析师` : ""}</p>)}</details>}
 		</article>
 		<article className="conclusion-card">
 			<span>分市场研究方法</span>

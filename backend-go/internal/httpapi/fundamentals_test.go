@@ -70,6 +70,19 @@ func TestConsensusImportRequiresAdminToken(t *testing.T) {
 	}
 }
 
+func TestConsensusSyncRequiresAdminToken(t *testing.T) {
+	server, err := New(config.Config{AdminAPIToken: "secret"}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/go/consensus/equity%3ANYSE%3AVRT/sync", nil)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestForecastCreateRequiresAdminToken(t *testing.T) {
 	server, err := New(config.Config{AdminAPIToken: "test-token"}, nil, nil)
 	if err != nil {

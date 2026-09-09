@@ -2,9 +2,11 @@ package httpapi
 
 import (
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/consensus"
 )
 
@@ -16,6 +18,69 @@ type estimateSnapshotInput struct {
 
 type guidanceSnapshotInput struct {
 	Guidance consensus.Guidance `json:"guidance"`
+}
+
+func (s *Server) consensusAt(w http.ResponseWriter, r *http.Request) {
+	assetID, err := fundamentalAssetID(chi.URLParam(r, "assetID"))
+	if err != nil || strings.TrimSpace(assetID) == "" {
+		writeError(w, http.StatusUnprocessableEntity, "asset_id path is invalid")
+		return
+	}
+	cutoffValue, ok := optionalTimeQuery(w, r, "as_of")
+	if !ok {
+		return
+	}
+	cutoff := time.Now().UTC()
+	if cutoffValue != nil {
+		var typed bool
+		cutoff, typed = cutoffValue.(time.Time)
+		if !typed {
+			writeError(w, http.StatusInternalServerError, "invalid consensus as_of cutoff")
+			return
+		}
+	}
+	limit, ok := intQuery(w, r.URL.Query(), "limit", 60, 1, 500)
+	if !ok {
+		return
+	}
+	items, err := consensus.NewStore(s.db).ListAvailable(r.Context(), assetID, cutoff, limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "consensus snapshot query failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"asset_id": assetID, "as_of": cutoff.UTC(), "items": items,
+		"time_contract_version":               consensus.TimeContractVersion,
+		"observation_contract_version":        consensus.FMPObservationContractVersion,
+		"provider_publication_time_available": false, "historical_backfill": false,
+		"automatic_rating": false,
+	})
+}
+
+func (s *Server) syncConsensus(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	assetID, err := fundamentalAssetID(chi.URLParam(r, "assetID"))
+	if err != nil || strings.TrimSpace(assetID) == "" {
+		writeError(w, http.StatusUnprocessableEntity, "asset_id path is invalid")
+		return
+	}
+	limit, ok := intQuery(w, r.URL.Query(), "limit", 10, 1, 40)
+	if !ok {
+		return
+	}
+	taskID := uuid.NewString()
+	queuedID, err := s.enqueueGoModelJob(r.Context(), "masterdata", taskID, "market_loop.sync_consensus_snapshots", []any{assetID}, map[string]any{"asset_id": assetID, "limit": limit}, 4, "consensus-snapshot:"+assetID)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "consensus snapshot sync could not be queued")
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"task_id": queuedID, "status": "queued", "asset_id": assetID, "limit": limit, "source": "FMP analyst estimates",
+		"time_contract_version": consensus.TimeContractVersion, "observation_contract_version": consensus.FMPObservationContractVersion,
+		"historical_backfill": false, "automatic_rating": false,
+	})
 }
 
 // importConsensusEstimate accepts source-linked historical consensus data from

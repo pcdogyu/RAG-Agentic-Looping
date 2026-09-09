@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/config"
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/consensus"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/fundamentalresearch"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/fundamentals"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/marketdata"
@@ -30,6 +31,7 @@ const (
 	refreshAssetUniverseTask       = "market_loop.refresh_asset_universe"
 	refreshMacroUniverseTask       = "market_loop.refresh_macro_universe"
 	syncFundamentalsTask           = "market_loop.sync_fundamental_snapshots"
+	syncConsensusTask              = "market_loop.sync_consensus_snapshots"
 	syncCorporateActionsTask       = "market_loop.sync_corporate_actions"
 	refreshTrackedFundamentalsTask = "market_loop.refresh_tracked_fundamentals"
 	runScheduledFundamentalTask    = "market_loop.run_scheduled_fundamental_research"
@@ -99,10 +101,92 @@ func NewMasterdataHandlers(cfg config.Config, db *pgxpool.Pool, redisClient *red
 		refreshAssetUniverseTask:       runtime.refreshAssetUniverse,
 		refreshMacroUniverseTask:       runtime.refreshMacroUniverse,
 		syncFundamentalsTask:           runtime.syncFundamentalSnapshots,
+		syncConsensusTask:              runtime.syncConsensusSnapshots,
 		syncCorporateActionsTask:       runtime.syncCorporateActions,
 		refreshTrackedFundamentalsTask: runtime.refreshTrackedFundamentals,
 		runScheduledFundamentalTask:    runtime.runScheduledFundamentalResearch,
 	}
+}
+
+func (runtime *masterdataRuntime) syncConsensusSnapshots(ctx context.Context, job Job) (any, error) {
+	envelope := taskEnvelope{}
+	_ = json.Unmarshal(job.Payload, &envelope)
+	assetID := strings.TrimSpace(stringValue(envelope.Kwargs["asset_id"]))
+	if assetID == "" && len(envelope.Args) > 0 {
+		assetID = strings.TrimSpace(stringValue(envelope.Args[0]))
+	}
+	if assetID == "" {
+		return nil, errors.New("consensus snapshot sync requires asset_id")
+	}
+	limit := int(numberValue(envelope.Kwargs["limit"]))
+	if limit == 0 {
+		limit = 10
+	}
+	if limit < 1 || limit > 40 {
+		return nil, errors.New("consensus snapshot limit must be between 1 and 40")
+	}
+	return runtime.syncAssetConsensus(ctx, assetID, limit)
+}
+
+func (runtime *masterdataRuntime) syncAssetConsensus(ctx context.Context, assetID string, limit int) (any, error) {
+	var symbol, market, assetClass, currency string
+	if err := runtime.db.QueryRow(ctx, `SELECT symbol,market,asset_class,currency FROM assets WHERE id=$1 AND active=true`, assetID).Scan(&symbol, &market, &assetClass, &currency); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("active asset %q was not found", assetID)
+		}
+		return nil, err
+	}
+	if strings.ToUpper(market) != "US" || strings.ToLower(assetClass) != "equity" {
+		return nil, fmt.Errorf("consensus snapshots currently support US equities only")
+	}
+	active := (&discoveryRuntime{cfg: runtime.cfg, db: runtime.db}).effectiveDiscoveryConfig(ctx)
+	client := consensus.FMPClient{BaseURL: active.FMPBaseURL, AccessToken: active.FMPAccessToken, HTTPClient: runtime.client}
+	items, err := client.FetchAnnual(ctx, assetID, symbol, currency, limit)
+	if err != nil {
+		return nil, err
+	}
+	store := consensus.NewStore(runtime.db)
+	previous, err := store.ListAvailable(ctx, assetID, time.Now().UTC(), 1000)
+	if err != nil {
+		return nil, err
+	}
+	latestPayload := map[string]map[string]any{}
+	for _, item := range previous {
+		if _, exists := latestPayload[item.SourceDocumentID]; !exists {
+			latestPayload[item.SourceDocumentID] = item.SourcePayload
+		}
+	}
+	inserted := 0
+	metrics := map[string]int{}
+	for _, item := range items {
+		if sameConsensusProviderRecord(latestPayload[item.Estimate.SourceDocumentID], item.SourcePayload) {
+			metrics[item.Estimate.Metric]++
+			continue
+		}
+		created, err := store.SaveEstimate(ctx, item.Estimate, item.SourcePayload, item.Estimate.AvailableAt)
+		if err != nil {
+			return nil, err
+		}
+		metrics[item.Estimate.Metric]++
+		if created {
+			inserted++
+		}
+	}
+	return map[string]any{
+		"asset_id": assetID, "symbol": symbol, "source": "FMP analyst estimates", "snapshot_count": len(items), "inserted": inserted,
+		"unchanged": len(items) - inserted, "metrics": metrics, "time_contract_version": consensus.TimeContractVersion,
+		"observation_contract_version": consensus.FMPObservationContractVersion, "provider_publication_time_available": false,
+		"historical_backfill": false, "automatic_rating": false,
+	}, nil
+}
+
+func sameConsensusProviderRecord(left, right map[string]any) bool {
+	if left == nil || right == nil {
+		return false
+	}
+	leftJSON, leftErr := json.Marshal(left["provider_record"])
+	rightJSON, rightErr := json.Marshal(right["provider_record"])
+	return leftErr == nil && rightErr == nil && bytes.Equal(leftJSON, rightJSON)
 }
 
 func (runtime *masterdataRuntime) syncCorporateActions(ctx context.Context, job Job) (any, error) {
@@ -280,11 +364,15 @@ func (runtime *masterdataRuntime) refreshTrackedFundamentals(ctx context.Context
 			bootstrapped++
 		}
 		fundamentalResult, fundamentalErr := runtime.syncAssetFundamentals(ctx, candidate.AssetID, 12)
+		consensusResult, consensusErr := runtime.syncAssetConsensus(ctx, candidate.AssetID, 10)
 		actionResult, actionErr := runtime.syncAssetCorporateActions(ctx, candidate.AssetID, 500)
-		if fundamentalErr != nil || actionErr != nil {
-			entry := map[string]any{"status": "partial", "selection_reason": candidate.SelectionReason, "fundamentals": fundamentalResult, "corporate_actions": actionResult}
+		if fundamentalErr != nil || consensusErr != nil || actionErr != nil {
+			entry := map[string]any{"status": "partial", "selection_reason": candidate.SelectionReason, "fundamentals": fundamentalResult, "consensus": consensusResult, "corporate_actions": actionResult}
 			if fundamentalErr != nil {
 				entry["fundamental_error"] = fundamentalErr.Error()
+			}
+			if consensusErr != nil {
+				entry["consensus_error"] = consensusErr.Error()
 			}
 			if actionErr != nil {
 				entry["corporate_action_error"] = actionErr.Error()
@@ -292,7 +380,7 @@ func (runtime *masterdataRuntime) refreshTrackedFundamentals(ctx context.Context
 			results[candidate.AssetID] = entry
 			continue
 		}
-		results[candidate.AssetID] = map[string]any{"status": "completed", "selection_reason": candidate.SelectionReason, "fundamentals": fundamentalResult, "corporate_actions": actionResult}
+		results[candidate.AssetID] = map[string]any{"status": "completed", "selection_reason": candidate.SelectionReason, "fundamentals": fundamentalResult, "consensus": consensusResult, "corporate_actions": actionResult}
 		succeeded++
 	}
 	return map[string]any{

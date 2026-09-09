@@ -51,7 +51,7 @@ var workerLaneDefinitions = []MigrationLane{
 	}},
 	{ID: "masterdata", Order: 8, GoQueue: "masterdata", TaskTypes: []string{
 		"market_loop.refresh_crypto_universe", "market_loop.refresh_asset_universe",
-		"market_loop.refresh_macro_universe", "market_loop.sync_fundamental_snapshots", "market_loop.refresh_tracked_fundamentals",
+		"market_loop.refresh_macro_universe", "market_loop.sync_fundamental_snapshots", "market_loop.sync_consensus_snapshots", "market_loop.refresh_tracked_fundamentals",
 		"market_loop.sync_corporate_actions", "market_loop.run_scheduled_fundamental_research",
 	}},
 	{ID: "operations", Order: 9, GoQueue: "operations", TaskTypes: []string{

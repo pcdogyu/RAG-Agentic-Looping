@@ -13,23 +13,25 @@ import (
 const TimeContractVersion = "consensus-point-in-time-v1"
 
 type Estimate struct {
-	ID               string     `json:"id"`
-	AssetID          string     `json:"asset_id"`
-	Metric           string     `json:"metric"`
-	FiscalPeriod     string     `json:"fiscal_period,omitempty"`
-	FiscalPeriodEnd  time.Time  `json:"fiscal_period_end"`
-	AccountingBasis  string     `json:"accounting_basis"`
-	Statistic        string     `json:"statistic"`
-	Value            float64    `json:"estimate_value"`
-	AnalystCount     *int       `json:"analyst_count,omitempty"`
-	Currency         string     `json:"currency,omitempty"`
-	Unit             string     `json:"unit"`
-	PublishedAt      time.Time  `json:"published_at"`
-	AvailableAt      time.Time  `json:"available_at"`
-	RevisionAt       *time.Time `json:"revision_at,omitempty"`
-	SourceName       string     `json:"source_name"`
-	SourceURL        string     `json:"source_url"`
-	SourceDocumentID string     `json:"source_document_id,omitempty"`
+	ID               string         `json:"id"`
+	AssetID          string         `json:"asset_id"`
+	Metric           string         `json:"metric"`
+	FiscalPeriod     string         `json:"fiscal_period,omitempty"`
+	FiscalPeriodEnd  time.Time      `json:"fiscal_period_end"`
+	AccountingBasis  string         `json:"accounting_basis"`
+	Statistic        string         `json:"statistic"`
+	Value            float64        `json:"estimate_value"`
+	AnalystCount     *int           `json:"analyst_count,omitempty"`
+	Currency         string         `json:"currency,omitempty"`
+	Unit             string         `json:"unit"`
+	PublishedAt      time.Time      `json:"published_at"`
+	AvailableAt      time.Time      `json:"available_at"`
+	RevisionAt       *time.Time     `json:"revision_at,omitempty"`
+	SourceName       string         `json:"source_name"`
+	SourceURL        string         `json:"source_url"`
+	SourceDocumentID string         `json:"source_document_id,omitempty"`
+	SourcePayload    map[string]any `json:"source_payload,omitempty"`
+	RetrievedAt      time.Time      `json:"retrieved_at,omitempty"`
 }
 
 type Actual struct {

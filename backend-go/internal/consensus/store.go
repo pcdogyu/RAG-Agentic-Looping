@@ -41,6 +41,7 @@ func (s *Store) SaveEstimate(ctx context.Context, value Estimate, payload map[st
 	if err := normalizeEstimate(&value, retrievedAt); err != nil {
 		return false, err
 	}
+	value.SourcePayload, value.RetrievedAt = payload, retrievedAt.UTC()
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return false, err
@@ -72,7 +73,7 @@ ON CONFLICT(asset_id,metric,fiscal_period_end,accounting_basis,source_name,sourc
 }
 
 func (s *Store) EstimatesBefore(ctx context.Context, assetID, metric string, periodEnd, announcementAt time.Time) ([]Estimate, error) {
-	rows, err := s.db.Query(ctx, `SELECT id,asset_id,metric,fiscal_period,fiscal_period_end,accounting_basis,statistic,estimate_value,analyst_count,currency,unit,published_at,available_at,revision_at,source_name,source_url,source_document_id FROM consensus_snapshots WHERE asset_id=$1 AND metric=$2 AND fiscal_period_end=$3 AND available_at<$4 ORDER BY available_at,id`, assetID, metric, dateUTC(periodEnd), announcementAt.UTC())
+	rows, err := s.db.Query(ctx, `SELECT id,asset_id,metric,fiscal_period,fiscal_period_end,accounting_basis,statistic,estimate_value,analyst_count,currency,unit,published_at,available_at,revision_at,source_name,source_url,source_document_id,source_payload,retrieved_at FROM consensus_snapshots WHERE asset_id=$1 AND metric=$2 AND fiscal_period_end=$3 AND available_at<$4 ORDER BY available_at,id`, assetID, metric, dateUTC(periodEnd), announcementAt.UTC())
 	if err != nil {
 		return nil, err
 	}
@@ -80,8 +81,40 @@ func (s *Store) EstimatesBefore(ctx context.Context, assetID, metric string, per
 	values := []Estimate{}
 	for rows.Next() {
 		var value Estimate
-		if err := rows.Scan(&value.ID, &value.AssetID, &value.Metric, &value.FiscalPeriod, &value.FiscalPeriodEnd, &value.AccountingBasis, &value.Statistic, &value.Value, &value.AnalystCount, &value.Currency, &value.Unit, &value.PublishedAt, &value.AvailableAt, &value.RevisionAt, &value.SourceName, &value.SourceURL, &value.SourceDocumentID); err != nil {
+		var payload []byte
+		if err := rows.Scan(&value.ID, &value.AssetID, &value.Metric, &value.FiscalPeriod, &value.FiscalPeriodEnd, &value.AccountingBasis, &value.Statistic, &value.Value, &value.AnalystCount, &value.Currency, &value.Unit, &value.PublishedAt, &value.AvailableAt, &value.RevisionAt, &value.SourceName, &value.SourceURL, &value.SourceDocumentID, &payload, &value.RetrievedAt); err != nil {
 			return nil, err
+		}
+		if err := json.Unmarshal(payload, &value.SourcePayload); err != nil {
+			return nil, fmt.Errorf("decode consensus source payload: %w", err)
+		}
+		values = append(values, value)
+	}
+	return values, rows.Err()
+}
+
+// ListAvailable returns only snapshots observed by the requested cutoff. FMP
+// observations cannot appear before collection began because available_at is
+// the first-observed timestamp when provider publication time is absent.
+func (s *Store) ListAvailable(ctx context.Context, assetID string, cutoff time.Time, limit int) ([]Estimate, error) {
+	if s.db == nil || strings.TrimSpace(assetID) == "" || cutoff.IsZero() || limit < 1 || limit > 500 {
+		return nil, fmt.Errorf("consensus store, asset_id, cutoff and limit are required")
+	}
+	rows, err := s.db.Query(ctx, `SELECT id,asset_id,metric,fiscal_period,fiscal_period_end,accounting_basis,statistic,estimate_value,analyst_count,currency,unit,published_at,available_at,revision_at,source_name,source_url,source_document_id,source_payload,retrieved_at
+FROM consensus_snapshots WHERE asset_id=$1 AND available_at<=$2 ORDER BY available_at DESC,fiscal_period_end,metric,statistic,id LIMIT $3`, strings.TrimSpace(assetID), cutoff.UTC(), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	values := []Estimate{}
+	for rows.Next() {
+		var value Estimate
+		var payload []byte
+		if err := rows.Scan(&value.ID, &value.AssetID, &value.Metric, &value.FiscalPeriod, &value.FiscalPeriodEnd, &value.AccountingBasis, &value.Statistic, &value.Value, &value.AnalystCount, &value.Currency, &value.Unit, &value.PublishedAt, &value.AvailableAt, &value.RevisionAt, &value.SourceName, &value.SourceURL, &value.SourceDocumentID, &payload, &value.RetrievedAt); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(payload, &value.SourcePayload); err != nil {
+			return nil, fmt.Errorf("decode consensus source payload: %w", err)
 		}
 		values = append(values, value)
 	}
