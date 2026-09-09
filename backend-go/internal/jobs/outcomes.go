@@ -434,7 +434,7 @@ func (runtime *outcomeRuntime) persistPriceObservations(ctx context.Context, ass
 	if runtime.db != nil {
 		fmpBaseURL = (&discoveryRuntime{cfg: runtime.cfg, db: runtime.db}).effectiveDiscoveryConfig(ctx).FMPBaseURL
 	}
-	sourceName, sourceURL := "FMP", marketPriceSourceURL(fmpBaseURL, "/historical-price-eod/full")
+	sourceName, sourceURL := "FMP", marketPriceSourceURL(fmpBaseURL, "/historical-price-eod/dividend-adjusted")
 	if market == "CN" || market == "HK" {
 		sourceName, sourceURL = "market-adapter", marketPriceSourceURL(runtime.cfg.MarketAdapterURL, "/v1/prices")
 	} else if market == "CRYPTO" || strings.EqualFold(stringValue(asset["asset_class"]), "crypto") {
@@ -503,7 +503,7 @@ func (runtime *outcomeRuntime) fetchPrices(ctx context.Context, asset map[string
 		return nil, err
 	}
 	query := url.Values{"symbol": []string{symbol}, "from": []string{start.Format("2006-01-02")}, "to": []string{end.Format("2006-01-02")}}
-	return runtime.requestJSON(ctx, http.MethodGet, active.FMPBaseURL+"/historical-price-eod/full?"+query.Encode(), nil, map[string]string{"apikey": active.FMPAccessToken})
+	return runtime.requestJSON(ctx, http.MethodGet, active.FMPBaseURL+"/historical-price-eod/dividend-adjusted?"+query.Encode(), nil, map[string]string{"apikey": active.FMPAccessToken})
 }
 
 func (runtime *outcomeRuntime) waitForFMP(ctx context.Context, perMinute int) error {

@@ -31,8 +31,8 @@ func TestOutcomeSchedulerIsEnabledForGoRuntime(t *testing.T) {
 }
 
 func TestMarketPriceSourceURLRemovesCredentialsAndQuery(t *testing.T) {
-	got := marketPriceSourceURL("https://user:secret@example.com/stable?apikey=secret#fragment", "/historical-price-eod/full")
-	if got != "https://example.com/stable/historical-price-eod/full" {
+	got := marketPriceSourceURL("https://user:secret@example.com/stable?apikey=secret#fragment", "/historical-price-eod/dividend-adjusted")
+	if got != "https://example.com/stable/historical-price-eod/dividend-adjusted" {
 		t.Fatalf("unsafe or unexpected source URL: %s", got)
 	}
 	if got := marketPriceSourceURL("not-a-url", "/prices"); got != "" {

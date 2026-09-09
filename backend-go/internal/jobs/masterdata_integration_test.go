@@ -149,7 +149,7 @@ func TestManualMarketPriceSyncPersistsOnlyProviderObservationsAgainstIsolatedPos
 	}
 	today, prior := time.Now().UTC().Format("2006-01-02"), time.Now().UTC().AddDate(0, 0, -1).Format("2006-01-02")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("apikey") != "isolated-price" || r.URL.Path != "/historical-price-eod/full" || r.URL.Query().Get("symbol") != "PRICE" {
+		if r.Header.Get("apikey") != "isolated-price" || r.URL.Path != "/historical-price-eod/dividend-adjusted" || r.URL.Query().Get("symbol") != "PRICE" {
 			t.Errorf("unexpected FMP price request: path=%s symbol=%q apikey=%q", r.URL.Path, r.URL.Query().Get("symbol"), r.Header.Get("apikey"))
 			http.Error(w, "unexpected request", http.StatusBadRequest)
 			return
