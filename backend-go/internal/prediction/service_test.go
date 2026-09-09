@@ -66,3 +66,17 @@ func TestModelRegistrationValidationBindsArtifactAndFiniteSchema(t *testing.T) {
 		t.Fatal("zero feature scale was accepted")
 	}
 }
+
+func TestModelRegistrationValidationRejectsUnfrozenOutcomeContracts(t *testing.T) {
+	base := signals.BinaryModel{Version: "model-v1", Objective: "excess_up", HorizonSessions: 5, TrainingCutoff: time.Now().UTC(), FeatureNames: []string{"surprise"}, Means: map[string]float64{"surprise": 0}, Scales: map[string]float64{"surprise": 1}, Coefficients: map[string]float64{"surprise": .4}, SampleCount: 30}
+	unsupportedHorizon := base
+	unsupportedHorizon.HorizonSessions = 2
+	if err := validateModel(unsupportedHorizon); err == nil {
+		t.Fatal("calendar-like two-session horizon was accepted outside the frozen label definition")
+	}
+	unsupportedObjective := base
+	unsupportedObjective.Objective = "direction_score"
+	if err := validateModel(unsupportedObjective); err == nil {
+		t.Fatal("heuristic direction score was accepted as a trained outcome objective")
+	}
+}

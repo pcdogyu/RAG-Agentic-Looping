@@ -7,6 +7,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/evaluation"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/marketdata"
 )
 
@@ -203,6 +204,10 @@ func (s *Server) marketDataQuality(w http.ResponseWriter, r *http.Request) {
 		"corporate_action_observations": `SELECT count(*)::int FROM corporate_action_observations WHERE available_at<=$1`,
 		"failed_universe_snapshots":     `SELECT count(*)::int FROM security_universe_snapshots WHERE status='failed' AND available_at<=$1`,
 		"outcomes_missing_benchmark":    `SELECT count(*)::int FROM outcomes WHERE observed_at<=$1 AND coalesce(payload->>'benchmark_status','unavailable')<>'available'`,
+		"mature_prediction_labels":      `SELECT count(*)::int FROM outcome_records WHERE label_definition_version='prediction-outcome-label-v1' AND status='mature' AND label_available_at<=$1`,
+		"unavailable_prediction_labels": `SELECT count(*)::int FROM outcome_records WHERE label_definition_version='prediction-outcome-label-v1' AND status='unavailable' AND label_available_at<=$1`,
+		"excluded_prediction_labels":    `SELECT count(*)::int FROM outcome_records WHERE label_definition_version='prediction-outcome-label-v1' AND status='excluded' AND label_available_at<=$1`,
+		"pending_prediction_labels":     `SELECT count(*)::int FROM prediction_runs p JOIN prediction_models m ON m.version=p.model_version WHERE m.scope->>'outcome_label_definition_version'='prediction-outcome-label-v1' AND p.signal_available_at<=$1 AND NOT EXISTS(SELECT 1 FROM outcome_records o WHERE o.prediction_run_id=p.id)`,
 	} {
 		var value int
 		if err := s.db.QueryRow(r.Context(), query, asOf).Scan(&value); err != nil {
@@ -213,7 +218,7 @@ func (s *Server) marketDataQuality(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"as_of": asOf.Format(time.RFC3339Nano), "benchmark_contract_version": marketdata.BenchmarkMappingContractVersion,
-		"universe_contract_version": marketdata.SecurityUniverseContractVersion, "benchmark_coverage": benchmarkCoverage,
+		"universe_contract_version": marketdata.SecurityUniverseContractVersion, "outcome_label_definition_version": evaluation.OutcomeLabelDefinitionVersion, "benchmark_coverage": benchmarkCoverage,
 		"latest_universes": universes, "counts": counts,
 		"handling": map[string]any{
 			"missing_benchmark":       "relative_return_unavailable_and_excluded_from_relative_aggregates",
@@ -221,4 +226,22 @@ func (s *Server) marketDataQuality(w http.ResponseWriter, r *http.Request) {
 			"delisting": "requires_explicit_provider_status", "historical_industry": "must_be_supplied_from_point_in_time_context",
 		},
 	})
+}
+
+func (s *Server) predictionOutcomeLabels(w http.ResponseWriter, r *http.Request) {
+	assetID, err := fundamentalAssetID(chi.URLParam(r, "assetID"))
+	if err != nil || assetID == "" {
+		writeError(w, http.StatusUnprocessableEntity, "asset_id path is invalid")
+		return
+	}
+	limit, ok := intQuery(w, r.URL.Query(), "limit", 50, 1, 200)
+	if !ok {
+		return
+	}
+	items, err := evaluation.NewOutcomeStore(s.db).ListByAsset(r.Context(), assetID, limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "prediction outcome label query failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"asset_id": assetID, "definition_version": evaluation.OutcomeLabelDefinitionVersion, "items": items})
 }

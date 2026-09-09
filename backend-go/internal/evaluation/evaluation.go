@@ -10,12 +10,45 @@ import (
 	"time"
 )
 
+const OutcomeLabelDefinitionVersion = "prediction-outcome-label-v1"
+
 type HorizonPolicy struct {
+	Version          string  `json:"version"`
+	Objective        string  `json:"objective"`
 	HorizonSessions  int     `json:"horizon_sessions"`
 	NeutralBand      float64 `json:"neutral_band"`
+	ExecutionEnabled bool    `json:"execution_enabled"`
+	ExecutionSide    string  `json:"execution_side,omitempty"`
 	ExecutionCostBPS float64 `json:"execution_cost_bps"`
+	SlippageBPS      float64 `json:"slippage_bps"`
+	BorrowBPS        float64 `json:"borrow_bps"`
+	FundingBPS       float64 `json:"funding_bps"`
 	EntryPolicy      string  `json:"entry_policy"`
+	ExitPolicy       string  `json:"exit_policy"`
 	PriceField       string  `json:"price_field"`
+	AlphaDefinition  string  `json:"alpha_definition"`
+}
+
+type ExecutionAssumptions struct {
+	Enabled          bool    `json:"enabled"`
+	Side             string  `json:"side,omitempty"`
+	RoundTripCostBPS float64 `json:"round_trip_cost_bps,omitempty"`
+	SlippageBPS      float64 `json:"slippage_bps,omitempty"`
+	BorrowBPS        float64 `json:"borrow_bps,omitempty"`
+	FundingBPS       float64 `json:"funding_bps,omitempty"`
+}
+
+func WithExecutionAssumptions(policy HorizonPolicy, input ExecutionAssumptions) (HorizonPolicy, error) {
+	policy.ExecutionEnabled = input.Enabled
+	policy.ExecutionSide = strings.ToLower(strings.TrimSpace(input.Side))
+	policy.ExecutionCostBPS = input.RoundTripCostBPS
+	policy.SlippageBPS = input.SlippageBPS
+	policy.BorrowBPS = input.BorrowBPS
+	policy.FundingBPS = input.FundingBPS
+	if err := ValidateHorizonPolicy(policy); err != nil {
+		return HorizonPolicy{}, err
+	}
+	return policy, nil
 }
 
 type PricePoint struct {
@@ -28,25 +61,84 @@ type PricePoint struct {
 }
 
 type OutcomeLabel struct {
-	Status          string     `json:"status"`
-	Reason          string     `json:"reason,omitempty"`
-	HorizonSessions int        `json:"horizon_sessions"`
-	EntryAt         *time.Time `json:"entry_at,omitempty"`
-	ExitAt          *time.Time `json:"exit_at,omitempty"`
-	RawReturn       *float64   `json:"raw_return,omitempty"`
-	BenchmarkReturn *float64   `json:"benchmark_return,omitempty"`
-	ExcessReturn    *float64   `json:"excess_return,omitempty"`
-	NetReturn       *float64   `json:"net_return,omitempty"`
-	Direction       string     `json:"direction,omitempty"`
+	Status               string     `json:"status"`
+	Reason               string     `json:"reason,omitempty"`
+	DefinitionVersion    string     `json:"definition_version"`
+	Objective            string     `json:"objective"`
+	HorizonSessions      int        `json:"horizon_sessions"`
+	PriceField           string     `json:"price_field,omitempty"`
+	TimePrecision        string     `json:"time_precision,omitempty"`
+	AlphaDefinition      string     `json:"alpha_definition,omitempty"`
+	EntryAt              *time.Time `json:"entry_at,omitempty"`
+	ExitAt               *time.Time `json:"exit_at,omitempty"`
+	LabelAvailableAt     *time.Time `json:"label_available_at,omitempty"`
+	EntryPrice           *float64   `json:"entry_price,omitempty"`
+	ExitPrice            *float64   `json:"exit_price,omitempty"`
+	RawReturn            *float64   `json:"raw_return,omitempty"`
+	BenchmarkReturn      *float64   `json:"benchmark_return,omitempty"`
+	ExcessReturn         *float64   `json:"excess_return,omitempty"`
+	RiskAdjustedResidual *float64   `json:"risk_adjusted_residual,omitempty"`
+	GrossStrategyReturn  *float64   `json:"gross_strategy_return,omitempty"`
+	NetReturn            *float64   `json:"net_return,omitempty"`
+	ExecutionCostBPS     *float64   `json:"execution_cost_bps,omitempty"`
+	AbsoluteLabel        string     `json:"absolute_label,omitempty"`
+	RelativeLabel        string     `json:"relative_label,omitempty"`
+	ObjectiveLabel       string     `json:"objective_label,omitempty"`
+	SimulationStatus     string     `json:"simulation_status"`
+	ResearchResultOnly   bool       `json:"research_result_only"`
+	RiskAdjustmentStatus string     `json:"risk_adjustment_status"`
+}
+
+func ResolveHorizonPolicy(objective string, horizonSessions int) (HorizonPolicy, error) {
+	objective = strings.ToLower(strings.TrimSpace(objective))
+	if objective != "absolute_up" && objective != "excess_up" {
+		return HorizonPolicy{}, fmt.Errorf("objective must be absolute_up or excess_up")
+	}
+	bands := map[int]float64{1: .005, 5: .01, 20: .02}
+	band, ok := bands[horizonSessions]
+	if !ok {
+		return HorizonPolicy{}, fmt.Errorf("horizon_sessions must be one of 1, 5 or 20")
+	}
+	return HorizonPolicy{Version: OutcomeLabelDefinitionVersion, Objective: objective, HorizonSessions: horizonSessions, NeutralBand: band,
+		EntryPolicy: "first_observable_session_after_signal", ExitPolicy: "nth_observable_session_after_entry", PriceField: "adjusted_close",
+		AlphaDefinition: "arithmetic_asset_total_return_minus_benchmark_total_return"}, nil
+}
+
+func ValidateHorizonPolicy(policy HorizonPolicy) error {
+	frozen, err := ResolveHorizonPolicy(policy.Objective, policy.HorizonSessions)
+	if err != nil {
+		return err
+	}
+	if policy.Version != frozen.Version || policy.NeutralBand != frozen.NeutralBand || policy.EntryPolicy != frozen.EntryPolicy || policy.ExitPolicy != frozen.ExitPolicy || policy.PriceField != frozen.PriceField || policy.AlphaDefinition != frozen.AlphaDefinition {
+		return fmt.Errorf("outcome label policy differs from frozen definition %s", OutcomeLabelDefinitionVersion)
+	}
+	if !policy.ExecutionEnabled {
+		return nil
+	}
+	policy.ExecutionSide = strings.ToLower(strings.TrimSpace(policy.ExecutionSide))
+	if policy.ExecutionSide != "long" && policy.ExecutionSide != "short" {
+		return fmt.Errorf("enabled execution simulation requires side long or short")
+	}
+	for _, value := range []float64{policy.ExecutionCostBPS, policy.SlippageBPS, policy.BorrowBPS, policy.FundingBPS} {
+		if value < 0 || value > 10000 || math.IsNaN(value) || math.IsInf(value, 0) {
+			return fmt.Errorf("execution costs must be finite and between 0 and 10000 bps")
+		}
+	}
+	if policy.ExecutionSide != "short" && policy.BorrowBPS != 0 {
+		return fmt.Errorf("borrow_bps only applies to short execution simulations")
+	}
+	return nil
 }
 
 func BuildOutcomeLabel(signalAvailableAt time.Time, asset, benchmark []PricePoint, policy HorizonPolicy) OutcomeLabel {
-	result := OutcomeLabel{Status: "unavailable", HorizonSessions: policy.HorizonSessions}
-	if signalAvailableAt.IsZero() || policy.HorizonSessions < 1 || policy.EntryPolicy != "first_session_after_signal" {
+	result := OutcomeLabel{Status: "unavailable", DefinitionVersion: policy.Version, Objective: policy.Objective, HorizonSessions: policy.HorizonSessions,
+		PriceField: policy.PriceField, TimePrecision: "daily_close", AlphaDefinition: policy.AlphaDefinition,
+		SimulationStatus: "not_configured", ResearchResultOnly: true, RiskAdjustmentStatus: "not_configured", RelativeLabel: "unavailable"}
+	if signalAvailableAt.IsZero() || ValidateHorizonPolicy(policy) != nil {
 		result.Reason = "invalid_label_policy"
 		return result
 	}
-	asset = eligiblePrices(asset, signalAvailableAt, policy.PriceField)
+	asset = eligibleSessions(asset, signalAvailableAt)
 	if len(asset) <= policy.HorizonSessions {
 		result.Reason = "label_not_mature"
 		return result
@@ -55,57 +147,90 @@ func BuildOutcomeLabel(signalAvailableAt time.Time, asset, benchmark []PricePoin
 	entryPrice, okEntry := selectedPrice(entry, policy.PriceField)
 	exitPrice, okExit := selectedPrice(exit, policy.PriceField)
 	if !okEntry || !okExit || entryPrice <= 0 {
-		result.Reason = "missing_or_invalid_asset_price"
+		result.Reason = "adjusted_close_missing"
 		return result
 	}
 	raw := exitPrice/entryPrice - 1
-	result.EntryAt, result.ExitAt, result.RawReturn = timePointer(entry.AvailableAt), timePointer(exit.AvailableAt), &raw
+	labelAvailableAt := exit.AvailableAt
+	if entry.AvailableAt.After(labelAvailableAt) {
+		labelAvailableAt = entry.AvailableAt
+	}
+	result.EntryAt, result.ExitAt, result.LabelAvailableAt = timePointer(entry.SessionDate), timePointer(exit.SessionDate), timePointer(labelAvailableAt)
+	result.EntryPrice, result.ExitPrice, result.RawReturn = &entryPrice, &exitPrice, &raw
+	result.AbsoluteLabel = classifyOutcome(raw, policy.NeutralBand, "up", "down")
 	if len(benchmark) > 0 {
-		benchmark = eligiblePrices(benchmark, signalAvailableAt, policy.PriceField)
-		if len(benchmark) <= policy.HorizonSessions || !strings.EqualFold(entry.Currency, benchmark[0].Currency) {
-			result.Reason = "benchmark_unavailable_or_currency_mismatch"
-			return result
+		benchmark = eligibleSessions(benchmark, signalAvailableAt)
+		leftPoint, leftOK := priceOnSession(benchmark, entry.SessionDate)
+		rightPoint, rightOK := priceOnSession(benchmark, exit.SessionDate)
+		if leftOK && rightOK && strings.EqualFold(entry.Currency, leftPoint.Currency) && strings.EqualFold(entry.Currency, rightPoint.Currency) {
+			left, okLeft := selectedPrice(leftPoint, policy.PriceField)
+			right, okRight := selectedPrice(rightPoint, policy.PriceField)
+			if okLeft && okRight && left > 0 {
+				value := right/left - 1
+				excess := raw - value
+				result.BenchmarkReturn, result.ExcessReturn = &value, &excess
+				result.RelativeLabel = classifyOutcome(excess, policy.NeutralBand, "outperform", "underperform")
+				if leftPoint.AvailableAt.After(*result.LabelAvailableAt) {
+					result.LabelAvailableAt = timePointer(leftPoint.AvailableAt)
+				}
+				if rightPoint.AvailableAt.After(*result.LabelAvailableAt) {
+					result.LabelAvailableAt = timePointer(rightPoint.AvailableAt)
+				}
+			}
 		}
-		left, okLeft := selectedPrice(benchmark[0], policy.PriceField)
-		right, okRight := selectedPrice(benchmark[policy.HorizonSessions], policy.PriceField)
-		if !okLeft || !okRight || left <= 0 {
-			result.Reason = "benchmark_unavailable_or_currency_mismatch"
-			return result
-		}
-		value := right/left - 1
-		excess := raw - value
-		result.BenchmarkReturn, result.ExcessReturn = &value, &excess
 	}
-	net := raw - policy.ExecutionCostBPS/10000
-	result.NetReturn = &net
+	if policy.Objective == "excess_up" && result.ExcessReturn == nil {
+		result.Reason = "benchmark_unavailable_or_session_mismatch"
+		return result
+	}
+	result.ObjectiveLabel = result.AbsoluteLabel
+	if policy.Objective == "excess_up" {
+		result.ObjectiveLabel = result.RelativeLabel
+	}
+	if policy.ExecutionEnabled {
+		gross := raw
+		if strings.EqualFold(policy.ExecutionSide, "short") {
+			gross = -raw
+		}
+		cost := policy.ExecutionCostBPS + policy.SlippageBPS + policy.BorrowBPS + policy.FundingBPS
+		net := gross - cost/10000
+		result.GrossStrategyReturn, result.NetReturn, result.ExecutionCostBPS = &gross, &net, &cost
+		result.SimulationStatus, result.ResearchResultOnly = "simulated_with_pre_registered_assumptions", false
+	}
 	result.Status = "mature"
-	metric := raw
-	if result.ExcessReturn != nil {
-		metric = *result.ExcessReturn
-	}
-	if metric > policy.NeutralBand {
-		result.Direction = "up"
-	} else if metric < -policy.NeutralBand {
-		result.Direction = "down"
-	} else {
-		result.Direction = "neutral"
-	}
 	return result
 }
 
-func eligiblePrices(values []PricePoint, signal time.Time, field string) []PricePoint {
+func eligibleSessions(values []PricePoint, signal time.Time) []PricePoint {
 	result := []PricePoint{}
 	for _, value := range values {
-		if value.AvailableAt.IsZero() || !value.AvailableAt.After(signal) {
-			continue
-		}
-		if _, ok := selectedPrice(value, field); !ok {
+		if value.SessionDate.IsZero() || value.AvailableAt.IsZero() || !value.SessionDate.After(signal) {
 			continue
 		}
 		result = append(result, value)
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].SessionDate.Before(result[j].SessionDate) })
 	return result
+}
+
+func priceOnSession(values []PricePoint, session time.Time) (PricePoint, bool) {
+	date := session.UTC().Format("2006-01-02")
+	for _, value := range values {
+		if value.SessionDate.UTC().Format("2006-01-02") == date {
+			return value, true
+		}
+	}
+	return PricePoint{}, false
+}
+
+func classifyOutcome(value, band float64, positive, negative string) string {
+	if value > band {
+		return positive
+	}
+	if value < -band {
+		return negative
+	}
+	return "neutral"
 }
 
 func selectedPrice(point PricePoint, field string) (float64, bool) {

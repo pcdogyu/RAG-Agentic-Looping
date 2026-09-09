@@ -14,6 +14,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/calibration"
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/evaluation"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/governance"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/marketpolicy"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/signals"
@@ -104,6 +105,18 @@ func (s *Service) RegisterModel(ctx context.Context, input ModelRegistration) er
 	if policy := marketpolicy.Resolve(fmt.Sprint(input.Scope["asset_class"]), input.Market); !policy.PredictionSupported {
 		return fmt.Errorf("prediction model scope is unsupported")
 	}
+	labelPolicy, _ := evaluation.ResolveHorizonPolicy(input.Model.Objective, input.Model.HorizonSessions)
+	if raw, exists := input.Scope["execution_assumptions"]; exists {
+		body, marshalErr := json.Marshal(raw)
+		assumptions := evaluation.ExecutionAssumptions{}
+		if marshalErr != nil || json.Unmarshal(body, &assumptions) != nil {
+			return fmt.Errorf("execution_assumptions are invalid")
+		}
+		if _, err := evaluation.WithExecutionAssumptions(labelPolicy, assumptions); err != nil {
+			return err
+		}
+	}
+	input.Scope["outcome_label_definition_version"] = evaluation.OutcomeLabelDefinitionVersion
 	scope, _ := json.Marshal(input.Scope)
 	_, err := s.db.Exec(ctx, `INSERT INTO prediction_models(version,objective,market,horizon_sessions,feature_schema,model_payload,training_cutoff,artifact_digest,status,scope) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(version) DO NOTHING`, input.Model.Version, input.Model.Objective, strings.ToUpper(input.Market), input.Model.HorizonSessions, featureSchema, payload, input.Model.TrainingCutoff, input.ArtifactDigest, status, scope)
 	return err
@@ -190,6 +203,9 @@ func ModelArtifactDigest(model signals.BinaryModel) string {
 func validateModel(model signals.BinaryModel) error {
 	if strings.TrimSpace(model.Objective) == "" || len(model.FeatureNames) == 0 || model.SampleCount < 1 {
 		return fmt.Errorf("model objective, features and positive sample_count are required")
+	}
+	if _, err := evaluation.ResolveHorizonPolicy(model.Objective, model.HorizonSessions); err != nil {
+		return err
 	}
 	seen := map[string]bool{}
 	for _, name := range model.FeatureNames {

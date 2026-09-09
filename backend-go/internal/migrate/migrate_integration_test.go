@@ -130,6 +130,11 @@ func TestUpCreatesFreshGoRuntimeSchema(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=$1 AND table_name='prediction_runs' AND column_name='asset_class')`, schema).Scan(&predictionAssetClassColumn); err != nil || !predictionAssetClassColumn {
 		t.Fatalf("prediction_runs.asset_class missing: exists=%v err=%v", predictionAssetClassColumn, err)
 	}
+	outcomeLabelColumns := []string{"label_definition_version", "objective", "horizon_sessions", "entry_price", "exit_price", "price_field", "time_precision", "benchmark_asset_id", "benchmark_mapping_id", "alpha_definition", "absolute_label", "relative_label", "objective_label", "risk_adjusted_residual", "risk_adjustment_status", "gross_strategy_return", "simulation_status", "research_result_only", "execution_assumptions"}
+	var outcomeLabelColumnCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*)::int FROM information_schema.columns WHERE table_schema=$1 AND table_name='outcome_records' AND column_name=ANY($2::text[])`, schema, outcomeLabelColumns).Scan(&outcomeLabelColumnCount); err != nil || outcomeLabelColumnCount != len(outcomeLabelColumns) {
+		t.Fatalf("outcome label columns=%d want=%d err=%v", outcomeLabelColumnCount, len(outcomeLabelColumns), err)
+	}
 	for _, index := range legacyORMIndexes {
 		var exists bool
 		if err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_indexes WHERE schemaname=$1 AND indexname=$2)`, schema, index).Scan(&exists); err != nil || !exists {

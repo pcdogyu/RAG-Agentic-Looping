@@ -12,10 +12,21 @@ func price(value float64, day int, adjusted bool) PricePoint {
 	return PricePoint{SessionDate: stamp, AvailableAt: stamp, Close: &value, AdjustedClose: &value, Currency: "USD", CorporateActionAdjusted: adjusted}
 }
 
+func outcomePolicy(t *testing.T, objective string, horizon int) HorizonPolicy {
+	t.Helper()
+	policy, err := ResolveHorizonPolicy(objective, horizon)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return policy
+}
+
 func TestOutcomeStartsAfterSignalAndKeepsAbsoluteRelativeAndNetReturns(t *testing.T) {
 	asset := []PricePoint{price(100, 2, true), price(105, 3, true), price(110, 4, true)}
 	benchmark := []PricePoint{price(100, 2, true), price(102, 3, true), price(103, 4, true)}
-	result := BuildOutcomeLabel(time.Date(2025, 1, 2, 20, 0, 0, 0, time.UTC), asset, benchmark, HorizonPolicy{HorizonSessions: 2, NeutralBand: .01, ExecutionCostBPS: 10, EntryPolicy: "first_session_after_signal", PriceField: "adjusted_close"})
+	policy := outcomePolicy(t, "excess_up", 1)
+	policy.ExecutionEnabled, policy.ExecutionSide, policy.ExecutionCostBPS = true, "long", 10
+	result := BuildOutcomeLabel(time.Date(2025, 1, 2, 20, 0, 0, 0, time.UTC), asset, benchmark, policy)
 	if result.Status != "mature" || result.RawReturn == nil || result.BenchmarkReturn == nil || result.ExcessReturn == nil || result.NetReturn == nil {
 		t.Fatalf("result=%#v", result)
 	}
@@ -25,8 +36,8 @@ func TestOutcomeStartsAfterSignalAndKeepsAbsoluteRelativeAndNetReturns(t *testin
 }
 
 func TestOutcomeRejectsUnadjustedCorporateActionSeries(t *testing.T) {
-	result := BuildOutcomeLabel(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC), []PricePoint{price(100, 2, false), price(50, 3, false)}, nil, HorizonPolicy{HorizonSessions: 1, EntryPolicy: "first_session_after_signal", PriceField: "adjusted_close"})
-	if result.Status != "unavailable" {
+	result := BuildOutcomeLabel(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC), []PricePoint{price(100, 2, false), price(50, 3, false)}, nil, outcomePolicy(t, "absolute_up", 1))
+	if result.Status != "unavailable" || result.Reason != "adjusted_close_missing" {
 		t.Fatalf("result=%#v", result)
 	}
 }
@@ -39,7 +50,7 @@ func TestOutcomeUsesAdjustedCloseAcrossSplitInsteadOfFalseRawPriceCrash(t *testi
 		{SessionDate: entryAt, AvailableAt: entryAt, Close: &rawEntry, AdjustedClose: &adjustedEntry, Currency: "USD", CorporateActionAdjusted: true},
 		{SessionDate: exitAt, AvailableAt: exitAt, Close: &rawExit, AdjustedClose: &adjustedExit, Currency: "USD", CorporateActionAdjusted: true},
 	}
-	result := BuildOutcomeLabel(entryAt.Add(-time.Hour), asset, nil, HorizonPolicy{HorizonSessions: 1, EntryPolicy: "first_session_after_signal", PriceField: "adjusted_close"})
+	result := BuildOutcomeLabel(entryAt.Add(-time.Hour), asset, nil, outcomePolicy(t, "absolute_up", 1))
 	if result.Status != "mature" || result.RawReturn == nil || math.Abs(*result.RawReturn-.02) > 1e-9 {
 		t.Fatalf("split-adjusted result=%#v", result)
 	}
@@ -55,7 +66,7 @@ func TestOutcomeUsesTotalReturnAdjustedCloseAcrossCashDividend(t *testing.T) {
 		{SessionDate: entryAt, AvailableAt: entryAt, Close: &rawEntry, AdjustedClose: &adjustedEntry, Currency: "USD", CorporateActionAdjusted: true},
 		{SessionDate: exitAt, AvailableAt: exitAt, Close: &rawExit, AdjustedClose: &adjustedExit, Currency: "USD", CorporateActionAdjusted: true},
 	}
-	result := BuildOutcomeLabel(entryAt.Add(-time.Hour), asset, nil, HorizonPolicy{HorizonSessions: 1, EntryPolicy: "first_session_after_signal", PriceField: "adjusted_close"})
+	result := BuildOutcomeLabel(entryAt.Add(-time.Hour), asset, nil, outcomePolicy(t, "absolute_up", 1))
 	if result.Status != "mature" || result.RawReturn == nil || math.Abs(*result.RawReturn) > 1e-12 {
 		t.Fatalf("dividend-adjusted result=%#v", result)
 	}
@@ -64,9 +75,82 @@ func TestOutcomeUsesTotalReturnAdjustedCloseAcrossCashDividend(t *testing.T) {
 func TestOutcomeEntryMustBeStrictlyAfterSignalAvailability(t *testing.T) {
 	signal := time.Date(2025, 1, 2, 21, 0, 0, 0, time.UTC)
 	asset := []PricePoint{price(100, 2, true), price(105, 3, true), price(110, 4, true)}
-	result := BuildOutcomeLabel(signal, asset, nil, HorizonPolicy{HorizonSessions: 1, EntryPolicy: "first_session_after_signal", PriceField: "adjusted_close"})
+	result := BuildOutcomeLabel(signal, asset, nil, outcomePolicy(t, "absolute_up", 1))
 	if result.Status != "mature" || result.EntryAt == nil || !result.EntryAt.Equal(time.Date(2025, 1, 3, 21, 0, 0, 0, time.UTC)) || result.RawReturn == nil || *result.RawReturn <= 0 {
 		t.Fatalf("same-time price was incorrectly used as executable entry: %#v", result)
+	}
+}
+
+func TestAbsoluteGainCanBeRelativeUnderperformanceWithoutExecutionClaim(t *testing.T) {
+	asset := []PricePoint{price(100, 2, true), price(102, 3, true)}
+	benchmark := []PricePoint{price(100, 2, true), price(108, 3, true)}
+	result := BuildOutcomeLabel(time.Date(2025, 1, 1, 23, 0, 0, 0, time.UTC), asset, benchmark, outcomePolicy(t, "excess_up", 1))
+	if result.Status != "mature" || result.AbsoluteLabel != "up" || result.RelativeLabel != "underperform" || result.ObjectiveLabel != "underperform" || result.ExcessReturn == nil || math.Abs(*result.ExcessReturn+.06) > 1e-12 {
+		t.Fatalf("absolute and relative truth was collapsed: %#v", result)
+	}
+	if result.NetReturn != nil || result.SimulationStatus != "not_configured" || !result.ResearchResultOnly {
+		t.Fatalf("unconfigured execution was presented as realizable: %#v", result)
+	}
+}
+
+func TestExecutionSimulationRequiresExplicitApplicableCostAssumptions(t *testing.T) {
+	base := outcomePolicy(t, "absolute_up", 1)
+	if _, err := WithExecutionAssumptions(base, ExecutionAssumptions{Enabled: true, Side: "long", BorrowBPS: 5}); err == nil {
+		t.Fatal("long simulation accepted an inapplicable borrow cost")
+	}
+	policy, err := WithExecutionAssumptions(base, ExecutionAssumptions{Enabled: true, Side: "short", RoundTripCostBPS: 10, SlippageBPS: 5, BorrowBPS: 4, FundingBPS: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := BuildOutcomeLabel(time.Date(2025, 1, 1, 23, 0, 0, 0, time.UTC), []PricePoint{price(100, 2, true), price(102, 3, true)}, nil, policy)
+	if result.Status != "mature" || result.GrossStrategyReturn == nil || math.Abs(*result.GrossStrategyReturn+.02) > 1e-12 || result.NetReturn == nil || math.Abs(*result.NetReturn+.022) > 1e-12 || result.ExecutionCostBPS == nil || *result.ExecutionCostBPS != 20 {
+		t.Fatalf("explicit short costs were not applied independently: %#v", result)
+	}
+}
+
+func TestRelativeLabelRequiresBenchmarkOnTheExactAssetSessions(t *testing.T) {
+	asset := []PricePoint{price(100, 2, true), price(102, 3, true)}
+	benchmark := []PricePoint{price(100, 2, true), price(108, 4, true)}
+	relative := BuildOutcomeLabel(time.Date(2025, 1, 1, 23, 0, 0, 0, time.UTC), asset, benchmark, outcomePolicy(t, "excess_up", 1))
+	if relative.Status != "unavailable" || relative.Reason != "benchmark_unavailable_or_session_mismatch" || relative.RawReturn == nil || relative.AbsoluteLabel != "up" {
+		t.Fatalf("misaligned relative target did not preserve only the known absolute result: %#v", relative)
+	}
+	absolute := BuildOutcomeLabel(time.Date(2025, 1, 1, 23, 0, 0, 0, time.UTC), asset, benchmark, outcomePolicy(t, "absolute_up", 1))
+	if absolute.Status != "mature" || absolute.ObjectiveLabel != "up" || absolute.RelativeLabel != "unavailable" {
+		t.Fatalf("optional benchmark mismatch blocked an absolute label: %#v", absolute)
+	}
+}
+
+func TestOneFiveAndTwentySessionLabelsMatureIndependently(t *testing.T) {
+	start := time.Date(2025, 3, 1, 21, 0, 0, 0, time.UTC)
+	points := make([]PricePoint, 21)
+	for index := range points {
+		value := 100.0 + float64(index)
+		stamp := start.AddDate(0, 0, index+1)
+		points[index] = PricePoint{SessionDate: stamp, AvailableAt: stamp, AdjustedClose: &value, Currency: "USD", CorporateActionAdjusted: true}
+	}
+	for _, horizon := range []int{1, 5, 20} {
+		available := points[:horizon]
+		pending := BuildOutcomeLabel(start, available, nil, outcomePolicy(t, "absolute_up", horizon))
+		if pending.Status != "unavailable" || pending.Reason != "label_not_mature" {
+			t.Fatalf("horizon %d matured early: %#v", horizon, pending)
+		}
+		mature := BuildOutcomeLabel(start, points[:horizon+1], nil, outcomePolicy(t, "absolute_up", horizon))
+		if mature.Status != "mature" || mature.ExitAt == nil || !mature.ExitAt.Equal(points[horizon].SessionDate) {
+			t.Fatalf("horizon %d did not mature independently: %#v", horizon, mature)
+		}
+	}
+}
+
+func TestLaterBackfillDoesNotTurnPreSignalSessionIntoEntry(t *testing.T) {
+	signal := time.Date(2025, 1, 3, 23, 0, 0, 0, time.UTC)
+	fridayValue, mondayValue, tuesdayValue := 100.0, 101.0, 102.0
+	backfilledFriday := PricePoint{SessionDate: time.Date(2025, 1, 3, 21, 0, 0, 0, time.UTC), AvailableAt: time.Date(2025, 1, 7, 22, 0, 0, 0, time.UTC), AdjustedClose: &fridayValue, Currency: "USD", CorporateActionAdjusted: true}
+	monday := PricePoint{SessionDate: time.Date(2025, 1, 6, 21, 0, 0, 0, time.UTC), AvailableAt: time.Date(2025, 1, 6, 21, 1, 0, 0, time.UTC), AdjustedClose: &mondayValue, Currency: "USD", CorporateActionAdjusted: true}
+	tuesday := PricePoint{SessionDate: time.Date(2025, 1, 7, 21, 0, 0, 0, time.UTC), AvailableAt: time.Date(2025, 1, 7, 21, 1, 0, 0, time.UTC), AdjustedClose: &tuesdayValue, Currency: "USD", CorporateActionAdjusted: true}
+	result := BuildOutcomeLabel(signal, []PricePoint{backfilledFriday, monday, tuesday}, nil, outcomePolicy(t, "absolute_up", 1))
+	if result.Status != "mature" || result.EntryAt == nil || !result.EntryAt.Equal(monday.SessionDate) {
+		t.Fatalf("pre-signal backfill became an executable entry: %#v", result)
 	}
 }
 

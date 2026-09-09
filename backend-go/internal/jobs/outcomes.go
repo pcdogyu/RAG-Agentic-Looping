@@ -101,6 +101,10 @@ func (runtime *outcomeRuntime) evaluateOutcomes(ctx context.Context, _ Job) (any
 	}
 
 	now := time.Now().UTC()
+	predictionSummary, err := runtime.evaluatePredictionOutcomes(ctx, now, map[string][]outcomePricePoint{})
+	if err != nil {
+		return nil, err
+	}
 	created, pending, skipped, failed := 0, 0, 0, 0
 	failures := make([]string, 0, 10)
 	priceCache := map[string][]outcomePricePoint{}
@@ -138,7 +142,7 @@ func (runtime *outcomeRuntime) evaluateOutcomes(ctx context.Context, _ Job) (any
 	}
 	return map[string]any{
 		"outcomes": created, "pending": pending, "skipped": skipped,
-		"failed": failed, "failures": failures,
+		"failed": failed, "failures": failures, "prediction_outcomes": predictionSummary,
 	}, nil
 }
 
@@ -337,7 +341,7 @@ func (runtime *outcomeRuntime) benchmarkReturn(
 	request := marketdata.BenchmarkResolutionRequest{
 		AssetID: stringValue(asset["asset_id"]), Market: market, Currency: currency,
 		IndustryID: stringValue(asset["industry_id"]), PolicyID: stringValue(asset["benchmark_policy_id"]),
-		EffectiveAt: entryAt, AvailableAsOf: signalAvailableAt,
+		EffectiveAt: signalAvailableAt, AvailableAsOf: signalAvailableAt,
 	}
 	var resolution marketdata.BenchmarkResolution
 	var err error

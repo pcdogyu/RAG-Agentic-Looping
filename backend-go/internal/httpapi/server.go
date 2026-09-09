@@ -46,6 +46,7 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) (*Serve
 	r.Get("/go/security-universes/{universeID}/snapshots", s.securityUniverseSnapshots)
 	r.Get("/go/security-universe-memberships/{assetID}", s.securityUniverseMemberships)
 	r.Get("/go/market-data-quality", s.marketDataQuality)
+	r.Get("/go/outcome-labels/{assetID}", s.predictionOutcomeLabels)
 	r.Post("/go/fundamentals/{assetID}/sync", s.syncFundamentals)
 	r.Post("/go/fundamental-research/{assetID}", s.runFundamentalResearch)
 	r.Get("/go/fundamental-research/{assetID}/schedule", s.fundamentalResearchSchedule)
