@@ -34,6 +34,7 @@ import {
   factSourceGroupDefinitions,
   formatQueueDuration,
   FundamentalResearchPage,
+	benchmarkMappingDraftJSON,
   scheduleDraftJSON,
   ModelInferenceQueuePanel,
   modelQueueRetryRequest,
@@ -740,6 +741,9 @@ describe("shared hash navigation", () => {
 		expect(markup).toContain("已批准分析师证据");
 		expect(markup).toContain("任意字符串不能作为估值、基准或评级证据");
 		expect(markup).toContain("分析师证据登记");
+		expect(markup).toContain("PIT 基准映射");
+		expect(markup).toContain("时点基准治理");
+		expect(markup).toContain("自动批准：关闭");
 		expect(markup).toContain("人工研究成功后自动载入同源计划草稿，仍需管理员显式批准");
 		expect(markup).toContain("分析师一致预期");
 		expect(markup).toContain("数据不会倒填到首次观测之前");
@@ -756,6 +760,21 @@ describe("shared hash navigation", () => {
 		expect(scheduleDraftJSON({ status: "available", schedule_draft: draft })).toContain('"forecast_version_id": "forecast-1"');
 		expect(scheduleDraftJSON({ status: "insufficient_data", schedule_draft: draft })).toBe("");
 		expect(scheduleDraftJSON({ status: "available" })).toBe("");
+	});
+
+	it("builds a current-only human benchmark mapping draft from the market policy", () => {
+		const validFrom = new Date("2026-09-10T00:00:00Z");
+		const draft = JSON.parse(benchmarkMappingDraftJSON("equity:XNAS:AAPL", {
+			asset_class: "equity", market: "US", currency: "USD",
+			policy: { version: "market-policy-v3", benchmark_id: "equity:AMEX:SPY" },
+		}, validFrom)) as Record<string, unknown>;
+		expect(draft).toMatchObject({
+			scope_type: "market", scope_id: "US", subject_market: "US", subject_currency: "USD",
+			benchmark_asset_id: "equity:AMEX:SPY", policy_version: "market-policy-v3", valid_from: "2026-09-10T00:00:00.000Z",
+			source_name: "", source_document_id: "", mapping_reason: "", approved_by: "",
+		});
+		expect(draft.metadata).toEqual({ approval_mode: "human", draft_for_asset_id: "equity:XNAS:AAPL" });
+		expect(benchmarkMappingDraftJSON("equity:XNAS:AAPL", { market: "US", currency: "USD", policy: { version: "market-policy-v3" } }, validFrom)).toBe("");
 	});
 });
 

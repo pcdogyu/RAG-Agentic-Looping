@@ -4092,6 +4092,9 @@ type FundamentalBundle = {
 	analystEvidence?: {
 		items?: Array<{ id?: string; evidence_type?: string; title?: string; rationale?: string; values?: Record<string, unknown>; available_at?: string; approved_by?: string; approved_at?: string; source_name?: string; source_url?: string }>;
 	};
+	benchmarkMapping?: {
+		resolution?: { status?: string; reason?: string; mapping?: { id?: string; scope_type?: string; scope_id?: string; benchmark_asset_id?: string; source_name?: string; mapping_reason?: string; approved_by?: string; available_at?: string } };
+	};
   forecasts?: { items?: Array<{ id?: string; model_version?: string; status?: string; as_of?: string; assumptions?: unknown[] }> };
   valuations?: { items?: Array<{ id?: string; model_version?: string; status?: string; as_of?: string; result?: { status?: string; reason?: string; currency?: string; range?: { low?: number; high?: number } } }> };
   ratings?: { items?: Array<{
@@ -4103,13 +4106,27 @@ type FundamentalBundle = {
     evidence_ids?: string[];
   }> };
   predictions?: { items?: Array<{ status?: string; probability?: number; signal_available_at?: string; horizon_sessions?: number; model_version?: string; calibration_version?: string; exclusion_reason?: string }> };
-	marketPolicy?: { asset_class?: string; market?: string; currency?: string; policy?: { version?: string; fundamental_method?: string; fundamental_supported?: boolean; prediction_supported?: boolean; prediction_scope?: string; reason?: string; required_inputs?: string[] } };
+	marketPolicy?: { asset_class?: string; market?: string; currency?: string; policy?: { version?: string; fundamental_method?: string; fundamental_supported?: boolean; prediction_supported?: boolean; prediction_scope?: string; benchmark_id?: string; benchmark_policy?: string; reason?: string; required_inputs?: string[] } };
   schedule?: { items?: Array<{ id?: string; status?: string; forecast_version_id?: string; cadence_hours?: number; next_run_at?: string; last_run_status?: string; last_run_reason?: string; approved_by?: string; approved_at?: string }> };
 };
 
 export function scheduleDraftJSON(payload: { status?: string; schedule_draft?: Record<string, unknown> }) {
 	if (payload.status !== "available" || !payload.schedule_draft) return "";
 	return JSON.stringify(payload.schedule_draft, null, 2);
+}
+
+export function benchmarkMappingDraftJSON(assetID: string, marketPolicy: FundamentalBundle["marketPolicy"], validFrom = new Date()) {
+	const market = marketPolicy?.market?.trim().toUpperCase();
+	const currency = marketPolicy?.currency?.trim().toUpperCase();
+	const benchmarkAssetID = marketPolicy?.policy?.benchmark_id?.trim();
+	const policyVersion = marketPolicy?.policy?.version?.trim();
+	if (!assetID.trim() || !market || !currency || !benchmarkAssetID || !policyVersion || Number.isNaN(validFrom.getTime())) return "";
+	return JSON.stringify({
+		scope_type: "market", scope_id: market, subject_market: market, subject_currency: currency,
+		benchmark_asset_id: benchmarkAssetID, policy_version: policyVersion, valid_from: validFrom.toISOString(),
+		source_name: "", source_document_id: "", source_url: "", mapping_reason: "", approved_by: "",
+		metadata: { approval_mode: "human", draft_for_asset_id: assetID.trim() },
+	}, null, 2);
 }
 
 export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
@@ -4122,6 +4139,8 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
   const [scheduleJSON, setScheduleJSON] = useState("");
 	const [analystEvidenceJSON, setAnalystEvidenceJSON] = useState("");
 	const [analystEvidenceRequestID, setAnalystEvidenceRequestID] = useState(() => globalThis.crypto?.randomUUID?.() || `analyst-evidence-${Date.now()}`);
+	const [benchmarkMappingJSON, setBenchmarkMappingJSON] = useState("");
+	const [benchmarkMappingRequestID, setBenchmarkMappingRequestID] = useState(() => globalThis.crypto?.randomUUID?.() || `benchmark-mapping-${Date.now()}`);
 	const [guidanceReviewJSON, setGuidanceReviewJSON] = useState("");
 	const [guidanceReviewRequestID, setGuidanceReviewRequestID] = useState(() => globalThis.crypto?.randomUUID?.() || `guidance-review-${Date.now()}`);
   const [scheduleRequestID, setScheduleRequestID] = useState(() => globalThis.crypto?.randomUUID?.() || `fundamental-schedule-${Date.now()}`);
@@ -4141,6 +4160,7 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 			{ key: "forecasts", route: "forecasts" },
 			{ key: "valuations", route: "valuations" }, { key: "ratings", route: "ratings" },
 			{ key: "predictions", route: "predictions" }, { key: "marketPolicy", route: "market-policies" },
+			{ key: "benchmarkMapping", route: "benchmark-mappings" },
 			{ key: "schedule", route: "fundamental-research", suffix: "/schedule" },
 		] as const;
     try {
@@ -4170,6 +4190,54 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 			await load();
 		} catch (error) {
 			setMessage(`分析师证据登记失败：${error instanceof Error ? error.message : "JSON 或请求无效"}`);
+		} finally { setLoading(false); }
+	}
+	function loadBenchmarkMappingTemplate() {
+		const draft = benchmarkMappingDraftJSON(assetID, bundle.marketPolicy);
+		if (!draft) {
+			setMessage("当前资产没有完整的市场、币种、策略版本或规范基准身份，不能生成审批草稿。");
+			return;
+		}
+		setBenchmarkMappingJSON(draft);
+		setBenchmarkMappingRequestID(globalThis.crypto?.randomUUID?.() || `benchmark-mapping-${Date.now()}`);
+		setMessage("已生成从当前时点生效的市场级基准映射草稿；请补充真实来源、理由和批准人。系统不会自动提交或倒填历史。");
+	}
+	async function approveBenchmarkMapping() {
+		const canonical = assetID.trim();
+		if (!canonical || !token || !benchmarkMappingJSON.trim()) return;
+		setLoading(true); setMessage("");
+		try {
+			const body = JSON.parse(benchmarkMappingJSON) as Record<string, unknown>;
+			const expectedMarket = bundle.marketPolicy?.market?.trim().toUpperCase();
+			const expectedCurrency = bundle.marketPolicy?.currency?.trim().toUpperCase();
+			const expectedBenchmark = bundle.marketPolicy?.policy?.benchmark_id?.trim();
+			if (String(body.subject_market || "").trim().toUpperCase() !== expectedMarket) throw new Error("subject_market 必须与当前资产市场一致");
+			if (String(body.subject_currency || "").trim().toUpperCase() !== expectedCurrency) throw new Error("subject_currency 必须与当前资产币种一致");
+			if (String(body.benchmark_asset_id || "").trim() !== expectedBenchmark) throw new Error("benchmark_asset_id 必须与当前市场策略一致");
+			for (const field of ["source_name", "source_document_id", "mapping_reason", "approved_by"] as const) {
+				if (!String(body[field] || "").trim()) throw new Error(`${field} 不能为空`);
+			}
+			const response = await fetch(`${apiBase}/go/benchmark-mappings`, { method: "POST", headers: { "Content-Type": "application/json", "X-Admin-Token": token, "Idempotency-Key": benchmarkMappingRequestID }, body: JSON.stringify(body) });
+			const payload = await response.json() as { created?: boolean; mapping?: { id?: string }; detail?: string };
+			if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
+			setMessage(`PIT 基准映射${payload.created ? "已不可变批准" : "已幂等读回"}：${payload.mapping?.id || "已保存"}。不会自动生成历史映射。`);
+			setBenchmarkMappingRequestID(globalThis.crypto?.randomUUID?.() || `benchmark-mapping-${Date.now()}`);
+			await load();
+		} catch (error) {
+			setMessage(`基准映射批准失败：${error instanceof Error ? error.message : "JSON 或请求无效"}`);
+		} finally { setLoading(false); }
+	}
+	async function syncCanonicalBenchmarkPrice() {
+		const benchmarkAssetID = bundle.marketPolicy?.policy?.benchmark_id?.trim();
+		if (!benchmarkAssetID || !token) return;
+		setLoading(true); setMessage("");
+		try {
+			const response = await fetch(`${apiBase}/go/market-prices/${encodeURIComponent(benchmarkAssetID)}/sync?lookback_days=14`, { method: "POST", headers: { "X-Admin-Token": token } });
+			const payload = await response.json() as { task_id?: string; detail?: string };
+			if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
+			setMessage(`规范基准 ${benchmarkAssetID} 的复权行情同步任务已排队：${payload.task_id || "等待 Worker"}。该操作不批准基准映射。`);
+		} catch (error) {
+			setMessage(`规范基准行情同步失败：${error instanceof Error ? error.message : "未知错误"}`);
 		} finally { setLoading(false); }
 	}
 	async function syncMarketPrices() {
@@ -4295,6 +4363,8 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
   const forecast = bundle.forecasts?.items?.[0];
   const schedule = bundle.schedule?.items?.[0];
 	const analystEvidenceItems = bundle.analystEvidence?.items || [];
+	const benchmarkResolution = bundle.benchmarkMapping?.resolution;
+	const benchmarkMapping = benchmarkResolution?.mapping;
 	const preparation = bundle.preparation;
 	const prices = bundle.prices?.items || [];
 	const latestPrice = prices[0];
@@ -4316,6 +4386,11 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
     {token && <div className="integration-editor">
 		<label>分析师证据登记<textarea aria-label="分析师证据 JSON" rows={8} value={analystEvidenceJSON} onChange={(event) => { setAnalystEvidenceJSON(event.target.value); setAnalystEvidenceRequestID(globalThis.crypto?.randomUUID?.() || `analyst-evidence-${Date.now()}`); }} placeholder='填写 evidence_type、title、rationale、values、observed_at、available_at、source_name、source_document_id、source_url、approved_by；asset_id 使用当前标的。' /></label>
 		<button type="button" disabled={loading || !analystEvidenceJSON.trim()} onClick={() => void registerAnalystEvidence()}>登记不可变分析师证据</button>
+		<label>PIT 基准映射审批<textarea aria-label="PIT 基准映射 JSON" rows={8} value={benchmarkMappingJSON} onChange={(event) => { setBenchmarkMappingJSON(event.target.value); setBenchmarkMappingRequestID(globalThis.crypto?.randomUUID?.() || `benchmark-mapping-${Date.now()}`); }} placeholder='先生成草稿，再填写 source_name、source_document_id、source_url、mapping_reason 和 approved_by；默认从当前时点生效。' /></label>
+		<button type="button" disabled={loading || !bundle.marketPolicy?.policy?.benchmark_id} onClick={loadBenchmarkMappingTemplate}>生成市场级基准映射草稿</button>
+		<button type="button" disabled={loading || !benchmarkMappingJSON.trim()} onClick={() => void approveBenchmarkMapping()}>批准不可变 PIT 基准映射</button>
+		<button type="button" disabled={loading || !bundle.marketPolicy?.policy?.benchmark_id} onClick={() => void syncCanonicalBenchmarkPrice()}>同步规范基准复权行情</button>
+		<small>基准映射必须有真实来源、理由和批准人；草稿默认不回填历史。同步基准行情只写事实，不会自动批准映射。</small>
       <label>无新闻基本面研究输入<textarea aria-label="基本面研究 JSON" rows={8} value={workflowJSON} onChange={(event) => setWorkflowJSON(event.target.value)} placeholder='粘贴含 as_of、forecast、valuation、rating 的证据化 JSON；不会自动补造假设或价格。' /></label>
 		<button type="button" disabled={loading || !preparation?.workflow_template} onClick={loadPreparationTemplate}>载入财务事实模板</button>
 		<button type="button" disabled={loading} onClick={() => void syncMarketPrices()}>同步真实复权价格</button>
@@ -4333,6 +4408,7 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
     <div className="metric-grid">
       <article><span>财务快照</span><strong>{bundle.fundamentals?.items?.length ?? 0}</strong><small>严格按 available_at 截止</small></article>
 		<article><span>已批准分析师证据</span><strong>{analystEvidenceItems.length}</strong><small>任意字符串不能作为估值、基准或评级证据</small></article>
+		<article><span>PIT 基准映射</span><strong>{benchmarkResolution?.status === "available" ? "已批准" : "不可用"}</strong><small>{benchmarkMapping?.benchmark_asset_id || benchmarkResolution?.reason || bundle.marketPolicy?.policy?.benchmark_id || "等待市场策略"}</small></article>
 		<article><span>复权价格证据</span><strong>{typeof latestPrice?.price === "number" ? `${latestPrice.price} ${latestPrice.currency || ""}` : "不可用"}</strong><small>{latestPrice?.id || "管理员解锁后可同步真实复权价格，不自动写入研究假设"}</small></article>
 		<article><span>一致预期返回</span><strong>{consensusItems.length}</strong><small>仅返回首次观测后可用的数据</small></article>
 		<article><span>管理层指引</span><strong>{guidanceItems.length}</strong><small>与分析师一致预期分开保存</small></article>
@@ -4346,6 +4422,12 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
       <article><span>定时研究</span><strong>{schedule?.status || "未配置"}</strong><small>{schedule?.last_run_reason || schedule?.last_run_status || schedule?.next_run_at || "人工研究成功后自动载入同源计划草稿，仍需管理员显式批准"}</small></article>
     </div>
 	<div className="conclusion-list">
+		<article className="conclusion-card">
+			<span>时点基准治理</span>
+			<h3>{benchmarkResolution?.status === "available" ? `${benchmarkMapping?.benchmark_asset_id || "基准"} 已批准` : "尚无当时可用的基准映射"}</h3>
+			<p>{benchmarkMapping ? `${benchmarkMapping.scope_type || "scope"}:${benchmarkMapping.scope_id || "—"} · ${benchmarkMapping.mapping_reason || "已记录批准理由"}` : `策略候选 ${bundle.marketPolicy?.policy?.benchmark_id || "未配置"}；身份存在不代表映射已经批准。`}</p>
+			<small>{benchmarkMapping ? `来源 ${benchmarkMapping.source_name || "—"} · 批准人 ${benchmarkMapping.approved_by || "—"} · 可用时间 ${benchmarkMapping.available_at || "—"}` : `状态 ${benchmarkResolution?.reason || "missing_point_in_time_mapping"} · 自动批准：关闭`}</small>
+		</article>
 		<article className="conclusion-card">
 			<span>分析师证据登记</span>
 			<h3>{analystEvidenceItems.length ? `${analystEvidenceItems.length} 条可用证据` : "尚无已批准证据"}</h3>
