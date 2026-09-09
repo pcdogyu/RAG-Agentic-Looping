@@ -729,10 +729,10 @@ func (runtime *outcomeRuntime) saveOutcome(ctx context.Context, recommendationID
 	body, _ := json.Marshal(outcome)
 	tag, err := runtime.db.Exec(ctx, `
 		INSERT INTO outcomes(id,recommendation_id,horizon_days,observed_at,payload)
-		SELECT $1,$2,$3,$4,$5::jsonb
+		SELECT $1::varchar,$2::varchar,$3,$4,$5::jsonb
 		WHERE NOT EXISTS (
-			SELECT 1 FROM outcomes WHERE recommendation_id=$2 AND horizon_days=$3
-		)`, id, recommendationID, int(numberValue(outcome["horizon_days"])), parseTime(outcome["observed_at"]), body)
+			SELECT 1 FROM outcomes WHERE recommendation_id=$2::varchar AND horizon_days=$3
+		)`, id.String(), recommendationID.String(), int(numberValue(outcome["horizon_days"])), parseTime(outcome["observed_at"]), body)
 	return tag.RowsAffected() == 1, err
 }
 

@@ -135,4 +135,17 @@ func TestPredictionOutcomesMatureFiveSessionsWithoutAdvancingTwentyAgainstIsolat
 	if err != nil || repeated["selected"] != 1 || repeated["matured"] != 0 || repeated["pending"] != 1 {
 		t.Fatalf("mature record was not idempotent: summary=%#v err=%v", repeated, err)
 	}
+	legacyRecommendationID := uuid.New()
+	legacyOutcome := map[string]any{
+		"id": legacyRecommendationID.String(), "horizon_days": 5.0,
+		"observed_at": now.Format(time.RFC3339), "status": "completed",
+	}
+	inserted, err := runtime.saveOutcome(ctx, legacyRecommendationID, legacyOutcome)
+	if err != nil || !inserted {
+		t.Fatalf("legacy outcome with UUID identifiers was not stored: inserted=%v err=%v", inserted, err)
+	}
+	inserted, err = runtime.saveOutcome(ctx, legacyRecommendationID, legacyOutcome)
+	if err != nil || inserted {
+		t.Fatalf("legacy outcome idempotency failed: inserted=%v err=%v", inserted, err)
+	}
 }
