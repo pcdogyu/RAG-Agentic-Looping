@@ -22,6 +22,7 @@ type Observation struct {
 }
 
 type Scope struct {
+	AssetClass      string   `json:"asset_class"`
 	Market          string   `json:"market"`
 	HorizonSessions int      `json:"horizon_sessions"`
 	EventTypes      []string `json:"event_types"`
@@ -109,13 +110,17 @@ type Result struct {
 	CalibrationVersion string   `json:"calibration_version,omitempty"`
 }
 
-func (model Model) Apply(sourceVersion string, score float64, market string, horizon int, eventType string, asOf time.Time) Result {
+func (model Model) Apply(sourceVersion string, score float64, assetClass, market string, horizon int, eventType string, asOf time.Time) Result {
 	result := Result{Status: "unavailable"}
 	if sourceVersion != model.SourceModelVersion {
 		result.Reason = "source_model_version_mismatch"
 		return result
 	}
-	if !strings.EqualFold(strings.TrimSpace(market), model.Scope.Market) || horizon != model.Scope.HorizonSessions {
+	modelAssetClass := strings.TrimSpace(model.Scope.AssetClass)
+	if modelAssetClass == "" {
+		modelAssetClass = "equity"
+	}
+	if !strings.EqualFold(strings.TrimSpace(assetClass), modelAssetClass) || !strings.EqualFold(strings.TrimSpace(market), model.Scope.Market) || horizon != model.Scope.HorizonSessions {
 		result.Reason = "outside_calibration_scope"
 		return result
 	}
@@ -198,6 +203,9 @@ func Evaluate(probabilities []float64, labels []bool, binCount int) (Metrics, er
 }
 
 func normalizeScope(scope Scope) Scope {
+	if scope.AssetClass = strings.ToLower(strings.TrimSpace(scope.AssetClass)); scope.AssetClass == "" {
+		scope.AssetClass = "equity"
+	}
 	scope.Market = strings.ToUpper(strings.TrimSpace(scope.Market))
 	values := []string{}
 	seen := map[string]bool{}

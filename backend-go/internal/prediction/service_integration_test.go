@@ -96,6 +96,17 @@ func TestPredictionLifecycleAgainstIsolatedPostgres(t *testing.T) {
 	if err != nil || len(items) != 2 {
 		t.Fatalf("prediction list=%#v err=%v", items, err)
 	}
+	if items[0].AssetClass != "equity" {
+		t.Fatalf("prediction asset class was not persisted: %#v", items[0])
+	}
+	crossScope := input
+	crossScope.AssetClass = "crypto"
+	if _, err = service.Predict(ctx, crossScope); err == nil {
+		t.Fatal("prediction request could override the asset master class")
+	}
+	if _, err = service.RegisterCalibration(ctx, CalibrationRegistration{SourceModelVersion: model.Version, Observations: observations, Scope: calibration.Scope{AssetClass: "crypto", Market: "US", HorizonSessions: 5}, Status: "shadow"}); err == nil {
+		t.Fatal("cross-asset calibration scope was accepted for an equity model")
+	}
 
 	candidate := model
 	candidate.Version = "integration-candidate-v2"

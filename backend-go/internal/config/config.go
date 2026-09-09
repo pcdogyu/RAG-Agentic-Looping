@@ -62,6 +62,7 @@ type Config struct {
 	ResearchPredictionMode  string
 	PolicyShadowMinDays     int
 	PolicyShadowMinReviewed int
+	CounterResearchEnabled  bool
 	CodeContextLength       int
 	CodeMaxOutput           int
 	OllamaKeepAlive         string
@@ -152,6 +153,7 @@ func Load() (Config, error) {
 		ResearchPredictionMode:  strings.ToLower(env("RESEARCH_PREDICTION_MODE", "unavailable")),
 		PolicyShadowMinDays:     envInt("RESEARCH_POLICY_SHADOW_MIN_DAYS", 14),
 		PolicyShadowMinReviewed: envInt("RESEARCH_POLICY_SHADOW_MIN_REVIEWED", 100),
+		CounterResearchEnabled:  envBool("COUNTER_RESEARCH_ENABLED", false),
 		CodeContextLength:       envInt("OLLAMA_CODE_CONTEXT_LENGTH", 16384),
 		CodeMaxOutput:           envInt("OLLAMA_CODE_MAX_OUTPUT_TOKENS", 8192),
 		OllamaKeepAlive:         env("OLLAMA_KEEP_ALIVE", "0"),

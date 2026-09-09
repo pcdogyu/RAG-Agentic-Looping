@@ -728,6 +728,8 @@ describe("shared hash navigation", () => {
   it("renders the separate fundamental-rating and calibrated-prediction workbench", () => {
     const markup = renderToStaticMarkup(createElement(FundamentalResearchPage, { apiBase: "" }));
     expect(markup).toContain("基本面评级与短期预测");
+		expect(markup).toContain("资产政策");
+		expect(markup).toContain("分市场研究方法");
     expect(markup).toContain("未校准时不显示概率");
     expect(markup).toContain("缺失字段保持为空，不按零处理");
     expect(markup).toContain("管理员令牌");

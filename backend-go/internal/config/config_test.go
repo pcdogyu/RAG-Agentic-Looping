@@ -50,3 +50,19 @@ func TestResearchHistoryDefaultsToNinetyDaysAndTwentyItems(t *testing.T) {
 		t.Fatalf("unexpected research history config: window=%s items=%d", cfg.ResearchHistoryWindow, cfg.ResearchHistoryItems)
 	}
 }
+
+func TestCounterResearchIsOptIn(t *testing.T) {
+	t.Setenv("COUNTER_RESEARCH_ENABLED", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CounterResearchEnabled {
+		t.Fatal("counter research must remain disabled until explicitly enabled")
+	}
+	t.Setenv("COUNTER_RESEARCH_ENABLED", "true")
+	cfg, err = Load()
+	if err != nil || !cfg.CounterResearchEnabled {
+		t.Fatalf("explicit counter-research opt-in was not loaded: enabled=%v err=%v", cfg.CounterResearchEnabled, err)
+	}
+}

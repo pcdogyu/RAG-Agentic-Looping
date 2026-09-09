@@ -64,4 +64,15 @@ func TestLayeredReportDisclosesCoverageAndNoProbabilityMetrics(t *testing.T) {
 	}
 }
 
+func TestReportsRemainSeparatedByAssetClassAndMarket(t *testing.T) {
+	value, raw := .8, .1
+	result := ReportBySegment([]PredictionResult{
+		{ID: "equity", AssetClass: "equity", Market: "US", Status: "predicted", Score: &value, Outcome: &OutcomeLabel{Status: "mature", RawReturn: &raw}},
+		{ID: "crypto", AssetClass: "crypto", Market: "CRYPTO", Status: "rejected", Outcome: &OutcomeLabel{Status: "mature", RawReturn: &raw}},
+	})
+	if len(result) != 2 || result["equity:US"].Predicted != 1 || result["crypto:CRYPTO"].Rejected != 1 {
+		t.Fatalf("segmented reports=%#v", result)
+	}
+}
+
 func fmtID(value int) string { return fmt.Sprintf("event-%03d", value) }

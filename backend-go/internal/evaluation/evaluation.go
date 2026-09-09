@@ -198,11 +198,37 @@ func WalkForward(records []Record, trainWindow, calibrationWindow, testWindow, s
 
 type PredictionResult struct {
 	ID          string        `json:"id"`
+	AssetClass  string        `json:"asset_class"`
+	Market      string        `json:"market"`
 	Status      string        `json:"status"`
 	Score       *float64      `json:"score,omitempty"`
 	Probability *float64      `json:"probability,omitempty"`
 	Outcome     *OutcomeLabel `json:"outcome,omitempty"`
 }
+
+// ReportBySegment prevents a strong result in one asset class or market from
+// masking weak or uncalibrated behavior in another. It never pools segments.
+func ReportBySegment(results []PredictionResult) map[string]LayeredReport {
+	grouped := map[string][]PredictionResult{}
+	for _, item := range results {
+		assetClass := strings.ToLower(strings.TrimSpace(item.AssetClass))
+		market := strings.ToUpper(strings.TrimSpace(item.Market))
+		if assetClass == "" {
+			assetClass = "unknown"
+		}
+		if market == "" {
+			market = "UNKNOWN"
+		}
+		key := assetClass + ":" + market
+		grouped[key] = append(grouped[key], item)
+	}
+	reports := map[string]LayeredReport{}
+	for key, values := range grouped {
+		reports[key] = Report(values)
+	}
+	return reports
+}
+
 type LayeredReport struct {
 	Total             int      `json:"total"`
 	Mature            int      `json:"mature"`

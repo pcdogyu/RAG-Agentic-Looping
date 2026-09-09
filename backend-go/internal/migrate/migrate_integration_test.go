@@ -126,6 +126,10 @@ func TestUpCreatesFreshGoRuntimeSchema(t *testing.T) {
 			t.Fatalf("%s was not created: exists=%v err=%v", table, exists, err)
 		}
 	}
+	var predictionAssetClassColumn bool
+	if err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=$1 AND table_name='prediction_runs' AND column_name='asset_class')`, schema).Scan(&predictionAssetClassColumn); err != nil || !predictionAssetClassColumn {
+		t.Fatalf("prediction_runs.asset_class missing: exists=%v err=%v", predictionAssetClassColumn, err)
+	}
 	for _, index := range legacyORMIndexes {
 		var exists bool
 		if err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_indexes WHERE schemaname=$1 AND indexname=$2)`, schema, index).Scan(&exists); err != nil || !exists {

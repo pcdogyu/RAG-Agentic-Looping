@@ -3,9 +3,11 @@ package httpapi
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/config"
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/marketpolicy"
 )
 
 func TestFundamentalAssetIDUnescapesCanonicalID(t *testing.T) {
@@ -114,5 +116,47 @@ func TestPredictionAndGovernanceWritesRequireAdminToken(t *testing.T) {
 	server.Handler().ServeHTTP(response, request)
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("governance history status=%d", response.Code)
+	}
+}
+
+func TestCounterResearchStatusAndAblationContract(t *testing.T) {
+	server, err := New(config.Config{AdminAPIToken: "test-token", CounterResearchEnabled: true}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/go/counter-research/status", nil)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"confidence_effect":"none"`) || !strings.Contains(response.Body.String(), `"enabled":true`) {
+		t.Fatalf("counter-research status=%d body=%s", response.Code, response.Body.String())
+	}
+	request = httptest.NewRequest(http.MethodPost, "/go/counter-research/ablation", strings.NewReader(`{"observations":[]}`))
+	response = httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("counter-research ablation status=%d", response.Code)
+	}
+}
+
+func TestSegmentedEvaluationRequiresAdminToken(t *testing.T) {
+	server, err := New(config.Config{AdminAPIToken: "test-token"}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/go/model-evaluation/segmented-report", strings.NewReader(`{"results":[]}`))
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("segmented evaluation status=%d", response.Code)
+	}
+}
+
+func TestPredictionPolicyRejectsDeclaredMarketMismatch(t *testing.T) {
+	item := assetPolicyRecord{AssetClass: "crypto", Market: "CRYPTO", Policy: marketpolicy.Resolve("crypto", "CRYPTO")}
+	if err := validatePredictionPolicy(item, "US"); err == nil {
+		t.Fatal("declared cross-market prediction was accepted")
+	}
+	if err := validatePredictionPolicy(item, "CRYPTO"); err != nil {
+		t.Fatal(err)
 	}
 }

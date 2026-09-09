@@ -41,6 +41,16 @@ func TestPredictionRunIdentityIncludesModelCalibrationAndFeatures(t *testing.T) 
 	if first == predictionRunID(changedFeatures) {
 		t.Fatal("feature snapshot was absent from prediction identity")
 	}
+	equity := base
+	equity.AssetClass = "equity"
+	if first != predictionRunID(equity) {
+		t.Fatal("explicit equity scope changed the legacy prediction identity")
+	}
+	crypto := base
+	crypto.AssetClass = "crypto"
+	if first == predictionRunID(crypto) {
+		t.Fatal("non-equity asset class was absent from prediction identity")
+	}
 }
 
 func TestModelRegistrationValidationBindsArtifactAndFiniteSchema(t *testing.T) {

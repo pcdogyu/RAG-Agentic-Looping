@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/forecast"
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/marketpolicy"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/rating"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/valuation"
 )
@@ -52,13 +53,14 @@ type Input struct {
 }
 
 type Result struct {
-	AssetID   string           `json:"asset_id"`
-	AsOf      time.Time        `json:"as_of"`
-	Status    string           `json:"status"`
-	Reason    string           `json:"reason,omitempty"`
-	Forecast  forecast.Version `json:"forecast"`
-	Valuation *valuation.Run   `json:"valuation,omitempty"`
-	Rating    *rating.Snapshot `json:"rating,omitempty"`
+	AssetID      string              `json:"asset_id"`
+	AsOf         time.Time           `json:"as_of"`
+	Status       string              `json:"status"`
+	Reason       string              `json:"reason,omitempty"`
+	MarketPolicy marketpolicy.Policy `json:"market_policy"`
+	Forecast     forecast.Version    `json:"forecast"`
+	Valuation    *valuation.Run      `json:"valuation,omitempty"`
+	Rating       *rating.Snapshot    `json:"rating,omitempty"`
 }
 
 type Service struct{ db *pgxpool.Pool }
@@ -72,6 +74,19 @@ func (s *Service) Run(ctx context.Context, input Input) (Result, error) {
 	}
 	input.AsOf = input.AsOf.UTC()
 	result := Result{AssetID: input.AssetID, AsOf: input.AsOf, Status: "insufficient_data"}
+	var assetClass, market, currency string
+	if err := s.db.QueryRow(ctx, `SELECT asset_class,market,currency FROM assets WHERE id=$1 AND active=true`, input.AssetID).Scan(&assetClass, &market, &currency); err != nil {
+		return Result{}, fmt.Errorf("load active asset policy: %w", err)
+	}
+	result.MarketPolicy = marketpolicy.Resolve(assetClass, market)
+	if err := marketpolicy.ValidateFundamental(result.MarketPolicy, input.Forecast.Inputs.Currency, input.Rating.Policy.Market, input.Rating.Policy.AssetClass, input.Rating.Policy.BenchmarkID); err != nil {
+		result.Status, result.Reason = "not_applicable", err.Error()
+		return result, nil
+	}
+	if !strings.EqualFold(strings.TrimSpace(currency), result.MarketPolicy.Currency) {
+		result.Status, result.Reason = "not_applicable", "asset_currency_outside_market_policy"
+		return result, nil
+	}
 	version, _, err := forecast.NewStore(s.db).Create(ctx, forecast.Submission{AssetID: input.AssetID, AsOf: input.AsOf, ParentVersionID: input.Forecast.ParentVersionID, Inputs: input.Forecast.Inputs, FundamentalSnapshotIDs: input.Forecast.FundamentalSnapshotIDs, Assumptions: input.Forecast.Assumptions})
 	if err != nil {
 		return Result{}, fmt.Errorf("forecast stage: %w", err)

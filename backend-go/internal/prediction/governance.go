@@ -17,6 +17,7 @@ import (
 
 type ShadowInput struct {
 	AssetID               string            `json:"asset_id"`
+	AssetClass            string            `json:"asset_class"`
 	EventID               string            `json:"event_id,omitempty"`
 	SignalAvailableAt     time.Time         `json:"signal_available_at"`
 	IncumbentModelVersion string            `json:"incumbent_model_version"`
@@ -79,7 +80,7 @@ func (s *Service) CompareShadow(ctx context.Context, input ShadowInput) (ShadowC
 	if incumbentObjective != candidateObjective || incumbentHorizon != candidateHorizon || !strings.EqualFold(incumbentMarket, candidateMarket) || !strings.EqualFold(input.Market, incumbentMarket) {
 		return ShadowComparison{}, fmt.Errorf("models must share objective, horizon, market, and prediction cutoff")
 	}
-	common := Input{AssetID: input.AssetID, EventID: input.EventID, SignalAvailableAt: input.SignalAvailableAt.UTC(), Market: input.Market, EventType: input.EventType, Features: input.Features}
+	common := Input{AssetID: input.AssetID, AssetClass: input.AssetClass, EventID: input.EventID, SignalAvailableAt: input.SignalAvailableAt.UTC(), Market: input.Market, EventType: input.EventType, Features: input.Features}
 	common.ModelVersion = input.IncumbentModelVersion
 	incumbent, err := s.Predict(ctx, common)
 	if err != nil {

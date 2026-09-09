@@ -1591,6 +1591,17 @@ export type EventConclusionDetail = {
     macro_factors: Array<{ id: string; name: string; description: string; strength: number }>;
     missing_information: string[];
     conditional_information?: string[];
+		counter_research?: {
+			enabled: boolean;
+			status: string;
+			candidate_errors_found?: number;
+			confirmed_errors_found?: number | null;
+			challenged_claims?: string[];
+			competing_mechanisms?: string[];
+			independent_origin_count?: number;
+			latency_ms?: number;
+			confidence_effect?: "none";
+		};
   };
   news: Array<{ id: string; title: string; url: string; source: string }>;
   evidence: Array<{ id: string; claim: string; source_name: string; source_url: string; excerpt: string }>;
@@ -2587,6 +2598,8 @@ export function EventConclusionDetailModal({ detail, onClose }: { detail: EventC
         <span>影响目标<strong>{report.impacts.length}</strong></span>
       </div>
       {!report.evidence_complete && <div className="page-message">该报告可追溯，但资料覆盖不足，不应视为可直接交易的确定性结论。</div>}
+		{report.counter_research?.enabled && <div className="page-message">反方研究：{report.counter_research.status} · 候选错误 {report.counter_research.candidate_errors_found ?? 0} · 独立来源 {report.counter_research.independent_origin_count ?? 0}。候选反证不改变置信度，确认错误需独立真值复核。</div>}
+		{!!report.counter_research?.challenged_claims?.length && <details><summary>反方研究候选</summary>{report.counter_research.challenged_claims.map((claim, index) => <p key={`${claim}-${index}`}>{claim}{report.counter_research?.competing_mechanisms?.[index] ? `：${report.counter_research.competing_mechanisms[index]}` : ""}</p>)}</details>}
       <h3>事件结论</h3><p>{report.summary}</p>
 	  <ClaimStatusDetails value={report.claim_status} />
       {(report.affected_markets.length > 0 || report.affected_sectors.length > 0) && <div className="event-report-scope">
@@ -4052,6 +4065,7 @@ type FundamentalBundle = {
     evidence_ids?: string[];
   }> };
   predictions?: { items?: Array<{ status?: string; probability?: number; signal_available_at?: string; horizon_sessions?: number; model_version?: string; calibration_version?: string; exclusion_reason?: string }> };
+	marketPolicy?: { asset_class?: string; market?: string; currency?: string; policy?: { version?: string; fundamental_method?: string; fundamental_supported?: boolean; prediction_supported?: boolean; prediction_scope?: string; reason?: string; required_inputs?: string[] } };
 };
 
 export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
@@ -4067,13 +4081,17 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
     if (!canonical) return;
     setLoading(true); setMessage("");
     const path = encodeURIComponent(canonical);
-    const endpoints = ["fundamentals", "forecasts", "valuations", "ratings", "predictions"] as const;
+		const endpoints = [
+			{ key: "fundamentals", route: "fundamentals" }, { key: "forecasts", route: "forecasts" },
+			{ key: "valuations", route: "valuations" }, { key: "ratings", route: "ratings" },
+			{ key: "predictions", route: "predictions" }, { key: "marketPolicy", route: "market-policies" },
+		] as const;
     try {
-      const responses = await Promise.all(endpoints.map((name) => fetch(`${apiBase}/go/${name}/${path}?limit=20`)));
+			const responses = await Promise.all(endpoints.map((item) => fetch(`${apiBase}/go/${item.route}/${path}?limit=20`)));
       const failed = responses.find((response) => !response.ok);
       if (failed) throw new Error(`HTTP ${failed.status}`);
       const values = await Promise.all(responses.map((response) => response.json()));
-      setBundle(Object.fromEntries(endpoints.map((name, index) => [name, values[index]])) as FundamentalBundle);
+			setBundle(Object.fromEntries(endpoints.map((item, index) => [item.key, values[index]])) as FundamentalBundle);
     } catch (error) {
       setMessage(`读取失败：${error instanceof Error ? error.message : "未知错误"}`);
     } finally { setLoading(false); }
@@ -4117,10 +4135,17 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
       <article><span>预测版本</span><strong>{bundle.forecasts?.items?.length ?? 0}</strong><small>假设与证据可追溯</small></article>
       <article><span>估值运行</span><strong>{bundle.valuations?.items?.length ?? 0}</strong><small>情景区间不是概率</small></article>
       <article><span>基本面评级</span><strong>{rating?.result?.rating || rating?.result?.status || "不可用"}</strong><small>{rating?.result?.reason || rating?.state?.effective_at || "等待完整输入"}</small></article>
-      <article><span>短期预测</span><strong>{prediction?.status || "不可用"}</strong><small>{prediction?.status === "calibrated" && typeof prediction.probability === "number" ? `${Math.round(prediction.probability * 100)}%` : "未校准时不显示概率"}</small></article>
+		<article><span>短期预测</span><strong>{prediction?.status || "不可用"}</strong><small>{prediction?.status === "calibrated" && typeof prediction.probability === "number" ? `${Math.round(prediction.probability * 100)}%` : "未校准时不显示概率"}</small></article>
+		<article><span>资产政策</span><strong>{bundle.marketPolicy?.asset_class || "不可用"} · {bundle.marketPolicy?.market || "—"}</strong><small>{bundle.marketPolicy?.policy?.fundamental_supported ? "基本面可用" : "基本面不适用"} · {bundle.marketPolicy?.policy?.prediction_supported ? "短期预测可用" : "短期预测不适用"}</small></article>
     </div>
     <div className="conclusion-list">
-      <article className="conclusion-card">
+		<article className="conclusion-card">
+			<span>分市场研究方法</span>
+			<h3>{bundle.marketPolicy?.policy?.fundamental_method || "未配置"}</h3>
+			<p>范围 {bundle.marketPolicy?.policy?.prediction_scope || "—"} · 币种 {bundle.marketPolicy?.currency || "—"}</p>
+			<small>{bundle.marketPolicy?.policy?.reason || `政策 ${bundle.marketPolicy?.policy?.version || "—"}`}</small>
+		</article>
+		<article className="conclusion-card">
         <span>基本面预测与估值</span>
         <h3>{valuationRange && typeof valuationRange.low === "number" && typeof valuationRange.high === "number" ? `${valuationRange.low.toFixed(2)}—${valuationRange.high.toFixed(2)} ${valuation?.result?.currency || ""}` : valuation?.result?.reason || "暂无可复算估值区间"}</h3>
         <p>估值模型：{valuation?.model_version || "不可用"} · 预测模型：{forecast?.model_version || "不可用"}</p>

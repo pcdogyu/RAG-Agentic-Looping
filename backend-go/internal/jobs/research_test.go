@@ -969,6 +969,38 @@ func TestPromptInjectionInsideNewsIsIgnored(t *testing.T) {
 	}
 }
 
+func TestCounterResearchOnlyAcceptsNewPITEvidenceAgainstExactClaims(t *testing.T) {
+	asOf := time.Date(2026, 9, 9, 2, 0, 0, 0, time.UTC)
+	baseline := eventResearchDraft{
+		EvidenceIDs: []string{"baseline"},
+		Impacts:     []eventImpactDraft{{Claims: []claimDraft{{Text: "Acme margin expands", EvidenceIDs: []string{"baseline"}}}}},
+	}
+	evidence := []researchEvidence{
+		{ID: "baseline", IndependentGroup: "filing", PublishedAt: asOf.Add(-2 * time.Hour), ObservedAt: asOf.Add(-time.Hour), AsOf: asOf.Add(-2 * time.Hour)},
+		{ID: "new", IndependentGroup: "supplier", PublishedAt: asOf.Add(-2 * time.Minute), ObservedAt: asOf.Add(-time.Minute), AsOf: asOf.Add(-2 * time.Minute)},
+		{ID: "future", IndependentGroup: "wire", PublishedAt: asOf.Add(time.Minute), ObservedAt: asOf.Add(2 * time.Minute), AsOf: asOf.Add(time.Minute)},
+	}
+	draft := counterResearchDraft{Findings: []counterResearchFindingDraft{
+		{ChallengedClaim: "Acme margin expands", CompetingMechanism: "input cost offsets revenue", EvidenceIDs: []string{"new"}},
+		{ChallengedClaim: "Acme margin expands", CompetingMechanism: "future information", EvidenceIDs: []string{"future"}},
+		{ChallengedClaim: "different claim", CompetingMechanism: "not a baseline claim", EvidenceIDs: []string{"new"}},
+	}}
+	review := assessCounterResearch(asOf, baseline, evidence, draft, time.Second)
+	if stringValue(review["status"]) != "candidate_error_found" || int(numberValue(review["candidate_errors_found"])) != 1 || review["confirmed_errors_found"] != nil {
+		t.Fatalf("counter review=%#v", review)
+	}
+	if !containsString(stringSlice(review["new_evidence_ids"]), "new") || containsString(stringSlice(review["new_evidence_ids"]), "future") {
+		t.Fatalf("counter review accepted invalid evidence: %#v", review)
+	}
+}
+
+func TestCounterResearchSchemaIsClosedAndPromptRejectsVotingConfidence(t *testing.T) {
+	schema := counterResearchSchema()
+	if schema["additionalProperties"] != false || !strings.Contains(counterResearchSystemPrompt, "不是投票") || !strings.Contains(counterResearchSystemPrompt, "不得引用截止时间后的证据") {
+		t.Fatalf("counter-research contract is unsafe: %#v", schema)
+	}
+}
+
 func containsPrefix(values []string, prefix string) bool {
 	for _, value := range values {
 		if strings.HasPrefix(value, prefix) {

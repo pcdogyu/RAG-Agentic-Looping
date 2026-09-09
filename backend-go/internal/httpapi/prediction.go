@@ -1,11 +1,14 @@
 package httpapi
 
 import (
+	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/governance"
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/marketpolicy"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/prediction"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/signals"
 )
@@ -16,6 +19,17 @@ func (s *Server) registerPredictionModel(w http.ResponseWriter, r *http.Request)
 	}
 	input := prediction.ModelRegistration{}
 	if !decodeJSONBody(w, r, &input) {
+		return
+	}
+	assetClass := "equity"
+	if value := input.Scope["asset_class"]; value != nil {
+		assetClass = strings.ToLower(strings.TrimSpace(fmt.Sprint(value)))
+	}
+	if assetClass == "" {
+		assetClass = "equity"
+	}
+	if policy := marketpolicy.Resolve(assetClass, input.Market); !policy.PredictionSupported {
+		writeError(w, http.StatusUnprocessableEntity, "prediction model scope is unsupported")
 		return
 	}
 	if err := prediction.New(s.db).RegisterModel(r.Context(), input); err != nil {
@@ -30,6 +44,14 @@ func (s *Server) registerCalibration(w http.ResponseWriter, r *http.Request) {
 	}
 	input := prediction.CalibrationRegistration{}
 	if !decodeJSONBody(w, r, &input) {
+		return
+	}
+	calibrationAssetClass := strings.TrimSpace(input.Scope.AssetClass)
+	if calibrationAssetClass == "" {
+		calibrationAssetClass = "equity"
+	}
+	if policy := marketpolicy.Resolve(calibrationAssetClass, input.Scope.Market); !policy.PredictionSupported {
+		writeError(w, http.StatusUnprocessableEntity, "calibration scope is unsupported")
 		return
 	}
 	model, err := prediction.New(s.db).RegisterCalibration(r.Context(), input)
@@ -62,7 +84,16 @@ func (s *Server) createPrediction(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSONBody(w, r, &input) {
 		return
 	}
-	run, err := prediction.New(s.db).Predict(r.Context(), prediction.Input{AssetID: assetID, EventID: input.EventID, SignalAvailableAt: input.SignalAvailableAt, ModelVersion: input.ModelVersion, Market: input.Market, EventType: input.EventType, Features: input.Features})
+	asset, err := s.loadAssetPolicy(r.Context(), assetID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if err = validatePredictionPolicy(asset, input.Market); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	run, err := prediction.New(s.db).Predict(r.Context(), prediction.Input{AssetID: assetID, AssetClass: asset.AssetClass, EventID: input.EventID, SignalAvailableAt: input.SignalAvailableAt, ModelVersion: input.ModelVersion, Market: asset.Market, EventType: input.EventType, Features: input.Features})
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
@@ -115,7 +146,16 @@ func (s *Server) createShadowComparison(w http.ResponseWriter, r *http.Request) 
 	if !decodeJSONBody(w, r, &input) {
 		return
 	}
-	comparison, err := prediction.New(s.db).CompareShadow(r.Context(), prediction.ShadowInput{AssetID: assetID, EventID: input.EventID, SignalAvailableAt: input.SignalAvailableAt, IncumbentModelVersion: input.IncumbentModelVersion, CandidateModelVersion: input.CandidateModelVersion, Market: input.Market, EventType: input.EventType, Features: input.Features, ExecutionAssumptions: input.ExecutionAssumptions})
+	asset, err := s.loadAssetPolicy(r.Context(), assetID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if err = validatePredictionPolicy(asset, input.Market); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	comparison, err := prediction.New(s.db).CompareShadow(r.Context(), prediction.ShadowInput{AssetID: assetID, AssetClass: asset.AssetClass, EventID: input.EventID, SignalAvailableAt: input.SignalAvailableAt, IncumbentModelVersion: input.IncumbentModelVersion, CandidateModelVersion: input.CandidateModelVersion, Market: asset.Market, EventType: input.EventType, Features: input.Features, ExecutionAssumptions: input.ExecutionAssumptions})
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return

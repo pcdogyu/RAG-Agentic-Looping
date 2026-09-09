@@ -14,16 +14,19 @@ func TestPlattCalibrationIsScopedAndNeverPublishesExactBounds(t *testing.T) {
 		score := float64(index-20) / 5
 		observations[index] = Observation{SampleID: fmt.Sprintf("sample-%d", index), Score: score, Label: index >= 20, ObservedAt: base.AddDate(0, 0, index)}
 	}
-	model, err := FitPlatt("baseline-v1", observations, Scope{Market: "US", HorizonSessions: 5, EventTypes: []string{"earnings"}})
+	model, err := FitPlatt("baseline-v1", observations, Scope{AssetClass: "equity", Market: "US", HorizonSessions: 5, EventTypes: []string{"earnings"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	result := model.Apply("baseline-v1", 1000, "US", 5, "earnings", base.AddDate(0, 0, 50))
+	result := model.Apply("baseline-v1", 1000, "equity", "US", 5, "earnings", base.AddDate(0, 0, 50))
 	if result.Status != "calibrated" || result.Probability == nil || *result.Probability <= 0 || *result.Probability >= 1 {
 		t.Fatalf("result=%#v", result)
 	}
-	if outside := model.Apply("baseline-v1", 0, "CN", 5, "earnings", base.AddDate(0, 0, 50)); outside.Status != "unavailable" {
+	if outside := model.Apply("baseline-v1", 0, "equity", "CN", 5, "earnings", base.AddDate(0, 0, 50)); outside.Status != "unavailable" {
 		t.Fatalf("outside=%#v", outside)
+	}
+	if outside := model.Apply("baseline-v1", 0, "crypto", "US", 5, "earnings", base.AddDate(0, 0, 50)); outside.Status != "unavailable" {
+		t.Fatalf("cross-asset calibration was accepted: %#v", outside)
 	}
 }
 

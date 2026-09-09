@@ -72,4 +72,14 @@ func TestWorkflowCompletesWithoutNewsAgainstIsolatedPostgres(t *testing.T) {
 	if err != nil || insufficient.Status != "insufficient_data" || insufficient.Reason != "missing_required_financial_inputs" || insufficient.Valuation != nil || insufficient.Rating != nil {
 		t.Fatalf("insufficient workflow=%#v err=%v", insufficient, err)
 	}
+	const cryptoID = "crypto:coingecko:bitcoin"
+	if _, err = pool.Exec(ctx, `INSERT INTO assets(id,asset_class,market,symbol,name,exchange_or_provider,currency,aliases,products,competitors,lot_size,active) VALUES($1,'crypto','CRYPTO','BTC','Bitcoin','coingecko','USD','[]','[]','[]',1,true)`, cryptoID); err != nil {
+		t.Fatal(err)
+	}
+	cryptoInput := input
+	cryptoInput.AssetID = cryptoID
+	unsupported, err := New(pool).Run(ctx, cryptoInput)
+	if err != nil || unsupported.Status != "not_applicable" || unsupported.MarketPolicy.FundamentalSupported || unsupported.Forecast.ID != "" || unsupported.Valuation != nil || unsupported.Rating != nil {
+		t.Fatalf("crypto workflow=%#v err=%v", unsupported, err)
+	}
 }

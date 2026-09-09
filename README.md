@@ -115,6 +115,12 @@ go run ./cmd/evaluation probability-calibration --root ..
 go run ./cmd/evaluation compare-models --root ..
 ```
 
+## 可选反方研究与分市场隔离
+
+`COUNTER_RESEARCH_ENABLED` 默认是 `false`。显式开启后，事件研究会增加一次独立反证检查；它只能引用截止时间内、第一版研报未使用的独立原始来源证据，输出仅作为待人工/真值复核的候选，不改变主研报置信度。状态和有标签消融计算分别位于 `/go/counter-research/status`、`/go/counter-research/ablation`。
+
+`/go/market-policies/{assetID}` 根据资产主数据返回适用的市场政策。预测模型、校准器和运行按 `asset_class + market` 隔离；股票基本面 DCF 不适用于 ETF、商品或加密资产，这些资产在专用估值输入与模型齐备前会明确返回不适用，而不是把缺失值填零。`/go/model-evaluation/segmented-report` 只返回按资产类别和市场拆分的效果报告，不用美股样本掩盖其他市场结果。
+
 ## 开发检查
 
 Go：
