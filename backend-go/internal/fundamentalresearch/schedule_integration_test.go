@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/analystevidence"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/forecast"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/marketdata"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/migrate"
@@ -69,11 +70,37 @@ func TestScheduledWorkflowRevaluesApprovedForecastAgainstIsolatedPostgres(t *tes
 		t.Fatal(err)
 	}
 	benchmark := .05
-	submission := PlanSubmission{AssetID: assetID, ForecastVersionID: forecastVersion.ID, Valuation: ValuationPlan{MultipleScenarios: []valuation.MultipleScenario{{Name: "base", PriceEarningsMultiple: 20, ComparableEvidenceIDs: []string{"comparable-set-1"}}}}, Rating: ScheduledRatingPlan{Policy: rating.DefaultUSPolicy(), BenchmarkReturn: &benchmark, BenchmarkEvidenceID: "benchmark-expectation-1", ReasonCodes: []string{"approved_periodic_review"}, EvidenceIDs: []string{incomeID, balanceID, cashFlowID}}, CadenceHours: 24, MaxPriceAgeHours: 120, MaxPlanAgeDays: 90, ApprovedBy: "integration-test", IdempotencyKey: "scheduled-plan-request-1"}
 	approvedAt := base
+	evidenceStore := analystevidence.NewStore(pool)
+	comparable, _, err := evidenceStore.Create(ctx, workflowEvidenceSubmission(assetID, analystevidence.ValuationMultiple, "scheduled-comparable", map[string]any{"selected_multiple": 20.0}, approvedAt), approvedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	benchmarkEvidence, _, err := evidenceStore.Create(ctx, workflowEvidenceSubmission(assetID, analystevidence.BenchmarkExpectation, "scheduled-benchmark", map[string]any{"benchmark_id": rating.DefaultUSPolicy().BenchmarkID, "expected_return": benchmark}, approvedAt), approvedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rationale, _, err := evidenceStore.Create(ctx, workflowEvidenceSubmission(assetID, analystevidence.RatingRationale, "scheduled-rationale", map[string]any{"reason_codes": []any{"scheduled_fundamental_review", "approved_periodic_review"}}, approvedAt), approvedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	submission := PlanSubmission{AssetID: assetID, ForecastVersionID: forecastVersion.ID, Valuation: ValuationPlan{MultipleScenarios: []valuation.MultipleScenario{{Name: "base", PriceEarningsMultiple: 20, ComparableEvidenceIDs: []string{comparable.ID}}}}, Rating: ScheduledRatingPlan{Policy: rating.DefaultUSPolicy(), BenchmarkReturn: &benchmark, BenchmarkEvidenceID: benchmarkEvidence.ID, ReasonCodes: []string{"approved_periodic_review"}, EvidenceIDs: []string{incomeID, balanceID, cashFlowID, rationale.ID}}, CadenceHours: 24, MaxPriceAgeHours: 120, MaxPlanAgeDays: 90, ApprovedBy: "integration-test", IdempotencyKey: "scheduled-plan-request-1"}
+	unregistered := submission
+	unregistered.IdempotencyKey = "unregistered-evidence-plan"
+	unregistered.Valuation.MultipleScenarios = append([]valuation.MultipleScenario{}, submission.Valuation.MultipleScenarios...)
+	unregistered.Valuation.MultipleScenarios[0].ComparableEvidenceIDs = []string{"arbitrary-string"}
+	if _, _, err = NewPlanStore(pool).Approve(ctx, unregistered, approvedAt); err == nil || !strings.Contains(err.Error(), "evidence gate") {
+		t.Fatalf("unregistered evidence was accepted: %v", err)
+	}
 	plan, created, err := NewPlanStore(pool).Approve(ctx, submission, approvedAt)
-	if err != nil || !created || plan.Status != "approved" {
+	if err != nil || !created || plan.Status != "approved" || plan.EvidenceContractVersion != analystevidence.ContractVersion {
 		t.Fatalf("plan=%#v created=%v err=%v", plan, created, err)
+	}
+	if err = migrate.Up(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	if err = pool.QueryRow(ctx, `SELECT status FROM fundamental_research_plans WHERE id=$1`, plan.ID).Scan(&plan.Status); err != nil || plan.Status != "approved" {
+		t.Fatalf("repeated migration stopped current evidence plan: status=%s err=%v", plan.Status, err)
 	}
 	repeated, created, err := NewPlanStore(pool).Approve(ctx, submission, approvedAt.Add(time.Minute))
 	if err != nil || created || repeated.ID != plan.ID {
@@ -94,11 +121,11 @@ func TestScheduledWorkflowRevaluesApprovedForecastAgainstIsolatedPostgres(t *tes
 			Inputs:                 forecast.Inputs{Currency: "USD", Unit: "millions", Revenue: &revenue, OperatingMargin: &margin, TaxRate: &tax, Depreciation: &depreciation, Capex: &capex, ChangeNWC: &nwc, DilutedShares: &shares},
 			FundamentalSnapshotIDs: []string{incomeID, balanceID, cashFlowID},
 		},
-		Valuation: ValuationPlan{MultipleScenarios: []valuation.MultipleScenario{{Name: "base", PriceEarningsMultiple: 20, ComparableEvidenceIDs: []string{"comparable-set-1"}}}},
+		Valuation: ValuationPlan{MultipleScenarios: []valuation.MultipleScenario{{Name: "base", PriceEarningsMultiple: 20, ComparableEvidenceIDs: []string{comparable.ID}}}},
 		Rating: RatingPlan{
 			Policy: rating.DefaultUSPolicy(), AsOfPrice: &result.Price.Price, AsOfPriceEvidenceID: result.Price.ID,
-			BenchmarkReturn: &benchmark, BenchmarkEvidenceID: "benchmark-expectation-1",
-			ReasonCodes: []string{"scheduled_fundamental_review", "approved_periodic_review"}, EvidenceIDs: []string{incomeID, balanceID, cashFlowID},
+			BenchmarkReturn: &benchmark, BenchmarkEvidenceID: benchmarkEvidence.ID,
+			ReasonCodes: []string{"scheduled_fundamental_review", "approved_periodic_review"}, EvidenceIDs: []string{incomeID, balanceID, cashFlowID, rationale.ID},
 		},
 	})
 	if err != nil || manual.Status != "available" || manual.Valuation == nil || manual.Rating == nil {
@@ -137,5 +164,15 @@ func TestScheduledWorkflowRevaluesApprovedForecastAgainstIsolatedPostgres(t *tes
 	history, err := NewPlanStore(pool).History(ctx, assetID, 1)
 	if err != nil || len(history) != 1 || history[0].Status != "paused" {
 		t.Fatalf("stale result reactivated paused plan: history=%#v err=%v", history, err)
+	}
+	if _, err = pool.Exec(ctx, `UPDATE fundamental_research_plans SET status='approved',evidence_contract_version=NULL WHERE id=$1`, plan.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err = migrate.Up(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	var legacyStatus, legacyReason string
+	if err = pool.QueryRow(ctx, `SELECT status,last_run_reason FROM fundamental_research_plans WHERE id=$1`, plan.ID).Scan(&legacyStatus, &legacyReason); err != nil || legacyStatus != "review_required" || legacyReason != "analyst_evidence_registration_required" {
+		t.Fatalf("legacy plan was not stopped: status=%s reason=%s err=%v", legacyStatus, legacyReason, err)
 	}
 }

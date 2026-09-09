@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/analystevidence"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/forecast"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/fundamentals"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/marketdata"
@@ -45,24 +46,25 @@ type PlanSubmission struct {
 }
 
 type Plan struct {
-	ID                string              `json:"id"`
-	AssetID           string              `json:"asset_id"`
-	ForecastVersionID string              `json:"forecast_version_id"`
-	Valuation         ValuationPlan       `json:"valuation"`
-	Rating            ScheduledRatingPlan `json:"rating"`
-	CadenceHours      int                 `json:"cadence_hours"`
-	MaxPriceAgeHours  int                 `json:"max_price_age_hours"`
-	MaxPlanAgeDays    int                 `json:"max_plan_age_days"`
-	Status            string              `json:"status"`
-	ApprovedBy        string              `json:"approved_by"`
-	ApprovedAt        time.Time           `json:"approved_at"`
-	NextRunAt         time.Time           `json:"next_run_at"`
-	LastRunAt         *time.Time          `json:"last_run_at,omitempty"`
-	LastRunStatus     string              `json:"last_run_status,omitempty"`
-	LastRunReason     string              `json:"last_run_reason,omitempty"`
-	LastResult        map[string]any      `json:"last_result"`
-	CreatedAt         time.Time           `json:"created_at"`
-	UpdatedAt         time.Time           `json:"updated_at"`
+	ID                      string              `json:"id"`
+	AssetID                 string              `json:"asset_id"`
+	ForecastVersionID       string              `json:"forecast_version_id"`
+	Valuation               ValuationPlan       `json:"valuation"`
+	Rating                  ScheduledRatingPlan `json:"rating"`
+	CadenceHours            int                 `json:"cadence_hours"`
+	MaxPriceAgeHours        int                 `json:"max_price_age_hours"`
+	MaxPlanAgeDays          int                 `json:"max_plan_age_days"`
+	Status                  string              `json:"status"`
+	ApprovedBy              string              `json:"approved_by"`
+	ApprovedAt              time.Time           `json:"approved_at"`
+	EvidenceContractVersion string              `json:"evidence_contract_version"`
+	NextRunAt               time.Time           `json:"next_run_at"`
+	LastRunAt               *time.Time          `json:"last_run_at,omitempty"`
+	LastRunStatus           string              `json:"last_run_status,omitempty"`
+	LastRunReason           string              `json:"last_run_reason,omitempty"`
+	LastResult              map[string]any      `json:"last_result"`
+	CreatedAt               time.Time           `json:"created_at"`
+	UpdatedAt               time.Time           `json:"updated_at"`
 }
 
 type ScheduledResult struct {
@@ -141,6 +143,9 @@ func (s *PlanStore) Approve(ctx context.Context, submission PlanSubmission, appr
 	if newer {
 		return Plan{}, false, fmt.Errorf("forecast review is required because newer financial statements are available")
 	}
+	if err := validateScheduledResearchEvidence(ctx, s.db, submission.AssetID, version, submission.Valuation, submission.Rating, approvedAt); err != nil {
+		return Plan{}, false, fmt.Errorf("evidence gate: %w", err)
+	}
 	approvedAt = approvedAt.UTC()
 	valuationBody, _ := json.Marshal(submission.Valuation)
 	ratingBody, _ := json.Marshal(submission.Rating)
@@ -161,8 +166,8 @@ func (s *PlanStore) Approve(ctx context.Context, submission PlanSubmission, appr
 	if _, err := tx.Exec(ctx, `UPDATE fundamental_research_plans SET status='paused',updated_at=$2 WHERE asset_id=$1 AND status='approved'`, submission.AssetID, approvedAt); err != nil {
 		return Plan{}, false, err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO fundamental_research_plans(id,asset_id,forecast_version_id,valuation_plan,rating_plan,cadence_hours,max_price_age_hours,max_plan_age_days,status,idempotency_key,approved_by,approved_at,next_run_at)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,'approved',$9,$10,$11,$11)`, id, submission.AssetID, submission.ForecastVersionID, valuationBody, ratingBody, submission.CadenceHours, submission.MaxPriceAgeHours, submission.MaxPlanAgeDays, submission.IdempotencyKey, submission.ApprovedBy, approvedAt)
+	_, err = tx.Exec(ctx, `INSERT INTO fundamental_research_plans(id,asset_id,forecast_version_id,valuation_plan,rating_plan,cadence_hours,max_price_age_hours,max_plan_age_days,status,idempotency_key,approved_by,approved_at,next_run_at,evidence_contract_version)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,'approved',$9,$10,$11,$11,$12)`, id, submission.AssetID, submission.ForecastVersionID, valuationBody, ratingBody, submission.CadenceHours, submission.MaxPriceAgeHours, submission.MaxPlanAgeDays, submission.IdempotencyKey, submission.ApprovedBy, approvedAt, analystevidence.ContractVersion)
 	if err != nil {
 		return Plan{}, false, err
 	}
@@ -249,12 +254,12 @@ func validateScheduledPlans(valuationPlan ValuationPlan, ratingPlan ScheduledRat
 	return nil
 }
 
-const planSelect = `SELECT id,asset_id,forecast_version_id,valuation_plan::jsonb,rating_plan::jsonb,cadence_hours,max_price_age_hours,max_plan_age_days,status,approved_by,approved_at,next_run_at,last_run_at,last_run_status,last_run_reason,last_result::jsonb,created_at,updated_at FROM fundamental_research_plans`
+const planSelect = `SELECT id,asset_id,forecast_version_id,valuation_plan::jsonb,rating_plan::jsonb,cadence_hours,max_price_age_hours,max_plan_age_days,status,approved_by,approved_at,coalesce(evidence_contract_version,''),next_run_at,last_run_at,last_run_status,last_run_reason,last_result::jsonb,created_at,updated_at FROM fundamental_research_plans`
 
 func scanPlan(row pgx.Row) (Plan, error) {
 	var plan Plan
 	var valuationRaw, ratingRaw, resultRaw any
-	err := row.Scan(&plan.ID, &plan.AssetID, &plan.ForecastVersionID, &valuationRaw, &ratingRaw, &plan.CadenceHours, &plan.MaxPriceAgeHours, &plan.MaxPlanAgeDays, &plan.Status, &plan.ApprovedBy, &plan.ApprovedAt, &plan.NextRunAt, &plan.LastRunAt, &plan.LastRunStatus, &plan.LastRunReason, &resultRaw, &plan.CreatedAt, &plan.UpdatedAt)
+	err := row.Scan(&plan.ID, &plan.AssetID, &plan.ForecastVersionID, &valuationRaw, &ratingRaw, &plan.CadenceHours, &plan.MaxPriceAgeHours, &plan.MaxPlanAgeDays, &plan.Status, &plan.ApprovedBy, &plan.ApprovedAt, &plan.EvidenceContractVersion, &plan.NextRunAt, &plan.LastRunAt, &plan.LastRunStatus, &plan.LastRunReason, &resultRaw, &plan.CreatedAt, &plan.UpdatedAt)
 	if err != nil {
 		return Plan{}, err
 	}
@@ -373,12 +378,16 @@ func (s *PlanStore) Run(ctx context.Context, plan Plan, now time.Time) (Schedule
 	if now.IsZero() {
 		return result, fmt.Errorf("scheduled research time is required")
 	}
-	var currentStatus string
-	if err := s.db.QueryRow(ctx, `SELECT status FROM fundamental_research_plans WHERE id=$1`, plan.ID).Scan(&currentStatus); err != nil {
+	var currentStatus, currentEvidenceContract string
+	if err := s.db.QueryRow(ctx, `SELECT status,coalesce(evidence_contract_version,'') FROM fundamental_research_plans WHERE id=$1`, plan.ID).Scan(&currentStatus, &currentEvidenceContract); err != nil {
 		return result, err
 	}
 	if currentStatus != "approved" {
 		result.Status, result.Reason = "not_applicable", "scheduled_research_plan_is_not_approved"
+		return result, nil
+	}
+	if currentEvidenceContract != analystevidence.ContractVersion {
+		result.Status, result.Reason = "review_required", "analyst_evidence_registration_required"
 		return result, nil
 	}
 	if now.UTC().After(plan.ApprovedAt.AddDate(0, 0, plan.MaxPlanAgeDays)) {

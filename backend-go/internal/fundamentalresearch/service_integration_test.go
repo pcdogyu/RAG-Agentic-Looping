@@ -9,7 +9,9 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/analystevidence"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/forecast"
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/marketdata"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/migrate"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/rating"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/valuation"
@@ -56,7 +58,37 @@ func TestWorkflowCompletesWithoutNewsAgainstIsolatedPostgres(t *testing.T) {
 	}
 	revenue, margin, tax, depreciation, capex, nwc, shares := 1000.0, .2, .2, 20.0, 30.0, 5.0, 100.0
 	price, benchmark := 20.0, .05
-	input := Input{AssetID: assetID, AsOf: asOf, Forecast: ForecastPlan{Inputs: forecast.Inputs{Currency: "USD", Unit: "millions", Revenue: &revenue, OperatingMargin: &margin, TaxRate: &tax, Depreciation: &depreciation, Capex: &capex, ChangeNWC: &nwc, DilutedShares: &shares}, FundamentalSnapshotIDs: []string{snapshotID}}, Valuation: ValuationPlan{MultipleScenarios: []valuation.MultipleScenario{{Name: "base", PriceEarningsMultiple: 20, ComparableEvidenceIDs: []string{"comparable-set-1"}}}}, Rating: RatingPlan{Policy: rating.DefaultUSPolicy(), AsOfPrice: &price, AsOfPriceEvidenceID: "price-close-2026-09-08", BenchmarkReturn: &benchmark, BenchmarkEvidenceID: "benchmark-return-2026-09-08", ReasonCodes: []string{"scheduled_fundamental_review"}, EvidenceIDs: []string{snapshotID}}}
+	priceRecord := marketdata.PriceObservation{AssetID: assetID, Market: "US", Currency: "USD", ObservedAt: asOf.Add(-2 * time.Hour), AvailableAt: asOf.Add(-time.Hour), Price: price, PriceField: "adjusted_close", TimePrecision: "timestamped", SourceName: "test-market", SourceDocumentID: "price-series:" + assetID}
+	if err = priceRecord.NormalizeAndValidate(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = marketdata.NewStore(pool).Save(ctx, priceRecord); err != nil {
+		t.Fatal(err)
+	}
+	evidenceStore := analystevidence.NewStore(pool)
+	comparable, _, err := evidenceStore.Create(ctx, workflowEvidenceSubmission(assetID, analystevidence.ValuationMultiple, "workflow-comparable", map[string]any{"selected_multiple": 20.0}, asOf), asOf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	benchmarkEvidence, _, err := evidenceStore.Create(ctx, workflowEvidenceSubmission(assetID, analystevidence.BenchmarkExpectation, "workflow-benchmark", map[string]any{"benchmark_id": rating.DefaultUSPolicy().BenchmarkID, "expected_return": benchmark}, asOf), asOf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rationale, _, err := evidenceStore.Create(ctx, workflowEvidenceSubmission(assetID, analystevidence.RatingRationale, "workflow-rationale", map[string]any{"reason_codes": []any{"scheduled_fundamental_review"}}, asOf), asOf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := Input{AssetID: assetID, AsOf: asOf, Forecast: ForecastPlan{Inputs: forecast.Inputs{Currency: "USD", Unit: "millions", Revenue: &revenue, OperatingMargin: &margin, TaxRate: &tax, Depreciation: &depreciation, Capex: &capex, ChangeNWC: &nwc, DilutedShares: &shares}, FundamentalSnapshotIDs: []string{snapshotID}}, Valuation: ValuationPlan{MultipleScenarios: []valuation.MultipleScenario{{Name: "base", PriceEarningsMultiple: 20, ComparableEvidenceIDs: []string{comparable.ID}}}}, Rating: RatingPlan{Policy: rating.DefaultUSPolicy(), AsOfPrice: &price, AsOfPriceEvidenceID: priceRecord.ID, BenchmarkReturn: &benchmark, BenchmarkEvidenceID: benchmarkEvidence.ID, ReasonCodes: []string{"scheduled_fundamental_review"}, EvidenceIDs: []string{snapshotID, rationale.ID}}}
+	wrongPrice := price + 1
+	wrong := input
+	wrong.Rating.AsOfPrice = &wrongPrice
+	if _, err = New(pool).Run(ctx, wrong); err == nil || !strings.Contains(err.Error(), "evidence gate") {
+		t.Fatalf("mismatched price evidence was accepted: %v", err)
+	}
+	var forecastsBeforeValidRun int
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM forecast_versions WHERE asset_id=$1`, assetID).Scan(&forecastsBeforeValidRun); err != nil || forecastsBeforeValidRun != 0 {
+		t.Fatalf("failed evidence gate wrote forecast versions: count=%d err=%v", forecastsBeforeValidRun, err)
+	}
 	result, err := New(pool).Run(ctx, input)
 	if err != nil || result.Status != "available" || result.Forecast.Status != "available" || result.Valuation == nil || result.Valuation.Status != "available" || result.Rating == nil || result.Rating.Result.Rating != "strong_buy" {
 		t.Fatalf("workflow=%#v err=%v", result, err)
@@ -96,5 +128,14 @@ func TestWorkflowCompletesWithoutNewsAgainstIsolatedPostgres(t *testing.T) {
 	unsupported, err := New(pool).Run(ctx, cryptoInput)
 	if err != nil || unsupported.Status != "not_applicable" || unsupported.MarketPolicy.FundamentalSupported || unsupported.Forecast.ID != "" || unsupported.Valuation != nil || unsupported.Rating != nil {
 		t.Fatalf("crypto workflow=%#v err=%v", unsupported, err)
+	}
+}
+
+func workflowEvidenceSubmission(assetID, evidenceType, key string, values map[string]any, cutoff time.Time) analystevidence.Submission {
+	return analystevidence.Submission{
+		AssetID: assetID, EvidenceType: evidenceType, Title: key, Rationale: "integration test reviewed evidence",
+		Values: values, ObservedAt: cutoff.Add(-2 * time.Hour), AvailableAt: cutoff.Add(-time.Hour),
+		SourceName: "integration-test", SourceDocumentID: key, SourceURL: "https://example.test/" + key,
+		ApprovedBy: "integration-test", IdempotencyKey: key,
 	}
 }

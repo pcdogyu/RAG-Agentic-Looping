@@ -737,6 +737,9 @@ describe("shared hash navigation", () => {
 		expect(markup).toContain("不会自动生成假设、估值或评级");
 		expect(markup).toContain("同步真实复权价格");
 		expect(markup).toContain("复权价格证据");
+		expect(markup).toContain("已批准分析师证据");
+		expect(markup).toContain("任意字符串不能作为估值、基准或评级证据");
+		expect(markup).toContain("分析师证据登记");
 		expect(markup).toContain("人工研究成功后自动载入同源计划草稿，仍需管理员显式批准");
 		expect(markup).toContain("分析师一致预期");
 		expect(markup).toContain("数据不会倒填到首次观测之前");

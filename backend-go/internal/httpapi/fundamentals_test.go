@@ -61,6 +61,12 @@ func TestFundamentalResearchRequiresAdminToken(t *testing.T) {
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("market price sync status=%d", response.Code)
 	}
+	request = httptest.NewRequest(http.MethodPost, "/go/analyst-evidence", nil)
+	response = httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("analyst evidence create status=%d", response.Code)
+	}
 }
 
 func TestConsensusImportRequiresAdminToken(t *testing.T) {

@@ -4089,6 +4089,9 @@ type FundamentalBundle = {
 		workflow_template?: Record<string, unknown>;
 		controls?: { automatic_assumptions?: boolean; automatic_valuation?: boolean; automatic_rating?: boolean; analyst_approval_required?: boolean };
 	};
+	analystEvidence?: {
+		items?: Array<{ id?: string; evidence_type?: string; title?: string; rationale?: string; values?: Record<string, unknown>; available_at?: string; approved_by?: string; approved_at?: string; source_name?: string; source_url?: string }>;
+	};
   forecasts?: { items?: Array<{ id?: string; model_version?: string; status?: string; as_of?: string; assumptions?: unknown[] }> };
   valuations?: { items?: Array<{ id?: string; model_version?: string; status?: string; as_of?: string; result?: { status?: string; reason?: string; currency?: string; range?: { low?: number; high?: number } } }> };
   ratings?: { items?: Array<{
@@ -4117,6 +4120,8 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
   const [token, setToken] = useState(readToken);
   const [workflowJSON, setWorkflowJSON] = useState("");
   const [scheduleJSON, setScheduleJSON] = useState("");
+	const [analystEvidenceJSON, setAnalystEvidenceJSON] = useState("");
+	const [analystEvidenceRequestID, setAnalystEvidenceRequestID] = useState(() => globalThis.crypto?.randomUUID?.() || `analyst-evidence-${Date.now()}`);
 	const [guidanceReviewJSON, setGuidanceReviewJSON] = useState("");
 	const [guidanceReviewRequestID, setGuidanceReviewRequestID] = useState(() => globalThis.crypto?.randomUUID?.() || `guidance-review-${Date.now()}`);
   const [scheduleRequestID, setScheduleRequestID] = useState(() => globalThis.crypto?.randomUUID?.() || `fundamental-schedule-${Date.now()}`);
@@ -4128,6 +4133,7 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
     const path = encodeURIComponent(canonical);
 		const endpoints = [
 			{ key: "fundamentals", route: "fundamentals" }, { key: "preparation", route: "fundamental-research", suffix: "/preparation" },
+			{ key: "analystEvidence", route: "analyst-evidence" },
 			{ key: "prices", route: "market-prices", query: "price_field=adjusted_close&limit=20" },
 			{ key: "consensus", route: "consensus" },
 			{ key: "guidance", route: "consensus", suffix: "/guidance" },
@@ -4146,6 +4152,25 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
     } catch (error) {
       setMessage(`读取失败：${error instanceof Error ? error.message : "未知错误"}`);
     } finally { setLoading(false); }
+	}
+	async function registerAnalystEvidence() {
+		const canonical = assetID.trim();
+		if (!canonical || !token || !analystEvidenceJSON.trim()) return;
+		setLoading(true); setMessage("");
+		try {
+			const body = JSON.parse(analystEvidenceJSON) as Record<string, unknown>;
+			if (typeof body.asset_id === "string" && body.asset_id.trim() && body.asset_id.trim() !== canonical) throw new Error("asset_id 必须与当前标的一致");
+			body.asset_id = canonical;
+			const response = await fetch(`${apiBase}/go/analyst-evidence`, { method: "POST", headers: { "Content-Type": "application/json", "X-Admin-Token": token, "Idempotency-Key": analystEvidenceRequestID }, body: JSON.stringify(body) });
+			const payload = await response.json() as { id?: string; detail?: string };
+			if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
+			setMessage(`分析师证据已不可变登记：${payload.id || "已保存"}。请将该 ID 引用到对应研究输入。`);
+			setAnalystEvidenceJSON("");
+			setAnalystEvidenceRequestID(globalThis.crypto?.randomUUID?.() || `analyst-evidence-${Date.now()}`);
+			await load();
+		} catch (error) {
+			setMessage(`分析师证据登记失败：${error instanceof Error ? error.message : "JSON 或请求无效"}`);
+		} finally { setLoading(false); }
 	}
 	async function syncMarketPrices() {
 		const canonical = assetID.trim();
@@ -4269,6 +4294,7 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
   const valuation = bundle.valuations?.items?.[0];
   const forecast = bundle.forecasts?.items?.[0];
   const schedule = bundle.schedule?.items?.[0];
+	const analystEvidenceItems = bundle.analystEvidence?.items || [];
 	const preparation = bundle.preparation;
 	const prices = bundle.prices?.items || [];
 	const latestPrice = prices[0];
@@ -4288,6 +4314,8 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
     </form>
     <AdminUnlock token={token} onToken={setToken} />
     {token && <div className="integration-editor">
+		<label>分析师证据登记<textarea aria-label="分析师证据 JSON" rows={8} value={analystEvidenceJSON} onChange={(event) => { setAnalystEvidenceJSON(event.target.value); setAnalystEvidenceRequestID(globalThis.crypto?.randomUUID?.() || `analyst-evidence-${Date.now()}`); }} placeholder='填写 evidence_type、title、rationale、values、observed_at、available_at、source_name、source_document_id、source_url、approved_by；asset_id 使用当前标的。' /></label>
+		<button type="button" disabled={loading || !analystEvidenceJSON.trim()} onClick={() => void registerAnalystEvidence()}>登记不可变分析师证据</button>
       <label>无新闻基本面研究输入<textarea aria-label="基本面研究 JSON" rows={8} value={workflowJSON} onChange={(event) => setWorkflowJSON(event.target.value)} placeholder='粘贴含 as_of、forecast、valuation、rating 的证据化 JSON；不会自动补造假设或价格。' /></label>
 		<button type="button" disabled={loading || !preparation?.workflow_template} onClick={loadPreparationTemplate}>载入财务事实模板</button>
 		<button type="button" disabled={loading} onClick={() => void syncMarketPrices()}>同步真实复权价格</button>
@@ -4304,6 +4332,7 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
     {message && <div className="page-message">{message}</div>}
     <div className="metric-grid">
       <article><span>财务快照</span><strong>{bundle.fundamentals?.items?.length ?? 0}</strong><small>严格按 available_at 截止</small></article>
+		<article><span>已批准分析师证据</span><strong>{analystEvidenceItems.length}</strong><small>任意字符串不能作为估值、基准或评级证据</small></article>
 		<article><span>复权价格证据</span><strong>{typeof latestPrice?.price === "number" ? `${latestPrice.price} ${latestPrice.currency || ""}` : "不可用"}</strong><small>{latestPrice?.id || "管理员解锁后可同步真实复权价格，不自动写入研究假设"}</small></article>
 		<article><span>一致预期返回</span><strong>{consensusItems.length}</strong><small>仅返回首次观测后可用的数据</small></article>
 		<article><span>管理层指引</span><strong>{guidanceItems.length}</strong><small>与分析师一致预期分开保存</small></article>
@@ -4316,7 +4345,13 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 		<article><span>资产政策</span><strong>{bundle.marketPolicy?.asset_class || "不可用"} · {bundle.marketPolicy?.market || "—"}</strong><small>{bundle.marketPolicy?.policy?.fundamental_supported ? "基本面可用" : "基本面不适用"} · {bundle.marketPolicy?.policy?.prediction_supported ? "短期预测可用" : "短期预测不适用"}</small></article>
       <article><span>定时研究</span><strong>{schedule?.status || "未配置"}</strong><small>{schedule?.last_run_reason || schedule?.last_run_status || schedule?.next_run_at || "人工研究成功后自动载入同源计划草稿，仍需管理员显式批准"}</small></article>
     </div>
-    <div className="conclusion-list">
+	<div className="conclusion-list">
+		<article className="conclusion-card">
+			<span>分析师证据登记</span>
+			<h3>{analystEvidenceItems.length ? `${analystEvidenceItems.length} 条可用证据` : "尚无已批准证据"}</h3>
+			<p>{analystEvidenceItems.length ? analystEvidenceItems.map((item) => `${item.evidence_type || "unknown"} · ${item.id || "—"}`).join("；") : "请先登记带来源、时点、数值和审批人的证据，再引用到研究输入。"}</p>
+			<small>证据按资产和 available_at 隔离；ID 非空不代表证据有效。</small>
+		</article>
 		<article className="conclusion-card">
 			<span>无新闻研究准备包</span>
 			<h3>{preparation?.status === "analyst_review_required" ? "财务事实已齐，等待分析师输入" : "事实输入尚未就绪"}</h3>

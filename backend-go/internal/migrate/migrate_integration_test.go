@@ -120,7 +120,7 @@ func TestUpCreatesFreshGoRuntimeSchema(t *testing.T) {
 			t.Fatalf("Go runtime table %s was not created: exists=%v err=%v", table, exists, err)
 		}
 	}
-	for _, table := range []string{"fundamental_snapshots", "consensus_snapshots", "management_guidance_snapshots", "guidance_source_documents", "guidance_source_reviews", "forecast_versions", "event_assumption_links", "valuation_runs", "fundamental_rating_states", "fundamental_rating_revisions", "rating_invalidation_rules", "prediction_models", "probability_calibrations", "prediction_runs", "outcome_records", "shadow_prediction_comparisons", "model_governance_checks", "market_price_observations", "fundamental_research_plans", "corporate_action_observations", "benchmark_mapping_observations", "security_universe_snapshots", "security_universe_memberships", "evaluation_holdout_reservations", "evaluation_dataset_versions", "evaluation_dataset_folds", "evaluation_dataset_samples", "evaluation_experiments", "evaluation_experiment_variants", "evaluation_experiment_predictions", "research_quality_reviews", "evaluation_performance_reports", "model_failure_drills"} {
+	for _, table := range []string{"fundamental_snapshots", "consensus_snapshots", "management_guidance_snapshots", "guidance_source_documents", "guidance_source_reviews", "forecast_versions", "event_assumption_links", "valuation_runs", "fundamental_rating_states", "fundamental_rating_revisions", "rating_invalidation_rules", "prediction_models", "probability_calibrations", "prediction_runs", "outcome_records", "shadow_prediction_comparisons", "model_governance_checks", "market_price_observations", "fundamental_research_plans", "analyst_evidence_records", "corporate_action_observations", "benchmark_mapping_observations", "security_universe_snapshots", "security_universe_memberships", "evaluation_holdout_reservations", "evaluation_dataset_versions", "evaluation_dataset_folds", "evaluation_dataset_samples", "evaluation_experiments", "evaluation_experiment_variants", "evaluation_experiment_predictions", "research_quality_reviews", "evaluation_performance_reports", "model_failure_drills"} {
 		var exists bool
 		if err := pool.QueryRow(ctx, `SELECT to_regclass($1) IS NOT NULL`, schema+"."+table).Scan(&exists); err != nil || !exists {
 			t.Fatalf("%s was not created: exists=%v err=%v", table, exists, err)
@@ -129,6 +129,10 @@ func TestUpCreatesFreshGoRuntimeSchema(t *testing.T) {
 	var predictionAssetClassColumn bool
 	if err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=$1 AND table_name='prediction_runs' AND column_name='asset_class')`, schema).Scan(&predictionAssetClassColumn); err != nil || !predictionAssetClassColumn {
 		t.Fatalf("prediction_runs.asset_class missing: exists=%v err=%v", predictionAssetClassColumn, err)
+	}
+	var evidenceContractColumn bool
+	if err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=$1 AND table_name='fundamental_research_plans' AND column_name='evidence_contract_version')`, schema).Scan(&evidenceContractColumn); err != nil || !evidenceContractColumn {
+		t.Fatalf("fundamental_research_plans.evidence_contract_version missing: exists=%v err=%v", evidenceContractColumn, err)
 	}
 	outcomeLabelColumns := []string{"label_definition_version", "objective", "horizon_sessions", "entry_price", "exit_price", "price_field", "time_precision", "benchmark_asset_id", "benchmark_mapping_id", "alpha_definition", "absolute_label", "relative_label", "objective_label", "risk_adjusted_residual", "risk_adjustment_status", "gross_strategy_return", "simulation_status", "research_result_only", "execution_assumptions"}
 	var outcomeLabelColumnCount int

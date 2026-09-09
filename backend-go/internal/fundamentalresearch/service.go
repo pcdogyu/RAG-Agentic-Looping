@@ -111,6 +111,9 @@ func (s *Service) Run(ctx context.Context, input Input) (Result, error) {
 		result.Status, result.Reason = "not_applicable", "asset_currency_outside_market_policy"
 		return result, nil
 	}
+	if err := validateManualResearchEvidence(ctx, s.db, input); err != nil {
+		return Result{}, fmt.Errorf("evidence gate: %w", err)
+	}
 	version, _, err := forecast.NewStore(s.db).Create(ctx, forecast.Submission{AssetID: input.AssetID, AsOf: input.AsOf, ParentVersionID: input.Forecast.ParentVersionID, Inputs: input.Forecast.Inputs, FundamentalSnapshotIDs: input.Forecast.FundamentalSnapshotIDs, Assumptions: input.Forecast.Assumptions})
 	if err != nil {
 		return Result{}, fmt.Errorf("forecast stage: %w", err)
