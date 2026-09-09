@@ -107,6 +107,9 @@ func TestPredictionLifecycleAgainstIsolatedPostgres(t *testing.T) {
 	if _, err = service.RegisterCalibration(ctx, CalibrationRegistration{SourceModelVersion: model.Version, Observations: observations, Scope: calibration.Scope{AssetClass: "crypto", Market: "US", HorizonSessions: 5}, Status: "shadow"}); err == nil {
 		t.Fatal("cross-asset calibration scope was accepted for an equity model")
 	}
+	if _, err = service.RegisterCalibration(ctx, CalibrationRegistration{SourceModelVersion: model.Version, Observations: observations, Scope: calibration.Scope{AssetClass: "equity", Market: "US", HorizonSessions: 20}, Status: "shadow"}); err == nil {
+		t.Fatal("cross-horizon calibration scope was accepted for a five-session model")
+	}
 
 	candidate := model
 	candidate.Version = "integration-candidate-v2"

@@ -158,6 +158,8 @@ type Bin struct {
 	Count           int     `json:"count"`
 	MeanProbability float64 `json:"mean_probability"`
 	Frequency       float64 `json:"frequency"`
+	FrequencyLow95  float64 `json:"frequency_low_95"`
+	FrequencyHigh95 float64 `json:"frequency_high_95"`
 }
 
 func Evaluate(probabilities []float64, labels []bool, binCount int) (Metrics, error) {
@@ -196,10 +198,24 @@ func Evaluate(probabilities []float64, labels []bool, binCount int) (Metrics, er
 		if bin.Count > 0 {
 			bin.MeanProbability = sums[index] / float64(bin.Count)
 			bin.Frequency = float64(positive[index]) / float64(bin.Count)
+			bin.FrequencyLow95, bin.FrequencyHigh95 = wilsonInterval(positive[index], bin.Count)
 			metrics.ECE += float64(bin.Count) / float64(len(labels)) * math.Abs(bin.Frequency-bin.MeanProbability)
 		}
 	}
 	return metrics, nil
+}
+
+func wilsonInterval(positive, total int) (float64, float64) {
+	if total < 1 {
+		return 0, 0
+	}
+	z := 1.959963984540054
+	n := float64(total)
+	p := float64(positive) / n
+	denominator := 1 + z*z/n
+	center := (p + z*z/(2*n)) / denominator
+	margin := z * math.Sqrt((p*(1-p)+z*z/(4*n))/n) / denominator
+	return math.Max(0, center-margin), math.Min(1, center+margin)
 }
 
 func normalizeScope(scope Scope) Scope {

@@ -32,7 +32,7 @@ func TestPlattCalibrationIsScopedAndNeverPublishesExactBounds(t *testing.T) {
 
 func TestCalibrationMetricsReportBinsAndRejectBounds(t *testing.T) {
 	metrics, err := Evaluate([]float64{.2, .7, .8, .3}, []bool{false, true, true, false}, 2)
-	if err != nil || metrics.SampleCount != 4 || len(metrics.Bins) != 2 || math.IsNaN(metrics.ECE) {
+	if err != nil || metrics.SampleCount != 4 || len(metrics.Bins) != 2 || math.IsNaN(metrics.ECE) || metrics.Bins[0].FrequencyHigh95 <= metrics.Bins[0].FrequencyLow95 {
 		t.Fatalf("metrics=%#v err=%v", metrics, err)
 	}
 	if _, err := Evaluate([]float64{0}, []bool{false}, 10); err == nil {

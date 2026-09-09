@@ -96,7 +96,7 @@ jobs:
         run: go test -race ./internal/marketdata -run '^Test(StorePersistsFirstAvailabilityIdempotently|CorporateActionStorePreservesPointInTimeRevisionsAgainstIsolatedPostgres|BenchmarkMappingIsApprovedImmutableAndPointInTimeAgainstIsolatedPostgres|UniverseQueriesKeepFailuresAndHistoricalMembershipAgainstIsolatedPostgres)$' -count=1 -v
       - name: Verify historical security-universe capture against PostgreSQL
         run: go test -race ./internal/jobs -run '^(TestPersistMarketRecordsIncludedExcludedAndDelistedMembershipsAgainstIsolatedPostgres|TestPredictionOutcomesMatureFiveSessionsWithoutAdvancingTwentyAgainstIsolatedPostgres)$' -count=1 -v
-      - name: Verify rolling walk-forward manifests and sealed holdout against PostgreSQL
+      - name: Verify rolling manifests, sealed holdout, baselines and independent calibration against PostgreSQL
         run: go test -race ./internal/evaluation -run '^TestDatasetStorePersistsReproducibleWalkForwardAndSealedHoldoutAgainstIsolatedPostgres$' -count=1 -v
       - name: Verify recent research filtering against PostgreSQL
         env:

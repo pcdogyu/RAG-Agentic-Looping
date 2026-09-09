@@ -61,14 +61,24 @@ func TestDatasetStorePersistsReproducibleWalkForwardAndSealedHoldoutAgainstIsola
 	for index := 0; index < 180; index++ {
 		signal := start.AddDate(0, 0, index)
 		id := fmt.Sprintf("wf-prediction-%03d", index)
-		feature, _ := json.Marshal(map[string]any{"as_of": signal, "values": map[string]any{"feature": index}})
+		direction := -1.0
+		if index%2 == 0 {
+			direction = 1
+		}
+		feature, _ := json.Marshal(map[string]any{"as_of": signal, "values": map[string]any{
+			"pre_signal_price_reaction": direction, "business_exposure_share": direction * 1.1,
+			"new_information_score": direction * 1.2, "consensus_surprise_z": direction * 1.3}})
 		if _, err = pool.Exec(ctx, `INSERT INTO prediction_runs(id,asset_id,asset_class,signal_available_at,horizon_sessions,objective,model_version,status,model_status,raw_score,feature_snapshot,exclusion_reason,idempotency_key,created_at)
 			VALUES($1,'equity:XNAS:WF','equity',$2,1,'absolute_up','wf-model','uncalibrated','shadow',0.5,$3,'',$1,$2)`, id, signal, feature); err != nil {
 			t.Fatal(err)
 		}
+		label, rawReturn := "down", -.01
+		if index%2 == 0 {
+			label, rawReturn = "up", .01
+		}
 		if _, err = pool.Exec(ctx, `INSERT INTO outcome_records(prediction_run_id,entry_at,exit_at,label_available_at,raw_return,status,data_quality,label_definition_version,objective,horizon_sessions,price_field,time_precision,alpha_definition,absolute_label,relative_label,objective_label,risk_adjustment_status,simulation_status,research_result_only)
-			VALUES($1,$2,$3,$4,0.01,'mature','{}','prediction-outcome-label-v1','absolute_up',1,'adjusted_close','daily_close','arithmetic_asset_total_return_minus_benchmark_total_return','up','unavailable','up','not_configured','not_configured',true)`,
-			id, signal.AddDate(0, 0, 1), signal.AddDate(0, 0, 2), signal.AddDate(0, 0, 3)); err != nil {
+			VALUES($1,$2,$3,$4,$5,'mature','{}','prediction-outcome-label-v1','absolute_up',1,'adjusted_close','daily_close','arithmetic_asset_total_return_minus_benchmark_total_return',$6,'unavailable',$6,'not_configured','not_configured',true)`,
+			id, signal.AddDate(0, 0, 1), signal.AddDate(0, 0, 2), signal.AddDate(0, 0, 3), rawReturn, label); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -82,8 +92,8 @@ func TestDatasetStorePersistsReproducibleWalkForwardAndSealedHoldoutAgainstIsola
 		t.Fatalf("reserve holdout=%#v created=%v err=%v", reservation, created, err)
 	}
 	input := DatasetBuildInput{HoldoutReservationID: reservation.ID, AvailableAsOf: start.AddDate(0, 0, 170), DevelopmentStart: start,
-		DevelopmentEnd: start.AddDate(0, 0, 120), TrainWindowDays: 30, CalibrationWindowDays: 15, TestWindowDays: 15,
-		StepDays: 15, EmbargoDays: 2, CreatedBy: "isolated builder", IdempotencyKey: "wf-dataset-v1"}
+		DevelopmentEnd: start.AddDate(0, 0, 120), TrainWindowDays: 40, CalibrationWindowDays: 35, TestWindowDays: 25,
+		StepDays: 10, EmbargoDays: 2, CreatedBy: "isolated builder", IdempotencyKey: "wf-dataset-v1"}
 	dataset, created, err := store.Materialize(ctx, input, start.AddDate(0, 0, 180))
 	if err != nil || !created || len(dataset.Manifest.Folds) < 2 || dataset.Manifest.FinalHoldout.IncludedCount != 30 {
 		t.Fatalf("dataset=%#v created=%v err=%v", dataset, created, err)
@@ -116,4 +126,35 @@ func TestDatasetStorePersistsReproducibleWalkForwardAndSealedHoldoutAgainstIsola
 	if strings.Contains(string(body), "wf-prediction-130") || public.Manifest.FinalHoldout.IncludedCount != 30 {
 		t.Fatalf("sealed sample leaked or count disappeared: %s", body)
 	}
+	experimentStore := NewExperimentStore(pool)
+	experiment, created, err := experimentStore.Materialize(ctx, ExperimentBuildInput{DatasetID: dataset.Manifest.ID, CreatedBy: "isolated experimenter", IdempotencyKey: "wf-experiment-v1"}, start.AddDate(0, 0, 181))
+	if err != nil || !created || experiment.Experiment.FinalHoldoutAccessed || len(experiment.Experiment.Folds) != len(dataset.Manifest.Folds) {
+		t.Fatalf("experiment=%#v created=%v err=%v", experiment, created, err)
+	}
+	full := experimentVariantByName(experiment.Experiment.Folds[0].Variants, "logistic_full")
+	if full.Status != "evaluated" || full.Model == nil || full.Calibrator == nil || full.Metrics.Probability == nil {
+		t.Fatalf("dataset-backed independent experiment did not calibrate: %#v", full)
+	}
+	var finalPredictions int
+	if err = pool.QueryRow(ctx, `SELECT count(*)::int FROM evaluation_experiment_predictions prediction
+		JOIN evaluation_dataset_samples sample ON sample.dataset_id=$1 AND sample.prediction_run_id=prediction.prediction_run_id
+		WHERE prediction.experiment_id=$2 AND sample.fold_index=-1`, dataset.Manifest.ID, experiment.Experiment.ID).Scan(&finalPredictions); err != nil {
+		t.Fatal(err)
+	}
+	if finalPredictions != 0 {
+		t.Fatalf("development experiment accessed %d sealed holdout samples", finalPredictions)
+	}
+	repeatedExperiment, created, err := experimentStore.Materialize(ctx, ExperimentBuildInput{DatasetID: dataset.Manifest.ID, CreatedBy: "isolated experimenter", IdempotencyKey: "wf-experiment-v1"}, start.AddDate(0, 0, 181))
+	if err != nil || created || repeatedExperiment.Experiment.ID != experiment.Experiment.ID {
+		t.Fatalf("experiment was not idempotent: %#v created=%v err=%v", repeatedExperiment, created, err)
+	}
+}
+
+func experimentVariantByName(values []ExperimentVariant, name string) ExperimentVariant {
+	for _, value := range values {
+		if value.Name == name {
+			return value
+		}
+	}
+	return ExperimentVariant{}
 }

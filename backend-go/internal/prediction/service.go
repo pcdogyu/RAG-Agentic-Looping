@@ -159,8 +159,9 @@ func (s *Service) RegisterCalibration(ctx context.Context, input CalibrationRegi
 		return calibration.Model{}, fmt.Errorf("calibration scope is unsupported")
 	}
 	var sourceMarket string
+	var sourceHorizon int
 	var sourceScopeBody []byte
-	if err := s.db.QueryRow(ctx, `SELECT market,scope::jsonb FROM prediction_models WHERE version=$1`, input.SourceModelVersion).Scan(&sourceMarket, &sourceScopeBody); err != nil {
+	if err := s.db.QueryRow(ctx, `SELECT market,horizon_sessions,scope::jsonb FROM prediction_models WHERE version=$1`, input.SourceModelVersion).Scan(&sourceMarket, &sourceHorizon, &sourceScopeBody); err != nil {
 		return calibration.Model{}, fmt.Errorf("load source prediction model: %w", err)
 	}
 	sourceScope := map[string]any{}
@@ -169,8 +170,8 @@ func (s *Service) RegisterCalibration(ctx context.Context, input CalibrationRegi
 	if sourceAssetClass == "" || sourceAssetClass == "<nil>" {
 		sourceAssetClass = "equity"
 	}
-	if !strings.EqualFold(sourceMarket, input.Scope.Market) || sourceAssetClass != input.Scope.AssetClass {
-		return calibration.Model{}, fmt.Errorf("calibration scope must match the source model asset class and market")
+	if !strings.EqualFold(sourceMarket, input.Scope.Market) || sourceAssetClass != input.Scope.AssetClass || sourceHorizon != input.Scope.HorizonSessions {
+		return calibration.Model{}, fmt.Errorf("calibration scope must match the source model asset class, market and horizon")
 	}
 	model, err := calibration.FitPlatt(input.SourceModelVersion, input.Observations, input.Scope)
 	if err != nil {
