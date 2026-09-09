@@ -81,3 +81,27 @@ CREATE TABLE IF NOT EXISTS security_universe_memberships (
 
 CREATE INDEX IF NOT EXISTS ix_security_universe_membership_asset
     ON security_universe_memberships(asset_id,available_at DESC,effective_at DESC);
+
+-- Outcomes created before the PIT mapping contract used an implicit market
+-- switch. Retain those derived values for audit, but never expose them as an
+-- approved relative return. This predicate is idempotent on every startup.
+UPDATE outcomes
+SET payload = (
+    payload::jsonb || jsonb_build_object(
+        'legacy_benchmark_audit', jsonb_build_object(
+            'benchmark_return', payload::jsonb->'benchmark_return',
+            'alpha', payload::jsonb->'alpha',
+            'benchmark_status', payload::jsonb->'benchmark_status',
+            'quarantine_reason', 'pre_pit_mapping_contract'
+        ),
+        'benchmark_return', NULL,
+        'alpha', NULL,
+        'benchmark_status', 'unavailable',
+        'benchmark_reason', 'legacy_unapproved_mapping',
+        'benchmark_mapping_id', '',
+        'benchmark_asset_id', ''
+    )
+)::json
+WHERE coalesce(payload::jsonb->>'benchmark_mapping_id','')=''
+  AND coalesce(payload::jsonb->>'benchmark_reason','')<>'legacy_unapproved_mapping'
+  AND (payload::jsonb->>'benchmark_return' IS NOT NULL OR payload::jsonb->>'alpha' IS NOT NULL);

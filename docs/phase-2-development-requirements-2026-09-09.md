@@ -151,6 +151,7 @@
 - 管理员通过 `POST /go/benchmark-mappings` 显式批准映射，请求必须携带幂等键；跨币种映射、基准资产不存在、资产自我基准和身份不一致会被拒绝。迁移不自动填入任何猜测或倒填的历史策略。
 - `GET /go/benchmark-mappings/{assetID}` 按有效时点和可获得截止解析优先级；历史行业只能由调用方提供当时的行业上下文，禁止读取今天的行业分类替代过去。
 - 结果计算已移除按市场写死的 SPY、沪深 300、恒指和 BTC 路径。信号产生时尚未批准映射、精确身份/币种不完整或基准价格缺失时，`benchmark_return` 与 `alpha` 保持空值，并记录结构化 `unavailable` 原因。
+- 旧版硬编码路径已经生成的相对收益不会继续冒充已批准结果：迁移将原值保存在 `legacy_benchmark_audit`，公开字段置空并标记 `legacy_unapproved_mapping`；绝对收益仍保留。
 - 新增 `security_universe_snapshots` 与 `security_universe_memberships`。每次主数据刷新不可变保存供应商、纳入条件、纳入、排除、供应商明确退市和失败状态；供应商列表缺失只标记为排除，不推断为退市，失败刷新不清空现有证券。
 - `GET /go/security-universes/{universeID}/snapshots` 和 `GET /go/security-universe-memberships/{assetID}` 支持按可获得时点读回历史；`GET /go/market-data-quality` 汇总基准缺失、证券池失败/排除/退市、行情和公司行动覆盖，并公开各类缺失处理规则。
 - PostgreSQL 回归测试覆盖事后批准不回灌、幂等审批、币种冲突、失败快照、未来快照隔离，以及纳入/排除/退市三类成员记录。

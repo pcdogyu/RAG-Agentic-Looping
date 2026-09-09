@@ -165,6 +165,15 @@ func TestUpCreatesFreshGoRuntimeSchema(t *testing.T) {
 	if _, err := pool.Exec(ctx, `INSERT INTO news_items(id,source,source_quality,title,summary,url,language,published_at,observed_at,as_of,content_hash,symbols,raw_metadata) VALUES($1,'test','official','title','summary','https://example.com','en',now(),now(),now(),$2,'[]','{}')`, uuid.NewString(), fmt.Sprintf("%064d", 1)); err != nil {
 		t.Fatalf("fresh schema rejected a core write: %v", err)
 	}
+	legacyRecommendationID, legacyOutcomeID := uuid.NewString(), uuid.NewString()
+	if _, err := pool.Exec(ctx, `INSERT INTO recommendations(id,run_id,asset_id,score,rating,confidence,as_of,payload)
+		VALUES($1,$2,'legacy-asset',50,'buy',0.5,now(),'{}')`, legacyRecommendationID, uuid.NewString()); err != nil {
+		t.Fatalf("insert legacy benchmark recommendation: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO outcomes(id,recommendation_id,horizon_days,observed_at,payload)
+		VALUES($1,$2,20,now(),'{"raw_return":0.12,"benchmark_return":0.04,"alpha":0.08,"benchmark_status":"available"}')`, legacyOutcomeID, legacyRecommendationID); err != nil {
+		t.Fatalf("insert legacy benchmark outcome: %v", err)
+	}
 
 	newsID, eventID := uuid.New(), uuid.New()
 	summary := "博通(AVGO.O)2026财年Q4展望营收为348亿美元。"
@@ -190,6 +199,19 @@ func TestUpCreatesFreshGoRuntimeSchema(t *testing.T) {
 	}
 	if err := Up(ctx, pool); err != nil {
 		t.Fatalf("reapply migrations for headline repair: %v", err)
+	}
+	var benchmarkStatus, benchmarkReason string
+	var benchmarkReturn, alpha *float64
+	var legacyBenchmarkReturn, legacyAlpha float64
+	if err := pool.QueryRow(ctx, `SELECT payload::jsonb->>'benchmark_status',payload::jsonb->>'benchmark_reason',
+		(payload::jsonb->>'benchmark_return')::double precision,(payload::jsonb->>'alpha')::double precision,
+		(payload::jsonb->'legacy_benchmark_audit'->>'benchmark_return')::double precision,
+		(payload::jsonb->'legacy_benchmark_audit'->>'alpha')::double precision FROM outcomes WHERE id=$1`, legacyOutcomeID).Scan(
+		&benchmarkStatus, &benchmarkReason, &benchmarkReturn, &alpha, &legacyBenchmarkReturn, &legacyAlpha); err != nil {
+		t.Fatal(err)
+	}
+	if benchmarkStatus != "unavailable" || benchmarkReason != "legacy_unapproved_mapping" || benchmarkReturn != nil || alpha != nil || legacyBenchmarkReturn != .04 || legacyAlpha != .08 {
+		t.Fatalf("legacy benchmark was not quarantined audibly: status=%s reason=%s return=%v alpha=%v legacy=%v/%v", benchmarkStatus, benchmarkReason, benchmarkReturn, alpha, legacyBenchmarkReturn, legacyAlpha)
 	}
 	var repairedNews, repairedEvent, repairedPayload string
 	if err := pool.QueryRow(ctx, `SELECT title FROM news_items WHERE id=$1`, newsID).Scan(&repairedNews); err != nil {
