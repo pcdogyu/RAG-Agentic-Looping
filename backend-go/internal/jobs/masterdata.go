@@ -20,6 +20,7 @@ import (
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/config"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/fundamentalresearch"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/fundamentals"
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/marketdata"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -28,6 +29,7 @@ const (
 	refreshAssetUniverseTask       = "market_loop.refresh_asset_universe"
 	refreshMacroUniverseTask       = "market_loop.refresh_macro_universe"
 	syncFundamentalsTask           = "market_loop.sync_fundamental_snapshots"
+	syncCorporateActionsTask       = "market_loop.sync_corporate_actions"
 	refreshTrackedFundamentalsTask = "market_loop.refresh_tracked_fundamentals"
 	runScheduledFundamentalTask    = "market_loop.run_scheduled_fundamental_research"
 	masterdataLockTTL              = 2 * time.Hour
@@ -91,9 +93,66 @@ func NewMasterdataHandlers(cfg config.Config, db *pgxpool.Pool, redisClient *red
 		refreshAssetUniverseTask:       runtime.refreshAssetUniverse,
 		refreshMacroUniverseTask:       runtime.refreshMacroUniverse,
 		syncFundamentalsTask:           runtime.syncFundamentalSnapshots,
+		syncCorporateActionsTask:       runtime.syncCorporateActions,
 		refreshTrackedFundamentalsTask: runtime.refreshTrackedFundamentals,
 		runScheduledFundamentalTask:    runtime.runScheduledFundamentalResearch,
 	}
+}
+
+func (runtime *masterdataRuntime) syncCorporateActions(ctx context.Context, job Job) (any, error) {
+	envelope := taskEnvelope{}
+	_ = json.Unmarshal(job.Payload, &envelope)
+	assetID := strings.TrimSpace(stringValue(envelope.Kwargs["asset_id"]))
+	if assetID == "" && len(envelope.Args) > 0 {
+		assetID = strings.TrimSpace(stringValue(envelope.Args[0]))
+	}
+	if assetID == "" {
+		return nil, errors.New("corporate action sync requires asset_id")
+	}
+	limit := int(numberValue(envelope.Kwargs["limit"]))
+	if limit == 0 {
+		limit = 500
+	}
+	if limit < 1 || limit > 1000 {
+		return nil, errors.New("corporate action limit must be between 1 and 1000")
+	}
+	return runtime.syncAssetCorporateActions(ctx, assetID, limit)
+}
+
+func (runtime *masterdataRuntime) syncAssetCorporateActions(ctx context.Context, assetID string, limit int) (any, error) {
+	var symbol, market, assetClass, currency string
+	if err := runtime.db.QueryRow(ctx, `SELECT symbol,market,asset_class,currency FROM assets WHERE id=$1 AND active=true`, assetID).Scan(&symbol, &market, &assetClass, &currency); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("active asset %q was not found", assetID)
+		}
+		return nil, err
+	}
+	if strings.ToUpper(market) != "US" || strings.ToLower(assetClass) != "equity" {
+		return nil, fmt.Errorf("corporate action sync currently supports US equities only")
+	}
+	active := (&discoveryRuntime{cfg: runtime.cfg, db: runtime.db}).effectiveDiscoveryConfig(ctx)
+	client := marketdata.FMPCorporateActionClient{BaseURL: active.FMPBaseURL, AccessToken: active.FMPAccessToken, HTTPClient: runtime.client}
+	items, err := client.Fetch(ctx, assetID, market, currency, symbol, limit)
+	if err != nil {
+		return nil, err
+	}
+	store := marketdata.NewStore(runtime.db)
+	inserted := 0
+	counts := map[string]int{}
+	for _, item := range items {
+		created, err := store.SaveCorporateAction(ctx, item)
+		if err != nil {
+			return nil, err
+		}
+		counts[string(item.ActionType)]++
+		if created {
+			inserted++
+		}
+	}
+	return map[string]any{
+		"asset_id": assetID, "symbol": symbol, "source": "FMP", "action_count": len(items), "inserted": inserted,
+		"unchanged": len(items) - inserted, "action_types": counts, "time_contract_version": marketdata.CorporateActionContractVersion,
+	}, nil
 }
 
 // syncFundamentalSnapshots is intentionally a per-asset, manually queued P1
@@ -177,12 +236,20 @@ func (runtime *masterdataRuntime) refreshTrackedFundamentals(ctx context.Context
 	results := map[string]any{}
 	succeeded := 0
 	for _, assetID := range assetIDs {
-		result, syncErr := runtime.syncAssetFundamentals(ctx, assetID, 12)
-		if syncErr != nil {
-			results[assetID] = map[string]any{"status": "failed", "error": syncErr.Error()}
+		fundamentalResult, fundamentalErr := runtime.syncAssetFundamentals(ctx, assetID, 12)
+		actionResult, actionErr := runtime.syncAssetCorporateActions(ctx, assetID, 500)
+		if fundamentalErr != nil || actionErr != nil {
+			entry := map[string]any{"status": "partial", "fundamentals": fundamentalResult, "corporate_actions": actionResult}
+			if fundamentalErr != nil {
+				entry["fundamental_error"] = fundamentalErr.Error()
+			}
+			if actionErr != nil {
+				entry["corporate_action_error"] = actionErr.Error()
+			}
+			results[assetID] = entry
 			continue
 		}
-		results[assetID] = result
+		results[assetID] = map[string]any{"status": "completed", "fundamentals": fundamentalResult, "corporate_actions": actionResult}
 		succeeded++
 	}
 	return map[string]any{"status": "completed", "selected": len(assetIDs), "succeeded": succeeded, "results": results, "automatic_assumptions": false}, nil
@@ -203,6 +270,15 @@ func (runtime *masterdataRuntime) runScheduledFundamentalResearch(ctx context.Co
 	for _, plan := range plans {
 		result := fundamentalresearch.ScheduledResult{Version: fundamentalresearch.ScheduledResearchVersion, PlanID: plan.ID, AssetID: plan.AssetID, Status: "data_refresh_failed", AsOf: now, ForecastVersionID: plan.ForecastVersionID}
 		if _, syncErr := runtime.syncAssetFundamentals(ctx, plan.AssetID, 12); syncErr != nil {
+			result.Reason = syncErr.Error()
+			if recordErr := store.Record(ctx, plan, result, time.Now().UTC()); recordErr != nil {
+				return nil, recordErr
+			}
+			results[plan.AssetID] = result
+			failed++
+			continue
+		}
+		if _, syncErr := runtime.syncAssetCorporateActions(ctx, plan.AssetID, 500); syncErr != nil {
 			result.Reason = syncErr.Error()
 			if recordErr := store.Record(ctx, plan, result, time.Now().UTC()); recordErr != nil {
 				return nil, recordErr

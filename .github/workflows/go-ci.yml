@@ -92,8 +92,8 @@ jobs:
         run: go test -race ./internal/prediction -run '^TestPredictionLifecycleAgainstIsolatedPostgres$' -count=1 -v
       - name: Verify no-news fundamental workflow against PostgreSQL
         run: go test -race ./internal/fundamentalresearch -run '^Test(WorkflowCompletesWithoutNews|ScheduledWorkflowRevaluesApprovedForecast)AgainstIsolatedPostgres$' -count=1 -v
-      - name: Verify immutable market-price observations against PostgreSQL
-        run: go test -race ./internal/marketdata -run '^TestStorePersistsFirstAvailabilityIdempotently$' -count=1 -v
+      - name: Verify immutable market-data observations against PostgreSQL
+        run: go test -race ./internal/marketdata -run '^Test(StorePersistsFirstAvailabilityIdempotently|CorporateActionStorePreservesPointInTimeRevisionsAgainstIsolatedPostgres)$' -count=1 -v
       - name: Verify recent research filtering against PostgreSQL
         env:
           MAPPING_TEST_ISOLATED: "1"

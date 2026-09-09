@@ -49,6 +49,12 @@ func TestFundamentalResearchRequiresAdminToken(t *testing.T) {
 			t.Fatalf("schedule method=%s status=%d", method, response.Code)
 		}
 	}
+	request = httptest.NewRequest(http.MethodPost, "/go/corporate-actions/equity%3ANYSE%3AVRT/sync", nil)
+	response = httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("corporate action sync status=%d", response.Code)
+	}
 }
 
 func TestConsensusImportRequiresAdminToken(t *testing.T) {

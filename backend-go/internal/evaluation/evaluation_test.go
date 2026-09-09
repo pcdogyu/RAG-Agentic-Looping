@@ -2,6 +2,7 @@ package evaluation
 
 import (
 	"fmt"
+	"math"
 	"testing"
 	"time"
 )
@@ -27,6 +28,20 @@ func TestOutcomeRejectsUnadjustedCorporateActionSeries(t *testing.T) {
 	result := BuildOutcomeLabel(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC), []PricePoint{price(100, 2, false), price(50, 3, false)}, nil, HorizonPolicy{HorizonSessions: 1, EntryPolicy: "first_session_after_signal", PriceField: "adjusted_close"})
 	if result.Status != "unavailable" {
 		t.Fatalf("result=%#v", result)
+	}
+}
+
+func TestOutcomeUsesAdjustedCloseAcrossSplitInsteadOfFalseRawPriceCrash(t *testing.T) {
+	entryAt := time.Date(2025, 1, 2, 21, 0, 0, 0, time.UTC)
+	exitAt := time.Date(2025, 1, 3, 21, 0, 0, 0, time.UTC)
+	rawEntry, adjustedEntry, rawExit, adjustedExit := 100.0, 50.0, 51.0, 51.0
+	asset := []PricePoint{
+		{SessionDate: entryAt, AvailableAt: entryAt, Close: &rawEntry, AdjustedClose: &adjustedEntry, Currency: "USD", CorporateActionAdjusted: true},
+		{SessionDate: exitAt, AvailableAt: exitAt, Close: &rawExit, AdjustedClose: &adjustedExit, Currency: "USD", CorporateActionAdjusted: true},
+	}
+	result := BuildOutcomeLabel(entryAt.Add(-time.Hour), asset, nil, HorizonPolicy{HorizonSessions: 1, EntryPolicy: "first_session_after_signal", PriceField: "adjusted_close"})
+	if result.Status != "mature" || result.RawReturn == nil || math.Abs(*result.RawReturn-.02) > 1e-9 {
+		t.Fatalf("split-adjusted result=%#v", result)
 	}
 }
 
