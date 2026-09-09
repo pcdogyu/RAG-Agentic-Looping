@@ -33,6 +33,7 @@ const (
 	syncFundamentalsTask           = "market_loop.sync_fundamental_snapshots"
 	syncConsensusTask              = "market_loop.sync_consensus_snapshots"
 	syncGuidanceSourcesTask        = "market_loop.sync_guidance_source_documents"
+	syncMarketPricesTask           = "market_loop.sync_market_price_observations"
 	syncCorporateActionsTask       = "market_loop.sync_corporate_actions"
 	refreshTrackedFundamentalsTask = "market_loop.refresh_tracked_fundamentals"
 	runScheduledFundamentalTask    = "market_loop.run_scheduled_fundamental_research"
@@ -104,10 +105,73 @@ func NewMasterdataHandlers(cfg config.Config, db *pgxpool.Pool, redisClient *red
 		syncFundamentalsTask:           runtime.syncFundamentalSnapshots,
 		syncConsensusTask:              runtime.syncConsensusSnapshots,
 		syncGuidanceSourcesTask:        runtime.syncGuidanceSourceDocuments,
+		syncMarketPricesTask:           runtime.syncMarketPriceObservations,
 		syncCorporateActionsTask:       runtime.syncCorporateActions,
 		refreshTrackedFundamentalsTask: runtime.refreshTrackedFundamentals,
 		runScheduledFundamentalTask:    runtime.runScheduledFundamentalResearch,
 	}
+}
+
+// syncMarketPriceObservations gives the governed manual workflow the same
+// immutable adjusted-close input used by scheduled research and outcome
+// evaluation. It records only provider observations and never creates a
+// forecast assumption, valuation, rating, or probability.
+func (runtime *masterdataRuntime) syncMarketPriceObservations(ctx context.Context, job Job) (any, error) {
+	envelope := taskEnvelope{}
+	_ = json.Unmarshal(job.Payload, &envelope)
+	assetID := strings.TrimSpace(stringValue(envelope.Kwargs["asset_id"]))
+	if assetID == "" && len(envelope.Args) > 0 {
+		assetID = strings.TrimSpace(stringValue(envelope.Args[0]))
+	}
+	if assetID == "" {
+		return nil, errors.New("market price observation sync requires asset_id")
+	}
+	lookbackDays := int(numberValue(envelope.Kwargs["lookback_days"]))
+	if lookbackDays == 0 {
+		lookbackDays = 14
+	}
+	if lookbackDays < 1 || lookbackDays > 90 {
+		return nil, errors.New("market price observation lookback_days must be between 1 and 90")
+	}
+	asset := map[string]any{}
+	var assetClass, market, symbol, currency string
+	if err := runtime.db.QueryRow(ctx, `SELECT asset_class,market,symbol,currency FROM assets WHERE id=$1 AND active=true`, assetID).Scan(&assetClass, &market, &symbol, &currency); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, errors.New("active asset is not available for market price sync")
+		}
+		return nil, err
+	}
+	asset["asset_id"], asset["asset_class"], asset["market"], asset["symbol"], asset["currency"] = assetID, assetClass, market, symbol, currency
+	var before int
+	if err := runtime.db.QueryRow(ctx, `SELECT count(*) FROM market_price_observations WHERE asset_id=$1`, assetID).Scan(&before); err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	priceRuntime := &outcomeRuntime{cfg: runtime.cfg, db: runtime.db, redis: runtime.redis, client: runtime.client}
+	points, err := priceRuntime.cachedPrices(ctx, asset, now.AddDate(0, 0, -lookbackDays), now, map[string][]outcomePricePoint{})
+	if err != nil {
+		return nil, err
+	}
+	adjusted := 0
+	for _, point := range points {
+		if point.Adjusted {
+			adjusted++
+		}
+	}
+	var after int
+	if err := runtime.db.QueryRow(ctx, `SELECT count(*) FROM market_price_observations WHERE asset_id=$1`, assetID).Scan(&after); err != nil {
+		return nil, err
+	}
+	status, reason := "completed", ""
+	if adjusted == 0 {
+		status, reason = "unavailable", "adjusted_close_unavailable"
+	}
+	return map[string]any{
+		"status": status, "reason": reason, "asset_id": assetID, "lookback_days": lookbackDays,
+		"observations_received": len(points), "adjusted_close_received": adjusted, "inserted": after - before, "stored_total": after,
+		"time_contract_version": marketdata.PriceContractVersion, "automatic_assumptions": false, "automatic_valuation": false,
+		"automatic_rating": false, "automatic_probability": false,
+	}, nil
 }
 
 var errSECIdentityMissing = errors.New("SEC identity is not configured")

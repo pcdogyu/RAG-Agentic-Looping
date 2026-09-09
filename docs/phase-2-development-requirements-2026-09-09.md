@@ -119,6 +119,7 @@
 | 2.12 | 一致预期首次观测与前瞻修订历史 | 已完成工程接线（真实修订序列从首次观测后积累） |
 | 2.13 | 公告语义与管理层指引修订 | 已完成工程接线（生产真实指引修订待可靠来源积累） |
 | 2.14 | SEC 原始披露候选与管理层指引人工确认 | 已完成工程接线（生产 SEC 身份与真实人工核验待配置） |
+| 2.15 | 无新闻研究真实复权价格冷启动 | 已完成工程接线（生产真实价格读回待部署后验收） |
 
 ## 5. 第二期完成定义
 
@@ -275,3 +276,11 @@
 - 单元回归覆盖 User-Agent、CIK 解析、平行数组完整性、支持表单、官方时间语义和跨 accession 证据 URL 拒绝；PostgreSQL 回归覆盖候选幂等、公告前截止、人工确认、来源字段强制覆盖、核验幂等冲突以及无评级副作用。
 
 官方数据契约参考：[SEC EDGAR 数据 API](https://www.sec.gov/search-filings/edgar-application-programming-interfaces) 与 [SEC EDGAR 访问说明](https://www.sec.gov/search-filings/edgar-search-assistance)。
+
+### 2.15 无新闻研究真实复权价格冷启动
+
+- 新增管理员限定的 `POST /go/market-prices/{assetID}/sync`，把单标的最近 1—90 日真实供应商行情排入主数据 Worker；默认同步最近 14 日。它与定时研究和真实结果标签复用同一价格适配器、标准化逻辑与 `market_price_observations` 不可变存储，不建立第二套价格口径。
+- 同步结果分别报告供应商返回数、复权收盘价数、新增数和累计数；没有可靠 `adjusted_close` 时返回明确 `unavailable`，普通收盘价不能冒充复权价格证据。
+- 同步只写行情事实，响应和 Worker 结果明确 `automatic_assumptions=false`、`automatic_valuation=false`、`automatic_rating=false`；不会因为取得价格而生成预测、估值、评级或概率。
+- “基本面与预测”页面可显式同步并读取最近复权价格，展示价格观测 ID，供人工填写的研究输入引用。财务事实模板仍不自动把价格写入审批内容，分析师必须确认价格时点与证据适用性。
+- PostgreSQL 隔离回归覆盖真实适配器形状、复权价优先、来源 URL 去凭据、首次可获得时间、重复同步幂等，以及没有预测/评级副作用；生产验收需要对样板标的同步并读回非零不可变价格观测。

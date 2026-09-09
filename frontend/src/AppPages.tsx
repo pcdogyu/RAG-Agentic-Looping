@@ -4054,6 +4054,7 @@ export function ResearchPolicyPage({ apiBase }: { apiBase: string }) {
 
 type FundamentalBundle = {
   fundamentals?: { items?: Array<{ id?: string; statement_type?: string; available_at?: string; source?: { provider?: string; url?: string } }> };
+	prices?: { items?: Array<{ id?: string; price?: number; price_field?: string; observed_at?: string; available_at?: string; currency?: string; source_name?: string; source_url?: string }> };
 	consensus?: {
 		items?: Array<{ id?: string; metric?: string; fiscal_period_end?: string; statistic?: string; estimate_value?: number; analyst_count?: number; currency?: string; available_at?: string; source_name?: string }>;
 		revisions?: Array<{ current_id?: string; metric?: string; fiscal_period_end?: string; statistic?: string; previous_value?: number; current_value?: number; absolute_change?: number; direction?: string; observed_at?: string; individual_analyst_behavior_status?: string }>;
@@ -4122,6 +4123,7 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
     const path = encodeURIComponent(canonical);
 		const endpoints = [
 			{ key: "fundamentals", route: "fundamentals" }, { key: "preparation", route: "fundamental-research", suffix: "/preparation" },
+			{ key: "prices", route: "market-prices", query: "price_field=adjusted_close&limit=20" },
 			{ key: "consensus", route: "consensus" },
 			{ key: "guidance", route: "consensus", suffix: "/guidance" },
 			{ key: "guidanceSources", route: "consensus", suffix: "/guidance-sources" },
@@ -4131,7 +4133,7 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 			{ key: "schedule", route: "fundamental-research", suffix: "/schedule" },
 		] as const;
     try {
-			const responses = await Promise.all(endpoints.map((item) => fetch(`${apiBase}/go/${item.route}/${path}${"suffix" in item ? item.suffix : ""}?limit=20`)));
+			const responses = await Promise.all(endpoints.map((item) => fetch(`${apiBase}/go/${item.route}/${path}${"suffix" in item ? item.suffix : ""}?${"query" in item ? item.query : "limit=20"}`)));
       const failed = responses.find((response) => !response.ok);
       if (failed) throw new Error(`HTTP ${failed.status}`);
       const values = await Promise.all(responses.map((response) => response.json()));
@@ -4139,7 +4141,20 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
     } catch (error) {
       setMessage(`读取失败：${error instanceof Error ? error.message : "未知错误"}`);
     } finally { setLoading(false); }
-  }
+	}
+	async function syncMarketPrices() {
+		const canonical = assetID.trim();
+		if (!canonical || !token) return;
+		setLoading(true); setMessage("");
+		try {
+			const response = await fetch(`${apiBase}/go/market-prices/${encodeURIComponent(canonical)}/sync?lookback_days=14`, { method: "POST", headers: { "X-Admin-Token": token } });
+			const payload = await response.json() as { task_id?: string; detail?: string };
+			if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
+			setMessage(`真实复权价格同步任务已排队：${payload.task_id || "等待 Worker"}。完成后重新读取即可引用不可变价格证据。`);
+		} catch (error) {
+			setMessage(`复权价格同步失败：${error instanceof Error ? error.message : "未知错误"}`);
+		} finally { setLoading(false); }
+	}
 	async function syncConsensus() {
 		const canonical = assetID.trim();
 		if (!canonical || !token) return;
@@ -4243,6 +4258,8 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
   const forecast = bundle.forecasts?.items?.[0];
   const schedule = bundle.schedule?.items?.[0];
 	const preparation = bundle.preparation;
+	const prices = bundle.prices?.items || [];
+	const latestPrice = prices[0];
 	const consensus = bundle.consensus;
 	const consensusItems = consensus?.items || [];
 	const guidance = bundle.guidance;
@@ -4261,6 +4278,7 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
     {token && <div className="integration-editor">
       <label>无新闻基本面研究输入<textarea aria-label="基本面研究 JSON" rows={8} value={workflowJSON} onChange={(event) => setWorkflowJSON(event.target.value)} placeholder='粘贴含 as_of、forecast、valuation、rating 的证据化 JSON；不会自动补造假设或价格。' /></label>
 		<button type="button" disabled={loading || !preparation?.workflow_template} onClick={loadPreparationTemplate}>载入财务事实模板</button>
+		<button type="button" disabled={loading} onClick={() => void syncMarketPrices()}>同步真实复权价格</button>
 		<button type="button" disabled={loading} onClick={() => void syncConsensus()}>同步一致预期</button>
 		<button type="button" disabled={loading} onClick={() => void syncGuidanceSources()}>同步 SEC 披露候选</button>
 		<label>管理层指引人工核验<textarea aria-label="管理层指引核验 JSON" rows={8} value={guidanceReviewJSON} onChange={(event) => { setGuidanceReviewJSON(event.target.value); setGuidanceReviewRequestID(globalThis.crypto?.randomUUID?.() || `guidance-review-${Date.now()}`); }} placeholder='粘贴 source_document_id、decision、reviewed_by；确认指引时另填 guidance、evidence_url、evidence_location、evidence_excerpt。' /></label>
@@ -4274,6 +4292,7 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
     {message && <div className="page-message">{message}</div>}
     <div className="metric-grid">
       <article><span>财务快照</span><strong>{bundle.fundamentals?.items?.length ?? 0}</strong><small>严格按 available_at 截止</small></article>
+		<article><span>复权价格证据</span><strong>{typeof latestPrice?.price === "number" ? `${latestPrice.price} ${latestPrice.currency || ""}` : "不可用"}</strong><small>{latestPrice?.id || "管理员解锁后可同步真实复权价格，不自动写入研究假设"}</small></article>
 		<article><span>一致预期返回</span><strong>{consensusItems.length}</strong><small>仅返回首次观测后可用的数据</small></article>
 		<article><span>管理层指引</span><strong>{guidanceItems.length}</strong><small>与分析师一致预期分开保存</small></article>
 		<article><span>官方披露候选</span><strong>{guidanceSourceItems.length}</strong><small>候选不等于管理层指引</small></article>

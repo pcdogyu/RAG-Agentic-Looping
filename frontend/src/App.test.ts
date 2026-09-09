@@ -734,6 +734,8 @@ describe("shared hash navigation", () => {
     expect(markup).toContain("缺失字段保持为空，不按零处理");
 		expect(markup).toContain("无新闻研究准备包");
 		expect(markup).toContain("不会自动生成假设、估值或评级");
+		expect(markup).toContain("同步真实复权价格");
+		expect(markup).toContain("复权价格证据");
 		expect(markup).toContain("分析师一致预期");
 		expect(markup).toContain("数据不会倒填到首次观测之前");
 		expect(markup).toContain("管理层指引修订");

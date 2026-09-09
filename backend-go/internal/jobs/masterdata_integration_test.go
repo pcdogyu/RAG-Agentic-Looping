@@ -112,6 +112,86 @@ func TestConsensusSyncCapturesOnlyFirstObservedFMPHistoryAgainstIsolatedPostgres
 	}
 }
 
+func TestManualMarketPriceSyncPersistsOnlyProviderObservationsAgainstIsolatedPostgres(t *testing.T) {
+	dsn := strings.Replace(os.Getenv("TEST_DATABASE_URL"), "postgresql+psycopg://", "postgresql://", 1)
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	admin, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Close()
+	schema := "market_price_sync_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	if _, err = admin.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = admin.Exec(context.Background(), "DROP SCHEMA "+schema+" CASCADE") }()
+	dbConfig, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbConfig.ConnConfig.RuntimeParams["search_path"] = schema
+	pool, err := pgxpool.NewWithConfig(ctx, dbConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err = migrate.Up(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	const assetID = "equity:NASDAQ:PRICE"
+	if _, err = pool.Exec(ctx, `INSERT INTO assets(id,asset_class,market,symbol,name,exchange_or_provider,currency,aliases,products,competitors,lot_size,active)
+		VALUES($1,'equity','US','PRICE','Price Test','NASDAQ','USD','[]','[]','[]',1,true)`, assetID); err != nil {
+		t.Fatal(err)
+	}
+	today, prior := time.Now().UTC().Format("2006-01-02"), time.Now().UTC().AddDate(0, 0, -1).Format("2006-01-02")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("apikey") != "isolated-price" || r.URL.Path != "/historical-price-eod/full" || r.URL.Query().Get("symbol") != "PRICE" {
+			t.Errorf("unexpected FMP price request: path=%s symbol=%q apikey=%q", r.URL.Path, r.URL.Query().Get("symbol"), r.Header.Get("apikey"))
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+			return
+		}
+		_ = json.NewEncoder(w).Encode([]map[string]any{
+			{"date": prior, "close": 49.0, "adjClose": 50.0},
+			{"date": today, "close": 50.0, "adjClose": 51.0},
+		})
+	}))
+	defer server.Close()
+	payload, _ := json.Marshal(taskEnvelope{Args: []any{assetID}, Kwargs: map[string]any{"asset_id": assetID, "lookback_days": 14}})
+	runtime := &masterdataRuntime{cfg: config.Config{FMPBaseURL: server.URL, FMPAccessToken: "isolated-price", FMPRateLimit: 100000}, db: pool, client: server.Client()}
+	before := time.Now().UTC()
+	result, err := runtime.syncMarketPriceObservations(ctx, Job{ID: uuid.New(), Payload: payload})
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := result.(map[string]any)
+	if values["status"] != "completed" || values["adjusted_close_received"] != 2 || values["inserted"] != 2 || values["automatic_assumptions"] != false || values["automatic_rating"] != false {
+		t.Fatalf("unsafe or incomplete price sync result: %#v", values)
+	}
+	var count int
+	var field, sourceName, sourceURL string
+	var firstAvailable time.Time
+	if err = pool.QueryRow(ctx, `SELECT count(*),min(price_field),min(source_name),min(source_url),min(available_at) FROM market_price_observations WHERE asset_id=$1`, assetID).Scan(&count, &field, &sourceName, &sourceURL, &firstAvailable); err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 || field != "adjusted_close" || sourceName != "FMP" || strings.Contains(sourceURL, "isolated-price") || firstAvailable.Before(before) {
+		t.Fatalf("invalid persisted prices: count=%d field=%s source=%s url=%s available=%s", count, field, sourceName, sourceURL, firstAvailable)
+	}
+	repeated, err := runtime.syncMarketPriceObservations(ctx, Job{ID: uuid.New(), Payload: payload})
+	if err != nil || repeated.(map[string]any)["inserted"] != 0 {
+		t.Fatalf("price sync was not idempotent: result=%#v err=%v", repeated, err)
+	}
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM forecast_versions WHERE asset_id=$1`, assetID).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("price sync created forecast data: count=%d err=%v", count, err)
+	}
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM fundamental_rating_states WHERE asset_id=$1`, assetID).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("price sync created a rating: count=%d err=%v", count, err)
+	}
+}
+
 func TestMasterdataPersistencePreservesOverridesAndDeactivatesMissing(t *testing.T) {
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {

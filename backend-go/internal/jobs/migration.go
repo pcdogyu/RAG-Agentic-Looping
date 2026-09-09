@@ -52,7 +52,7 @@ var workerLaneDefinitions = []MigrationLane{
 	{ID: "masterdata", Order: 8, GoQueue: "masterdata", TaskTypes: []string{
 		"market_loop.refresh_crypto_universe", "market_loop.refresh_asset_universe",
 		"market_loop.refresh_macro_universe", "market_loop.sync_fundamental_snapshots", "market_loop.sync_consensus_snapshots", "market_loop.sync_guidance_source_documents", "market_loop.refresh_tracked_fundamentals",
-		"market_loop.sync_corporate_actions", "market_loop.run_scheduled_fundamental_research",
+		"market_loop.sync_market_price_observations", "market_loop.sync_corporate_actions", "market_loop.run_scheduled_fundamental_research",
 	}},
 	{ID: "operations", Order: 9, GoQueue: "operations", TaskTypes: []string{
 		"market_loop.dispatch_evolve_from_outcomes", "market_loop.monitor_health", "market_loop.monitor_prediction_models",
