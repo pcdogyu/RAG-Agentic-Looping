@@ -3,11 +3,13 @@ package jobs
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/migrate"
 )
@@ -95,5 +97,77 @@ func TestMasterdataPersistencePreservesOverridesAndDeactivatesMissing(t *testing
 	}
 	if active {
 		t.Fatal("missing provider asset was not deactivated")
+	}
+}
+
+func TestFundamentalRefreshCandidatesBootstrapOnlyRecentCurrentContractResearch(t *testing.T) {
+	dsn := strings.Replace(os.Getenv("TEST_DATABASE_URL"), "postgresql+psycopg://", "postgresql://", 1)
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	admin, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Close()
+	schema := "fundamental_bootstrap_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	if _, err = admin.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = admin.Exec(context.Background(), "DROP SCHEMA "+schema+" CASCADE") }()
+	dbConfig, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbConfig.ConnConfig.RuntimeParams["search_path"] = schema
+	pool, err := pgxpool.NewWithConfig(ctx, dbConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err = migrate.Up(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	for _, values := range [][]string{
+		{"equity:XNAS:TRACKED", "US", "TRACKED"},
+		{"equity:XNAS:RECENT", "US", "RECENT"},
+		{"equity:XNAS:LEGACY", "US", "LEGACY"},
+		{"equity:XNAS:EXPIRED", "US", "EXPIRED"},
+		{"equity:XSHG:CN", "CN", "600000"},
+	} {
+		if _, err = pool.Exec(ctx, `INSERT INTO assets(id,asset_class,market,symbol,name,exchange_or_provider,currency,aliases,products,competitors,lot_size,active)
+			VALUES($1,'equity',$2,$3,$3,'TEST','USD','[]','[]','[]',1,true)`, values[0], values[1], values[2]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC)
+	if _, err = pool.Exec(ctx, `INSERT INTO forecast_versions(id,asset_id,model_version,status,as_of,input_snapshot,assumptions,projection)
+		VALUES('forecast-tracked','equity:XNAS:TRACKED','test','unavailable',$1,'{}','[]','{}')`, now.AddDate(0, 0, -60)); err != nil {
+		t.Fatal(err)
+	}
+	for index, values := range []struct {
+		assetID string
+		asOf    time.Time
+		version string
+	}{
+		{"equity:XNAS:RECENT", now.AddDate(0, 0, -2), "llm-direction-v3"},
+		{"equity:XNAS:LEGACY", now.AddDate(0, 0, -2), "deterministic-event-factor-v2"},
+		{"equity:XNAS:EXPIRED", now.AddDate(0, 0, -31), "llm-direction-v3"},
+		{"equity:XSHG:CN", now.AddDate(0, 0, -2), "llm-direction-v3"},
+	} {
+		if _, err = pool.Exec(ctx, `INSERT INTO recommendations(id,run_id,asset_id,score,rating,confidence,as_of,payload)
+			VALUES($1,$2,$3,0,'watch',0,$4,json_build_object('scoring_version',$5))`, fmt.Sprintf("recommendation-%02d", index), fmt.Sprintf("run-%02d", index), values.assetID, values.asOf, values.version); err != nil {
+			t.Fatal(err)
+		}
+	}
+	items, err := (&masterdataRuntime{db: pool}).fundamentalRefreshCandidates(ctx, now, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 || items[0].AssetID != "equity:XNAS:TRACKED" || items[0].SelectionReason != "explicit_forecast_or_rating" ||
+		items[1].AssetID != "equity:XNAS:RECENT" || items[1].SelectionReason != "recent_completed_research" {
+		t.Fatalf("unexpected fundamental refresh candidates: %#v", items)
 	}
 }

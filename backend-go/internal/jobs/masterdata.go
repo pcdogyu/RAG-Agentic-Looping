@@ -57,6 +57,11 @@ type masterdataRuntime struct {
 	client *http.Client
 }
 
+type fundamentalRefreshCandidate struct {
+	AssetID         string
+	SelectionReason string
+}
+
 type masterAsset struct {
 	ID, Class, Market, Symbol, Name, Exchange, Currency string
 	Aliases, Products, Competitors                      []string
@@ -213,47 +218,88 @@ func (runtime *masterdataRuntime) syncAssetFundamentals(ctx context.Context, ass
 	}, nil
 }
 
-// refreshTrackedFundamentals keeps the bounded set of assets that already has
-// an explicit forecast or rating current without needing a news event. It does
-// not create assumptions, valuations, or ratings on behalf of an analyst.
-func (runtime *masterdataRuntime) refreshTrackedFundamentals(ctx context.Context, _ Job) (any, error) {
-	rows, err := runtime.db.Query(ctx, `SELECT a.id FROM assets a LEFT JOIN fundamental_snapshots snapshot ON snapshot.asset_id=a.id WHERE a.active=true AND upper(a.market)='US' AND lower(a.asset_class)='equity' AND (EXISTS(SELECT 1 FROM forecast_versions forecast WHERE forecast.asset_id=a.id) OR EXISTS(SELECT 1 FROM fundamental_rating_states rating WHERE rating.asset_id=a.id)) GROUP BY a.id ORDER BY max(snapshot.available_at) ASC NULLS FIRST,a.id LIMIT 10`)
+const recentResearchFundamentalBootstrapVersion = "recent-research-fundamental-bootstrap-v1"
+
+// fundamentalRefreshCandidates keeps explicit forecast/rating tracking as the
+// primary source, while allowing recent recommendations produced by the
+// current evidence contract to bootstrap factual statement collection. The
+// latter does not approve assumptions, create valuations, or create ratings.
+func (runtime *masterdataRuntime) fundamentalRefreshCandidates(ctx context.Context, now time.Time, limit int) ([]fundamentalRefreshCandidate, error) {
+	if runtime.db == nil || now.IsZero() || limit < 1 || limit > 100 {
+		return nil, errors.New("fundamental refresh store, time and limit are required")
+	}
+	rows, err := runtime.db.Query(ctx, `WITH candidates AS (
+		SELECT a.id,
+			(EXISTS(SELECT 1 FROM forecast_versions forecast WHERE forecast.asset_id=a.id)
+			 OR EXISTS(SELECT 1 FROM fundamental_rating_states rating WHERE rating.asset_id=a.id)) AS explicitly_tracked,
+			EXISTS(SELECT 1 FROM recommendations recommendation
+				WHERE recommendation.asset_id=a.id AND recommendation.as_of >= $1
+				AND recommendation.payload::jsonb->>'scoring_version'='llm-direction-v3') AS recent_research,
+			max(snapshot.available_at) AS latest_snapshot,
+			(SELECT max(recommendation.as_of) FROM recommendations recommendation
+				WHERE recommendation.asset_id=a.id AND recommendation.as_of >= $1
+				AND recommendation.payload::jsonb->>'scoring_version'='llm-direction-v3') AS latest_research
+		FROM assets a LEFT JOIN fundamental_snapshots snapshot ON snapshot.asset_id=a.id
+		WHERE a.active=true AND upper(a.market)='US' AND lower(a.asset_class)='equity'
+		GROUP BY a.id
+	)
+	SELECT id,CASE WHEN explicitly_tracked THEN 'explicit_forecast_or_rating' ELSE 'recent_completed_research' END
+	FROM candidates WHERE explicitly_tracked OR recent_research
+	ORDER BY latest_snapshot ASC NULLS FIRST,explicitly_tracked DESC,latest_research DESC NULLS LAST,id
+	LIMIT $2`, now.UTC().AddDate(0, 0, -30), limit)
 	if err != nil {
 		return nil, err
 	}
-	assetIDs := []string{}
+	defer rows.Close()
+	items := []fundamentalRefreshCandidate{}
 	for rows.Next() {
-		var assetID string
-		if err := rows.Scan(&assetID); err != nil {
-			rows.Close()
+		var item fundamentalRefreshCandidate
+		if err := rows.Scan(&item.AssetID, &item.SelectionReason); err != nil {
 			return nil, err
 		}
-		assetIDs = append(assetIDs, assetID)
+		items = append(items, item)
 	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
+	return items, rows.Err()
+}
+
+// refreshTrackedFundamentals keeps a bounded set of explicitly tracked or
+// recently researched assets factually current without needing a new news
+// event. It never creates assumptions, valuations, ratings, or predictions on
+// behalf of an analyst.
+func (runtime *masterdataRuntime) refreshTrackedFundamentals(ctx context.Context, _ Job) (any, error) {
+	candidates, err := runtime.fundamentalRefreshCandidates(ctx, time.Now().UTC(), 10)
+	if err != nil {
 		return nil, err
 	}
 	results := map[string]any{}
-	succeeded := 0
-	for _, assetID := range assetIDs {
-		fundamentalResult, fundamentalErr := runtime.syncAssetFundamentals(ctx, assetID, 12)
-		actionResult, actionErr := runtime.syncAssetCorporateActions(ctx, assetID, 500)
+	succeeded, explicit, bootstrapped := 0, 0, 0
+	for _, candidate := range candidates {
+		if candidate.SelectionReason == "explicit_forecast_or_rating" {
+			explicit++
+		} else {
+			bootstrapped++
+		}
+		fundamentalResult, fundamentalErr := runtime.syncAssetFundamentals(ctx, candidate.AssetID, 12)
+		actionResult, actionErr := runtime.syncAssetCorporateActions(ctx, candidate.AssetID, 500)
 		if fundamentalErr != nil || actionErr != nil {
-			entry := map[string]any{"status": "partial", "fundamentals": fundamentalResult, "corporate_actions": actionResult}
+			entry := map[string]any{"status": "partial", "selection_reason": candidate.SelectionReason, "fundamentals": fundamentalResult, "corporate_actions": actionResult}
 			if fundamentalErr != nil {
 				entry["fundamental_error"] = fundamentalErr.Error()
 			}
 			if actionErr != nil {
 				entry["corporate_action_error"] = actionErr.Error()
 			}
-			results[assetID] = entry
+			results[candidate.AssetID] = entry
 			continue
 		}
-		results[assetID] = map[string]any{"status": "completed", "fundamentals": fundamentalResult, "corporate_actions": actionResult}
+		results[candidate.AssetID] = map[string]any{"status": "completed", "selection_reason": candidate.SelectionReason, "fundamentals": fundamentalResult, "corporate_actions": actionResult}
 		succeeded++
 	}
-	return map[string]any{"status": "completed", "selected": len(assetIDs), "succeeded": succeeded, "results": results, "automatic_assumptions": false}, nil
+	return map[string]any{
+		"status": "completed", "selected": len(candidates), "succeeded": succeeded, "explicitly_tracked": explicit,
+		"recent_research_bootstrapped": bootstrapped, "selection_policy_version": recentResearchFundamentalBootstrapVersion,
+		"results": results, "automatic_assumptions": false, "automatic_ratings": false, "automatic_predictions": false,
+	}, nil
 }
 
 // runScheduledFundamentalResearch revalues only explicitly approved plans.
