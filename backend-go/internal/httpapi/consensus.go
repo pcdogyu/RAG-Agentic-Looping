@@ -20,6 +20,12 @@ type guidanceSnapshotInput struct {
 	Guidance consensus.Guidance `json:"guidance"`
 }
 
+type announcementAssessmentInput struct {
+	CurrentActual  consensus.Actual `json:"current_actual"`
+	PreviousActual consensus.Actual `json:"previous_actual"`
+	AnnouncementAt time.Time        `json:"announcement_at"`
+}
+
 func (s *Server) consensusAt(w http.ResponseWriter, r *http.Request) {
 	assetID, err := fundamentalAssetID(chi.URLParam(r, "assetID"))
 	if err != nil || strings.TrimSpace(assetID) == "" {
@@ -43,18 +49,81 @@ func (s *Server) consensusAt(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	items, err := consensus.NewStore(s.db).ListAvailable(r.Context(), assetID, cutoff, limit)
+	history, err := consensus.NewStore(s.db).ListAvailable(r.Context(), assetID, cutoff, 1000)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "consensus snapshot query failed")
 		return
 	}
+	items := history
+	if len(items) > limit {
+		items = items[:limit]
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"asset_id": assetID, "as_of": cutoff.UTC(), "items": items,
+		"asset_id": assetID, "as_of": cutoff.UTC(), "items": items, "revisions": consensus.BuildEstimateRevisions(history),
 		"time_contract_version":               consensus.TimeContractVersion,
 		"observation_contract_version":        consensus.FMPObservationContractVersion,
 		"provider_publication_time_available": false, "historical_backfill": false,
-		"automatic_rating": false,
+		"automatic_rating": false, "individual_analyst_behavior_status": "unavailable_aggregate_snapshots_only",
 	})
+}
+
+func (s *Server) guidanceAt(w http.ResponseWriter, r *http.Request) {
+	assetID, err := fundamentalAssetID(chi.URLParam(r, "assetID"))
+	if err != nil || strings.TrimSpace(assetID) == "" {
+		writeError(w, http.StatusUnprocessableEntity, "asset_id path is invalid")
+		return
+	}
+	cutoffValue, ok := optionalTimeQuery(w, r, "as_of")
+	if !ok {
+		return
+	}
+	cutoff := time.Now().UTC()
+	if cutoffValue != nil {
+		cutoff = cutoffValue.(time.Time)
+	}
+	limit, ok := intQuery(w, r.URL.Query(), "limit", 60, 1, 500)
+	if !ok {
+		return
+	}
+	history, err := consensus.NewStore(s.db).GuidanceHistory(r.Context(), assetID, cutoff, 500)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "management guidance snapshot query failed")
+		return
+	}
+	items := history
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"asset_id": assetID, "as_of": cutoff.UTC(), "items": items, "revisions": consensus.BuildGuidanceRevisions(history),
+		"time_contract_version": consensus.TimeContractVersion, "guidance_is_consensus": false, "automatic_rating": false,
+	})
+}
+
+func (s *Server) announcementAssessment(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	assetID, err := fundamentalAssetID(chi.URLParam(r, "assetID"))
+	if err != nil || strings.TrimSpace(assetID) == "" {
+		writeError(w, http.StatusUnprocessableEntity, "asset_id path is invalid")
+		return
+	}
+	input := announcementAssessmentInput{}
+	if !decodeJSONBody(w, r, &input) {
+		return
+	}
+	input.CurrentActual.AssetID, input.PreviousActual.AssetID = assetID, assetID
+	if err := consensus.ValidateAssessmentActuals(input.CurrentActual, input.PreviousActual, input.AnnouncementAt); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	estimates, err := consensus.NewStore(s.db).EstimatesBefore(r.Context(), assetID, input.CurrentActual.Metric, input.CurrentActual.FiscalPeriodEnd, input.AnnouncementAt)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "pre-announcement consensus query failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, consensus.AssessAnnouncement(input.CurrentActual, input.PreviousActual, estimates, input.AnnouncementAt))
 }
 
 func (s *Server) syncConsensus(w http.ResponseWriter, r *http.Request) {

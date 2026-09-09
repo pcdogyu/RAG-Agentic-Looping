@@ -75,6 +75,8 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) (*Serve
 	r.Post("/go/consensus/{assetID}/guidance", s.importManagementGuidance)
 	r.Get("/go/consensus/{assetID}", s.consensusAt)
 	r.Post("/go/consensus/{assetID}/sync", s.syncConsensus)
+	r.Get("/go/consensus/{assetID}/guidance", s.guidanceAt)
+	r.Post("/go/consensus/{assetID}/announcement-assessment", s.announcementAssessment)
 	r.Get("/go/forecasts/{assetID}", s.forecastVersions)
 	r.Post("/go/forecasts/{assetID}", s.createForecastVersion)
 	r.Get("/go/valuations/{assetID}", s.valuationRuns)

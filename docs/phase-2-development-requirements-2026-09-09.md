@@ -249,3 +249,12 @@
 - 每日受跟踪/近期完成研究的美股事实刷新同时采集一致预期，从上线日起前瞻积累真实修订序列。管理层指引继续与一致预期分表，并只接受带来源、适用期间和真实发布时间的管理员导入。
 - 同一期间的供应商原始汇总记录未变化时不追加重复快照；任一字段变化时按新的首次观测时点保存整条汇总记录对应的指标范围，以便复原每次真实修订的覆盖范围。
 - 一致预期采集只写事实快照，不生成预测假设、估值或基本面评级。PostgreSQL 隔离回归验证首次观测时间、未来数据隔离、完整来源、无历史倒填和无评级副作用。
+
+### 2.13 公告语义与管理层指引修订
+
+- 新增 `announcement-expectation-semantics-v1`，将同比变化与公告前一致预期偏差分开计算和返回；能够分别表达 `growth_below_consensus` 与 `decline_above_consensus`，不再把业务增长和市场超预期混为一个方向。
+- 同比要求资产、指标、期间类型、币种、单位和会计口径一致，并要求可比较的上年同期；上期值小于或等于零时只保留绝对变化，简单百分比明确为 `unavailable_non_positive_prior`。
+- `POST /go/consensus/{assetID}/announcement-assessment` 只读取严格早于公告时点的一致预期；期间、币种、单位或 GAAP/非 GAAP 口径不一致时保持 unavailable，不降级为猜测。
+- 一致预期只从供应商汇总快照计算修订方向、绝对幅度和样本数变化，并明确 `individual_analyst_behavior_status=unavailable_aggregate_snapshots_only`，不得推断单个分析师行为。
+- `GET /go/consensus/{assetID}/guidance` 按可用时点读回管理层指引旧值、新值、区间、适用期间和来源，并计算上调/下调、区间收窄/扩大及变动边界；响应明确 `guidance_is_consensus=false`。
+- PostgreSQL 隔离回归覆盖指引修订前截止、旧/新区间持久化和修订方向；单元回归覆盖“同比增长但低于预期”“同比下降但好于预期”、非正上期值以及聚合预期修订边界。

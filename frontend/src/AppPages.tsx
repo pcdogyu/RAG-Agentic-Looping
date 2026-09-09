@@ -4056,8 +4056,15 @@ type FundamentalBundle = {
   fundamentals?: { items?: Array<{ id?: string; statement_type?: string; available_at?: string; source?: { provider?: string; url?: string } }> };
 	consensus?: {
 		items?: Array<{ id?: string; metric?: string; fiscal_period_end?: string; statistic?: string; estimate_value?: number; analyst_count?: number; currency?: string; available_at?: string; source_name?: string }>;
+		revisions?: Array<{ current_id?: string; metric?: string; fiscal_period_end?: string; statistic?: string; previous_value?: number; current_value?: number; absolute_change?: number; direction?: string; observed_at?: string; individual_analyst_behavior_status?: string }>;
 		provider_publication_time_available?: boolean;
 		historical_backfill?: boolean;
+		automatic_rating?: boolean;
+	};
+	guidance?: {
+		items?: Array<{ id?: string; metric?: string; fiscal_period_end?: string; low_value?: number; high_value?: number; currency?: string; available_at?: string; source_name?: string; source_url?: string }>;
+		revisions?: Array<{ current_id?: string; metric?: string; fiscal_period_end?: string; previous_low?: number; previous_high?: number; current_low?: number; current_high?: number; direction?: string; range_change?: string; changed_bounds?: string[]; available_at?: string }>;
+		guidance_is_consensus?: boolean;
 		automatic_rating?: boolean;
 	};
 	preparation?: {
@@ -4105,6 +4112,7 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 		const endpoints = [
 			{ key: "fundamentals", route: "fundamentals" }, { key: "preparation", route: "fundamental-research", suffix: "/preparation" },
 			{ key: "consensus", route: "consensus" },
+			{ key: "guidance", route: "consensus", suffix: "/guidance" },
 			{ key: "forecasts", route: "forecasts" },
 			{ key: "valuations", route: "valuations" }, { key: "ratings", route: "ratings" },
 			{ key: "predictions", route: "predictions" }, { key: "marketPolicy", route: "market-policies" },
@@ -4193,6 +4201,8 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 	const preparation = bundle.preparation;
 	const consensus = bundle.consensus;
 	const consensusItems = consensus?.items || [];
+	const guidance = bundle.guidance;
+	const guidanceItems = guidance?.items || [];
   const valuationRange = valuation?.result?.range;
   const changedAssumptions = Object.entries(rating?.changed_assumptions || {});
   return <section className="app-page fundamental-page">
@@ -4216,6 +4226,7 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
     <div className="metric-grid">
       <article><span>财务快照</span><strong>{bundle.fundamentals?.items?.length ?? 0}</strong><small>严格按 available_at 截止</small></article>
 		<article><span>一致预期返回</span><strong>{consensusItems.length}</strong><small>仅返回首次观测后可用的数据</small></article>
+		<article><span>管理层指引</span><strong>{guidanceItems.length}</strong><small>与分析师一致预期分开保存</small></article>
 		<article><span>分析准备</span><strong>{preparation?.status === "analyst_review_required" ? "待人工审核" : preparation?.status || "不可用"}</strong><small>{preparation?.statement_period_end || preparation?.reason || "等待同报告期财务表"}</small></article>
       <article><span>预测版本</span><strong>{bundle.forecasts?.items?.length ?? 0}</strong><small>假设与证据可追溯</small></article>
       <article><span>估值运行</span><strong>{bundle.valuations?.items?.length ?? 0}</strong><small>情景区间不是概率</small></article>
@@ -4240,6 +4251,14 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 			<p>{consensusItems[0]?.available_at ? `最近观测：${new Date(consensusItems[0].available_at).toLocaleString("zh-CN")}` : "管理员可启动单标的 FMP 同步；数据不会倒填到首次观测之前。"}</p>
 			<small>供应商发布时间不可用：{consensus?.provider_publication_time_available === false ? "是" : "未确认"} · 历史倒填：{consensus?.historical_backfill === false ? "关闭" : "未确认"} · 自动评级：{consensus?.automatic_rating === false ? "关闭" : "未确认"}</small>
 			{consensusItems.length > 0 && <details><summary>观测明细（最多 12 条）</summary>{consensusItems.slice(0, 12).map((item) => <p key={item.id}>{item.metric || "指标"} · {item.statistic || "统计"} · {typeof item.estimate_value === "number" ? item.estimate_value : "—"} {item.currency || ""} · {item.fiscal_period_end || "—"}{item.analyst_count ? ` · ${item.analyst_count} 位分析师` : ""}</p>)}</details>}
+			{!!consensus?.revisions?.length && <details><summary>聚合预期修订</summary>{consensus.revisions.slice(0, 10).map((item) => <p key={item.current_id}>{item.metric || "指标"} · {item.statistic || "统计"} · {item.direction || "—"} {typeof item.absolute_change === "number" ? item.absolute_change : "—"} · 不推断单个分析师行为</p>)}</details>}
+		</article>
+		<article className="conclusion-card">
+			<span>管理层指引修订</span>
+			<h3>{guidanceItems.length > 0 ? `${guidanceItems.length} 条来源化指引` : "尚无可靠指引快照"}</h3>
+			<p>{guidance?.revisions?.length ? `${guidance.revisions.length} 次可复算区间修订` : "需要带真实发布时间、适用期间和来源的管理层披露；不会用一致预期代替。"}</p>
+			<small>指引等同一致预期：{guidance?.guidance_is_consensus === false ? "否" : "未确认"} · 自动评级：{guidance?.automatic_rating === false ? "关闭" : "未确认"}</small>
+			{!!guidance?.revisions?.length && <details><summary>修订明细</summary>{guidance.revisions.slice(0, 10).map((item) => <p key={item.current_id}>{item.metric || "指标"} · {item.direction || "—"} · 区间 {item.range_change || "—"} · {item.fiscal_period_end || "—"}</p>)}</details>}
 		</article>
 		<article className="conclusion-card">
 			<span>分市场研究方法</span>

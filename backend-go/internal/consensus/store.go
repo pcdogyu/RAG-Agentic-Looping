@@ -121,6 +121,31 @@ FROM consensus_snapshots WHERE asset_id=$1 AND available_at<=$2 ORDER BY availab
 	return values, rows.Err()
 }
 
+func (s *Store) GuidanceHistory(ctx context.Context, assetID string, cutoff time.Time, limit int) ([]Guidance, error) {
+	if s.db == nil || strings.TrimSpace(assetID) == "" || cutoff.IsZero() || limit < 1 || limit > 500 {
+		return nil, fmt.Errorf("guidance store, asset_id, cutoff and limit are required")
+	}
+	rows, err := s.db.Query(ctx, `SELECT id,asset_id,metric,fiscal_period,fiscal_period_end,accounting_basis,low_value,high_value,currency,unit,published_at,available_at,revision_at,source_name,source_url,source_document_id,source_payload,retrieved_at
+FROM management_guidance_snapshots WHERE asset_id=$1 AND available_at<=$2 ORDER BY available_at DESC,fiscal_period_end DESC,metric,id LIMIT $3`, strings.TrimSpace(assetID), cutoff.UTC(), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	values := []Guidance{}
+	for rows.Next() {
+		var value Guidance
+		var payload []byte
+		if err := rows.Scan(&value.ID, &value.AssetID, &value.Metric, &value.FiscalPeriod, &value.FiscalPeriodEnd, &value.AccountingBasis, &value.LowValue, &value.HighValue, &value.Currency, &value.Unit, &value.PublishedAt, &value.AvailableAt, &value.RevisionAt, &value.SourceName, &value.SourceURL, &value.SourceDocumentID, &payload, &value.RetrievedAt); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(payload, &value.SourcePayload); err != nil {
+			return nil, fmt.Errorf("decode guidance source payload: %w", err)
+		}
+		values = append(values, value)
+	}
+	return values, rows.Err()
+}
+
 func normalizeEstimate(value *Estimate, retrievedAt time.Time) error {
 	value.AssetID, value.Metric, value.AccountingBasis, value.Statistic = strings.TrimSpace(value.AssetID), strings.TrimSpace(value.Metric), strings.ToLower(strings.TrimSpace(value.AccountingBasis)), strings.ToLower(strings.TrimSpace(value.Statistic))
 	value.Currency, value.Unit, value.SourceName, value.SourceURL = strings.ToUpper(strings.TrimSpace(value.Currency)), strings.ToLower(strings.TrimSpace(value.Unit)), strings.TrimSpace(value.SourceName), strings.TrimSpace(value.SourceURL)

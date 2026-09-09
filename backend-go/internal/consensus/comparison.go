@@ -37,6 +37,7 @@ type Estimate struct {
 type Actual struct {
 	AssetID         string    `json:"asset_id"`
 	Metric          string    `json:"metric"`
+	FiscalPeriod    string    `json:"fiscal_period,omitempty"`
 	FiscalPeriodEnd time.Time `json:"fiscal_period_end"`
 	AccountingBasis string    `json:"accounting_basis"`
 	Value           float64   `json:"value"`
@@ -68,7 +69,8 @@ func LatestBeforeAnnouncement(items []Estimate, assetID, metric string, periodEn
 	}
 	var best *Estimate
 	for _, item := range items {
-		if item.AssetID != assetID || !strings.EqualFold(item.Metric, metric) || !sameDate(item.FiscalPeriodEnd, periodEnd) || !item.AvailableAt.Before(announcementAt) {
+		statistic := strings.ToLower(strings.TrimSpace(item.Statistic))
+		if item.AssetID != assetID || !strings.EqualFold(item.Metric, metric) || !sameDate(item.FiscalPeriodEnd, periodEnd) || !item.AvailableAt.Before(announcementAt) || statistic != "" && statistic != "mean" {
 			continue
 		}
 		if best == nil || estimateLater(item, *best) {
