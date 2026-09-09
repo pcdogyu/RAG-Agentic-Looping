@@ -79,6 +79,30 @@ func (s *Server) syncMarketPrices(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) licensedBenchmarkPriceImports(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	assetID, err := fundamentalAssetID(chi.URLParam(r, "assetID"))
+	if err != nil || assetID == "" {
+		writeError(w, http.StatusUnprocessableEntity, "asset_id path is invalid")
+		return
+	}
+	limit, ok := intQuery(w, r.URL.Query(), "limit", 20, 1, 200)
+	if !ok {
+		return
+	}
+	items, err := marketdata.NewStore(s.db).ListLicensedBenchmarkPriceImports(r.Context(), assetID, limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "licensed benchmark import receipt query failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"asset_id": assetID, "contract_version": marketdata.LicensedBenchmarkPriceImportContractVersion, "items": items,
+		"administrator_only": true, "license_and_approval_details_public": false,
+	})
+}
+
 func (s *Server) importLicensedBenchmarkPrices(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return

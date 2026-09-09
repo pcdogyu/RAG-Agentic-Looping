@@ -4110,6 +4110,22 @@ type FundamentalBundle = {
   schedule?: { items?: Array<{ id?: string; status?: string; forecast_version_id?: string; cadence_hours?: number; next_run_at?: string; last_run_status?: string; last_run_reason?: string; approved_by?: string; approved_at?: string }> };
 };
 
+type LicensedBenchmarkImportReceipt = {
+	id?: string;
+	asset_id?: string;
+	vendor_code?: string;
+	source_name?: string;
+	source_document_id?: string;
+	source_url?: string;
+	license_reference?: string;
+	approved_by?: string;
+	session_start?: string;
+	session_end?: string;
+	observation_count?: number;
+	inserted_count?: number;
+	available_at?: string;
+};
+
 export function scheduleDraftJSON(payload: { status?: string; schedule_draft?: Record<string, unknown> }) {
 	if (payload.status !== "available" || !payload.schedule_draft) return "";
 	return JSON.stringify(payload.schedule_draft, null, 2);
@@ -4223,6 +4239,8 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 	const [licensedBenchmarkObservations, setLicensedBenchmarkObservations] = useState("");
 	const [licensedBenchmarkRequestID, setLicensedBenchmarkRequestID] = useState(() => globalThis.crypto?.randomUUID?.() || `licensed-benchmark-${Date.now()}`);
 	const [licensedBenchmarkConfirmed, setLicensedBenchmarkConfirmed] = useState(false);
+	const [licensedBenchmarkReceipts, setLicensedBenchmarkReceipts] = useState<LicensedBenchmarkImportReceipt[]>([]);
+	const [licensedBenchmarkAuditLoaded, setLicensedBenchmarkAuditLoaded] = useState(false);
 	const [guidanceReviewJSON, setGuidanceReviewJSON] = useState("");
 	const [guidanceReviewRequestID, setGuidanceReviewRequestID] = useState(() => globalThis.crypto?.randomUUID?.() || `guidance-review-${Date.now()}`);
   const [scheduleRequestID, setScheduleRequestID] = useState(() => globalThis.crypto?.randomUUID?.() || `fundamental-schedule-${Date.now()}`);
@@ -4230,6 +4248,7 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
     event?.preventDefault();
     const canonical = assetID.trim();
     if (!canonical) return;
+		setLicensedBenchmarkReceipts([]); setLicensedBenchmarkAuditLoaded(false);
     setLoading(true); setMessage("");
     const path = encodeURIComponent(canonical);
 		const endpoints = [
@@ -4344,14 +4363,31 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 			const response = await fetch(`${apiBase}/go/market-prices/${encodeURIComponent(benchmarkAssetID)}/licensed-import`, {
 				method: "POST", headers: { "Content-Type": "application/json", "X-Admin-Token": token, "Idempotency-Key": licensedBenchmarkRequestID }, body: JSON.stringify(body),
 			});
-			const payload = await response.json() as { created?: boolean; detail?: string; receipt?: { id?: string; observation_count?: number; inserted_count?: number } };
+			const payload = await response.json() as { created?: boolean; detail?: string; receipt?: LicensedBenchmarkImportReceipt };
 			if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
 			setMessage(`持牌总回报行情${payload.created ? "已不可变导入" : "已幂等读回"}：${payload.receipt?.observation_count ?? 0} 条，首次新增 ${payload.receipt?.inserted_count ?? 0} 条，回执 ${payload.receipt?.id || "已保存"}。该操作不批准 PIT 映射。`);
+			if (payload.receipt?.id) setLicensedBenchmarkReceipts((items) => [payload.receipt!, ...items.filter((item) => item.id !== payload.receipt?.id)]);
+			setLicensedBenchmarkAuditLoaded(true);
 			setLicensedBenchmarkObservations("");
 			setLicensedBenchmarkConfirmed(false);
 			setLicensedBenchmarkRequestID(globalThis.crypto?.randomUUID?.() || `licensed-benchmark-${Date.now()}`);
 		} catch (error) {
 			setMessage(`持牌总回报行情导入失败：${error instanceof Error ? error.message : "JSON、CSV 或请求无效"}`);
+		} finally { setLoading(false); }
+	}
+	async function loadLicensedBenchmarkReceipts() {
+		const benchmarkAssetID = bundle.marketPolicy?.policy?.benchmark_id?.trim() || "";
+		if (!benchmarkAssetID || !token || !licensedBenchmarkImportTemplate(benchmarkAssetID)) return;
+		setLoading(true); setMessage("");
+		try {
+			const response = await fetch(`${apiBase}/go/market-prices/${encodeURIComponent(benchmarkAssetID)}/licensed-imports?limit=20`, { headers: { "X-Admin-Token": token } });
+			const payload = await response.json() as { items?: LicensedBenchmarkImportReceipt[]; detail?: string };
+			if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
+			const items = payload.items || [];
+			setLicensedBenchmarkReceipts(items); setLicensedBenchmarkAuditLoaded(true);
+			setMessage(items.length ? `已读取 ${benchmarkAssetID} 最近 ${items.length} 份管理员导入回执。` : `${benchmarkAssetID} 尚无持牌导入回执；系统没有自动导入数据。`);
+		} catch (error) {
+			setMessage(`持牌导入回执读取失败：${error instanceof Error ? error.message : "未知错误"}`);
 		} finally { setLoading(false); }
 	}
 	async function syncMarketPrices() {
@@ -4512,6 +4548,7 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 		<button type="button" disabled={loading || !licensedBenchmarkAvailable} onClick={loadLicensedBenchmarkTemplate}>生成持牌总回报导入模板</button>
 		<label className="licensed-import-confirmation"><input type="checkbox" checked={licensedBenchmarkConfirmed} onChange={(event) => setLicensedBenchmarkConfirmed(event.target.checked)} />我确认这些观测来自有权使用的规范总回报数据，且审批与许可证引用真实有效</label>
 		<button type="button" disabled={loading || !licensedBenchmarkMetadataJSON.trim() || !licensedBenchmarkObservations.trim() || !licensedBenchmarkConfirmed} onClick={() => void importLicensedBenchmarkPrices()}>人工导入持牌总回报行情</button>
+		<button type="button" disabled={loading || !licensedBenchmarkAvailable} onClick={() => void loadLicensedBenchmarkReceipts()}>读取持牌导入回执</button>
 		<small>只允许有授权、可追溯的 H00300/HSIDV 总回报数据；页面先校验身份、HTTPS、日期、正数和重复日。导入不会自动批准基准映射、生成评级或倒填可获得时间。</small>
       <label>无新闻基本面研究输入<textarea aria-label="基本面研究 JSON" rows={8} value={workflowJSON} onChange={(event) => setWorkflowJSON(event.target.value)} placeholder='粘贴含 as_of、forecast、valuation、rating 的证据化 JSON；不会自动补造假设或价格。' /></label>
 		<button type="button" disabled={loading || !preparation?.workflow_template} onClick={loadPreparationTemplate}>载入财务事实模板</button>
@@ -4531,7 +4568,7 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
       <article><span>财务快照</span><strong>{bundle.fundamentals?.items?.length ?? 0}</strong><small>严格按 available_at 截止</small></article>
 		<article><span>已批准分析师证据</span><strong>{analystEvidenceItems.length}</strong><small>任意字符串不能作为估值、基准或评级证据</small></article>
 		<article><span>PIT 基准映射</span><strong>{benchmarkResolution?.status === "available" ? "已批准" : "不可用"}</strong><small>{benchmarkMapping?.benchmark_asset_id || benchmarkResolution?.reason || bundle.marketPolicy?.policy?.benchmark_id || "等待市场策略"}</small></article>
-		<article><span>持牌总回报导入</span><strong>{licensedBenchmarkAvailable ? "人工入口已就绪" : "当前基准不适用"}</strong><small>{canonicalBenchmarkID || "读取资产后核对规范基准"} · 不自动获取或批准数据</small></article>
+		<article><span>持牌总回报导入</span><strong>{licensedBenchmarkAvailable ? licensedBenchmarkAuditLoaded ? `${licensedBenchmarkReceipts.length} 份回执` : "人工入口已就绪" : "当前基准不适用"}</strong><small>{canonicalBenchmarkID || "读取资产后核对规范基准"} · 不自动获取或批准数据</small></article>
 		<article><span>复权价格证据</span><strong>{typeof latestPrice?.price === "number" ? `${latestPrice.price} ${latestPrice.currency || ""}` : "不可用"}</strong><small>{latestPrice?.id || "管理员解锁后可同步真实复权价格，不自动写入研究假设"}</small></article>
 		<article><span>一致预期返回</span><strong>{consensusItems.length}</strong><small>仅返回首次观测后可用的数据</small></article>
 		<article><span>管理层指引</span><strong>{guidanceItems.length}</strong><small>与分析师一致预期分开保存</small></article>
@@ -4550,6 +4587,13 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 			<h3>{benchmarkResolution?.status === "available" ? `${benchmarkMapping?.benchmark_asset_id || "基准"} 已批准` : "尚无当时可用的基准映射"}</h3>
 			<p>{benchmarkMapping ? `${benchmarkMapping.scope_type || "scope"}:${benchmarkMapping.scope_id || "—"} · ${benchmarkMapping.mapping_reason || "已记录批准理由"}` : `策略候选 ${bundle.marketPolicy?.policy?.benchmark_id || "未配置"}；身份存在不代表映射已经批准。`}</p>
 			<small>{benchmarkMapping ? `来源 ${benchmarkMapping.source_name || "—"} · 批准人 ${benchmarkMapping.approved_by || "—"} · 可用时间 ${benchmarkMapping.available_at || "—"}` : `状态 ${benchmarkResolution?.reason || "missing_point_in_time_mapping"} · 自动批准：关闭`}</small>
+		</article>
+		<article className="conclusion-card">
+			<span>持牌导入回执</span>
+			<h3>{licensedBenchmarkAuditLoaded ? licensedBenchmarkReceipts.length ? `${licensedBenchmarkReceipts.length} 批已审计导入` : "尚无导入回执" : "等待管理员主动读取"}</h3>
+			<p>{licensedBenchmarkReceipts.length ? `最近覆盖 ${licensedBenchmarkReceipts[0]?.session_start || "—"} 至 ${licensedBenchmarkReceipts[0]?.session_end || "—"}，共 ${licensedBenchmarkReceipts[0]?.observation_count ?? 0} 条。` : "回执历史不会通过公开行情接口返回；没有回执不能推断已经获得或导入持牌数据。"}</p>
+			<small>许可证与审批详情仅管理员可见 · 覆盖范围从实际不可变行情观测计算</small>
+			{licensedBenchmarkReceipts.length > 0 && <details><summary>最近 20 批导入审计</summary>{licensedBenchmarkReceipts.map((item) => <p key={item.id}>{item.session_start || "—"} 至 {item.session_end || "—"} · {item.observation_count ?? 0} 条 / 首次新增 {item.inserted_count ?? 0} · {item.vendor_code || "—"} · {item.source_url ? <a href={item.source_url} target="_blank" rel="noreferrer">{item.source_name || item.source_document_id || "来源"}</a> : item.source_name || "—"} · 许可证 {item.license_reference || "—"} · 批准人 {item.approved_by || "—"} · {item.available_at ? new Date(item.available_at).toLocaleString("zh-CN") : "—"}</p>)}</details>}
 		</article>
 		<article className="conclusion-card">
 			<span>分析师证据登记</span>

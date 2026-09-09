@@ -747,6 +747,9 @@ describe("shared hash navigation", () => {
 		expect(markup).toContain("时点基准治理");
 		expect(markup).toContain("持牌总回报导入");
 		expect(markup).toContain("不自动获取或批准数据");
+		expect(markup).toContain("持牌导入回执");
+		expect(markup).toContain("许可证与审批详情仅管理员可见");
+		expect(markup).toContain("没有回执不能推断已经获得或导入持牌数据");
 		expect(markup).toContain("自动批准：关闭");
 		expect(markup).toContain("人工研究成功后自动载入同源计划草稿，仍需管理员显式批准");
 		expect(markup).toContain("分析师一致预期");

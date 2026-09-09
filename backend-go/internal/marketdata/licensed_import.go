@@ -40,13 +40,15 @@ type LicensedBenchmarkPriceImportReceipt struct {
 	AssetID          string    `json:"asset_id"`
 	Market           string    `json:"market"`
 	Currency         string    `json:"currency"`
+	SessionStart     string    `json:"session_start,omitempty"`
+	SessionEnd       string    `json:"session_end,omitempty"`
 	VendorCode       string    `json:"vendor_code"`
 	SourceName       string    `json:"source_name"`
 	SourceDocumentID string    `json:"source_document_id"`
 	SourceURL        string    `json:"source_url"`
 	LicenseReference string    `json:"license_reference"`
 	ApprovedBy       string    `json:"approved_by"`
-	ObservationIDs   []string  `json:"observation_ids"`
+	ObservationIDs   []string  `json:"observation_ids,omitempty"`
 	ObservationCount int       `json:"observation_count"`
 	InsertedCount    int       `json:"inserted_count"`
 	AvailableAt      time.Time `json:"available_at"`
@@ -233,6 +235,37 @@ func (s *Store) ImportLicensedBenchmarkPrices(ctx context.Context, assetID strin
 	return stored, true, nil
 }
 
+// ListLicensedBenchmarkPriceImports returns administrator audit receipts and
+// their actual persisted session coverage. Licence and approver details stay
+// behind the administrator API instead of leaking through public price reads.
+func (s *Store) ListLicensedBenchmarkPriceImports(ctx context.Context, assetID string, limit int) ([]LicensedBenchmarkPriceImportReceipt, error) {
+	assetID = strings.TrimSpace(assetID)
+	if s.db == nil || assetID == "" || limit < 1 || limit > 200 {
+		return nil, fmt.Errorf("invalid licensed benchmark import receipt query")
+	}
+	rows, err := s.db.Query(ctx, licensedBenchmarkReceiptSelect+` WHERE r.asset_id=$1 ORDER BY r.available_at DESC,r.id DESC LIMIT $2`, assetID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list licensed benchmark import receipts: %w", err)
+	}
+	defer rows.Close()
+	items := []LicensedBenchmarkPriceImportReceipt{}
+	for rows.Next() {
+		item, _, scanErr := scanLicensedBenchmarkReceipt(rows)
+		if scanErr != nil {
+			return nil, fmt.Errorf("scan licensed benchmark import receipt: %w", scanErr)
+		}
+		// History pages use counts and persisted coverage. Omitting up to 1000
+		// immutable IDs per row keeps the list response bounded; the original
+		// import response still returns the exact IDs.
+		item.ObservationIDs = nil
+		items = append(items, item)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("list licensed benchmark import receipts: %w", err)
+	}
+	return items, nil
+}
+
 func (s *Store) licensedBenchmarkIdentity(ctx context.Context, assetID string) (licensedBenchmarkIdentity, error) {
 	var identity licensedBenchmarkIdentity
 	var aliasesBody []byte
@@ -269,7 +302,14 @@ func matchesBenchmarkVendorCode(value, symbol string, aliases []string) bool {
 
 const licensedBenchmarkReceiptSelect = `SELECT r.id,r.request_hash,r.asset_id,a.market,a.currency,r.vendor_code,r.source_name,
 	r.source_document_id,r.source_url,r.license_reference,r.approved_by,r.observation_ids::jsonb,r.observation_count,r.inserted_count,
-	r.available_at,r.created_at FROM licensed_benchmark_price_import_receipts r JOIN assets a ON a.id=r.asset_id`
+	r.available_at,r.created_at,coverage.session_start,coverage.session_end
+	FROM licensed_benchmark_price_import_receipts r JOIN assets a ON a.id=r.asset_id
+	LEFT JOIN LATERAL (
+		SELECT coalesce(to_char(min(p.session_date),'YYYY-MM-DD'),'') AS session_start,
+			coalesce(to_char(max(p.session_date),'YYYY-MM-DD'),'') AS session_end
+		FROM market_price_observations p
+		WHERE p.id IN (SELECT jsonb_array_elements_text(r.observation_ids::jsonb))
+	) coverage ON true`
 
 func scanLicensedBenchmarkReceipt(row pgx.Row) (LicensedBenchmarkPriceImportReceipt, string, error) {
 	var item LicensedBenchmarkPriceImportReceipt
@@ -277,7 +317,7 @@ func scanLicensedBenchmarkReceipt(row pgx.Row) (LicensedBenchmarkPriceImportRece
 	var idsBody []byte
 	if err := row.Scan(&item.ID, &requestHash, &item.AssetID, &item.Market, &item.Currency, &item.VendorCode, &item.SourceName,
 		&item.SourceDocumentID, &item.SourceURL, &item.LicenseReference, &item.ApprovedBy, &idsBody, &item.ObservationCount,
-		&item.InsertedCount, &item.AvailableAt, &item.CreatedAt); err != nil {
+		&item.InsertedCount, &item.AvailableAt, &item.CreatedAt, &item.SessionStart, &item.SessionEnd); err != nil {
 		return LicensedBenchmarkPriceImportReceipt{}, "", err
 	}
 	if err := json.Unmarshal(idsBody, &item.ObservationIDs); err != nil {

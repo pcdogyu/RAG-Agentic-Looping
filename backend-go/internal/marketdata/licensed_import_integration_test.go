@@ -58,7 +58,7 @@ func TestLicensedBenchmarkImportIsAuditedAtomicAndIdempotentAgainstIsolatedPostg
 	if err != nil || !created {
 		t.Fatalf("licensed import created=%v err=%v", created, err)
 	}
-	if receipt.ContractVersion != LicensedBenchmarkPriceImportContractVersion || receipt.AssetID != marketpolicy.HKBenchmarkAssetID || receipt.Market != "HK" || receipt.Currency != "HKD" || receipt.ObservationCount != 2 || receipt.InsertedCount != 2 || len(receipt.ObservationIDs) != 2 || !receipt.AvailableAt.Equal(now) {
+	if receipt.ContractVersion != LicensedBenchmarkPriceImportContractVersion || receipt.AssetID != marketpolicy.HKBenchmarkAssetID || receipt.Market != "HK" || receipt.Currency != "HKD" || receipt.SessionStart != "2026-09-08" || receipt.SessionEnd != "2026-09-09" || receipt.ObservationCount != 2 || receipt.InsertedCount != 2 || len(receipt.ObservationIDs) != 2 || !receipt.AvailableAt.Equal(now) {
 		t.Fatalf("invalid licensed import receipt: %#v", receipt)
 	}
 	if receipt.SourceURL != "https://licensed.example.test/history" || strings.Contains(receipt.SourceURL, "must-not-persist") {
@@ -95,6 +95,14 @@ func TestLicensedBenchmarkImportIsAuditedAtomicAndIdempotentAgainstIsolatedPostg
 	}
 	if err = pool.QueryRow(ctx, `SELECT count(*) FROM licensed_benchmark_price_import_receipts WHERE asset_id=$1`, marketpolicy.HKBenchmarkAssetID).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("unexpected receipt count=%d err=%v", count, err)
+	}
+	receipts, err := NewStore(pool).ListLicensedBenchmarkPriceImports(ctx, marketpolicy.HKBenchmarkAssetID, 20)
+	if err != nil || len(receipts) != 1 || receipts[0].ID != receipt.ID || receipts[0].SessionStart != "2026-09-08" || receipts[0].SessionEnd != "2026-09-09" || receipts[0].LicenseReference != "agreement-2026-001" || receipts[0].ApprovedBy != "market-data-owner" || receipts[0].ObservationIDs != nil {
+		t.Fatalf("licensed import receipt audit query=%#v err=%v", receipts, err)
+	}
+	emptyReceipts, err := NewStore(pool).ListLicensedBenchmarkPriceImports(ctx, marketpolicy.CNBenchmarkAssetID, 20)
+	if err != nil || len(emptyReceipts) != 0 {
+		t.Fatalf("empty canonical receipt query=%#v err=%v", emptyReceipts, err)
 	}
 
 	input.IdempotencyKey = "wrong-vendor-code"

@@ -42,4 +42,17 @@ func TestLicensedBenchmarkImportRequiresAdminAndIdempotency(t *testing.T) {
 	if response.Code != http.StatusUnprocessableEntity || !strings.Contains(response.Body.String(), "Idempotency-Key") {
 		t.Fatalf("missing idempotency status=%d body=%s", response.Code, response.Body.String())
 	}
+	request = httptest.NewRequest(http.MethodGet, "/go/market-prices/index%3AHSI%3AHSIDV/licensed-imports", nil)
+	response = httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("receipt query unauthorized status=%d body=%s", response.Code, response.Body.String())
+	}
+	request = httptest.NewRequest(http.MethodGet, "/go/market-prices/index%3AHSI%3AHSIDV/licensed-imports?limit=0", nil)
+	request.Header.Set("X-Admin-Token", "test-token")
+	response = httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusUnprocessableEntity || !strings.Contains(response.Body.String(), "limit") {
+		t.Fatalf("receipt query invalid limit status=%d body=%s", response.Code, response.Body.String())
+	}
 }
