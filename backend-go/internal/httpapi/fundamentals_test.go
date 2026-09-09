@@ -125,11 +125,13 @@ func TestPredictionAndGovernanceWritesRequireAdminToken(t *testing.T) {
 			t.Fatalf("path=%s status=%d", path, response.Code)
 		}
 	}
-	request := httptest.NewRequest(http.MethodGet, "/go/model-governance/checks", nil)
-	response := httptest.NewRecorder()
-	server.Handler().ServeHTTP(response, request)
-	if response.Code != http.StatusUnauthorized {
-		t.Fatalf("governance history status=%d", response.Code)
+	for _, path := range []string{"/go/model-governance/checks", "/go/model-evaluation/market-readiness"} {
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		response := httptest.NewRecorder()
+		server.Handler().ServeHTTP(response, request)
+		if response.Code != http.StatusUnauthorized {
+			t.Fatalf("protected read %s status=%d", path, response.Code)
+		}
 	}
 }
 
@@ -149,6 +151,13 @@ func TestCounterResearchStatusAndAblationContract(t *testing.T) {
 	server.Handler().ServeHTTP(response, request)
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("counter-research ablation status=%d", response.Code)
+	}
+	request = httptest.NewRequest(http.MethodPost, "/go/counter-research/ablation", strings.NewReader(`{"observations":[{"sample_id":"s1","event_cluster":"c1","fold":"fold-1","signal_cutoff":"2026-09-09T00:00:00Z","baseline_input_cutoff":"2026-09-09T00:00:00Z","counter_input_cutoff":"2026-09-09T00:00:00Z","baseline_version":"base-v1","counter_version":"counter-v1","same_input_cutoff":true,"ground_truth_source":"human-review","baseline_wrong":true,"error_found":true,"added_latency_ms":10,"added_cost":0}]}`))
+	request.Header.Set("X-Admin-Token", "test-token")
+	response = httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"release_status":"keep_disabled"`) || !strings.Contains(response.Body.String(), `"automatic_enable":false`) {
+		t.Fatalf("fixed counter-research ablation status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 

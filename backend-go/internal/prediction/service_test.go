@@ -51,6 +51,11 @@ func TestPredictionRunIdentityIncludesModelCalibrationAndFeatures(t *testing.T) 
 	if first == predictionRunID(crypto) {
 		t.Fatal("non-equity asset class was absent from prediction identity")
 	}
+	otherListing := base
+	otherListing.AssetID = "equity:XHKG:09988"
+	if first == predictionRunID(otherListing) {
+		t.Fatal("different listings of the same issuer shared a prediction identity")
+	}
 }
 
 func TestModelRegistrationValidationBindsArtifactAndFiniteSchema(t *testing.T) {

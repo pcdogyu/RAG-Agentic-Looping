@@ -53,7 +53,22 @@ func TestSummarizeAblationUsesOnlyLabelledOutcomes(t *testing.T) {
 		{BaselineWrong: true, ErrorFound: false, Latency: time.Second, Cost: 3},
 		{BaselineWrong: false, ErrorFound: true, Latency: 3 * time.Second, Cost: 2},
 	})
-	if result.ErrorDiscoveryRate == nil || *result.ErrorDiscoveryRate != .5 || result.FalseChallenges != 1 || result.MeanAddedLatencyMS != 2000 || result.MeanAddedCost != 2 {
+	if result.ErrorDiscoveryRate == nil || *result.ErrorDiscoveryRate != .5 || result.FalseChallenges != 1 || result.MeanAddedLatencyMS != 2000 || result.MeanAddedCost != 2 || result.ReleaseStatus != "keep_disabled" || result.AutomaticEnable {
 		t.Fatalf("ablation=%#v", result)
+	}
+}
+
+func TestAblationOnlyBecomesEligibleForHumanReviewAfterStableIndependentEvidence(t *testing.T) {
+	values := make([]AblationObservation, 150)
+	for index := range values {
+		values[index].Fold = []string{"fold-1", "fold-2", "fold-3"}[index%3]
+		if index < 30 {
+			values[index].BaselineWrong = true
+			values[index].ErrorFound = true
+		}
+	}
+	result := SummarizeAblation(values)
+	if result.ReleaseStatus != "eligible_for_human_review" || result.IndependentFolds != 3 || result.StableFoldWins != 3 || result.AutomaticEnable {
+		t.Fatalf("stable evidence gate=%#v", result)
 	}
 }
