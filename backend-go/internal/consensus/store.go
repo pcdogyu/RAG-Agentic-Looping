@@ -101,7 +101,7 @@ func (s *Store) ListAvailable(ctx context.Context, assetID string, cutoff time.T
 		return nil, fmt.Errorf("consensus store, asset_id, cutoff and limit are required")
 	}
 	rows, err := s.db.Query(ctx, `SELECT id,asset_id,metric,fiscal_period,fiscal_period_end,accounting_basis,statistic,estimate_value,analyst_count,currency,unit,published_at,available_at,revision_at,source_name,source_url,source_document_id,source_payload,retrieved_at
-FROM consensus_snapshots WHERE asset_id=$1 AND available_at<=$2 ORDER BY available_at DESC,fiscal_period_end,metric,statistic,id LIMIT $3`, strings.TrimSpace(assetID), cutoff.UTC(), limit)
+FROM consensus_snapshots WHERE asset_id=$1 AND available_at<=$2 ORDER BY available_at DESC,fiscal_period_end DESC,metric,statistic,id LIMIT $3`, strings.TrimSpace(assetID), cutoff.UTC(), limit)
 	if err != nil {
 		return nil, err
 	}
