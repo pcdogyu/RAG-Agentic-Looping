@@ -125,6 +125,7 @@
 | 2.18 | 预测、估值与评级直写入口统一证据门禁 | 已完成（生产三类直写拒绝与零副作用已验收） |
 | 2.19 | 前瞻结果标签冷启动触发与幂等调度 | 已完成（生产真实任务与未成熟门禁已验收） |
 | 2.20 | A 股复权行情端点与来源语义修复 | 已完成（生产回填与残余失败分层已验收） |
+| 2.21 | 美股基准资产身份统一 | 已完成（生产策略回读与 Worker 平滑替换已验收） |
 
 ### 当前真实验收缺口
 
@@ -340,3 +341,12 @@
 - 生产验收（2026-09-10 北京时间）：提交 `0ebd135` 仅部署 Market Adapter、outcomes worker 和共享价格持久化所需的 masterdata worker，research worker `8dd3b1fd5e67` 未停止或重建。样板同步任务 `452dfb0e-04f8-4c40-968b-4da3ef358bc0` 一次完成，收到并新增 11 条 `002311` 前复权价格；最新记录明确保存 `adjusted_close`、`Tencent Finance`、`https://web.ifzq.gtimg.cn/appstock/app/newfqkline/get` 和 `tencent-kline:sz002311`，旧普通收盘记录保持不可变且未被覆盖。
 - 再次执行结果任务 `d2fe53a8-9a98-4da8-b6ff-42bc1ce06b1c` 后，135 条 A 股历史结果成功恢复，历史结果总数增至 458，生产库新增 1191 条腾讯 A 股前复权观测；前瞻标签子任务仍为 `selected=39,pending=39,matured=0,excluded=0,unavailable=0,failed=0`。剩余 10 条失败均为已停用且已在美股证券池标记 `excluded` 的非美交易所旧身份，FMP 当前套餐返回 402；这些失败继续显式保留，没有被删除、改成美股收益或填成零值。
 - Market Adapter 健康、API 健康、网页返回 200。当前数据质量接口披露 458 条历史结果均缺少已批准的 PIT 基准映射、39 条前瞻标签未成熟；这两个真实缺口继续作为第二期完成门禁。
+
+### 2.21 美股基准资产身份统一
+
+- 审计发现市场策略和基本面评级的默认美股基准使用了不存在的 `equity:US:SPY`，而生产主数据中的精确证券身份是 `equity:AMEX:SPY`（市场 `US`、币种 `USD`）。旧身份会使后续人工基准映射无法同时满足资产存在性和策略一致性门禁。
+- 新增共享常量 `marketpolicy.USBenchmarkAssetID`，市场策略和评级默认政策统一引用 `equity:AMEX:SPY`；测试中的分析师证据、定时研究及评级样例同步采用同一身份，仓库中不再残留 `equity:US:SPY`。
+- 该修复只更正代码中的规范身份，不自动创建或追溯补写任何 `benchmark_mapping_observations`。生产基准映射仍为 0，必须由分析师明确批准来源、适用范围、有效时间、理由和审批人后才能形成相对收益证据。
+- 自动化验收：Go CI `34407125324` 通过全量竞态、冻结评估和全部隔离 PostgreSQL/Redis 回归。生产提交 `2f526a3` 部署后，管理员就绪接口对美股股票返回 `benchmark_id=equity:AMEX:SPY`、`benchmark_policy=approved_point_in_time_mapping`，同时仍如实显示成熟结果与同范围校准样本不足、自动发布关闭；生产主数据可读回该精确 SPY 资产。
+- 本次策略代码影响 API、主数据、演进和研究路径。API、masterdata worker 与 evolution worker 完成更新后，旧 research worker `8dd3b1fd5e67` 收到 SIGTERM 即停止领取新任务，并用约 148 秒排空在途任务后退出；原任务 `93b064ec-388c-4e28-95eb-1fd3b9c24d32` 没有被强杀，最终以 `output_limit_invalid_json` 显式失败。新版 research worker `a832f1a55f52` 随后启动并继续处理持久队列，排队和重试记录未被删除。
+- 生产 API 健康返回 200，数据库与 Redis 均正常；网页返回 200。此步骤解除未来美股基准审批的身份阻断，但没有替代人工审批，也不改变第二期尚未完成的结论。
