@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/config"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/consensus"
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/marketpolicy"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/migrate"
 )
 
@@ -144,12 +145,18 @@ func TestManualMarketPriceSyncPersistsOnlyProviderObservationsAgainstIsolatedPos
 	}
 	const assetID = "equity:NASDAQ:PRICE"
 	const cnAssetID = "equity:XSHG:600000"
+	const inactiveAssetID = "equity:NASDAQ:INACTIVE"
 	if _, err = pool.Exec(ctx, `INSERT INTO assets(id,asset_class,market,symbol,name,exchange_or_provider,currency,aliases,products,competitors,lot_size,active)
 		VALUES($1,'equity','US','PRICE','Price Test','NASDAQ','USD','[]','[]','[]',1,true)`, assetID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = pool.Exec(ctx, `INSERT INTO assets(id,asset_class,market,symbol,name,exchange_or_provider,currency,aliases,products,competitors,lot_size,active)
 		VALUES($1,'equity','CN','600000','CN Price Test','XSHG','CNY','[]','[]','[]',100,true)`, cnAssetID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, `INSERT INTO assets(id,asset_class,market,symbol,name,exchange_or_provider,currency,aliases,products,competitors,lot_size,active) VALUES
+		($1,'equity','US','SPY','Canonical Benchmark','AMEX','USD','[]','[]','[]',1,false),
+		($2,'equity','US','INACTIVE','Inactive Non-benchmark','NASDAQ','USD','[]','[]','[]',1,false)`, marketpolicy.USBenchmarkAssetID, inactiveAssetID); err != nil {
 		t.Fatal(err)
 	}
 	prior, earlier := time.Now().UTC().AddDate(0, 0, -1).Format("2006-01-02"), time.Now().UTC().AddDate(0, 0, -2).Format("2006-01-02")
@@ -167,7 +174,8 @@ func TestManualMarketPriceSyncPersistsOnlyProviderObservationsAgainstIsolatedPos
 			}}})
 			return
 		}
-		if r.Header.Get("apikey") != "isolated-price" || r.URL.Path != "/historical-price-eod/dividend-adjusted" || r.URL.Query().Get("symbol") != "PRICE" {
+		symbol := r.URL.Query().Get("symbol")
+		if r.Header.Get("apikey") != "isolated-price" || r.URL.Path != "/historical-price-eod/dividend-adjusted" || (symbol != "PRICE" && symbol != "SPY") {
 			t.Errorf("unexpected FMP price request: path=%s symbol=%q apikey=%q", r.URL.Path, r.URL.Query().Get("symbol"), r.Header.Get("apikey"))
 			http.Error(w, "unexpected request", http.StatusBadRequest)
 			return
@@ -213,6 +221,22 @@ func TestManualMarketPriceSyncPersistsOnlyProviderObservationsAgainstIsolatedPos
 	}
 	if cnField != "adjusted_close" || cnSourceName != "Tencent Finance" || cnSourceURL != "https://example.test/newfqkline/get" || cnSourceID != "tencent-kline:sh600000" {
 		t.Fatalf("CN price lineage is invalid: field=%s source=%s url=%s document=%s", cnField, cnSourceName, cnSourceURL, cnSourceID)
+	}
+	benchmarkPayload, _ := json.Marshal(taskEnvelope{Args: []any{marketpolicy.USBenchmarkAssetID}, Kwargs: map[string]any{"asset_id": marketpolicy.USBenchmarkAssetID, "lookback_days": 14}})
+	benchmarkResult, err := runtime.syncMarketPriceObservations(ctx, Job{ID: uuid.New(), Payload: benchmarkPayload})
+	if err != nil {
+		t.Fatal(err)
+	}
+	benchmarkValues := benchmarkResult.(map[string]any)
+	if benchmarkValues["status"] != "completed" || benchmarkValues["asset_active"] != false || benchmarkValues["selection_reason"] != "canonical_market_policy_benchmark" || benchmarkValues["adjusted_close_received"] != 2 {
+		t.Fatalf("inactive canonical benchmark did not sync safely: %#v", benchmarkValues)
+	}
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM market_price_observations WHERE asset_id=$1 AND price_field='adjusted_close'`, marketpolicy.USBenchmarkAssetID).Scan(&count); err != nil || count != 2 {
+		t.Fatalf("canonical benchmark observations=%d err=%v", count, err)
+	}
+	inactivePayload, _ := json.Marshal(taskEnvelope{Args: []any{inactiveAssetID}, Kwargs: map[string]any{"asset_id": inactiveAssetID, "lookback_days": 14}})
+	if result, syncErr := runtime.syncMarketPriceObservations(ctx, Job{ID: uuid.New(), Payload: inactivePayload}); syncErr == nil || result != nil || syncErr.Error() != "inactive asset is not a canonical market-policy benchmark" {
+		t.Fatalf("inactive non-benchmark was not rejected: result=%#v err=%v", result, syncErr)
 	}
 	if err = pool.QueryRow(ctx, `SELECT count(*) FROM forecast_versions WHERE asset_id=$1`, assetID).Scan(&count); err != nil || count != 0 {
 		t.Fatalf("price sync created forecast data: count=%d err=%v", count, err)

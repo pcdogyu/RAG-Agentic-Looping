@@ -7,7 +7,12 @@ import (
 	"strings"
 )
 
-const USBenchmarkAssetID = "equity:AMEX:SPY"
+const (
+	USBenchmarkAssetID     = "equity:AMEX:SPY"
+	CNBenchmarkAssetID     = "index:CN:000300"
+	HKBenchmarkAssetID     = "index:HK:HSI"
+	CryptoBenchmarkAssetID = "crypto:coingecko:bitcoin"
+)
 
 type Policy struct {
 	Version              string   `json:"version"`
@@ -37,9 +42,9 @@ func Resolve(assetClass, market string) Policy {
 	case assetClass == "equity" && market == "US":
 		base.Currency, base.TimeZone, base.Calendar, base.BenchmarkID, base.FundamentalMethod = "USD", "America/New_York", "XNYS", USBenchmarkAssetID, "fcff_wacc_or_pe"
 	case assetClass == "equity" && market == "CN":
-		base.Currency, base.TimeZone, base.Calendar, base.BenchmarkID, base.FundamentalMethod = "CNY", "Asia/Shanghai", "XSHG", "index:CN:000300", "fcff_wacc_or_pe"
+		base.Currency, base.TimeZone, base.Calendar, base.BenchmarkID, base.FundamentalMethod = "CNY", "Asia/Shanghai", "XSHG", CNBenchmarkAssetID, "fcff_wacc_or_pe"
 	case assetClass == "equity" && market == "HK":
-		base.Currency, base.TimeZone, base.Calendar, base.BenchmarkID, base.FundamentalMethod = "HKD", "Asia/Hong_Kong", "XHKG", "index:HK:HSI", "fcff_wacc_or_pe"
+		base.Currency, base.TimeZone, base.Calendar, base.BenchmarkID, base.FundamentalMethod = "HKD", "Asia/Hong_Kong", "XHKG", HKBenchmarkAssetID, "fcff_wacc_or_pe"
 	case assetClass == "etf" && (market == "US" || market == "CN" || market == "HK"):
 		base.Currency, base.TimeZone, base.Calendar = marketIdentity(market)
 		base.FundamentalMethod, base.PredictionSupported, base.Supported = "nav_holdings_and_tracking_error", true, true
@@ -55,7 +60,7 @@ func Resolve(assetClass, market string) Policy {
 		base.ExecutionConstraints = []string{"contract_multiplier", "expiry_and_roll", "session_calendar", "liquidity_and_slippage"}
 		base.Reason = "fundamental_rating_not_applicable_to_commodity"
 	case assetClass == "crypto" && (market == "CRYPTO" || market == "GLOBAL"):
-		base.Currency, base.TimeZone, base.Calendar, base.BenchmarkID, base.FundamentalMethod = "USD", "UTC", "24x7", "crypto:coingecko:bitcoin", "network_tokenomics"
+		base.Currency, base.TimeZone, base.Calendar, base.BenchmarkID, base.FundamentalMethod = "USD", "UTC", "24x7", CryptoBenchmarkAssetID, "network_tokenomics"
 		base.PredictionSupported, base.Supported = true, true
 		base.RequiredInputs = []string{"point_in_time_supply", "network_activity", "protocol_fees", "tokenomics"}
 		base.BenchmarkPolicy = "approved_point_in_time_crypto_mapping"
@@ -70,6 +75,19 @@ func Resolve(assetClass, market string) Policy {
 		base.ExecutionConstraints = []string{"exchange_calendar", "lot_size", "currency", "liquidity_and_slippage"}
 	}
 	return base
+}
+
+// IsCanonicalBenchmarkAsset reports whether an exact master-data identity is
+// frozen in a market policy as a benchmark. Canonical benchmark instruments
+// may intentionally stay outside the active research universe while their
+// immutable price observations still need to be collected.
+func IsCanonicalBenchmarkAsset(assetID string) bool {
+	switch strings.TrimSpace(assetID) {
+	case USBenchmarkAssetID, CNBenchmarkAssetID, HKBenchmarkAssetID, CryptoBenchmarkAssetID:
+		return true
+	default:
+		return false
+	}
 }
 
 func ValidateFundamental(policy Policy, currency, ratingMarket, ratingAssetClass, benchmarkID string) error {

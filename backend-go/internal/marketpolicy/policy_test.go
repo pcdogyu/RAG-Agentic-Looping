@@ -39,6 +39,19 @@ func TestFundamentalPolicyRejectsCrossMarketCurrencyAndBenchmark(t *testing.T) {
 	}
 }
 
+func TestCanonicalBenchmarkAssetsUseExactFrozenIdentities(t *testing.T) {
+	for _, assetID := range []string{USBenchmarkAssetID, CNBenchmarkAssetID, HKBenchmarkAssetID, CryptoBenchmarkAssetID} {
+		if !IsCanonicalBenchmarkAsset(assetID) {
+			t.Fatalf("canonical benchmark %q was not recognized", assetID)
+		}
+	}
+	for _, assetID := range []string{"", "SPY", "equity:US:SPY", "equity:AMEX:NVDA"} {
+		if IsCanonicalBenchmarkAsset(assetID) {
+			t.Fatalf("non-canonical benchmark %q was accepted", assetID)
+		}
+	}
+}
+
 func TestNewAssetReadinessWaitsForCoreMarketAndScopeSpecificEvidence(t *testing.T) {
 	crypto := ReadinessSegment{AssetClass: "crypto", ActiveAssets: 10, ApprovedModels: 1, PredictionRuns: 120, CalibratedRuns: 120, MatureOutcomes: 120, Reasons: []string{}}
 	classifyReadiness(&crypto, false, 100)

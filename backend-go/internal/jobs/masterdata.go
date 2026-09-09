@@ -23,6 +23,7 @@ import (
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/fundamentalresearch"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/fundamentals"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/marketdata"
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/marketpolicy"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -135,11 +136,19 @@ func (runtime *masterdataRuntime) syncMarketPriceObservations(ctx context.Contex
 	}
 	asset := map[string]any{}
 	var assetClass, market, symbol, currency string
-	if err := runtime.db.QueryRow(ctx, `SELECT asset_class,market,symbol,currency FROM assets WHERE id=$1 AND active=true`, assetID).Scan(&assetClass, &market, &symbol, &currency); err != nil {
+	var active bool
+	if err := runtime.db.QueryRow(ctx, `SELECT asset_class,market,symbol,currency,active FROM assets WHERE id=$1`, assetID).Scan(&assetClass, &market, &symbol, &currency, &active); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, errors.New("active asset is not available for market price sync")
+			return nil, errors.New("asset is not available for market price sync")
 		}
 		return nil, err
+	}
+	selectionReason := "active_asset"
+	if !active {
+		if !marketpolicy.IsCanonicalBenchmarkAsset(assetID) {
+			return nil, errors.New("inactive asset is not a canonical market-policy benchmark")
+		}
+		selectionReason = "canonical_market_policy_benchmark"
 	}
 	asset["asset_id"], asset["asset_class"], asset["market"], asset["symbol"], asset["currency"] = assetID, assetClass, market, symbol, currency
 	var before int
@@ -169,6 +178,7 @@ func (runtime *masterdataRuntime) syncMarketPriceObservations(ctx context.Contex
 	return map[string]any{
 		"status": status, "reason": reason, "asset_id": assetID, "lookback_days": lookbackDays,
 		"observations_received": len(points), "adjusted_close_received": adjusted, "inserted": after - before, "stored_total": after,
+		"asset_active": active, "selection_reason": selectionReason,
 		"time_contract_version": marketdata.PriceContractVersion, "automatic_assumptions": false, "automatic_valuation": false,
 		"automatic_rating": false, "automatic_probability": false,
 	}, nil
