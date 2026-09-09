@@ -472,6 +472,7 @@ services:
     environment:
       ADAPTER_PORT: "8091"
       MARKET_PROVIDER_TIMEOUT_SECONDS: ${MARKET_PROVIDER_TIMEOUT_SECONDS:-90}
+      CSI_INDEX_PERF_URL: ${CSI_INDEX_PERF_URL:-https://www.csindex.com.cn/csindex-home/perf/index-perf}
     healthcheck:
       test: ["CMD", "/usr/local/bin/market-adapter", "-healthcheck"]
       interval: 10s

@@ -99,6 +99,12 @@ func TestUpCreatesFreshGoRuntimeSchema(t *testing.T) {
 	if err := Up(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
+	var canonicalBenchmarks int
+	if err := pool.QueryRow(ctx, `SELECT count(*)::int FROM assets WHERE (id,asset_class,market,symbol,currency,active,instrument_type) IN (
+		('index:CSI:H00300','index','CN','H00300','CNY',false,'gross_total_return_index'),
+		('index:HSI:HSIDV','index','HK','HSIDV','HKD',false,'gross_total_return_index'))`).Scan(&canonicalBenchmarks); err != nil || canonicalBenchmarks != 2 {
+		t.Fatalf("canonical total-return benchmark identities=%d err=%v", canonicalBenchmarks, err)
+	}
 
 	for table, columns := range legacyORMColumns {
 		var exists bool

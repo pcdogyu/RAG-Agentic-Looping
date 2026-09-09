@@ -48,6 +48,7 @@ type outcomePricePoint struct {
 	SourceName string
 	SourceURL  string
 	SourceID   string
+	ReturnKind string
 	// SessionOnly means the provider supplied a calendar date without an
 	// intraday timestamp. It represents that day's close, not a price known at
 	// the beginning of the day.
@@ -495,11 +496,15 @@ func (runtime *outcomeRuntime) persistPriceObservations(ctx context.Context, ass
 		if point.SessionOnly {
 			precision = "daily_close"
 		}
+		metadata := map[string]any{"symbol": stringValue(asset["symbol"]), "outcome_price_contract": "outcome-price-v2"}
+		if point.ReturnKind != "" {
+			metadata["return_series_kind"] = point.ReturnKind
+		}
 		observation := marketdata.PriceObservation{
 			AssetID: assetID, Market: market, Currency: currency, ObservedAt: point.ObservedAt,
 			AvailableAt: availableAt, Price: point.Close, PriceField: field, TimePrecision: precision,
 			SourceName: pointSourceName, SourceDocumentID: pointSourceID, SourceURL: pointSourceURL,
-			Metadata: map[string]any{"symbol": stringValue(asset["symbol"]), "outcome_price_contract": "outcome-price-v2"},
+			Metadata: metadata,
 		}
 		if _, err := store.Save(ctx, observation); err != nil {
 			return fmt.Errorf("persist market price observation for %s: %w", assetID, err)
@@ -661,6 +666,7 @@ func normalizeOutcomePrices(payload any, notAfter time.Time) []outcomePricePoint
 			storeOutcomePricePoint(byTime, outcomePricePoint{
 				ObservedAt: stamp, Close: close, Adjusted: adjusted, SessionOnly: sessionOnly,
 				SourceName: stringValue(item["source_name"]), SourceURL: stringValue(item["source_url"]), SourceID: stringValue(item["source_document_id"]),
+				ReturnKind: stringValue(item["return_series_kind"]),
 			})
 		}
 	}

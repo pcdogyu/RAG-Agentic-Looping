@@ -9,8 +9,8 @@ import (
 
 const (
 	USBenchmarkAssetID     = "equity:AMEX:SPY"
-	CNBenchmarkAssetID     = "index:CN:000300"
-	HKBenchmarkAssetID     = "index:HK:HSI"
+	CNBenchmarkAssetID     = "index:CSI:H00300"
+	HKBenchmarkAssetID     = "index:HSI:HSIDV"
 	CryptoBenchmarkAssetID = "crypto:coingecko:bitcoin"
 )
 
@@ -36,7 +36,7 @@ type Policy struct {
 
 func Resolve(assetClass, market string) Policy {
 	assetClass, market = strings.ToLower(strings.TrimSpace(assetClass)), strings.ToUpper(strings.TrimSpace(market))
-	base := Policy{Version: "market-policy-v3", AssetClass: assetClass, Market: market, PredictionScope: assetClass + ":" + market,
+	base := Policy{Version: "market-policy-v4", AssetClass: assetClass, Market: market, PredictionScope: assetClass + ":" + market,
 		OutcomePriceField: "adjusted_close", BenchmarkPolicy: "approved_point_in_time_mapping", RequiredInputs: []string{}, ExecutionConstraints: []string{}}
 	switch {
 	case assetClass == "equity" && market == "US":

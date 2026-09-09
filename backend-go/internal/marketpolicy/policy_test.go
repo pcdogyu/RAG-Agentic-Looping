@@ -40,12 +40,20 @@ func TestFundamentalPolicyRejectsCrossMarketCurrencyAndBenchmark(t *testing.T) {
 }
 
 func TestCanonicalBenchmarkAssetsUseExactFrozenIdentities(t *testing.T) {
+	if CNBenchmarkAssetID != "index:CSI:H00300" || HKBenchmarkAssetID != "index:HSI:HSIDV" {
+		t.Fatalf("equity policies do not use the official gross total-return identities: CN=%q HK=%q", CNBenchmarkAssetID, HKBenchmarkAssetID)
+	}
+	for _, market := range []string{"CN", "HK"} {
+		if policy := Resolve("equity", market); policy.Version != "market-policy-v4" {
+			t.Fatalf("%s benchmark identity changed without a policy version bump: %#v", market, policy)
+		}
+	}
 	for _, assetID := range []string{USBenchmarkAssetID, CNBenchmarkAssetID, HKBenchmarkAssetID, CryptoBenchmarkAssetID} {
 		if !IsCanonicalBenchmarkAsset(assetID) {
 			t.Fatalf("canonical benchmark %q was not recognized", assetID)
 		}
 	}
-	for _, assetID := range []string{"", "SPY", "equity:US:SPY", "equity:AMEX:NVDA"} {
+	for _, assetID := range []string{"", "SPY", "equity:US:SPY", "equity:AMEX:NVDA", "index:CN:000300", "index:HK:HSI"} {
 		if IsCanonicalBenchmarkAsset(assetID) {
 			t.Fatalf("non-canonical benchmark %q was accepted", assetID)
 		}

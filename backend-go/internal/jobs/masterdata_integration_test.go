@@ -163,9 +163,17 @@ func TestManualMarketPriceSyncPersistsOnlyProviderObservationsAgainstIsolatedPos
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.URL.Path == "/v1/prices" {
 			request := map[string]any{}
-			if err := json.NewDecoder(r.Body).Decode(&request); err != nil || request["symbol"] != "600000" || request["market"] != "CN" {
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil || request["market"] != "CN" || (request["symbol"] != "600000" && request["symbol"] != "H00300") {
 				t.Errorf("unexpected CN price request: request=%#v err=%v", request, err)
 				http.Error(w, "unexpected request", http.StatusBadRequest)
+				return
+			}
+			if request["symbol"] == "H00300" {
+				_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{{
+					"date": prior, "adjusted_close": 6801.25, "price_field": "adjusted_close",
+					"source_name": "China Securities Index Co., Ltd.", "source_url": "https://www.csindex.com.cn/csindex-home/perf/index-perf?token=secret", "source_document_id": "csindex-total-return:H00300",
+					"return_series_kind": "gross_total_return_index",
+				}}})
 				return
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{{
@@ -233,6 +241,22 @@ func TestManualMarketPriceSyncPersistsOnlyProviderObservationsAgainstIsolatedPos
 	}
 	if err = pool.QueryRow(ctx, `SELECT count(*) FROM market_price_observations WHERE asset_id=$1 AND price_field='adjusted_close'`, marketpolicy.USBenchmarkAssetID).Scan(&count); err != nil || count != 2 {
 		t.Fatalf("canonical benchmark observations=%d err=%v", count, err)
+	}
+	cnBenchmarkPayload, _ := json.Marshal(taskEnvelope{Args: []any{marketpolicy.CNBenchmarkAssetID}, Kwargs: map[string]any{"asset_id": marketpolicy.CNBenchmarkAssetID, "lookback_days": 14}})
+	cnBenchmarkResult, err := runtime.syncMarketPriceObservations(ctx, Job{ID: uuid.New(), Payload: cnBenchmarkPayload})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cnBenchmarkValues := cnBenchmarkResult.(map[string]any)
+	if cnBenchmarkValues["status"] != "completed" || cnBenchmarkValues["asset_active"] != false || cnBenchmarkValues["selection_reason"] != "canonical_market_policy_benchmark" || cnBenchmarkValues["adjusted_close_received"] != 1 {
+		t.Fatalf("inactive CSI total-return benchmark did not sync safely: %#v", cnBenchmarkValues)
+	}
+	var cnBenchmarkField, cnBenchmarkSource, cnBenchmarkURL, cnBenchmarkSourceID, cnBenchmarkReturnKind string
+	if err = pool.QueryRow(ctx, `SELECT price_field,source_name,source_url,source_document_id,metadata->>'return_series_kind' FROM market_price_observations WHERE asset_id=$1`, marketpolicy.CNBenchmarkAssetID).Scan(&cnBenchmarkField, &cnBenchmarkSource, &cnBenchmarkURL, &cnBenchmarkSourceID, &cnBenchmarkReturnKind); err != nil {
+		t.Fatal(err)
+	}
+	if cnBenchmarkField != "adjusted_close" || cnBenchmarkSource != "China Securities Index Co., Ltd." || cnBenchmarkURL != "https://www.csindex.com.cn/csindex-home/perf/index-perf" || cnBenchmarkSourceID != "csindex-total-return:H00300" || cnBenchmarkReturnKind != "gross_total_return_index" {
+		t.Fatalf("CSI benchmark lineage is invalid: field=%s source=%s url=%s document=%s return=%s", cnBenchmarkField, cnBenchmarkSource, cnBenchmarkURL, cnBenchmarkSourceID, cnBenchmarkReturnKind)
 	}
 	inactivePayload, _ := json.Marshal(taskEnvelope{Args: []any{inactiveAssetID}, Kwargs: map[string]any{"asset_id": inactiveAssetID, "lookback_days": 14}})
 	if result, syncErr := runtime.syncMarketPriceObservations(ctx, Job{ID: uuid.New(), Payload: inactivePayload}); syncErr == nil || result != nil || syncErr.Error() != "inactive asset is not a canonical market-policy benchmark" {

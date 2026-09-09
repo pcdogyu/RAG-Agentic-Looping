@@ -30,7 +30,7 @@ func main() {
 	timeout := time.Duration(envInt("MARKET_PROVIDER_TIMEOUT_SECONDS", 90)) * time.Second
 	provider := marketadapter.NewProvider(&http.Client{Timeout: timeout}, marketadapter.ProviderConfig{
 		SinaUniverseURL: env("SINA_UNIVERSE_URL", ""), TencentChinaURL: env("TENCENT_CN_KLINE_URL", ""),
-		TencentHKURL: env("TENCENT_HK_KLINE_URL", ""), FundamentalsURL: env("EASTMONEY_FUNDAMENTALS_URL", ""),
+		TencentHKURL: env("TENCENT_HK_KLINE_URL", ""), CSIIndexURL: env("CSI_INDEX_PERF_URL", ""), FundamentalsURL: env("EASTMONEY_FUNDAMENTALS_URL", ""),
 		NewsURL: env("EASTMONEY_FAST_NEWS_URL", ""),
 	})
 	server := &http.Server{

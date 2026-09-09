@@ -20,6 +20,7 @@ type ProviderConfig struct {
 	SinaUniverseURL string
 	TencentChinaURL string
 	TencentHKURL    string
+	CSIIndexURL     string
 	FundamentalsURL string
 	NewsURL         string
 	Now             func() time.Time
@@ -30,6 +31,7 @@ func DefaultProviderConfig() ProviderConfig {
 		SinaUniverseURL: "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php",
 		TencentChinaURL: "https://web.ifzq.gtimg.cn/appstock/app/newfqkline/get",
 		TencentHKURL:    "https://web.ifzq.gtimg.cn/appstock/app/hkfqkline/get",
+		CSIIndexURL:     "https://www.csindex.com.cn/csindex-home/perf/index-perf",
 		FundamentalsURL: "https://datacenter-web.eastmoney.com/api/data/v1/get",
 		NewsURL:         "https://np-weblist.eastmoney.com/comm/web/getFastNewsList",
 		Now:             time.Now,
@@ -54,6 +56,9 @@ func NewProvider(client *http.Client, cfg ProviderConfig) *EastAsiaProvider {
 	}
 	if cfg.TencentHKURL == "" {
 		cfg.TencentHKURL = defaults.TencentHKURL
+	}
+	if cfg.CSIIndexURL == "" {
+		cfg.CSIIndexURL = defaults.CSIIndexURL
 	}
 	if cfg.FundamentalsURL == "" {
 		cfg.FundamentalsURL = defaults.FundamentalsURL
@@ -196,6 +201,9 @@ func (p *EastAsiaProvider) Prices(ctx context.Context, request PriceRequest) ([]
 	now := p.cfg.Now().UTC()
 	start := normalizeDate(request.Start, now.AddDate(-1, 0, 0))
 	end := normalizeDate(request.End, now)
+	if request.Market == "CN" && strings.EqualFold(strings.TrimSpace(request.Symbol), "H00300") {
+		return p.csiTotalReturnPrices(ctx, "H00300", start, end)
+	}
 	prefix := "sz"
 	endpoint := p.cfg.TencentChinaURL
 	if request.Market == "HK" {
@@ -257,6 +265,72 @@ func (p *EastAsiaProvider) Prices(ctx context.Context, request PriceRequest) ([]
 			item["price_field"] = "close"
 		}
 		items = append(items, item)
+	}
+	return items, nil
+}
+
+// csiTotalReturnPrices reads the official CSI total-return series instead of
+// treating the similarly named 000300 price index as dividend-adjusted data.
+// H00300 is the official CSI 300 gross total-return code; every returned row is
+// identity-checked before it may enter the immutable adjusted-close store.
+func (p *EastAsiaProvider) csiTotalReturnPrices(ctx context.Context, symbol string, start, end time.Time) ([]map[string]any, error) {
+	query := url.Values{
+		"indexCode": {symbol},
+		"startDate": {start.Format("20060102")},
+		"endDate":   {end.Format("20060102")},
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, p.cfg.CSIIndexURL+"?"+query.Encode(), nil)
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("User-Agent", userAgent)
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("Referer", "https://www.csindex.com.cn/")
+	request.Header.Set("X-Requested-With", "XMLHttpRequest")
+	response, err := p.client.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(response.Body, 512))
+		return nil, fmt.Errorf("CSI total-return provider HTTP %d: %s", response.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var envelope struct {
+		Code string `json:"code"`
+		Data []struct {
+			TradeDate      string      `json:"tradeDate"`
+			IndexCode      string      `json:"indexCode"`
+			IndexNameCNAll string      `json:"indexNameCnAll"`
+			IndexNameENAll string      `json:"indexNameEnAll"`
+			Close          json.Number `json:"close"`
+		} `json:"data"`
+	}
+	decoder := json.NewDecoder(io.LimitReader(response.Body, 64<<20))
+	decoder.UseNumber()
+	if err := decoder.Decode(&envelope); err != nil {
+		return nil, fmt.Errorf("decode CSI total-return response: %w", err)
+	}
+	if envelope.Code != "200" {
+		return nil, fmt.Errorf("CSI total-return provider returned code %q", envelope.Code)
+	}
+	items := make([]map[string]any, 0, len(envelope.Data))
+	for _, row := range envelope.Data {
+		if !strings.EqualFold(strings.TrimSpace(row.IndexCode), symbol) {
+			return nil, fmt.Errorf("CSI total-return identity mismatch: requested %s received %s", symbol, row.IndexCode)
+		}
+		day, parseErr := time.Parse("20060102", strings.TrimSpace(row.TradeDate))
+		close, closeErr := row.Close.Float64()
+		if parseErr != nil || closeErr != nil || close <= 0 || day.Before(start) || day.After(end) {
+			continue
+		}
+		items = append(items, map[string]any{
+			"date": day.Format("2006-01-02"), "symbol": symbol,
+			"adjusted_close": close, "price_field": "adjusted_close",
+			"source_name": "China Securities Index Co., Ltd.", "source_url": providerSourceURL(p.cfg.CSIIndexURL),
+			"source_document_id": "csindex-total-return:" + symbol,
+			"return_series_kind": "gross_total_return_index", "index_name_cn": row.IndexNameCNAll, "index_name_en": row.IndexNameENAll,
+		})
 	}
 	return items, nil
 }

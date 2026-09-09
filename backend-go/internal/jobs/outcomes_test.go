@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/config"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/marketdata"
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/marketpolicy"
 )
 
 func TestOutcomeHandlersCoverMigrationManifest(t *testing.T) {
@@ -208,12 +209,12 @@ func TestEvaluateRecommendationOutcomeMath(t *testing.T) {
 			{"date": "2026-01-06", "close": 90.0},
 			{"date": "2026-01-07", "close": 110.0},
 		}
-		if request["symbol"] == "000300" {
+		if request["symbol"] == "H00300" {
 			prices = []map[string]any{
-				{"date": "2026-01-02", "close": 100.0},
-				{"date": "2026-01-05", "close": 101.0},
-				{"date": "2026-01-06", "close": 102.0},
-				{"date": "2026-01-07", "close": 103.0},
+				{"date": "2026-01-02", "adjusted_close": 100.0},
+				{"date": "2026-01-05", "adjusted_close": 101.0},
+				{"date": "2026-01-06", "adjusted_close": 102.0},
+				{"date": "2026-01-07", "adjusted_close": 103.0},
 			}
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"items": prices})
@@ -228,8 +229,8 @@ func TestEvaluateRecommendationOutcomeMath(t *testing.T) {
 				t.Fatalf("unexpected benchmark request: %#v", request)
 			}
 			return marketdata.BenchmarkResolution{Status: "available", Mapping: &marketdata.BenchmarkMapping{
-				ID: "mapping-cn-v1", BenchmarkAssetID: "index:CN:000300", BenchmarkClass: "equity",
-				BenchmarkMarket: "CN", BenchmarkCurrency: "CNY", BenchmarkSymbol: "000300",
+				ID: "mapping-cn-v1", BenchmarkAssetID: marketpolicy.CNBenchmarkAssetID, BenchmarkClass: "index",
+				BenchmarkMarket: "CN", BenchmarkCurrency: "CNY", BenchmarkSymbol: "H00300",
 			}}, nil
 		},
 	}
