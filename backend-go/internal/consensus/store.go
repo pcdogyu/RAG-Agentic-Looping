@@ -97,7 +97,7 @@ func (s *Store) EstimatesBefore(ctx context.Context, assetID, metric string, per
 // observations cannot appear before collection began because available_at is
 // the first-observed timestamp when provider publication time is absent.
 func (s *Store) ListAvailable(ctx context.Context, assetID string, cutoff time.Time, limit int) ([]Estimate, error) {
-	if s.db == nil || strings.TrimSpace(assetID) == "" || cutoff.IsZero() || limit < 1 || limit > 500 {
+	if s.db == nil || strings.TrimSpace(assetID) == "" || cutoff.IsZero() || limit < 1 || limit > 1000 {
 		return nil, fmt.Errorf("consensus store, asset_id, cutoff and limit are required")
 	}
 	rows, err := s.db.Query(ctx, `SELECT id,asset_id,metric,fiscal_period,fiscal_period_end,accounting_basis,statistic,estimate_value,analyst_count,currency,unit,published_at,available_at,revision_at,source_name,source_url,source_document_id,source_payload,retrieved_at
