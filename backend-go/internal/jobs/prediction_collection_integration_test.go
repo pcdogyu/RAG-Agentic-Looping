@@ -53,7 +53,7 @@ func TestRuleBaselineCollectionIsForwardOnlyIdempotentAndNotPromotableAgainstPos
 	insertRecommendation := func(id string, signalAt time.Time) {
 		payload, _ := json.Marshal(map[string]any{"scoring_version": "llm-direction-v3", "signal_available_at": signalAt.Format(time.RFC3339Nano)})
 		if _, insertErr := pool.Exec(ctx, `INSERT INTO recommendations(id,run_id,asset_id,score,rating,confidence,as_of,payload)
-			VALUES($1,$2,'equity:XNAS:FORWARD',40,'bullish',0,$3,$4)`, id, "run-"+id, signalAt, payload); insertErr != nil {
+			VALUES($1,$1,'equity:XNAS:FORWARD',40,'bullish',0,$2,$3)`, id, signalAt, payload); insertErr != nil {
 			t.Fatal(insertErr)
 		}
 	}

@@ -158,7 +158,7 @@ func TestFundamentalRefreshCandidatesBootstrapOnlyRecentCurrentContractResearch(
 		{"equity:XSHG:CN", now.AddDate(0, 0, -2), "llm-direction-v3"},
 	} {
 		if _, err = pool.Exec(ctx, `INSERT INTO recommendations(id,run_id,asset_id,score,rating,confidence,as_of,payload)
-			VALUES($1,$2,$3,0,'watch',0,$4,json_build_object('scoring_version',$5))`, fmt.Sprintf("recommendation-%02d", index), fmt.Sprintf("run-%02d", index), values.assetID, values.asOf, values.version); err != nil {
+			VALUES($1,$2,$3,0,'watch',0,$4,json_build_object('scoring_version',$5::text))`, fmt.Sprintf("recommendation-%02d", index), fmt.Sprintf("run-%02d", index), values.assetID, values.asOf, values.version); err != nil {
 			t.Fatal(err)
 		}
 	}
