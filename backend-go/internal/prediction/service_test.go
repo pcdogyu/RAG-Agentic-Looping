@@ -85,3 +85,23 @@ func TestModelRegistrationValidationRejectsUnfrozenOutcomeContracts(t *testing.T
 		t.Fatal("heuristic direction score was accepted as a trained outcome objective")
 	}
 }
+
+func TestFixedRuleCollectionBaselineIsUntrainedAndStrictlyFrozen(t *testing.T) {
+	model := signals.BinaryModel{
+		Kind: signals.ModelKindFixedRule, Version: "fixed-v1", Objective: "absolute_up", HorizonSessions: 5,
+		TrainingCutoff: time.Now().UTC(), FeatureNames: []string{signals.FeatureLLMDirectionScore},
+		Means: map[string]float64{signals.FeatureLLMDirectionScore: 0}, Scales: map[string]float64{signals.FeatureLLMDirectionScore: 1},
+		Coefficients: map[string]float64{signals.FeatureLLMDirectionScore: 1}, SampleCount: 0,
+	}
+	if err := validateModel(model); err != nil {
+		t.Fatal(err)
+	}
+	model.Coefficients[signals.FeatureLLMDirectionScore] = .9
+	if err := validateModel(model); err == nil {
+		t.Fatal("modified fixed-rule coefficient was accepted")
+	}
+	model.Kind = signals.ModelKindLearnedLogistic
+	if err := validateModel(model); err == nil {
+		t.Fatal("zero-sample learned model was accepted")
+	}
+}

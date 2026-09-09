@@ -26,6 +26,7 @@ import (
 const (
 	evaluateOutcomesTask          = "market_loop.evaluate_outcomes"
 	refreshEventMarketFactorsTask = "market_loop.refresh_event_market_factors"
+	collectRuleBaselineTask       = "market_loop.collect_rule_baseline_prediction"
 	marketFactorEventDays         = 45
 	marketFactorBatchSize         = 20
 )
@@ -66,6 +67,7 @@ func NewOutcomeHandlers(cfg config.Config, db *pgxpool.Pool, redisClient *redis.
 	return map[string]Handler{
 		evaluateOutcomesTask:          runtime.evaluateOutcomes,
 		refreshEventMarketFactorsTask: runtime.refreshEventMarketFactors,
+		collectRuleBaselineTask:       runtime.collectRuleBaselinePrediction,
 	}
 }
 

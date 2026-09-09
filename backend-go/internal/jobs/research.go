@@ -872,6 +872,14 @@ func (runtime *researchRuntime) saveRecommendationAndRun(ctx context.Context, ru
 	if err := persistEvidence(ctx, tx, runID, evidence); err != nil {
 		return err
 	}
+	if stringValue(recommendation["scoring_version"]) == "llm-direction-v3" {
+		collectionJobID := uuid.New()
+		collectionPayload, _ := json.Marshal(taskEnvelope{Args: []any{recommendationID.String()}, Kwargs: map[string]any{}})
+		if _, err := tx.Exec(ctx, `INSERT INTO go_jobs(id,queue,task_type,payload,status,priority,max_attempts,available_at,dedupe_key,created_at,updated_at)
+			VALUES($1,'outcomes',$2,$3,'queued',5,3,now(),$4,now(),now()) ON CONFLICT DO NOTHING`, collectionJobID, collectRuleBaselineTask, collectionPayload, "rule-baseline:"+recommendationID.String()); err != nil {
+			return err
+		}
+	}
 	return tx.Commit(ctx)
 }
 

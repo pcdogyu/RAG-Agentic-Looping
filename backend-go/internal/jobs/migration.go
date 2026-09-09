@@ -47,7 +47,7 @@ var workerLaneDefinitions = []MigrationLane{
 		"market_loop.reconcile_asset_mapping_leases", "market_loop.recover_orphaned_news",
 	}},
 	{ID: "outcomes", Order: 7, GoQueue: "outcomes", TaskTypes: []string{
-		"market_loop.evaluate_outcomes", "market_loop.refresh_event_market_factors",
+		"market_loop.evaluate_outcomes", "market_loop.refresh_event_market_factors", "market_loop.collect_rule_baseline_prediction",
 	}},
 	{ID: "masterdata", Order: 8, GoQueue: "masterdata", TaskTypes: []string{
 		"market_loop.refresh_crypto_universe", "market_loop.refresh_asset_universe",

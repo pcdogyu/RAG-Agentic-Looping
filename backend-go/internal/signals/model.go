@@ -26,6 +26,9 @@ const (
 	FeatureNewInformation    = "new_information_score"
 	FeatureBusinessExposure  = "business_exposure_share"
 	FeaturePriceReaction     = "pre_signal_price_reaction"
+	FeatureLLMDirectionScore = "llm_direction_score"
+	ModelKindLearnedLogistic = "learned_logistic"
+	ModelKindFixedRule       = "fixed_rule_baseline"
 )
 
 // CoreFeatureNames returns the stable P1 feature contract. Values still need
@@ -80,6 +83,7 @@ type Sample struct {
 }
 
 type BinaryModel struct {
+	Kind            string             `json:"kind,omitempty"`
 	Version         string             `json:"version"`
 	Objective       string             `json:"objective"`
 	HorizonSessions int                `json:"horizon_sessions"`
@@ -189,7 +193,7 @@ func FitBinary(samples []Sample, names []string, options FitOptions) (BinaryMode
 			coefficients[name] -= rate * (gradient[name]/float64(len(eligible)) + options.L2*coefficients[name])
 		}
 	}
-	model := BinaryModel{Objective: strings.TrimSpace(options.Objective), HorizonSessions: options.HorizonSessions, TrainingCutoff: options.TrainingCutoff.UTC(), FeatureNames: names, Means: means, Scales: scales, Coefficients: coefficients, Intercept: intercept, SampleCount: len(eligible)}
+	model := BinaryModel{Kind: ModelKindLearnedLogistic, Objective: strings.TrimSpace(options.Objective), HorizonSessions: options.HorizonSessions, TrainingCutoff: options.TrainingCutoff.UTC(), FeatureNames: names, Means: means, Scales: scales, Coefficients: coefficients, Intercept: intercept, SampleCount: len(eligible)}
 	identity, _ := json.Marshal(struct {
 		Model        BinaryModel `json:"model"`
 		Samples      []Sample    `json:"samples"`

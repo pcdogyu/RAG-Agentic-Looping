@@ -148,8 +148,13 @@ func (s *Service) Promote(ctx context.Context, modelVersion string, input govern
 		return governance.Decision{}, fmt.Errorf("prediction store and model_version are required")
 	}
 	var policyScope []byte
-	if err := s.db.QueryRow(ctx, `SELECT scope::jsonb FROM prediction_models WHERE version=$1 AND status='shadow'`, strings.TrimSpace(modelVersion)).Scan(&policyScope); err != nil {
+	var modelKind string
+	if err := s.db.QueryRow(ctx, `SELECT scope::jsonb,coalesce(nullif(model_payload->>'kind',''),'learned_logistic') FROM prediction_models WHERE version=$1 AND status='shadow'`, strings.TrimSpace(modelVersion)).Scan(&policyScope, &modelKind); err != nil {
 		return governance.Decision{}, fmt.Errorf("load shadow prediction model policy: %w", err)
+	}
+	if modelKind == signals.ModelKindFixedRule {
+		decision := governance.Decision{Status: "blocked", Reasons: []string{"fixed_rule_data_collection_only"}}
+		return decision, s.RecordPromotionDecision(ctx, "model", modelVersion, input, decision, now)
 	}
 	policyMap := map[string]any{}
 	if err := json.Unmarshal(policyScope, &policyMap); err != nil {
@@ -201,11 +206,14 @@ func (s *Service) RegisterCalibration(ctx context.Context, input CalibrationRegi
 	if policy := marketpolicy.Resolve(input.Scope.AssetClass, input.Scope.Market); !policy.PredictionSupported {
 		return calibration.Model{}, fmt.Errorf("calibration scope is unsupported")
 	}
-	var sourceMarket string
+	var sourceMarket, sourceModelKind string
 	var sourceHorizon int
 	var sourceScopeBody []byte
-	if err := s.db.QueryRow(ctx, `SELECT market,horizon_sessions,scope::jsonb FROM prediction_models WHERE version=$1`, input.SourceModelVersion).Scan(&sourceMarket, &sourceHorizon, &sourceScopeBody); err != nil {
+	if err := s.db.QueryRow(ctx, `SELECT market,horizon_sessions,scope::jsonb,coalesce(nullif(model_payload->>'kind',''),'learned_logistic') FROM prediction_models WHERE version=$1`, input.SourceModelVersion).Scan(&sourceMarket, &sourceHorizon, &sourceScopeBody, &sourceModelKind); err != nil {
 		return calibration.Model{}, fmt.Errorf("load source prediction model: %w", err)
+	}
+	if sourceModelKind == signals.ModelKindFixedRule {
+		return calibration.Model{}, fmt.Errorf("fixed-rule data collection baselines cannot publish calibrated probabilities")
 	}
 	sourceScope := map[string]any{}
 	_ = json.Unmarshal(sourceScopeBody, &sourceScope)
@@ -245,8 +253,24 @@ func ModelArtifactDigest(model signals.BinaryModel) string {
 }
 
 func validateModel(model signals.BinaryModel) error {
-	if strings.TrimSpace(model.Objective) == "" || len(model.FeatureNames) == 0 || model.SampleCount < 1 {
-		return fmt.Errorf("model objective, features and positive sample_count are required")
+	kind := strings.TrimSpace(model.Kind)
+	if kind == "" {
+		kind = signals.ModelKindLearnedLogistic
+	}
+	if strings.TrimSpace(model.Objective) == "" || len(model.FeatureNames) == 0 {
+		return fmt.Errorf("model objective and features are required")
+	}
+	if kind == signals.ModelKindLearnedLogistic && model.SampleCount < 1 {
+		return fmt.Errorf("learned models require a positive sample_count")
+	}
+	if kind == signals.ModelKindFixedRule {
+		if model.SampleCount != 0 || len(model.FeatureNames) != 1 || model.FeatureNames[0] != signals.FeatureLLMDirectionScore ||
+			model.Means[signals.FeatureLLMDirectionScore] != 0 || model.Scales[signals.FeatureLLMDirectionScore] != 1 ||
+			model.Coefficients[signals.FeatureLLMDirectionScore] != 1 || model.Intercept != 0 {
+			return fmt.Errorf("fixed-rule baseline must be the frozen untrained LLM direction identity rule")
+		}
+	} else if kind != signals.ModelKindLearnedLogistic {
+		return fmt.Errorf("model kind is unsupported")
 	}
 	if _, err := evaluation.ResolveHorizonPolicy(model.Objective, model.HorizonSessions); err != nil {
 		return err

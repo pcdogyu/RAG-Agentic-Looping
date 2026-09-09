@@ -77,3 +77,18 @@ func TestBinaryModelVersionTracksTrainingTruthAndRejectsDuplicateClusters(t *tes
 		t.Fatal("duplicate event cluster was accepted")
 	}
 }
+
+func TestFixedRuleBaselinePreservesDirectionWithoutPublishingProbability(t *testing.T) {
+	now := time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC)
+	value := .4
+	model := BinaryModel{
+		Kind: ModelKindFixedRule, Version: "fixed-v1", Objective: "absolute_up", HorizonSessions: 5,
+		TrainingCutoff: now.Add(-time.Minute), FeatureNames: []string{FeatureLLMDirectionScore},
+		Means: map[string]float64{FeatureLLMDirectionScore: 0}, Scales: map[string]float64{FeatureLLMDirectionScore: 1},
+		Coefficients: map[string]float64{FeatureLLMDirectionScore: 1}, SampleCount: 0,
+	}
+	result := model.Predict(BuildSnapshot(now, model.FeatureNames, []Feature{{Name: FeatureLLMDirectionScore, Value: &value, AvailableAt: now, SourceIDs: []string{"recommendation:1"}}}))
+	if result.Status != "uncalibrated" || result.RawScore == nil || *result.RawScore != value || result.Probability != nil {
+		t.Fatalf("fixed rule changed score semantics: %#v", result)
+	}
+}
