@@ -4104,6 +4104,11 @@ type FundamentalBundle = {
   schedule?: { items?: Array<{ id?: string; status?: string; forecast_version_id?: string; cadence_hours?: number; next_run_at?: string; last_run_status?: string; last_run_reason?: string; approved_by?: string; approved_at?: string }> };
 };
 
+export function scheduleDraftJSON(payload: { status?: string; schedule_draft?: Record<string, unknown> }) {
+	if (payload.status !== "available" || !payload.schedule_draft) return "";
+	return JSON.stringify(payload.schedule_draft, null, 2);
+}
+
 export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
   const [assetID, setAssetID] = useState("equity:XNAS:AAPL");
   const [bundle, setBundle] = useState<FundamentalBundle>({});
@@ -4207,9 +4212,16 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
     try {
       const body = JSON.parse(workflowJSON) as Record<string, unknown>;
       const response = await fetch(`${apiBase}/go/fundamental-research/${encodeURIComponent(canonical)}`, { method: "POST", headers: { "Content-Type": "application/json", "X-Admin-Token": token }, body: JSON.stringify(body) });
-      const payload = await response.json() as { status?: string; reason?: string; detail?: string };
+      const payload = await response.json() as { status?: string; reason?: string; detail?: string; schedule_draft?: Record<string, unknown>; schedule_draft_controls?: { approval_required?: boolean; automatic_approval?: boolean; runtime_price_field?: string } };
       if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
-      setMessage(payload.status === "available" ? "基本面研究工作流已完成并保存预测、估值和评级。" : `工作流未生成结论：${payload.reason || payload.status || "数据不足"}`);
+		const draftJSON = scheduleDraftJSON(payload);
+		if (draftJSON) {
+			setScheduleJSON(draftJSON);
+			setScheduleRequestID(globalThis.crypto?.randomUUID?.() || `fundamental-schedule-${Date.now()}`);
+			setMessage("基本面研究已完成；同源定时计划草稿已载入。请填写 approved_by 并复核后再批准，系统不会自动启用计划。");
+		} else {
+			setMessage(`工作流未生成结论：${payload.reason || payload.status || "数据不足"}`);
+		}
       await load();
     } catch (error) {
       setMessage(`工作流失败：${error instanceof Error ? error.message : "JSON 或请求无效"}`);
@@ -4287,7 +4299,7 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
       <label>定时研究批准计划<textarea aria-label="定时基本面研究计划 JSON" rows={8} value={scheduleJSON} onChange={(event) => { setScheduleJSON(event.target.value); setScheduleRequestID(globalThis.crypto?.randomUUID?.() || `fundamental-schedule-${Date.now()}`); }} placeholder='粘贴 forecast_version_id、valuation、rating、approved_by 和可选 cadence_hours；价格由运行时读取真实复权价。' /></label>
       <button type="button" disabled={loading || !scheduleJSON.trim()} onClick={() => void approveSchedule()}>批准定时研究</button>
       <button type="button" disabled={loading || schedule?.status !== "approved"} onClick={() => void pauseSchedule()}>暂停定时研究</button>
-      <small>计划只复用明确批准的预测与估值参数；出现新财报、计划过期或缺少复权价时自动停止并等待复核。</small>
+      <small>人工研究成功后会自动载入同源计划草稿，但 approved_by 保持空白且不会自动批准；计划运行时重新读取真实复权价。出现新财报、计划过期或缺少复权价时自动停止并等待复核。</small>
     </div>}
     {message && <div className="page-message">{message}</div>}
     <div className="metric-grid">
@@ -4302,7 +4314,7 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
       <article><span>基本面评级</span><strong>{rating?.result?.rating || rating?.result?.status || "不可用"}</strong><small>{rating?.result?.reason || rating?.state?.effective_at || "等待完整输入"}</small></article>
 		<article><span>短期预测</span><strong>{prediction?.status || "不可用"}</strong><small>{prediction?.status === "calibrated" && typeof prediction.probability === "number" ? `${Math.round(prediction.probability * 100)}%` : "未校准时不显示概率"}</small></article>
 		<article><span>资产政策</span><strong>{bundle.marketPolicy?.asset_class || "不可用"} · {bundle.marketPolicy?.market || "—"}</strong><small>{bundle.marketPolicy?.policy?.fundamental_supported ? "基本面可用" : "基本面不适用"} · {bundle.marketPolicy?.policy?.prediction_supported ? "短期预测可用" : "短期预测不适用"}</small></article>
-      <article><span>定时研究</span><strong>{schedule?.status || "未配置"}</strong><small>{schedule?.last_run_reason || schedule?.last_run_status || schedule?.next_run_at || "需要管理员显式批准"}</small></article>
+      <article><span>定时研究</span><strong>{schedule?.status || "未配置"}</strong><small>{schedule?.last_run_reason || schedule?.last_run_status || schedule?.next_run_at || "人工研究成功后自动载入同源计划草稿，仍需管理员显式批准"}</small></article>
     </div>
     <div className="conclusion-list">
 		<article className="conclusion-card">

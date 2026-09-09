@@ -53,14 +53,38 @@ type Input struct {
 }
 
 type Result struct {
-	AssetID      string              `json:"asset_id"`
-	AsOf         time.Time           `json:"as_of"`
-	Status       string              `json:"status"`
-	Reason       string              `json:"reason,omitempty"`
-	MarketPolicy marketpolicy.Policy `json:"market_policy"`
-	Forecast     forecast.Version    `json:"forecast"`
-	Valuation    *valuation.Run      `json:"valuation,omitempty"`
-	Rating       *rating.Snapshot    `json:"rating,omitempty"`
+	AssetID               string                 `json:"asset_id"`
+	AsOf                  time.Time              `json:"as_of"`
+	Status                string                 `json:"status"`
+	Reason                string                 `json:"reason,omitempty"`
+	MarketPolicy          marketpolicy.Policy    `json:"market_policy"`
+	Forecast              forecast.Version       `json:"forecast"`
+	Valuation             *valuation.Run         `json:"valuation,omitempty"`
+	Rating                *rating.Snapshot       `json:"rating,omitempty"`
+	ScheduleDraft         *ScheduleDraft         `json:"schedule_draft,omitempty"`
+	ScheduleDraftControls *ScheduleDraftControls `json:"schedule_draft_controls,omitempty"`
+}
+
+// ScheduleDraft carries the exact governed inputs from a successful manual
+// workflow into the separate schedule-approval step. It deliberately excludes
+// the manual run's point-in-time price: scheduled runs must resolve a fresh,
+// immutable adjusted-close observation at execution time. ApprovedBy remains
+// empty so producing a draft can never approve or activate a schedule.
+type ScheduleDraft struct {
+	AssetID           string              `json:"asset_id"`
+	ForecastVersionID string              `json:"forecast_version_id"`
+	Valuation         ValuationPlan       `json:"valuation"`
+	Rating            ScheduledRatingPlan `json:"rating"`
+	CadenceHours      int                 `json:"cadence_hours"`
+	MaxPriceAgeHours  int                 `json:"max_price_age_hours"`
+	MaxPlanAgeDays    int                 `json:"max_plan_age_days"`
+	ApprovedBy        string              `json:"approved_by"`
+}
+
+type ScheduleDraftControls struct {
+	ApprovalRequired  bool   `json:"approval_required"`
+	AutomaticApproval bool   `json:"automatic_approval"`
+	RuntimePriceField string `json:"runtime_price_field"`
 }
 
 type Service struct{ db *pgxpool.Pool }
@@ -112,5 +136,32 @@ func (s *Service) Run(ctx context.Context, input Input) (Result, error) {
 	result.Rating = &snapshot
 	result.Status = snapshot.Result.Status
 	result.Reason = snapshot.Result.Reason
+	if result.Status == "available" {
+		draft := scheduleDraftFromWorkflow(input, version.ID)
+		result.ScheduleDraft = &draft
+		result.ScheduleDraftControls = &ScheduleDraftControls{ApprovalRequired: true, AutomaticApproval: false, RuntimePriceField: "adjusted_close"}
+	}
 	return result, nil
+}
+
+func scheduleDraftFromWorkflow(input Input, forecastVersionID string) ScheduleDraft {
+	return ScheduleDraft{
+		AssetID:           input.AssetID,
+		ForecastVersionID: forecastVersionID,
+		Valuation:         input.Valuation,
+		Rating: ScheduledRatingPlan{
+			Policy:              input.Rating.Policy,
+			ExpectedDividend:    input.Rating.ExpectedDividend,
+			BenchmarkReturn:     input.Rating.BenchmarkReturn,
+			BenchmarkEvidenceID: input.Rating.BenchmarkEvidenceID,
+			ReasonCodes:         input.Rating.ReasonCodes,
+			ChangedAssumptions:  input.Rating.ChangedAssumptions,
+			EvidenceIDs:         input.Rating.EvidenceIDs,
+			InvalidationRules:   input.Rating.InvalidationRules,
+		},
+		CadenceHours:     24,
+		MaxPriceAgeHours: 120,
+		MaxPlanAgeDays:   90,
+		ApprovedBy:       "",
+	}
 }

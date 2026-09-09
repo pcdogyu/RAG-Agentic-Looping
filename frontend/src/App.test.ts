@@ -34,6 +34,7 @@ import {
   factSourceGroupDefinitions,
   formatQueueDuration,
   FundamentalResearchPage,
+  scheduleDraftJSON,
   ModelInferenceQueuePanel,
   modelQueueRetryRequest,
   modelQueuePanelColumns,
@@ -736,6 +737,7 @@ describe("shared hash navigation", () => {
 		expect(markup).toContain("不会自动生成假设、估值或评级");
 		expect(markup).toContain("同步真实复权价格");
 		expect(markup).toContain("复权价格证据");
+		expect(markup).toContain("人工研究成功后自动载入同源计划草稿，仍需管理员显式批准");
 		expect(markup).toContain("分析师一致预期");
 		expect(markup).toContain("数据不会倒填到首次观测之前");
 		expect(markup).toContain("管理层指引修订");
@@ -745,6 +747,13 @@ describe("shared hash navigation", () => {
 		expect(markup).toContain("自动抽取");
     expect(markup).toContain("管理员令牌");
   });
+
+	it("loads only a successful manual research schedule draft", () => {
+		const draft = { forecast_version_id: "forecast-1", approved_by: "", rating: { reason_codes: ["analyst_review"] } };
+		expect(scheduleDraftJSON({ status: "available", schedule_draft: draft })).toContain('"forecast_version_id": "forecast-1"');
+		expect(scheduleDraftJSON({ status: "insufficient_data", schedule_draft: draft })).toBe("");
+		expect(scheduleDraftJSON({ status: "available" })).toBe("");
+	});
 });
 
 describe("asset universe page", () => {

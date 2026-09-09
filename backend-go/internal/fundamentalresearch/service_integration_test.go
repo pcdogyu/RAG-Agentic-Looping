@@ -61,6 +61,15 @@ func TestWorkflowCompletesWithoutNewsAgainstIsolatedPostgres(t *testing.T) {
 	if err != nil || result.Status != "available" || result.Forecast.Status != "available" || result.Valuation == nil || result.Valuation.Status != "available" || result.Rating == nil || result.Rating.Result.Rating != "strong_buy" {
 		t.Fatalf("workflow=%#v err=%v", result, err)
 	}
+	if result.ScheduleDraft == nil || result.ScheduleDraft.ForecastVersionID != result.Forecast.ID || result.ScheduleDraft.ApprovedBy != "" {
+		t.Fatalf("schedule draft=%#v", result.ScheduleDraft)
+	}
+	if result.ScheduleDraftControls == nil || !result.ScheduleDraftControls.ApprovalRequired || result.ScheduleDraftControls.AutomaticApproval || result.ScheduleDraftControls.RuntimePriceField != "adjusted_close" {
+		t.Fatalf("schedule draft controls=%#v", result.ScheduleDraftControls)
+	}
+	if result.ScheduleDraft.Rating.BenchmarkEvidenceID != input.Rating.BenchmarkEvidenceID || len(result.ScheduleDraft.Valuation.MultipleScenarios) != 1 {
+		t.Fatalf("schedule draft lost governed inputs: %#v", result.ScheduleDraft)
+	}
 	repeated, err := New(pool).Run(ctx, input)
 	if err != nil || repeated.Forecast.ID != result.Forecast.ID || repeated.Valuation == nil || repeated.Valuation.ID != result.Valuation.ID || repeated.Rating == nil || repeated.Rating.Created {
 		t.Fatalf("repeated workflow=%#v err=%v", repeated, err)
@@ -71,6 +80,12 @@ func TestWorkflowCompletesWithoutNewsAgainstIsolatedPostgres(t *testing.T) {
 	insufficient, err := New(pool).Run(ctx, missing)
 	if err != nil || insufficient.Status != "insufficient_data" || insufficient.Reason != "missing_required_financial_inputs" || insufficient.Valuation != nil || insufficient.Rating != nil {
 		t.Fatalf("insufficient workflow=%#v err=%v", insufficient, err)
+	}
+	if insufficient.ScheduleDraft != nil {
+		t.Fatalf("insufficient workflow produced schedule draft: %#v", insufficient.ScheduleDraft)
+	}
+	if insufficient.ScheduleDraftControls != nil {
+		t.Fatalf("insufficient workflow produced schedule draft controls: %#v", insufficient.ScheduleDraftControls)
 	}
 	const cryptoID = "crypto:coingecko:bitcoin"
 	if _, err = pool.Exec(ctx, `INSERT INTO assets(id,asset_class,market,symbol,name,exchange_or_provider,currency,aliases,products,competitors,lot_size,active) VALUES($1,'crypto','CRYPTO','BTC','Bitcoin','coingecko','USD','[]','[]','[]',1,true)`, cryptoID); err != nil {
