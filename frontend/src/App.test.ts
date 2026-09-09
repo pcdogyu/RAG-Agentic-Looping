@@ -33,8 +33,10 @@ import {
   type EventConclusionDetail,
   factSourceGroupDefinitions,
   formatQueueDuration,
-  FundamentalResearchPage,
+	FundamentalResearchPage,
 	benchmarkMappingDraftJSON,
+	licensedBenchmarkImportBody,
+	licensedBenchmarkImportTemplate,
   scheduleDraftJSON,
   ModelInferenceQueuePanel,
   modelQueueRetryRequest,
@@ -743,6 +745,8 @@ describe("shared hash navigation", () => {
 		expect(markup).toContain("分析师证据登记");
 		expect(markup).toContain("PIT 基准映射");
 		expect(markup).toContain("时点基准治理");
+		expect(markup).toContain("持牌总回报导入");
+		expect(markup).toContain("不自动获取或批准数据");
 		expect(markup).toContain("自动批准：关闭");
 		expect(markup).toContain("人工研究成功后自动载入同源计划草稿，仍需管理员显式批准");
 		expect(markup).toContain("分析师一致预期");
@@ -775,6 +779,28 @@ describe("shared hash navigation", () => {
 		});
 		expect(draft.metadata).toEqual({ approval_mode: "human", draft_for_asset_id: "equity:XNAS:AAPL" });
 		expect(benchmarkMappingDraftJSON("equity:XNAS:AAPL", { market: "US", currency: "USD", policy: { version: "market-policy-v3" } }, validFrom)).toBe("");
+	});
+
+	it("prevalidates licensed total-return CSV and JSON without inventing authorization", () => {
+		const template = licensedBenchmarkImportTemplate("index:HSI:HSIDV");
+		expect(template).toContain('"vendor_code": ".HSIDV"');
+		expect(licensedBenchmarkImportTemplate("equity:AMEX:SPY")).toBe("");
+		const metadata = JSON.stringify({
+			vendor_code: "HSIRH", source_name: "Licensed Vendor", source_document_id: "export-1",
+			source_url: "https://licensed.example.test/history?token=client-only", license_reference: "agreement-1", approved_by: "owner",
+		});
+		const csvBody = licensedBenchmarkImportBody("index:HSI:HSIDV", metadata, "session_date,adjusted_close\n2026-09-09,12345.67\n2026-09-08,12200.5");
+		expect(csvBody.observations).toEqual([
+			{ session_date: "2026-09-08", adjusted_close: 12200.5 },
+			{ session_date: "2026-09-09", adjusted_close: 12345.67 },
+		]);
+		const jsonBody = licensedBenchmarkImportBody("index:HSI:HSIDV", metadata, '[{"session_date":"2026-09-08","adjusted_close":"12200.5"}]');
+		expect(jsonBody.observations).toEqual([{ session_date: "2026-09-08", adjusted_close: 12200.5 }]);
+		expect(() => licensedBenchmarkImportBody("index:HSI:HSIDV", metadata, "2026-09-08,1\n2026-09-08,2")).toThrow("不能重复");
+		expect(() => licensedBenchmarkImportBody("index:HSI:HSIDV", metadata.replace("https://", "http://"), "2026-09-08,1")).toThrow("HTTPS");
+		expect(() => licensedBenchmarkImportBody("index:HSI:HSIDV", metadata.replace("HSIRH", "HSI"), "2026-09-08,1")).toThrow("身份不一致");
+		expect(() => licensedBenchmarkImportBody("index:HSI:HSIDV", metadata.replace("agreement-1", ""), "2026-09-08,1")).toThrow("license_reference");
+		expect(() => licensedBenchmarkImportBody("equity:AMEX:SPY", metadata, "2026-09-08,1")).toThrow("不是可持牌导入");
 	});
 });
 

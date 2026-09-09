@@ -4129,6 +4129,84 @@ export function benchmarkMappingDraftJSON(assetID: string, marketPolicy: Fundame
 	}, null, 2);
 }
 
+const licensedTotalReturnVendorCodes: Record<string, string[]> = {
+	"index:CSI:H00300": ["H00300", ".CSIH00300", "CSIR0300", "CSI 300 Total Return Index"],
+	"index:HSI:HSIDV": ["HSIDV", ".HSIDV", "HSIRH", "HSIRH.HI", "Hang Seng Index Gross Total Return Index"],
+};
+
+export function licensedBenchmarkImportTemplate(benchmarkAssetID: string) {
+	const canonical = benchmarkAssetID.trim();
+	const vendorCode = canonical === "index:CSI:H00300" ? "H00300" : canonical === "index:HSI:HSIDV" ? ".HSIDV" : "";
+	if (!vendorCode) return "";
+	return JSON.stringify({
+		vendor_code: vendorCode, source_name: "", source_document_id: "", source_url: "",
+		license_reference: "", approved_by: "",
+	}, null, 2);
+}
+
+export function licensedBenchmarkImportBody(benchmarkAssetID: string, metadataJSON: string, observationsText: string) {
+	const canonical = benchmarkAssetID.trim();
+	const allowedCodes = licensedTotalReturnVendorCodes[canonical];
+	if (!allowedCodes) throw new Error("当前策略基准不是可持牌导入的规范中证/恒生总回报指数");
+	let metadata: Record<string, unknown>;
+	try {
+		const parsed = JSON.parse(metadataJSON) as unknown;
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error();
+		metadata = parsed as Record<string, unknown>;
+	} catch {
+		throw new Error("授权信息必须是有效 JSON 对象");
+	}
+	const required = ["vendor_code", "source_name", "source_document_id", "source_url", "license_reference", "approved_by"] as const;
+	const normalized = Object.fromEntries(required.map((field) => [field, String(metadata[field] || "").trim()])) as Record<(typeof required)[number], string>;
+	for (const field of required) {
+		if (!normalized[field]) throw new Error(`${field} 不能为空`);
+	}
+	if (!allowedCodes.some((value) => value.toLowerCase() === normalized.vendor_code.toLowerCase())) throw new Error("vendor_code 与当前规范基准身份不一致");
+	try {
+		const sourceURL = new URL(normalized.source_url);
+		if (sourceURL.protocol !== "https:") throw new Error();
+	} catch {
+		throw new Error("source_url 必须是绝对 HTTPS 地址");
+	}
+
+	type Observation = { session_date: string; adjusted_close: number };
+	let rawObservations: Array<Record<string, unknown>>;
+	const trimmed = observationsText.trim();
+	if (!trimmed) throw new Error("必须提供持牌总回报观测");
+	if (trimmed.startsWith("[")) {
+		try {
+			const parsed = JSON.parse(trimmed) as unknown;
+			if (!Array.isArray(parsed)) throw new Error();
+			rawObservations = parsed as Array<Record<string, unknown>>;
+		} catch {
+			throw new Error("观测 JSON 必须是数组");
+		}
+	} else {
+		const lines = trimmed.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+		if (lines[0]?.toLowerCase().replace(/\s/g, "") === "session_date,adjusted_close") lines.shift();
+		rawObservations = lines.map((line) => {
+			const cells = line.split(",").map((cell) => cell.trim());
+			if (cells.length !== 2) throw new Error("CSV 每行必须只有 session_date,adjusted_close 两列");
+			return { session_date: cells[0], adjusted_close: cells[1] };
+		});
+	}
+	if (rawObservations.length < 1 || rawObservations.length > 1000) throw new Error("一次必须提供 1—1000 条观测");
+	const seen = new Set<string>();
+	const observations: Observation[] = rawObservations.map((item) => {
+		if (!item || typeof item !== "object" || Array.isArray(item)) throw new Error("每条观测必须是对象");
+		const sessionDate = String(item.session_date || "").trim();
+		const parsedDate = new Date(`${sessionDate}T00:00:00.000Z`);
+		if (!/^\d{4}-\d{2}-\d{2}$/.test(sessionDate) || Number.isNaN(parsedDate.getTime()) || parsedDate.toISOString().slice(0, 10) !== sessionDate) throw new Error("session_date 必须是有效 YYYY-MM-DD 日期");
+		if (seen.has(sessionDate)) throw new Error("同一导入中 session_date 不能重复");
+		seen.add(sessionDate);
+		const adjustedClose = Number(item.adjusted_close);
+		if (!Number.isFinite(adjustedClose) || adjustedClose <= 0) throw new Error("adjusted_close 必须是正有限数");
+		return { session_date: sessionDate, adjusted_close: adjustedClose };
+	});
+	observations.sort((left, right) => left.session_date.localeCompare(right.session_date));
+	return { ...normalized, observations };
+}
+
 export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
   const [assetID, setAssetID] = useState("equity:XNAS:AAPL");
   const [bundle, setBundle] = useState<FundamentalBundle>({});
@@ -4141,6 +4219,10 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 	const [analystEvidenceRequestID, setAnalystEvidenceRequestID] = useState(() => globalThis.crypto?.randomUUID?.() || `analyst-evidence-${Date.now()}`);
 	const [benchmarkMappingJSON, setBenchmarkMappingJSON] = useState("");
 	const [benchmarkMappingRequestID, setBenchmarkMappingRequestID] = useState(() => globalThis.crypto?.randomUUID?.() || `benchmark-mapping-${Date.now()}`);
+	const [licensedBenchmarkMetadataJSON, setLicensedBenchmarkMetadataJSON] = useState("");
+	const [licensedBenchmarkObservations, setLicensedBenchmarkObservations] = useState("");
+	const [licensedBenchmarkRequestID, setLicensedBenchmarkRequestID] = useState(() => globalThis.crypto?.randomUUID?.() || `licensed-benchmark-${Date.now()}`);
+	const [licensedBenchmarkConfirmed, setLicensedBenchmarkConfirmed] = useState(false);
 	const [guidanceReviewJSON, setGuidanceReviewJSON] = useState("");
 	const [guidanceReviewRequestID, setGuidanceReviewRequestID] = useState(() => globalThis.crypto?.randomUUID?.() || `guidance-review-${Date.now()}`);
   const [scheduleRequestID, setScheduleRequestID] = useState(() => globalThis.crypto?.randomUUID?.() || `fundamental-schedule-${Date.now()}`);
@@ -4238,6 +4320,38 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 			setMessage(`规范基准 ${benchmarkAssetID} 的复权行情同步任务已排队：${payload.task_id || "等待 Worker"}。该操作不批准基准映射。`);
 		} catch (error) {
 			setMessage(`规范基准行情同步失败：${error instanceof Error ? error.message : "未知错误"}`);
+		} finally { setLoading(false); }
+	}
+	function loadLicensedBenchmarkTemplate() {
+		const benchmarkAssetID = bundle.marketPolicy?.policy?.benchmark_id?.trim() || "";
+		const template = licensedBenchmarkImportTemplate(benchmarkAssetID);
+		if (!template) {
+			setMessage("当前策略基准不是可持牌导入的中证 H00300 或恒生 HSIDV 总回报指数。");
+			return;
+		}
+		setLicensedBenchmarkMetadataJSON(template);
+		setLicensedBenchmarkObservations("session_date,adjusted_close\n");
+		setLicensedBenchmarkConfirmed(false);
+		setLicensedBenchmarkRequestID(globalThis.crypto?.randomUUID?.() || `licensed-benchmark-${Date.now()}`);
+		setMessage(`已生成 ${benchmarkAssetID} 持牌导入模板；只可填写真实授权来源、许可证引用、审批人和原始总回报观测。`);
+	}
+	async function importLicensedBenchmarkPrices() {
+		const benchmarkAssetID = bundle.marketPolicy?.policy?.benchmark_id?.trim() || "";
+		if (!benchmarkAssetID || !token || !licensedBenchmarkMetadataJSON.trim() || !licensedBenchmarkObservations.trim() || !licensedBenchmarkConfirmed) return;
+		setLoading(true); setMessage("");
+		try {
+			const body = licensedBenchmarkImportBody(benchmarkAssetID, licensedBenchmarkMetadataJSON, licensedBenchmarkObservations);
+			const response = await fetch(`${apiBase}/go/market-prices/${encodeURIComponent(benchmarkAssetID)}/licensed-import`, {
+				method: "POST", headers: { "Content-Type": "application/json", "X-Admin-Token": token, "Idempotency-Key": licensedBenchmarkRequestID }, body: JSON.stringify(body),
+			});
+			const payload = await response.json() as { created?: boolean; detail?: string; receipt?: { id?: string; observation_count?: number; inserted_count?: number } };
+			if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
+			setMessage(`持牌总回报行情${payload.created ? "已不可变导入" : "已幂等读回"}：${payload.receipt?.observation_count ?? 0} 条，首次新增 ${payload.receipt?.inserted_count ?? 0} 条，回执 ${payload.receipt?.id || "已保存"}。该操作不批准 PIT 映射。`);
+			setLicensedBenchmarkObservations("");
+			setLicensedBenchmarkConfirmed(false);
+			setLicensedBenchmarkRequestID(globalThis.crypto?.randomUUID?.() || `licensed-benchmark-${Date.now()}`);
+		} catch (error) {
+			setMessage(`持牌总回报行情导入失败：${error instanceof Error ? error.message : "JSON、CSV 或请求无效"}`);
 		} finally { setLoading(false); }
 	}
 	async function syncMarketPrices() {
@@ -4365,6 +4479,8 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 	const analystEvidenceItems = bundle.analystEvidence?.items || [];
 	const benchmarkResolution = bundle.benchmarkMapping?.resolution;
 	const benchmarkMapping = benchmarkResolution?.mapping;
+	const canonicalBenchmarkID = bundle.marketPolicy?.policy?.benchmark_id?.trim() || "";
+	const licensedBenchmarkAvailable = !!licensedBenchmarkImportTemplate(canonicalBenchmarkID);
 	const preparation = bundle.preparation;
 	const prices = bundle.prices?.items || [];
 	const latestPrice = prices[0];
@@ -4391,6 +4507,12 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 		<button type="button" disabled={loading || !benchmarkMappingJSON.trim()} onClick={() => void approveBenchmarkMapping()}>批准不可变 PIT 基准映射</button>
 		<button type="button" disabled={loading || !bundle.marketPolicy?.policy?.benchmark_id} onClick={() => void syncCanonicalBenchmarkPrice()}>同步规范基准复权行情</button>
 		<small>基准映射必须有真实来源、理由和批准人；草稿默认不回填历史。同步基准行情只写事实，不会自动批准映射。</small>
+		<label>持牌总回报授权信息<textarea aria-label="持牌总回报授权信息 JSON" rows={7} value={licensedBenchmarkMetadataJSON} onChange={(event) => { setLicensedBenchmarkMetadataJSON(event.target.value); setLicensedBenchmarkConfirmed(false); setLicensedBenchmarkRequestID(globalThis.crypto?.randomUUID?.() || `licensed-benchmark-${Date.now()}`); }} placeholder="由模板填写 vendor_code、真实来源、文档 ID、HTTPS 地址、许可证引用和批准人。" /></label>
+		<label>持牌总回报观测<textarea aria-label="持牌总回报观测 CSV 或 JSON" rows={7} value={licensedBenchmarkObservations} onChange={(event) => { setLicensedBenchmarkObservations(event.target.value); setLicensedBenchmarkConfirmed(false); setLicensedBenchmarkRequestID(globalThis.crypto?.randomUUID?.() || `licensed-benchmark-${Date.now()}`); }} placeholder={'CSV: session_date,adjusted_close\n2026-09-09,12345.67；或粘贴同字段 JSON 数组。'} /></label>
+		<button type="button" disabled={loading || !licensedBenchmarkAvailable} onClick={loadLicensedBenchmarkTemplate}>生成持牌总回报导入模板</button>
+		<label className="licensed-import-confirmation"><input type="checkbox" checked={licensedBenchmarkConfirmed} onChange={(event) => setLicensedBenchmarkConfirmed(event.target.checked)} />我确认这些观测来自有权使用的规范总回报数据，且审批与许可证引用真实有效</label>
+		<button type="button" disabled={loading || !licensedBenchmarkMetadataJSON.trim() || !licensedBenchmarkObservations.trim() || !licensedBenchmarkConfirmed} onClick={() => void importLicensedBenchmarkPrices()}>人工导入持牌总回报行情</button>
+		<small>只允许有授权、可追溯的 H00300/HSIDV 总回报数据；页面先校验身份、HTTPS、日期、正数和重复日。导入不会自动批准基准映射、生成评级或倒填可获得时间。</small>
       <label>无新闻基本面研究输入<textarea aria-label="基本面研究 JSON" rows={8} value={workflowJSON} onChange={(event) => setWorkflowJSON(event.target.value)} placeholder='粘贴含 as_of、forecast、valuation、rating 的证据化 JSON；不会自动补造假设或价格。' /></label>
 		<button type="button" disabled={loading || !preparation?.workflow_template} onClick={loadPreparationTemplate}>载入财务事实模板</button>
 		<button type="button" disabled={loading} onClick={() => void syncMarketPrices()}>同步真实复权价格</button>
@@ -4409,6 +4531,7 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
       <article><span>财务快照</span><strong>{bundle.fundamentals?.items?.length ?? 0}</strong><small>严格按 available_at 截止</small></article>
 		<article><span>已批准分析师证据</span><strong>{analystEvidenceItems.length}</strong><small>任意字符串不能作为估值、基准或评级证据</small></article>
 		<article><span>PIT 基准映射</span><strong>{benchmarkResolution?.status === "available" ? "已批准" : "不可用"}</strong><small>{benchmarkMapping?.benchmark_asset_id || benchmarkResolution?.reason || bundle.marketPolicy?.policy?.benchmark_id || "等待市场策略"}</small></article>
+		<article><span>持牌总回报导入</span><strong>{licensedBenchmarkAvailable ? "人工入口已就绪" : "当前基准不适用"}</strong><small>{canonicalBenchmarkID || "读取资产后核对规范基准"} · 不自动获取或批准数据</small></article>
 		<article><span>复权价格证据</span><strong>{typeof latestPrice?.price === "number" ? `${latestPrice.price} ${latestPrice.currency || ""}` : "不可用"}</strong><small>{latestPrice?.id || "管理员解锁后可同步真实复权价格，不自动写入研究假设"}</small></article>
 		<article><span>一致预期返回</span><strong>{consensusItems.length}</strong><small>仅返回首次观测后可用的数据</small></article>
 		<article><span>管理层指引</span><strong>{guidanceItems.length}</strong><small>与分析师一致预期分开保存</small></article>
