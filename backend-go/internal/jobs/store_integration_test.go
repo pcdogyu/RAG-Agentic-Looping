@@ -93,16 +93,24 @@ func TestClaimResearchUsesFastAndDeepPreferredLanesAgainstPostgres(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
+	assetID, err := store.Enqueue(ctx, EnqueueParams{Queue: queue, TaskType: researchAssetTask, Payload: taskEnvelope{Args: []any{"asset", "event", "run"}, Kwargs: map[string]any{"research_profile": "deep"}}, Priority: 9, MaxAttempts: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer func() {
-		_, _ = pool.Exec(context.Background(), `DELETE FROM go_jobs WHERE id=ANY($1)`, []uuid.UUID{fastID, deepID})
+		_, _ = pool.Exec(context.Background(), `DELETE FROM go_jobs WHERE id=ANY($1)`, []uuid.UUID{fastID, deepID, assetID})
 	}()
 	fast, err := store.ClaimResearch(ctx, "fast-worker", []string{queue}, time.Minute, "fast")
 	if err != nil || fast.ID != fastID {
 		t.Fatalf("fast lane claimed %#v: %v", fast, err)
 	}
-	deep, err := store.ClaimResearch(ctx, "deep-worker", []string{queue}, time.Minute, "preferred")
+	asset, err := store.ClaimResearch(ctx, "preferred-worker", []string{queue}, time.Minute, "preferred")
+	if err != nil || asset.ID != assetID {
+		t.Fatalf("preferred lane did not complete the downstream asset first: %#v err=%v", asset, err)
+	}
+	deep, err := store.ClaimResearch(ctx, "preferred-worker", []string{queue}, time.Minute, "preferred")
 	if err != nil || deep.ID != deepID {
-		t.Fatalf("preferred lane claimed %#v: %v", deep, err)
+		t.Fatalf("preferred lane did not resume deep events: %#v err=%v", deep, err)
 	}
 }
 

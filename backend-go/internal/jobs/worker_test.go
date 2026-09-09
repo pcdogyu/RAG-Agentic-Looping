@@ -30,3 +30,15 @@ func TestWorkerWithoutDrainUsesShutdownContext(t *testing.T) {
 		t.Fatal("non-draining worker must keep the shutdown context")
 	}
 }
+
+func TestSingleResearchWorkerUsesPreferredLane(t *testing.T) {
+	if mode := researchClaimMode(true, 1, 0); mode != "preferred" {
+		t.Fatalf("single research worker mode=%q", mode)
+	}
+	if mode := researchClaimMode(true, 2, 0); mode != "fast" {
+		t.Fatalf("first dual research worker mode=%q", mode)
+	}
+	if mode := researchClaimMode(true, 2, 1); mode != "preferred" {
+		t.Fatalf("second dual research worker mode=%q", mode)
+	}
+}

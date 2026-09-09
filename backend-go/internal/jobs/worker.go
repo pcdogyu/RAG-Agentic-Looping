@@ -58,18 +58,22 @@ func (w *Worker) Run(ctx context.Context) error {
 		group.Add(1)
 		go func(index int) {
 			defer group.Done()
-			mode := ""
-			if w.ResearchScheduling && w.Concurrency > 1 {
-				mode = "fast"
-				if index == 1 {
-					mode = "preferred"
-				}
-			}
+			mode := researchClaimMode(w.ResearchScheduling, w.Concurrency, index)
 			w.claimLoop(ctx, drainCtx, mode)
 		}(index)
 	}
 	group.Wait()
 	return ctx.Err()
+}
+
+func researchClaimMode(enabled bool, concurrency, index int) string {
+	if !enabled {
+		return ""
+	}
+	if concurrency <= 1 || index == 1 {
+		return "preferred"
+	}
+	return "fast"
 }
 
 func (w *Worker) executionContext(ctx context.Context) context.Context {
