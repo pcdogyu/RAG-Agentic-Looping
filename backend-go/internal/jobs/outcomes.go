@@ -31,12 +31,13 @@ const (
 )
 
 type outcomeRuntime struct {
-	cfg       config.Config
-	db        *pgxpool.Pool
-	redis     *redis.Client
-	client    *http.Client
-	fmpMu     sync.Mutex
-	nextFMPAt time.Time
+	cfg              config.Config
+	db               *pgxpool.Pool
+	redis            *redis.Client
+	client           *http.Client
+	resolveBenchmark func(context.Context, marketdata.BenchmarkResolutionRequest) (marketdata.BenchmarkResolution, error)
+	fmpMu            sync.Mutex
+	nextFMPAt        time.Time
 }
 
 type outcomePricePoint struct {
@@ -50,8 +51,11 @@ type outcomePricePoint struct {
 }
 
 type outcomeBenchmark struct {
-	Status string
-	Return *float64
+	Status           string
+	Reason           string
+	Return           *float64
+	MappingID        string
+	BenchmarkAssetID string
 }
 
 func NewOutcomeHandlers(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) map[string]Handler {
@@ -200,9 +204,9 @@ func (runtime *outcomeRuntime) evaluateRecommendation(
 	}
 	entry, exit := window[0], window[len(window)-1]
 	rawReturn := exit.Close/entry.Close - 1
-	benchmark, err := runtime.benchmarkReturn(ctx, asset, entry.ObservedAt, exit.ObservedAt, now, cache)
+	benchmark, err := runtime.benchmarkReturn(ctx, asset, start, entry.ObservedAt, exit.ObservedAt, now, cache)
 	if err != nil {
-		benchmark = outcomeBenchmark{Status: "missing"}
+		return nil, "failed", fmt.Errorf("benchmark evaluation failed: %w", err)
 	}
 	var alpha *float64
 	if benchmark.Return != nil {
@@ -248,7 +252,8 @@ func (runtime *outcomeRuntime) evaluateRecommendation(
 	return map[string]any{
 		"id": outcomeID.String(), "recommendation_id": recommendationID.String(), "horizon_days": horizon,
 		"raw_return": rawReturn, "benchmark_return": benchmark.Return, "alpha": alpha,
-		"benchmark_status": benchmark.Status, "entry_at": iso(entry.ObservedAt), "exit_at": iso(exit.ObservedAt),
+		"benchmark_status": benchmark.Status, "benchmark_reason": benchmark.Reason, "benchmark_mapping_id": benchmark.MappingID,
+		"benchmark_asset_id": benchmark.BenchmarkAssetID, "entry_at": iso(entry.ObservedAt), "exit_at": iso(exit.ObservedAt),
 		"entry_price": entry.Close, "exit_price": exit.Close, "direction_correct": directionCorrect,
 		"entry_price_time_precision": ternary(entry.SessionOnly, "daily_close", "timestamped"),
 		"entry_price_policy":         "first_observable_session_after_signal",
@@ -317,37 +322,53 @@ func priceObservableAfterSignal(point outcomePricePoint, signalAvailableAt time.
 func (runtime *outcomeRuntime) benchmarkReturn(
 	ctx context.Context,
 	asset map[string]any,
-	entryAt, exitAt, observedAt time.Time,
+	signalAvailableAt, entryAt, exitAt, observedAt time.Time,
 	cache map[string][]outcomePricePoint,
 ) (outcomeBenchmark, error) {
 	market := strings.ToUpper(stringValue(asset["market"]))
-	benchmark := map[string]any{}
-	switch market {
-	case "US":
-		benchmark = map[string]any{"asset_id": "equity:NYSEARCA:SPY", "asset_class": "equity", "market": "US", "symbol": "SPY"}
-	case "CN":
-		benchmark = map[string]any{"asset_id": "index:CN:000300", "asset_class": "equity", "market": "CN", "symbol": "000300"}
-	case "HK":
-		benchmark = map[string]any{"asset_id": "index:HK:HSI", "asset_class": "equity", "market": "HK", "symbol": "HSI"}
-	case "CRYPTO":
-		benchmark = map[string]any{"asset_id": "crypto:coingecko:bitcoin", "asset_class": "crypto", "market": "CRYPTO", "symbol": "BTC"}
-	default:
-		return outcomeBenchmark{Status: "missing"}, nil
+	currency := strings.ToUpper(strings.TrimSpace(stringValue(asset["currency"])))
+	if currency == "" && runtime.db != nil {
+		_ = runtime.db.QueryRow(ctx, `SELECT currency FROM assets WHERE id=$1`, stringValue(asset["asset_id"])).Scan(&currency)
+		currency = strings.ToUpper(strings.TrimSpace(currency))
 	}
-	if strings.EqualFold(stringValue(asset["asset_id"]), stringValue(benchmark["asset_id"])) ||
-		(strings.EqualFold(stringValue(asset["symbol"]), stringValue(benchmark["symbol"])) && market == strings.ToUpper(stringValue(benchmark["market"]))) {
-		return outcomeBenchmark{Status: "self_benchmark"}, nil
+	if market == "" || currency == "" || strings.TrimSpace(stringValue(asset["asset_id"])) == "" {
+		return outcomeBenchmark{Status: "unavailable", Reason: "incomplete_subject_identity"}, nil
+	}
+	request := marketdata.BenchmarkResolutionRequest{
+		AssetID: stringValue(asset["asset_id"]), Market: market, Currency: currency,
+		IndustryID: stringValue(asset["industry_id"]), PolicyID: stringValue(asset["benchmark_policy_id"]),
+		EffectiveAt: entryAt, AvailableAsOf: signalAvailableAt,
+	}
+	var resolution marketdata.BenchmarkResolution
+	var err error
+	if runtime.resolveBenchmark != nil {
+		resolution, err = runtime.resolveBenchmark(ctx, request)
+	} else if runtime.db != nil {
+		resolution, err = marketdata.NewStore(runtime.db).ResolveBenchmark(ctx, request)
+	} else {
+		resolution = marketdata.BenchmarkResolution{Status: "unavailable", Reason: "missing_point_in_time_mapping"}
+	}
+	if err != nil {
+		return outcomeBenchmark{Status: "unavailable", Reason: "mapping_query_failed"}, err
+	}
+	if resolution.Status != "available" || resolution.Mapping == nil {
+		return outcomeBenchmark{Status: "unavailable", Reason: resolution.Reason}, nil
+	}
+	mapping := resolution.Mapping
+	benchmark := map[string]any{
+		"asset_id": mapping.BenchmarkAssetID, "asset_class": mapping.BenchmarkClass, "market": mapping.BenchmarkMarket,
+		"currency": mapping.BenchmarkCurrency, "symbol": mapping.BenchmarkSymbol,
 	}
 	points, err := runtime.cachedPrices(ctx, benchmark, entryAt, observedAt, cache)
 	if err != nil {
-		return outcomeBenchmark{Status: "missing"}, err
+		return outcomeBenchmark{Status: "unavailable", Reason: "benchmark_price_fetch_failed", MappingID: mapping.ID, BenchmarkAssetID: mapping.BenchmarkAssetID}, err
 	}
 	window := outcomeWindowUntil(points, entryAt, exitAt)
 	if len(window) < 2 {
-		return outcomeBenchmark{Status: "missing"}, nil
+		return outcomeBenchmark{Status: "unavailable", Reason: "benchmark_price_window_missing", MappingID: mapping.ID, BenchmarkAssetID: mapping.BenchmarkAssetID}, nil
 	}
 	value := window[len(window)-1].Close/window[0].Close - 1
-	return outcomeBenchmark{Status: "available", Return: &value}, nil
+	return outcomeBenchmark{Status: "available", Return: &value, MappingID: mapping.ID, BenchmarkAssetID: mapping.BenchmarkAssetID}, nil
 }
 
 func outcomeWindowUntil(points []outcomePricePoint, start, target time.Time) []outcomePricePoint {

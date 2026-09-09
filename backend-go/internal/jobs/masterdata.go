@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/config"
@@ -452,7 +453,11 @@ func (runtime *masterdataRuntime) failMarketSync(ctx context.Context, market str
 	_ = runtime.db.QueryRow(ctx, `INSERT INTO asset_universe_sync(market,status,asset_count,industry_count,added_count,updated_count,deactivated_count,last_error,started_at,completed_at)
 		VALUES($1,'failed',0,0,0,0,0,$2,NULL,now())
 		ON CONFLICT(market) DO UPDATE SET status='failed',last_error=$2,completed_at=now() RETURNING asset_count`, market, detail).Scan(&count)
-	return map[string]any{"status": "failed", "error": detail, "assets": count}
+	historyRecorded := true
+	if err := runtime.persistFailedUniverseSnapshot(ctx, market, count, detail); err != nil {
+		historyRecorded = false
+	}
+	return map[string]any{"status": "failed", "error": detail, "assets": count, "history_recorded": historyRecorded}
 }
 
 func (runtime *masterdataRuntime) fetchAsianEquities(ctx context.Context) ([]masterAsset, error) {
@@ -767,6 +772,7 @@ func normalizeMasterIndustry(rawSector, rawIndustry string, rules []taxonomyRule
 }
 
 func (runtime *masterdataRuntime) persistMarket(ctx context.Context, market string, assets []masterAsset) (map[string]any, error) {
+	observedAt := time.Now().UTC()
 	tx, err := runtime.db.Begin(ctx)
 	if err != nil {
 		return nil, err
@@ -790,6 +796,10 @@ func (runtime *masterdataRuntime) persistMarket(ctx context.Context, market stri
 	if err := batchUpsertMasterAssets(ctx, tx, assets); err != nil {
 		return nil, err
 	}
+	snapshotID, included, excluded, delisted, err := runtime.persistCompletedUniverseSnapshot(ctx, tx, market, existing, assets, observedAt)
+	if err != nil {
+		return nil, err
+	}
 	result, err := tx.Exec(ctx, `UPDATE assets SET active=coalesce(manual_active,false),last_synced_at=now()
 		WHERE market=$1 AND NOT(id=ANY($2::text[])) AND coalesce(issuer_id,'') NOT LIKE 'curated:%'`, market, received)
 	if err != nil {
@@ -809,7 +819,107 @@ func (runtime *masterdataRuntime) persistMarket(ctx context.Context, market stri
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
-	return map[string]any{"status": "completed", "assets": len(received), "added": added, "updated": updated, "deactivated": deactivated}, nil
+	return map[string]any{"status": "completed", "assets": len(received), "added": added, "updated": updated, "deactivated": deactivated,
+		"universe_snapshot_id": snapshotID, "included": included, "excluded": excluded, "delisted": delisted}, nil
+}
+
+func (runtime *masterdataRuntime) persistFailedUniverseSnapshot(ctx context.Context, market string, assetCount int, detail string) error {
+	now := time.Now().UTC()
+	sourceName, sourceURL := runtime.universeSource(market)
+	policy, _ := json.Marshal(runtime.universeEligibilityPolicy(market))
+	metadata, _ := json.Marshal(map[string]any{"failure_retained": true, "current_assets_preserved": true})
+	_, err := runtime.db.Exec(ctx, `INSERT INTO security_universe_snapshots(
+        id,universe_id,market,status,observed_at,available_at,source_name,source_document_id,source_url,eligibility_policy,
+        asset_count,included_count,excluded_count,delisted_count,failure_detail,metadata)
+        VALUES($1,$2,$3,'failed',$4,$4,$5,$6,$7,$8,$9,0,0,0,$10,$11)`, uuid.NewString(), "market:"+market, market, now,
+		sourceName, "universe-refresh-failure:"+market+":"+now.Format(time.RFC3339Nano), sourceURL, policy, assetCount, detail, metadata)
+	if err != nil {
+		return fmt.Errorf("persist failed security universe snapshot: %w", err)
+	}
+	return nil
+}
+
+func (runtime *masterdataRuntime) persistCompletedUniverseSnapshot(ctx context.Context, tx pgx.Tx, market string, existing map[string]storedMasterAsset, assets []masterAsset, observedAt time.Time) (string, int, int, int, error) {
+	snapshotID := uuid.NewString()
+	sourceName, sourceURL := runtime.universeSource(market)
+	policy, _ := json.Marshal(runtime.universeEligibilityPolicy(market))
+	incoming := make(map[string]masterAsset, len(assets))
+	included, delisted := 0, 0
+	for _, asset := range assets {
+		incoming[asset.ID] = asset
+		if asset.Active {
+			included++
+		} else {
+			delisted++
+		}
+	}
+	excluded := 0
+	for assetID := range existing {
+		if _, ok := incoming[assetID]; !ok {
+			excluded++
+		}
+	}
+	metadata, _ := json.Marshal(map[string]any{
+		"missing_provider_assets": "excluded_not_assumed_delisted", "manual_active_override_preserved": true,
+	})
+	_, err := tx.Exec(ctx, `INSERT INTO security_universe_snapshots(
+        id,universe_id,market,status,observed_at,available_at,source_name,source_document_id,source_url,eligibility_policy,
+        asset_count,included_count,excluded_count,delisted_count,failure_detail,metadata)
+        VALUES($1,$2,$3,'completed',$4,$4,$5,$6,$7,$8,$9,$10,$11,$12,'',$13)`, snapshotID, "market:"+market, market, observedAt,
+		sourceName, "universe-snapshot:"+market+":"+observedAt.Format(time.RFC3339Nano), sourceURL, policy, len(assets), included, excluded, delisted, metadata)
+	if err != nil {
+		return "", 0, 0, 0, fmt.Errorf("persist security universe snapshot: %w", err)
+	}
+	batch := &pgx.Batch{}
+	for _, asset := range assets {
+		status, reasons := "included", []string{"provider_snapshot_member", "identity_validated", "eligibility_policy_passed"}
+		if !asset.Active {
+			status, reasons = "delisted", []string{"provider_marked_inactive"}
+		}
+		reasonJSON, _ := json.Marshal(reasons)
+		identityJSON, _ := json.Marshal(map[string]any{"asset_id": asset.ID, "symbol": asset.Symbol, "exchange_or_provider": asset.Exchange, "currency": asset.Currency})
+		batch.Queue(`INSERT INTO security_universe_memberships(snapshot_id,asset_id,membership_status,effective_at,available_at,reason_codes,source_identity)
+            VALUES($1,$2,$3,$4,$4,$5,$6)`, snapshotID, asset.ID, status, observedAt, reasonJSON, identityJSON)
+	}
+	for assetID := range existing {
+		if _, ok := incoming[assetID]; ok {
+			continue
+		}
+		reasonJSON, _ := json.Marshal([]string{"not_present_in_provider_snapshot", "delisting_not_inferred"})
+		identityJSON, _ := json.Marshal(map[string]any{"asset_id": assetID, "identity_source": "prior_asset_record"})
+		batch.Queue(`INSERT INTO security_universe_memberships(snapshot_id,asset_id,membership_status,effective_at,available_at,reason_codes,source_identity)
+            VALUES($1,$2,'excluded',$3,$3,$4,$5)`, snapshotID, assetID, observedAt, reasonJSON, identityJSON)
+	}
+	results := tx.SendBatch(ctx, batch)
+	if err := results.Close(); err != nil {
+		return "", 0, 0, 0, fmt.Errorf("persist security universe memberships: %w", err)
+	}
+	return snapshotID, included, excluded, delisted, nil
+}
+
+func (runtime *masterdataRuntime) universeSource(market string) (string, string) {
+	switch market {
+	case "CN", "HK":
+		return "Market Adapter", marketPriceSourceURL(runtime.cfg.MarketAdapterURL, "/v1/assets/universe")
+	case "US":
+		return "FMP", marketPriceSourceURL(runtime.cfg.FMPBaseURL, "/company-screener")
+	case "CRYPTO":
+		return "CoinGecko", marketPriceSourceURL(runtime.cfg.CoinGeckoURL, "/coins/list")
+	default:
+		return "configured provider", ""
+	}
+}
+
+func (runtime *masterdataRuntime) universeEligibilityPolicy(market string) map[string]any {
+	policy := map[string]any{
+		"version": "market-universe-eligibility-v1", "market": market, "minimum_asset_count": minimumMarketCounts[market],
+		"required_identity_fields":    []string{"asset_id", "symbol", "name", "exchange_or_provider", "currency"},
+		"cross_market_assets_allowed": false, "missing_member_handling": "excluded_not_assumed_delisted",
+	}
+	if market == "US" {
+		policy["us_supported_exchanges"] = []string{"NASDAQ", "NYSE", "AMEX", "OTC_ADR_ONLY"}
+	}
+	return policy
 }
 
 func (runtime *masterdataRuntime) upsertAssets(ctx context.Context, assets []masterAsset, deactivate bool) error {

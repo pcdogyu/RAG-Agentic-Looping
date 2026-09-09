@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/config"
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/marketdata"
 )
 
 func TestOutcomeHandlersCoverMigrationManifest(t *testing.T) {
@@ -163,6 +164,15 @@ func TestP0OutcomeDoesNotFallbackWhenSignalAvailabilityIsMissing(t *testing.T) {
 	}
 }
 
+func TestBenchmarkReturnIsUnavailableWithoutApprovedPointInTimeMapping(t *testing.T) {
+	result, err := (&outcomeRuntime{}).benchmarkReturn(context.Background(), map[string]any{
+		"asset_id": "equity:XNAS:ACME", "market": "US", "currency": "USD", "symbol": "ACME",
+	}, time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC), time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC), time.Date(2026, 1, 5, 0, 0, 0, 0, time.UTC), time.Date(2026, 1, 6, 0, 0, 0, 0, time.UTC), map[string][]outcomePricePoint{})
+	if err != nil || result.Status != "unavailable" || result.Reason != "missing_point_in_time_mapping" || result.Return != nil {
+		t.Fatalf("missing mapping became a numeric benchmark: result=%#v err=%v", result, err)
+	}
+}
+
 func TestEvaluateRecommendationOutcomeMath(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request map[string]any
@@ -190,13 +200,22 @@ func TestEvaluateRecommendationOutcomeMath(t *testing.T) {
 	runtime := &outcomeRuntime{
 		cfg:    config.Config{MarketAdapterURL: server.URL},
 		client: server.Client(),
+		resolveBenchmark: func(_ context.Context, request marketdata.BenchmarkResolutionRequest) (marketdata.BenchmarkResolution, error) {
+			if request.AssetID != "equity:XSHG:600001" || request.Market != "CN" || request.Currency != "CNY" {
+				t.Fatalf("unexpected benchmark request: %#v", request)
+			}
+			return marketdata.BenchmarkResolution{Status: "available", Mapping: &marketdata.BenchmarkMapping{
+				ID: "mapping-cn-v1", BenchmarkAssetID: "index:CN:000300", BenchmarkClass: "equity",
+				BenchmarkMarket: "CN", BenchmarkCurrency: "CNY", BenchmarkSymbol: "000300",
+			}}, nil
+		},
 	}
 	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	recommendation := map[string]any{
 		"signal_status": "directional", "horizon_days": 3.0, "horizon_unit": "trading_sessions",
 		"as_of": iso(start), "scoring_version": "short-term-impact-v1", "score": 20.0, "direction_score": 20.0,
 		"bull_probability": .5, "base_probability": .3, "bear_probability": .2,
-		"asset": map[string]any{"asset_id": "equity:XSHG:600001", "asset_class": "equity", "market": "CN", "symbol": "600001"},
+		"asset": map[string]any{"asset_id": "equity:XSHG:600001", "asset_class": "equity", "market": "CN", "currency": "CNY", "symbol": "600001"},
 	}
 	outcome, state, err := runtime.evaluateRecommendation(context.Background(), uuid.New(), start, recommendation, time.Date(2026, 1, 8, 0, 0, 0, 0, time.UTC), map[string][]outcomePricePoint{})
 	if err != nil || state != "completed" {

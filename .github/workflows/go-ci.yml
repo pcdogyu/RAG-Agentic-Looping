@@ -93,7 +93,9 @@ jobs:
       - name: Verify no-news fundamental workflow against PostgreSQL
         run: go test -race ./internal/fundamentalresearch -run '^Test(WorkflowCompletesWithoutNews|ScheduledWorkflowRevaluesApprovedForecast)AgainstIsolatedPostgres$' -count=1 -v
       - name: Verify immutable market-data observations against PostgreSQL
-        run: go test -race ./internal/marketdata -run '^Test(StorePersistsFirstAvailabilityIdempotently|CorporateActionStorePreservesPointInTimeRevisionsAgainstIsolatedPostgres)$' -count=1 -v
+        run: go test -race ./internal/marketdata -run '^Test(StorePersistsFirstAvailabilityIdempotently|CorporateActionStorePreservesPointInTimeRevisionsAgainstIsolatedPostgres|BenchmarkMappingIsApprovedImmutableAndPointInTimeAgainstIsolatedPostgres|UniverseQueriesKeepFailuresAndHistoricalMembershipAgainstIsolatedPostgres)$' -count=1 -v
+      - name: Verify historical security-universe capture against PostgreSQL
+        run: go test -race ./internal/jobs -run '^TestPersistMarketRecordsIncludedExcludedAndDelistedMembershipsAgainstIsolatedPostgres$' -count=1 -v
       - name: Verify recent research filtering against PostgreSQL
         env:
           MAPPING_TEST_ISOLATED: "1"
