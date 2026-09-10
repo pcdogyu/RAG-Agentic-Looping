@@ -29,14 +29,40 @@ func TestPhaseTwoReadinessKeepsMissingTruthExplicit(t *testing.T) {
 			t.Errorf("gate %s status=%s want=%s", gate.ID, gate.Status, expected)
 		}
 	}
+	for _, gate := range report.Gates {
+		if gate.ID == "sealed_holdout" && len(gate.Dependencies) != 0 {
+			t.Fatalf("future holdout registration must not wait for mature outcomes: %#v", gate)
+		}
+	}
+}
+
+func TestPhaseTwoReadinessUsesOneCompleteMarketInsteadOfEveryActiveEquity(t *testing.T) {
+	facts := phaseTwoReadinessFacts{
+		ActiveEquityAssets: 14398, BenchmarkCoveredActiveEquities: 2400, BenchmarkReadyEquityMarkets: 1,
+	}
+	report := buildPhaseTwoReadinessReport(facts, time.Now())
+	for _, gate := range report.Gates {
+		if gate.ID != "pit_benchmark_coverage" {
+			continue
+		}
+		if gate.Status != "completed" || gate.Current != 1 || gate.Required != 1 || gate.Unit != "个市场" {
+			t.Fatalf("one fully covered stock market must satisfy the benchmark gate: %#v", gate)
+		}
+		if report.Facts.BenchmarkCoveredActiveEquities != 2400 {
+			t.Fatalf("asset-level disclosure was lost: %#v", report.Facts)
+		}
+		return
+	}
+	t.Fatal("pit benchmark coverage gate is missing")
 }
 
 func TestPhaseTwoReadinessRequiresEveryBlockingGate(t *testing.T) {
 	facts := phaseTwoReadinessFacts{
-		AnalystEvidence: 6, ApprovedFundamentalPlans: 1, ActiveEquityAssets: 10, BenchmarkCoveredActiveEquities: 10,
+		AnalystEvidence: 6, ApprovedFundamentalPlans: 1, ActiveEquityAssets: 10, BenchmarkCoveredActiveEquities: 10, BenchmarkReadyEquityMarkets: 1,
 		MatureEquityOutcomes: 120, LargestMatureEquityMarket: 120, HoldoutReservations: 1, WalkForwardDatasets: 1,
 		DevelopmentExperiments: 1, LayeredPerformanceReports: 1, ResearchQualityReviews: 1, PassedFailureDrillScenarios: 5,
 		ApprovedPredictionModels: 1, SECIdentityConfigured: true, FinalHoldoutEvaluationImplemented: true, FinalHoldoutEvaluations: 1,
+		DatasetReadyEvaluationScopes: 1,
 	}
 	report := buildPhaseTwoReadinessReport(facts, time.Now())
 	if report.OverallStatus != "eligible_for_human_acceptance" || report.CompletedGates != report.TotalBlockingGates {
@@ -90,5 +116,27 @@ func TestPhaseTwoReadinessReadsEmptyMigratedPostgres(t *testing.T) {
 	report := buildPhaseTwoReadinessReport(facts, time.Now().UTC())
 	if report.OverallStatus != "blocked" || len(report.Gates) != 13 {
 		t.Fatalf("unexpected empty readiness report: %#v", report)
+	}
+
+	if _, err = pool.Exec(ctx, `INSERT INTO assets(id,asset_class,market,symbol,name,exchange_or_provider,currency,aliases,products,competitors,lot_size,active) VALUES
+		('equity-us-1','equity','US','AAA','AAA','test','USD','[]','[]','[]',1,true),
+		('equity-us-2','equity','US','BBB','BBB','test','USD','[]','[]','[]',1,true),
+		('equity-cn-1','equity','CN','600001','CN','test','CNY','[]','[]','[]',100,true),
+		('benchmark-us','index','US','SPXTR','SPX Total Return','test','USD','[]','[]','[]',1,true)`); err != nil {
+		t.Fatal(err)
+	}
+	observedAt := time.Now().UTC().Add(-time.Hour)
+	if _, err = pool.Exec(ctx, `INSERT INTO benchmark_mapping_observations(
+		id,idempotency_key,request_hash,scope_type,scope_id,subject_market,subject_currency,benchmark_asset_id,benchmark_market,benchmark_currency,
+		policy_version,valid_from,observed_at,available_at,source_name,source_document_id,mapping_reason,approved_by)
+		VALUES('mapping-us','mapping-us','digest','market','US','US','USD','benchmark-us','US','USD','test-v1',$1,$1,$1,'test','test-document','test mapping','reviewer')`, observedAt); err != nil {
+		t.Fatal(err)
+	}
+	facts, err = loadPhaseTwoReadinessFacts(ctx, server, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if facts.ActiveEquityAssets != 3 || facts.BenchmarkCoveredActiveEquities != 2 || facts.BenchmarkReadyEquityMarkets != 1 || facts.DatasetReadyEvaluationScopes != 0 {
+		t.Fatalf("readiness did not preserve asset disclosure and one-market completion semantics: %#v", facts)
 	}
 }
