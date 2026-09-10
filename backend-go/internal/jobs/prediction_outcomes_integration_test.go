@@ -50,6 +50,7 @@ func TestPredictionOutcomesMatureFiveSessionsWithoutAdvancingTwentyAgainstIsolat
 		{"equity:XNAS:TARGET", "TARGET", "Target Inc."},
 		{"etf:ARCX:BENCH", "BENCH", "Benchmark ETF"},
 		{"equity:XNAS:DELIST", "DELIST", "Delisted Inc."},
+		{"equity:XNAS:EXECUTABLE", "EXECUTABLE", "Executable Inc."},
 	} {
 		if _, err = pool.Exec(ctx, `INSERT INTO assets(id,asset_class,market,symbol,name,exchange_or_provider,currency,aliases,products,competitors,lot_size,active)
             VALUES($1,'equity','US',$2,$3,'XNAS','USD','[]','[]','[]',1,true)`, values[0], values[1], values[2]); err != nil {
@@ -85,6 +86,10 @@ func TestPredictionOutcomesMatureFiveSessionsWithoutAdvancingTwentyAgainstIsolat
 		t.Fatal(err)
 	}
 	if _, err = pool.Exec(ctx, `INSERT INTO prediction_runs(id,asset_id,asset_class,signal_available_at,horizon_sessions,objective,model_version,status,model_status,raw_score,feature_snapshot,exclusion_reason,idempotency_key)
+		VALUES('prediction-executable','equity:XNAS:EXECUTABLE','equity',$1,1,'absolute_up','label-model-execution','uncalibrated','shadow',0.8,'{}','','prediction-executable')`, signalAt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, `INSERT INTO prediction_runs(id,asset_id,asset_class,signal_available_at,horizon_sessions,objective,model_version,status,model_status,raw_score,feature_snapshot,exclusion_reason,idempotency_key)
 		VALUES('prediction-delisted','equity:XNAS:DELIST','equity',$1,20,'excess_up','label-model-20','uncalibrated','shadow',0.8,'{}','','prediction-delisted')`, signalAt); err != nil {
 		t.Fatal(err)
 	}
@@ -93,6 +98,16 @@ func TestPredictionOutcomesMatureFiveSessionsWithoutAdvancingTwentyAgainstIsolat
 		EffectiveAt: signalAt.AddDate(0, 0, 3), ObservedAt: signalAt.AddDate(0, 0, 2), AvailableAt: signalAt.AddDate(0, 0, 2),
 		TimePrecision: "date_only", SourceName: "isolated exchange notice", SourceDocumentID: "delist-notice-1",
 	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = marketdata.NewStore(pool).ImportTradability(ctx, "equity:XNAS:EXECUTABLE", marketdata.TradabilityImport{
+		SourceName: "isolated exchange status", SourceDocumentID: "execution-status-1", SourceURL: "https://exchange.example.test/status",
+		LicenseReference: "test-license", ApprovedBy: "test-reviewer", IdempotencyKey: "execution-status-1",
+		Observations: []marketdata.TradabilityImportPoint{
+			{SessionDate: "2026-01-02", SourceObservedAt: "2026-01-02T21:01:00Z", Status: marketdata.Tradable},
+			{SessionDate: "2026-01-05", SourceObservedAt: "2026-01-05T21:01:00Z", Status: marketdata.Tradable},
+		},
+	}, time.Date(2026, 1, 10, 11, 0, 0, 0, time.UTC)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = pool.Exec(ctx, `INSERT INTO prediction_models(version,objective,market,horizon_sessions,feature_schema,model_payload,training_cutoff,artifact_digest,status,scope)
@@ -125,7 +140,7 @@ func TestPredictionOutcomesMatureFiveSessionsWithoutAdvancingTwentyAgainstIsolat
 	runtime := &outcomeRuntime{cfg: config.Config{FMPBaseURL: server.URL, FMPAccessToken: "isolated", FMPRateLimit: 100000}, db: pool, client: server.Client()}
 	now := time.Date(2026, 1, 10, 12, 0, 0, 0, time.UTC)
 	summary, err := runtime.evaluatePredictionOutcomes(ctx, now, map[string][]outcomePricePoint{})
-	if err != nil || summary["selected"] != 5 || summary["matured"] != 2 || summary["pending"] != 1 || summary["unavailable"] != 1 || summary["excluded"] != 1 || summary["failed"] != 0 {
+	if err != nil || summary["selected"] != 6 || summary["matured"] != 3 || summary["pending"] != 1 || summary["unavailable"] != 1 || summary["excluded"] != 1 || summary["failed"] != 0 {
 		t.Fatalf("unexpected first maturity summary=%#v err=%v", summary, err)
 	}
 	items, err := evaluation.NewOutcomeStore(pool).ListByAsset(ctx, "equity:XNAS:TARGET", 10)
@@ -157,6 +172,13 @@ func TestPredictionOutcomesMatureFiveSessionsWithoutAdvancingTwentyAgainstIsolat
 	}
 	if executionLabel.Status != "mature" || executionLabel.RawReturn == nil || executionLabel.NetReturn != nil || executionLabel.GrossStrategyReturn != nil || executionLabel.SimulationStatus != "unavailable_tradability_evidence" || !executionLabel.ResearchResultOnly {
 		t.Fatalf("provider close was incorrectly presented as executable: %#v", executionLabel)
+	}
+	executable, err := evaluation.NewOutcomeStore(pool).ListByAsset(ctx, "equity:XNAS:EXECUTABLE", 10)
+	if err != nil || len(executable) != 1 || executable[0].Label.Status != "mature" || executable[0].Label.NetReturn == nil || executable[0].Label.GrossStrategyReturn == nil || executable[0].Label.SimulationStatus != "simulated_with_pre_registered_assumptions" || executable[0].Label.ResearchResultOnly {
+		t.Fatalf("approved tradability evidence did not unlock execution simulation: items=%#v err=%v", executable, err)
+	}
+	if executable[0].DataQuality["entry_tradability_status"] != "tradable" || executable[0].DataQuality["exit_tradability_status"] != "tradable" {
+		t.Fatalf("execution evidence audit missing: %#v", executable[0].DataQuality)
 	}
 	delisted, err := evaluation.NewOutcomeStore(pool).ListByAsset(ctx, "equity:XNAS:DELIST", 10)
 	if err != nil || len(delisted) != 1 || delisted[0].Label.Status != "unavailable" || delisted[0].ExclusionReason != "delisting_before_horizon_exit" {

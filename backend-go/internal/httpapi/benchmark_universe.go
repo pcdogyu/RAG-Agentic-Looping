@@ -202,6 +202,16 @@ func (s *Server) marketDataQuality(w http.ResponseWriter, r *http.Request) {
 	for key, query := range map[string]string{
 		"price_observations":            `SELECT count(*)::int FROM market_price_observations WHERE available_at<=$1`,
 		"corporate_action_observations": `SELECT count(*)::int FROM corporate_action_observations WHERE available_at<=$1`,
+		"tradability_observations":      `SELECT count(*)::int FROM market_tradability_observations WHERE available_at<=$1`,
+		"restricted_tradability":        `SELECT count(*)::int FROM market_tradability_observations WHERE status<>'tradable' AND available_at<=$1`,
+		"tradability_source_conflicts": `WITH latest AS (
+			SELECT DISTINCT ON (asset_id,source_name,session_date,execution_point) asset_id,source_name,session_date,status,buy_executable,sell_executable
+			FROM market_tradability_observations WHERE available_at<=$1
+			ORDER BY asset_id,source_name,session_date,execution_point,available_at DESC,observed_at DESC,created_at DESC,id DESC
+		) SELECT count(*)::int FROM (
+			SELECT asset_id,session_date FROM latest GROUP BY asset_id,session_date
+			HAVING count(DISTINCT (status,buy_executable,sell_executable))>1
+		) conflicts`,
 		"failed_universe_snapshots":     `SELECT count(*)::int FROM security_universe_snapshots WHERE status='failed' AND available_at<=$1`,
 		"outcomes_missing_benchmark":    `SELECT count(*)::int FROM outcomes WHERE observed_at<=$1 AND coalesce(payload->>'benchmark_status','unavailable')<>'available'`,
 		"mature_prediction_labels":      `SELECT count(*)::int FROM outcome_records WHERE label_definition_version='prediction-outcome-label-v1' AND status='mature' AND label_available_at<=$1`,
@@ -221,7 +231,8 @@ func (s *Server) marketDataQuality(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"as_of": asOf.Format(time.RFC3339Nano), "benchmark_contract_version": marketdata.BenchmarkMappingContractVersion,
-		"universe_contract_version": marketdata.SecurityUniverseContractVersion, "outcome_label_definition_version": evaluation.OutcomeLabelDefinitionVersion, "benchmark_coverage": benchmarkCoverage,
+		"universe_contract_version": marketdata.SecurityUniverseContractVersion, "tradability_contract_version": marketdata.TradabilityContractVersion,
+		"outcome_label_definition_version": evaluation.OutcomeLabelDefinitionVersion, "benchmark_coverage": benchmarkCoverage,
 		"latest_universes": universes, "counts": counts,
 		"handling": map[string]any{
 			"missing_benchmark":       "relative_return_unavailable_and_excluded_from_relative_aggregates",
@@ -230,6 +241,7 @@ func (s *Server) marketDataQuality(w http.ResponseWriter, r *http.Request) {
 			"symbol_change":         "missing_price_continuity_becomes_unavailable_after_horizon_specific_grace",
 			"suspension":            "trading_session_horizon_remains_pending_until_sessions_resume",
 			"price_limit_execution": "net_return_unavailable_without_explicit_entry_and_exit_tradability_evidence",
+			"tradability_conflict":  "all_latest_sources_must_agree_otherwise_execution_remains_unavailable",
 			"historical_industry":   "must_be_supplied_from_point_in_time_context",
 			"historical_membership": "resolved_at_signal_cutoff_not_from_current_classification",
 		},

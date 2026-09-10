@@ -23,6 +23,7 @@ type predictionOutcomeCandidate struct {
 type outcomeLifecycleEvidence struct {
 	Actions     []marketdata.CorporateActionObservation
 	Memberships []marketdata.SecurityUniverseMembership
+	Tradability []marketdata.TradabilityObservation
 	AvailableAt time.Time
 }
 
@@ -174,7 +175,9 @@ func (runtime *outcomeRuntime) evaluatePredictionOutcomes(ctx context.Context, n
 		// The label must become available after both immutable price series have
 		// been acquired and persisted, never at the task's earlier start time.
 		labelAvailableAt := time.Now().UTC()
-		label := evaluation.BuildOutcomeLabel(item.SignalAvailableAt, evaluationPricePoints(points, labelAvailableAt, item.Currency), evaluationPricePoints(benchmarkPoints, labelAvailableAt, benchmarkCurrency), policy)
+		label := evaluation.BuildOutcomeLabel(item.SignalAvailableAt,
+			evaluationPricePoints(points, labelAvailableAt, item.Currency, lifecycle.Tradability),
+			evaluationPricePoints(benchmarkPoints, labelAvailableAt, benchmarkCurrency, nil), policy)
 		if label.Reason == "label_not_mature" {
 			summary["pending"] = summary["pending"].(int) + 1
 			continue
@@ -195,10 +198,19 @@ func (runtime *outcomeRuntime) evaluatePredictionOutcomes(ctx context.Context, n
 			quality[key] = value
 		}
 		if policy.ExecutionEnabled {
-			// The current EOD providers do not expose order-fill, suspension or
-			// price-limit evidence. Never infer tradability from the close itself.
-			quality["entry_tradability_status"] = "unknown"
-			quality["exit_tradability_status"] = "unknown"
+			entryResolution, exitResolution := marketdata.ResolvedTradability{Status: "unknown", Reason: "entry_unavailable"}, marketdata.ResolvedTradability{Status: "unknown", Reason: "exit_unavailable"}
+			if label.EntryAt != nil {
+				entryResolution = marketdata.ResolveTradability(lifecycle.Tradability, *label.EntryAt)
+			}
+			if label.ExitAt != nil {
+				exitResolution = marketdata.ResolveTradability(lifecycle.Tradability, *label.ExitAt)
+			}
+			quality["entry_tradability_status"] = entryResolution.Status
+			quality["entry_tradability_reason"] = entryResolution.Reason
+			quality["entry_tradability_source_count"] = entryResolution.SourceCount
+			quality["exit_tradability_status"] = exitResolution.Status
+			quality["exit_tradability_reason"] = exitResolution.Reason
+			quality["exit_tradability_source_count"] = exitResolution.SourceCount
 			quality["tradability_inference_from_price"] = false
 		}
 		created, saveErr := store.Save(ctx, evaluation.PersistedOutcome{PredictionRunID: item.ID, Label: label, BenchmarkAssetID: benchmarkAssetID,
@@ -232,7 +244,11 @@ func (runtime *outcomeRuntime) cachedOutcomeLifecycleEvidence(ctx context.Contex
 	if err != nil {
 		return outcomeLifecycleEvidence{}, fmt.Errorf("load outcome security universe history: %w", err)
 	}
-	value := outcomeLifecycleEvidence{Actions: actions, Memberships: memberships, AvailableAt: now.UTC()}
+	tradability, err := store.ListTradabilityAvailable(ctx, assetID, now, now, 1000)
+	if err != nil {
+		return outcomeLifecycleEvidence{}, fmt.Errorf("load outcome tradability observations: %w", err)
+	}
+	value := outcomeLifecycleEvidence{Actions: actions, Memberships: memberships, Tradability: tradability, AvailableAt: now.UTC()}
 	cache[assetID] = value
 	return value, nil
 }
@@ -299,6 +315,8 @@ func outcomeLifecycleDataQuality(evidence outcomeLifecycleEvidence, signalAt, ef
 	quality := map[string]any{
 		"lifecycle_evidence_available_as_of": evidence.AvailableAt,
 		"corporate_action_coverage_claim":    "not_inferred_from_absence",
+		"tradability_observation_count":      len(evidence.Tradability),
+		"tradability_inference_from_price":   false,
 	}
 	seen := map[marketdata.CorporateActionType]bool{}
 	for _, action := range evidence.Actions {
@@ -364,11 +382,12 @@ func predictionExecutionPolicy(policy evaluation.HorizonPolicy, scope map[string
 	return evaluation.WithExecutionAssumptions(policy, assumptions)
 }
 
-func evaluationPricePoints(points []outcomePricePoint, availableAt time.Time, currency string) []evaluation.PricePoint {
+func evaluationPricePoints(points []outcomePricePoint, availableAt time.Time, currency string, tradability []marketdata.TradabilityObservation) []evaluation.PricePoint {
 	result := make([]evaluation.PricePoint, 0, len(points))
 	for _, point := range points {
 		value := point.Close
-		item := evaluation.PricePoint{SessionDate: point.ObservedAt, AvailableAt: availableAt.UTC(), Currency: strings.ToUpper(strings.TrimSpace(currency)), Close: &value, CorporateActionAdjusted: point.Adjusted}
+		resolved := marketdata.ResolveTradability(tradability, point.ObservedAt)
+		item := evaluation.PricePoint{SessionDate: point.ObservedAt, AvailableAt: availableAt.UTC(), Currency: strings.ToUpper(strings.TrimSpace(currency)), Close: &value, CorporateActionAdjusted: point.Adjusted, TradabilityStatus: resolved.Status}
 		if point.Adjusted {
 			item.AdjustedClose = &value
 		}

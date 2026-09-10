@@ -97,7 +97,7 @@ jobs:
       - name: Verify no-news fundamental workflow and preparation against PostgreSQL
         run: go test -race ./internal/fundamentalresearch -run '^(TestWorkflowCompletesWithoutNewsAgainstIsolatedPostgres|TestScheduledWorkflowRevaluesApprovedForecastAgainstIsolatedPostgres|TestPreparationBuildsSourceLinkedFactsWithoutInventingApprovalAgainstPostgres)$' -count=1 -v
       - name: Verify immutable market-data observations against PostgreSQL
-        run: go test -race ./internal/marketdata -run '^Test(StorePersistsFirstAvailabilityIdempotently|CorporateActionStorePreservesPointInTimeRevisionsAgainstIsolatedPostgres|BenchmarkMappingIsApprovedImmutableAndPointInTimeAgainstIsolatedPostgres|UniverseQueriesKeepFailuresAndHistoricalMembershipAgainstIsolatedPostgres|LicensedBenchmarkImportIsAuditedAtomicAndIdempotentAgainstIsolatedPostgres)$' -count=1 -v
+        run: go test -race ./internal/marketdata -run '^Test(StorePersistsFirstAvailabilityIdempotently|CorporateActionStorePreservesPointInTimeRevisionsAgainstIsolatedPostgres|BenchmarkMappingIsApprovedImmutableAndPointInTimeAgainstIsolatedPostgres|UniverseQueriesKeepFailuresAndHistoricalMembershipAgainstIsolatedPostgres|LicensedBenchmarkImportIsAuditedAtomicAndIdempotentAgainstIsolatedPostgres|TradabilityImportIsPointInTimeAuditedAndConflictSafeAgainstIsolatedPostgres)$' -count=1 -v
       - name: Verify historical security-universe capture against PostgreSQL
         run: go test -race ./internal/jobs -run '^(TestPersistMarketRecordsIncludedExcludedAndDelistedMembershipsAgainstIsolatedPostgres|TestPredictionOutcomesMatureFiveSessionsWithoutAdvancingTwentyAgainstIsolatedPostgres)$' -count=1 -v
       - name: Verify factual bootstrap, consensus capture and forward rule collection against PostgreSQL
