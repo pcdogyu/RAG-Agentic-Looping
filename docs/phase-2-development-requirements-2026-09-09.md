@@ -142,10 +142,11 @@
 | 2.35 | 单市场完成口径与留出时序修正 | 已完成工程、隔离 PostgreSQL 与生产读回验收（真实输入和自然成熟仍未完成） |
 | 2.36 | 结果标签成熟度诊断 | 已完成 API、前端、隔离 PostgreSQL 与生产读回验收（当前样本仍在等待交易日价格） |
 | 2.37 | 结果标签人工复检与终态跟踪 | 已完成前端、生产真实任务与自动刷新链路验收（当前 111 条样本仍在等待交易日价格） |
+| 2.38 | 结果评估部分成功安全摘要 | 已完成 API、前端、CI 与生产真实任务验收（标签分支成功，历史推荐结果分支警告保持可见） |
 
 ### 当前真实验收缺口
 
-截至 2026-09-10 11:36 北京时间，生产库的分析师证据、已批准定时研究计划、基准映射、成熟前瞻标签、留出预注册、滚动数据集、实验和效果报告均为 0；`SEC_IDENTITY` 仍未配置。以上项目依赖真实人工批准、可识别的 SEC 访问身份或未来 1/5/20 个交易日自然经过，不能通过演示数据、自动批准或提前标签补齐。当前 111 条前瞻预测全部保持 pending，最近一次同源任务明确归因为 `awaiting_price_sessions`，完整 PIT 基准覆盖的股票市场仍为 0；恒指持牌总回报与可交易状态导入门禁已经就绪，但尚未取得真实授权文件、许可证引用和人工审批。因此第二期尚未达到第 5 节的完成定义。
+截至 2026-09-10 14:19 北京时间，生产库的分析师证据、已批准定时研究计划、基准映射、成熟前瞻标签、留出预注册、滚动数据集、实验和效果报告均为 0；`SEC_IDENTITY` 仍未配置。以上项目依赖真实人工批准、可识别的 SEC 访问身份或未来 1/5/20 个交易日自然经过，不能通过演示数据、自动批准或提前标签补齐。当前 141 条前瞻预测全部保持 pending，最近一次同源任务明确归因为 `awaiting_price_sessions`，完整 PIT 基准覆盖的股票市场仍为 0；恒指持牌总回报与可交易状态导入门禁已经就绪，但尚未取得真实授权文件、许可证引用和人工审批。因此第二期尚未达到第 5 节的完成定义。
 
 ### 附件逐项复核结论
 
@@ -519,3 +520,11 @@
 - 页面按任务 ID 轮询 `GET /api/v1/tasks/{task_id}`，只在 `COMPLETED`、`FAILED` 或 `CANCELLED` 时停止；完成后重新读取生产就绪度并显示最新聚合计数。按钮在轮询中禁用，锁定管理员会话或卸载页面会中止前端轮询；五分钟仍未结束时明确提示任务继续在后台运行，重新点击仍由服务端复用活动任务。页面不展示任务接口的原始错误内容、内部 URL 或凭据。
 - 自动化验收：提交 `767f6c9` 本地 Frontend 8 个测试文件共 134 项测试和 TypeScript/Vite 生产构建通过；Frontend CI `34433719844` 同样通过。新增回归覆盖终态识别、运行中状态不误判、按钮禁用态、禁止提前成熟说明和活动任务复用说明。
 - 生产验收（2026-09-10 11:36 北京时间）：只替换 Web 为 `f681092560c9`；Go API `5526f14ee52f`、outcomes worker `c8f269638692`、research worker `12cb3f487f60`、masterdata worker `daaa4be35827` 和 Market Adapter `d73e94790f0a` 均未替换且重启次数为 0。API 与网页返回 200；线上资源 `index-VhpZznm-.js`、`index-BHcIboNS.css` 可读回按钮、禁止提前成熟说明和构建提交 `767f6c9`。按按钮同源链路提交的生产任务 `2973d059-f32f-49e1-9633-7fa7b8a52f11` 到达 `COMPLETED`，就绪度自动读回 `selected=111`、`matured=0`、`pending=111`、`failed=0` 和 `awaiting_price_sessions=111`，证明功能已部署且没有用人工操作绕过自然成熟门禁。
+
+### 2.38 结果评估部分成功安全摘要
+
+- 明确 `market_loop.evaluate_outcomes` 的双分支语义：任务级 `status` 保持原契约，预测标签和历史推荐结果分别统计；任一分支存在失败且任务已经结束时，新增 `summary_status=completed_with_warnings` 和 `warning_count`，不再把任务级 `completed` 显示成全部子流程成功。预测标签继续返回 selected、matured、pending、unavailable、excluded、failed 和待成熟原因；历史推荐结果只返回 created、pending、skipped、failed 计数。
+- 新增管理员限定的 `GET /go/outcome-labels/evaluations/{task_id}`。接口仅允许查询 `market_loop.evaluate_outcomes`，非法 ID 返回 422、不存在返回 404、未授权返回 401；响应不会序列化 `failures` 数组、供应商 URL、凭据或逐记录错误。第二期就绪度使用同一安全汇总器，避免两个页面产生不同判断。
+- 人工复检按钮改用安全接口轮询。页面把 `completed_with_warnings` 显示为“已完成（有警告）”，分别披露预测标签失败数和历史推荐结果失败数；旧 API 缺少新增字段时仍回退到原任务状态和零警告，不影响滚动升级或回滚。
+- 自动化验收：提交 `f90b034` 本地 `go test ./...`、`go vet ./...`、Frontend 8 个测试文件共 135 项测试和 TypeScript/Vite 生产构建全部通过。Frontend CI `34444357464` 通过；Go CI `34444357485` 通过格式、静态检查、全量竞态、冻结门禁以及隔离 PostgreSQL/Redis 契约。回归验证部分成功派生、安全 JSON 不含原始失败、管理员鉴权、前端警告态和旧响应兼容。
+- 生产验收（2026-09-10 14:19 北京时间）：只替换 Go API 为 `6fb92533021d` 和 Web 为 `bd6e1affbb4e`；outcomes worker `c8f269638692`、research worker `12cb3f487f60`、masterdata worker `daaa4be35827` 和 Market Adapter `d73e94790f0a` 均未替换且重启次数为 0。API 与网页返回 200，安全接口未授权返回 401；真实任务 `505da277-eae2-458e-a16b-00dc0a5a856b` 返回 `completed_with_warnings`、`warning_count=10`、预测标签 `selected=141 / pending=141 / failed=0 / awaiting_price_sessions=141`，历史推荐结果 `created=0 / pending=28 / skipped=509 / failed=10`，响应不含原始失败数组或 URL。线上资源 `index-BBWQGKh1.js`、`index-CM7hExXJ.css` 可读回安全接口路径、警告文案和构建提交 `f90b034`。
