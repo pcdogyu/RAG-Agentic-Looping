@@ -2,37 +2,55 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/consensus"
 )
 
 const phaseTwoReadinessVersion = "phase-two-readiness-v1"
 
+type phaseTwoOutcomeEvaluationFacts struct {
+	JobID          string         `json:"job_id"`
+	Status         string         `json:"status"`
+	CreatedAt      *time.Time     `json:"created_at,omitempty"`
+	CompletedAt    *time.Time     `json:"completed_at,omitempty"`
+	Selected       int            `json:"selected"`
+	Matured        int            `json:"matured"`
+	Pending        int            `json:"pending"`
+	Unavailable    int            `json:"unavailable"`
+	Excluded       int            `json:"excluded"`
+	Failed         int            `json:"failed"`
+	PendingReasons map[string]int `json:"pending_reasons"`
+}
+
 type phaseTwoReadinessFacts struct {
-	AnalystEvidence                   int  `json:"analyst_evidence"`
-	ApprovedFundamentalPlans          int  `json:"approved_fundamental_plans"`
-	ActiveEquityAssets                int  `json:"active_equity_assets"`
-	BenchmarkCoveredActiveEquities    int  `json:"benchmark_covered_active_equities"`
-	BenchmarkReadyEquityMarkets       int  `json:"benchmark_ready_equity_markets"`
-	MatureEquityOutcomes              int  `json:"mature_equity_outcomes"`
-	LargestMatureEquityMarket         int  `json:"largest_mature_equity_market"`
-	DatasetReadyEvaluationScopes      int  `json:"dataset_ready_evaluation_scopes"`
-	PendingPredictionLabels           int  `json:"pending_prediction_labels"`
-	HoldoutReservations               int  `json:"holdout_reservations"`
-	WalkForwardDatasets               int  `json:"walk_forward_datasets"`
-	DevelopmentExperiments            int  `json:"development_experiments"`
-	LayeredPerformanceReports         int  `json:"layered_performance_reports"`
-	ResearchQualityReviews            int  `json:"research_quality_reviews"`
-	PassedFailureDrillScenarios       int  `json:"passed_failure_drill_scenarios"`
-	ApprovedPredictionModels          int  `json:"approved_prediction_models"`
-	LicensedBenchmarkImportReceipts   int  `json:"licensed_benchmark_import_receipts"`
-	TradabilityImportReceipts         int  `json:"tradability_import_receipts"`
-	SECIdentityConfigured             bool `json:"sec_identity_configured"`
-	FinalHoldoutEvaluationImplemented bool `json:"final_holdout_evaluation_implemented"`
-	FinalHoldoutEvaluations           int  `json:"final_holdout_evaluations"`
+	AnalystEvidence                   int                            `json:"analyst_evidence"`
+	ApprovedFundamentalPlans          int                            `json:"approved_fundamental_plans"`
+	ActiveEquityAssets                int                            `json:"active_equity_assets"`
+	BenchmarkCoveredActiveEquities    int                            `json:"benchmark_covered_active_equities"`
+	BenchmarkReadyEquityMarkets       int                            `json:"benchmark_ready_equity_markets"`
+	MatureEquityOutcomes              int                            `json:"mature_equity_outcomes"`
+	LargestMatureEquityMarket         int                            `json:"largest_mature_equity_market"`
+	DatasetReadyEvaluationScopes      int                            `json:"dataset_ready_evaluation_scopes"`
+	PendingPredictionLabels           int                            `json:"pending_prediction_labels"`
+	HoldoutReservations               int                            `json:"holdout_reservations"`
+	WalkForwardDatasets               int                            `json:"walk_forward_datasets"`
+	DevelopmentExperiments            int                            `json:"development_experiments"`
+	LayeredPerformanceReports         int                            `json:"layered_performance_reports"`
+	ResearchQualityReviews            int                            `json:"research_quality_reviews"`
+	PassedFailureDrillScenarios       int                            `json:"passed_failure_drill_scenarios"`
+	ApprovedPredictionModels          int                            `json:"approved_prediction_models"`
+	LicensedBenchmarkImportReceipts   int                            `json:"licensed_benchmark_import_receipts"`
+	TradabilityImportReceipts         int                            `json:"tradability_import_receipts"`
+	SECIdentityConfigured             bool                           `json:"sec_identity_configured"`
+	FinalHoldoutEvaluationImplemented bool                           `json:"final_holdout_evaluation_implemented"`
+	FinalHoldoutEvaluations           int                            `json:"final_holdout_evaluations"`
+	LatestOutcomeEvaluation           phaseTwoOutcomeEvaluationFacts `json:"latest_outcome_evaluation"`
 }
 
 type phaseTwoReadinessGate struct {
@@ -82,6 +100,9 @@ func loadPhaseTwoReadinessFacts(ctx context.Context, s *Server, asOf time.Time) 
 	facts := phaseTwoReadinessFacts{
 		SECIdentityConfigured:             consensus.ValidateSECIdentity(s.cfg.SECIdentity) == nil,
 		FinalHoldoutEvaluationImplemented: true,
+		LatestOutcomeEvaluation: phaseTwoOutcomeEvaluationFacts{
+			Status: "not_run", PendingReasons: map[string]int{},
+		},
 	}
 	err := s.db.QueryRow(ctx, `WITH active_equity_coverage AS (
 		SELECT a.id,a.market,EXISTS(
@@ -138,7 +159,29 @@ func loadPhaseTwoReadinessFacts(ctx context.Context, s *Server, asOf time.Time) 
 		&facts.DevelopmentExperiments, &facts.LayeredPerformanceReports, &facts.FinalHoldoutEvaluations, &facts.ResearchQualityReviews,
 		&facts.PassedFailureDrillScenarios, &facts.ApprovedPredictionModels,
 		&facts.LicensedBenchmarkImportReceipts, &facts.TradabilityImportReceipts, &facts.DatasetReadyEvaluationScopes)
-	return facts, err
+	if err != nil {
+		return facts, err
+	}
+	var summaryJSON []byte
+	err = s.db.QueryRow(ctx, `SELECT id::text,status,created_at,completed_at,
+		coalesce(result->'prediction_outcomes','{}'::jsonb)::jsonb
+		FROM go_jobs WHERE task_type='market_loop.evaluate_outcomes' AND created_at<=$1
+		ORDER BY created_at DESC,id DESC LIMIT 1`, asOf).Scan(
+		&facts.LatestOutcomeEvaluation.JobID, &facts.LatestOutcomeEvaluation.Status,
+		&facts.LatestOutcomeEvaluation.CreatedAt, &facts.LatestOutcomeEvaluation.CompletedAt, &summaryJSON)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return facts, nil
+	}
+	if err != nil {
+		return facts, fmt.Errorf("load latest prediction outcome evaluation: %w", err)
+	}
+	if err = json.Unmarshal(summaryJSON, &facts.LatestOutcomeEvaluation); err != nil {
+		return facts, fmt.Errorf("decode latest prediction outcome evaluation: %w", err)
+	}
+	if facts.LatestOutcomeEvaluation.PendingReasons == nil {
+		facts.LatestOutcomeEvaluation.PendingReasons = map[string]int{}
+	}
+	return facts, nil
 }
 
 func buildPhaseTwoReadinessReport(facts phaseTwoReadinessFacts, asOf time.Time) phaseTwoReadinessReport {

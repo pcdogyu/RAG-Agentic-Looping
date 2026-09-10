@@ -18,6 +18,9 @@ func TestPhaseTwoReadinessKeepsMissingTruthExplicit(t *testing.T) {
 	if report.OverallStatus != "blocked" || report.AutomaticCompletion || report.CompletedGates != 0 {
 		t.Fatalf("missing production facts were presented as ready: %#v", report)
 	}
+	if report.Facts.LatestOutcomeEvaluation.Status != "" {
+		t.Fatalf("builder unexpectedly invented an outcome evaluation: %#v", report.Facts.LatestOutcomeEvaluation)
+	}
 	want := map[string]string{
 		"analyst_evidence": "waiting_human_input", "approved_fundamental_plan": "blocked_by_dependency",
 		"pit_benchmark_coverage": "waiting_human_input", "mature_forward_outcomes": "waiting_natural_maturity",
@@ -110,7 +113,7 @@ func TestPhaseTwoReadinessReadsEmptyMigratedPostgres(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !facts.SECIdentityConfigured || !facts.FinalHoldoutEvaluationImplemented || facts.FinalHoldoutEvaluations != 0 || facts.AnalystEvidence != 0 || facts.ActiveEquityAssets != 0 {
+	if !facts.SECIdentityConfigured || !facts.FinalHoldoutEvaluationImplemented || facts.FinalHoldoutEvaluations != 0 || facts.AnalystEvidence != 0 || facts.ActiveEquityAssets != 0 || facts.LatestOutcomeEvaluation.Status != "not_run" || facts.LatestOutcomeEvaluation.PendingReasons == nil {
 		t.Fatalf("unexpected empty readiness facts: %#v", facts)
 	}
 	report := buildPhaseTwoReadinessReport(facts, time.Now().UTC())
@@ -138,5 +141,21 @@ func TestPhaseTwoReadinessReadsEmptyMigratedPostgres(t *testing.T) {
 	}
 	if facts.ActiveEquityAssets != 3 || facts.BenchmarkCoveredActiveEquities != 2 || facts.BenchmarkReadyEquityMarkets != 1 || facts.DatasetReadyEvaluationScopes != 0 {
 		t.Fatalf("readiness did not preserve asset disclosure and one-market completion semantics: %#v", facts)
+	}
+
+	jobID := "11111111-1111-4111-8111-111111111111"
+	if _, err = pool.Exec(ctx, `INSERT INTO go_jobs(id,queue,task_type,payload,status,result,created_at,completed_at)
+		VALUES($1,'outcomes','market_loop.evaluate_outcomes','{}','completed',
+		'{"prediction_outcomes":{"selected":96,"matured":0,"pending":96,"unavailable":0,"excluded":0,"failed":0,"pending_reasons":{"awaiting_price_sessions":96}}}',
+		$2,$2)`, jobID, time.Now().UTC().Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	facts, err = loadPhaseTwoReadinessFacts(ctx, server, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	latest := facts.LatestOutcomeEvaluation
+	if latest.JobID != jobID || latest.Status != "completed" || latest.Selected != 96 || latest.Pending != 96 || latest.PendingReasons["awaiting_price_sessions"] != 96 || latest.CreatedAt == nil || latest.CompletedAt == nil {
+		t.Fatalf("latest outcome evaluation was not summarized safely: %#v", latest)
 	}
 }

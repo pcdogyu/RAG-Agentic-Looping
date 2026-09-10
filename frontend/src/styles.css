@@ -701,6 +701,15 @@ h1 span { color: var(--mint); font-weight: 400; }
 .readiness-summary article { display: grid; gap: 6px; min-width: 0; padding: 16px; border: 1px solid var(--line); border-top: 3px solid var(--cyan); border-radius: 10px; background: var(--panel-surface); }
 .readiness-summary span, .readiness-summary small { color: var(--muted); font-size: 10px; }
 .readiness-summary strong { color: var(--mint); font: 500 21px "DM Mono", monospace; }
+.readiness-outcome-evaluation { display: grid; gap: 12px; margin-bottom: 14px; padding: 16px; border: 1px solid var(--line); border-left: 3px solid var(--cyan); border-radius: 10px; background: var(--panel-surface); }
+.readiness-outcome-evaluation header, .readiness-outcome-evaluation footer { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.readiness-outcome-evaluation header span, .readiness-outcome-evaluation footer, .readiness-outcome-reasons small { color: var(--muted); font-size: 10px; }
+.readiness-outcome-evaluation h2, .readiness-outcome-evaluation p { margin: 0; }
+.readiness-outcome-evaluation header strong { color: var(--cyan); font: 500 11px "DM Mono", monospace; }
+.readiness-outcome-counts, .readiness-outcome-reasons { display: flex; flex-wrap: wrap; gap: 8px; }
+.readiness-outcome-counts span, .readiness-outcome-reasons > span { display: grid; gap: 3px; min-width: 112px; padding: 9px 11px; border: 1px solid var(--line); border-radius: 7px; background: var(--model-surface); color: var(--muted); font-size: 10px; }
+.readiness-outcome-counts b, .readiness-outcome-reasons b { color: var(--text); font: 500 14px "DM Mono", monospace; }
+.readiness-outcome-evaluation footer { padding-top: 4px; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
 .readiness-gates { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
 .readiness-gate { display: grid; align-content: start; gap: 9px; min-width: 0; padding: 16px; border: 1px solid var(--line); border-left: 3px solid var(--amber); border-radius: 10px; background: var(--panel-surface); }
 .readiness-gate.completed { border-left-color: var(--mint); }
