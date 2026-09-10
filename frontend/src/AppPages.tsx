@@ -1629,6 +1629,8 @@ export type TargetChange = {
   market: string | null;
   target_type: string;
   changed_at: string;
+  observed_at?: string;
+  overall_rating_changed?: boolean;
   previous: { rating: string; direction_score: number | null; rating_confidence: number | null } | null;
   current: { rating: string; direction_score: number | null; rating_confidence: number | null };
   latest: { rating: string; direction_score: number | null; rating_confidence: number | null; news_confidence: number | null };
@@ -2633,7 +2635,8 @@ export function TargetChangeGrid({
       const confidence = eventSignal?.rating_confidence ?? item.latest.rating_confidence;
       const previousRating = item.event_signal_state?.previous || item.rating_state?.previous || item.previous?.rating || item.current.rating;
       const currentRating = item.event_signal_state?.current || item.rating_state?.current || item.current.rating;
-      const changedAt = item.rating_state?.changed_at || item.changed_at;
+      const overallRatingChanged = item.overall_rating_changed ?? previousRating !== currentRating;
+      const changedAt = item.rating_state?.changed_at || item.observed_at || item.changed_at;
       return <article className={`target-change-card ${item.kind}`} key={item.key}>
         <header>
           <span>{item.target_type === "commodity_price" || item.kind === "macro" ? (targetTypeLabels[item.target_type] ?? item.target_type) : item.market} · {new Date(changedAt).toLocaleString("zh-CN")}</span>
@@ -2652,7 +2655,7 @@ export function TargetChangeGrid({
             </button>
           </div>
         </header>
-        <div className="target-change-field changed"><span>事件信号状态变化</span><div className="target-change-rating-row"><strong>{recommendationRatingLabel(previousRating)} → {recommendationRatingLabel(currentRating)}</strong>{(item.event_signal_state || item.rating_state)?.transition_limited && <em className="target-change-limited">单步限制</em>}</div></div>
+        <div className={`target-change-field ${overallRatingChanged ? "changed" : "unchanged"}`}><span>{overallRatingChanged ? "事件信号状态变化" : "总体评级（未变）"}</span><div className="target-change-rating-row"><strong>{overallRatingChanged ? `${recommendationRatingLabel(previousRating)} → ${recommendationRatingLabel(currentRating)}` : recommendationRatingLabel(currentRating)}</strong>{overallRatingChanged ? ((item.event_signal_state || item.rating_state)?.transition_limited && <em className="target-change-limited">单步限制</em>) : <em className="target-change-limited">未触发变更</em>}</div></div>
         <div className="target-change-field"><span>最新新闻信号</span><div className="target-change-rating-row"><strong>{recommendationRatingLabel(eventSignal?.rating || item.latest.rating)}</strong><b className={score === null ? "neutral" : score < 0 ? "negative" : score > 0 ? "positive" : "neutral"} title="本次事件原始方向分">{score === null ? "—" : `${score > 0 ? "+" : ""}${score}`}</b></div></div>
         {item.trend && <TargetTrendSummary trend={item.trend} />}
         <div className={`target-change-latest${onResearch ? " with-research" : ""}`}>
@@ -2682,7 +2685,7 @@ export function buildTargetChangeQuery(
   query: string,
   cursor: string | null = null,
 ) {
-  const params = new URLSearchParams({ kind, limit: "50" });
+  const params = new URLSearchParams({ kind, scope: "observed", limit: "50" });
   const normalizedQuery = query.trim();
   if (normalizedQuery) params.set("q", normalizedQuery);
   if (cursor) params.set("cursor", cursor);
@@ -2765,7 +2768,7 @@ function TargetChangeSection({
   return <section className={`target-change-section ${kind}`}>
     <header><div><p className="eyebrow">{kind === "macro" ? "MACRO / SECTOR" : "INSTRUMENT TARGETS"}</p><h2>{title}</h2><p>{copy}</p></div><button type="button" disabled={loading} onClick={() => void load()}>{loading ? "刷新中…" : "刷新"}</button></header>
     {error && <div className="page-error target-change-error"><span>{error}</span><button type="button" onClick={() => void load()}>重试</button></div>}
-    {!items.length && !error && (loading ? <div className="page-message">正在加载{title}…</div> : <div className="page-empty">{query ? `未找到与“${query}”匹配的评级变化。` : "当前没有最近评级变化。"}</div>)}
+    {!items.length && !error && (loading ? <div className="page-message">正在加载{title}…</div> : <div className="page-empty">{query ? `未找到与“${query}”匹配的评级观测。` : "当前没有最近评级观测。"}</div>)}
     {!!items.length && <TargetChangeGrid items={items} onOpen={onOpen} detailLoadingId={detailLoadingId} researchStates={researchStates} onResearch={onResearch} />}
     {cursor && <button className="load-more" type="button" disabled={loadingMore} onClick={() => void load(true)}>{loadingMore ? "正在加载…" : "加载更多"}</button>}
   </section>;
@@ -2825,15 +2828,15 @@ export function ChangedTargetsPage({ apiBase }: { apiBase: string }) {
   }
 
   return <section className="app-page targets-page">
-    <PageHeading eyebrow="RATING CHANGES" title="标的评级变化" copy="左侧追踪宏观经济、行业及跨资产目标，右侧追踪具体证券与商品价格；总体评级按独立新闻逐档变化。" />
+    <PageHeading eyebrow="RATING CHANGES" title="标的评级变化" copy="左侧追踪宏观经济、行业及跨资产目标，右侧追踪具体证券与商品价格；同时展示最近观测，未满足证据门槛的新闻信号不会改变总体评级。" />
     {detailError && <div className="page-error target-detail-error"><span>{detailError}</span></div>}
     <form className="page-filters target-search" role="search" onSubmit={(event) => { event.preventDefault(); setDebouncedQuery(searchQuery.trim()); }}>
       <input type="search" aria-label="搜索评级变化" placeholder="搜索宏观、行业、代码或标的名称" value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} />
       {searchQuery && <button type="button" onClick={() => { setSearchQuery(""); setDebouncedQuery(""); }}>清除</button>}
     </form>
     <div className="target-change-split">
-      <TargetChangeSection apiBase={apiBase} kind="macro" title="宏观经济与行业变化" copy="经济、行业、汇率、利率、供给、航运与风险资产。" query={debouncedQuery} onOpen={(item) => void openLatestResearch(item)} detailLoadingId={detailLoadingId} researchStates={researchStates} onResearch={(item) => void researchAgain(item)} />
-      <TargetChangeSection apiBase={apiBase} kind="asset" title="具体标的变化" copy="股票、加密资产与商品价格的总体评级单步变化及最新新闻信号。" query={debouncedQuery} onOpen={(item) => void openLatestResearch(item)} detailLoadingId={detailLoadingId} researchStates={researchStates} onResearch={(item) => void researchAgain(item)} />
+      <TargetChangeSection apiBase={apiBase} kind="macro" title="宏观经济与行业变化" copy="经济、行业、汇率、利率、供给、航运与风险资产的评级变化与最近观测。" query={debouncedQuery} onOpen={(item) => void openLatestResearch(item)} detailLoadingId={detailLoadingId} researchStates={researchStates} onResearch={(item) => void researchAgain(item)} />
+      <TargetChangeSection apiBase={apiBase} kind="asset" title="具体标的变化" copy="股票、加密资产与商品价格的总体评级变化、最近观测及最新新闻信号。" query={debouncedQuery} onOpen={(item) => void openLatestResearch(item)} detailLoadingId={detailLoadingId} researchStates={researchStates} onResearch={(item) => void researchAgain(item)} />
     </div>
     {selectedAsset && <ConclusionDetailModal detail={selectedAsset} onClose={() => setSelectedAsset(null)} />}
     {selectedEvent && <EventConclusionDetailModal detail={selectedEvent} onClose={() => setSelectedEvent(null)} />}

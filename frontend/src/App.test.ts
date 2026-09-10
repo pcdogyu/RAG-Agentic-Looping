@@ -962,6 +962,7 @@ describe("changed targets page", () => {
     expect(markup).toContain('aria-label="搜索评级变化"');
     expect(markup).toContain('placeholder="搜索宏观、行业、代码或标的名称"');
     expect(markup).toContain("股票、加密资产与商品价格");
+    expect(markup).toContain("未满足证据门槛的新闻信号不会改变总体评级");
     expect(markup).not.toContain("经济、行业、商品、汇率");
     expect(markup).toContain("正在加载宏观经济与行业变化");
     expect(markup).toContain("正在加载具体标的变化");
@@ -970,8 +971,8 @@ describe("changed targets page", () => {
 
   it("builds trimmed server-side search and cursor parameters", () => {
     expect(targetChangeSearchDebounceMs).toBe(300);
-    expect(buildTargetChangeQuery("asset", "  tgt  ")).toBe("kind=asset&limit=50&q=tgt");
-    expect(buildTargetChangeQuery("macro", "", "next-page")).toBe("kind=macro&limit=50&cursor=next-page");
+    expect(buildTargetChangeQuery("asset", "  tgt  ")).toBe("kind=asset&scope=observed&limit=50&q=tgt");
+    expect(buildTargetChangeQuery("macro", "", "next-page")).toBe("kind=macro&scope=observed&limit=50&cursor=next-page");
   });
 
   it("does not let periodic refresh supersede an in-flight target request", () => {
@@ -1095,6 +1096,19 @@ describe("changed targets page", () => {
     expect(commodityMarkup).toContain("事件信号状态变化");
     expect(commodityMarkup).toContain("长期证据趋势");
     expect(commodityMarkup).toContain("短期证据趋势");
+    const observedMarkup = renderToStaticMarkup(createElement(TargetChangeGrid, {
+      items: [{
+        ...assetItems[0],
+        overall_rating_changed: false,
+        observed_at: "2026-09-10T08:00:00Z",
+        previous: { rating: "watch", direction_score: 0, rating_confidence: 0.2 },
+        current: { rating: "watch", direction_score: 0, rating_confidence: 0.2 },
+      }],
+      onOpen: () => undefined,
+    }));
+    expect(observedMarkup).toContain("总体评级（未变）");
+    expect(observedMarkup).toContain("未触发变更");
+    expect(observedMarkup).not.toContain("观望 → 观望");
     expect(markup).toContain("事件信号状态变化");
     expect(markup).toContain("最新新闻信号");
     expect(markup).toContain("本次事件原始方向分");

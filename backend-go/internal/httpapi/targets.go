@@ -355,8 +355,8 @@ func (s *Server) targetChanges(w http.ResponseWriter, r *http.Request) {
 	if scope == "" {
 		scope = "changed"
 	}
-	if scope != "changed" && scope != "current" {
-		validationError(w, "scope", "Input should be 'current' or 'changed'")
+	if scope != "changed" && scope != "current" && scope != "observed" {
+		validationError(w, "scope", "Input should be 'current', 'changed', or 'observed'")
 		return
 	}
 	if scope == "current" && kind != "asset" {
@@ -376,16 +376,7 @@ func (s *Server) targetChanges(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "target change query failed")
 		return
 	}
-	if scope == "changed" {
-		changed := items[:0]
-		for _, item := range items {
-			if ratingStateChanged(item) {
-				changed = append(changed, item)
-			}
-		}
-		items = changed
-		items = filterTargetChanges(items, r.URL.Query().Get("q"))
-	}
+	items = scopedTargetChanges(items, scope, r.URL.Query().Get("q"))
 	for _, item := range items {
 		delete(item, "_rating_signals")
 	}
@@ -397,12 +388,9 @@ func (s *Server) targetChanges(w http.ResponseWriter, r *http.Request) {
 		}
 		filtered := items[:0]
 		for _, item := range items {
-			stampField := "changed_at"
-			if scope == "current" {
-				stampField = "rated_at"
-			}
+			stampField := targetChangeStampField(scope)
 			changedAt := parseAnyTime(item[stampField])
-			itemID := stringValue(item["change_detail_id"])
+			itemID := targetChangeCursorID(item, scope)
 			if changedAt != nil && (changedAt.Before(stamp) || (changedAt.Equal(stamp) && itemID < id)) {
 				filtered = append(filtered, item)
 			}
@@ -416,15 +404,29 @@ func (s *Server) targetChanges(w http.ResponseWriter, r *http.Request) {
 	var next any
 	if hasMore && len(items) > 0 {
 		last := items[len(items)-1]
-		stampField := "changed_at"
-		if scope == "current" {
-			stampField = "rated_at"
-		}
+		stampField := targetChangeStampField(scope)
 		if stamp := parseAnyTime(last[stampField]); stamp != nil {
-			next = encodeAssetCursor(*stamp, stringValue(last["change_detail_id"]))
+			next = encodeAssetCursor(*stamp, targetChangeCursorID(last, scope))
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "next_cursor": next})
+}
+
+func targetChangeStampField(scope string) string {
+	if scope == "current" {
+		return "rated_at"
+	}
+	if scope == "observed" {
+		return "observed_at"
+	}
+	return "changed_at"
+}
+
+func targetChangeCursorID(item map[string]any, scope string) string {
+	if scope == "observed" {
+		return stringValue(objectValue(item["latest_detail"])["id"])
+	}
+	return stringValue(item["change_detail_id"])
 }
 
 func filterTargetChanges(items []map[string]any, query string) []map[string]any {
@@ -447,6 +449,29 @@ func filterTargetChanges(items []map[string]any, query string) []map[string]any 
 	return filtered
 }
 
+func scopedTargetChanges(items []map[string]any, scope, query string) []map[string]any {
+	if scope == "current" {
+		return items
+	}
+	for _, item := range items {
+		item["overall_rating_changed"] = ratingStateChanged(item)
+	}
+	if scope == "changed" {
+		changed := items[:0]
+		for _, item := range items {
+			if boolValue(item["overall_rating_changed"]) {
+				changed = append(changed, item)
+			}
+		}
+		items = changed
+	}
+	items = filterTargetChanges(items, query)
+	if scope == "observed" {
+		sort.SliceStable(items, func(i, j int) bool { return targetObservedAfter(items[i], items[j]) })
+	}
+	return items
+}
+
 func (s *Server) assetTargetChanges(r *http.Request) ([]map[string]any, error) {
 	changes, err := s.latestChangedTargets(r)
 	if err != nil {
@@ -460,7 +485,7 @@ func (s *Server) assetTargetChanges(r *http.Request) ([]map[string]any, error) {
 		asset, _ := item.Current.Payload["asset"].(map[string]any)
 		value := map[string]any{
 			"kind": "asset", "key": item.Current.AssetID, "label": asset["name"], "symbol": asset["symbol"], "market": asset["market"],
-			"target_type": "tradable_asset", "changed_at": jsonTime(item.Current.AsOf),
+			"target_type": "tradable_asset", "changed_at": jsonTime(item.Current.AsOf), "observed_at": jsonTime(item.Latest.AsOf),
 			"previous": impactFields(item.Previous.Payload), "current": impactFields(item.Current.Payload),
 			"latest": map[string]any{"rating": item.Latest.Payload["rating"], "direction_score": item.Latest.Payload["direction_score"],
 				"rating_confidence": item.Latest.Payload["rating_confidence"], "news_confidence": item.Latest.Payload["news_confidence"]},
@@ -564,6 +589,15 @@ func targetChangeAfter(left, right map[string]any) bool {
 	leftTime, rightTime := parseAnyTime(left["changed_at"]), parseAnyTime(right["changed_at"])
 	if leftTime != nil && rightTime != nil && leftTime.Equal(*rightTime) {
 		return stringValue(left["change_detail_id"]) > stringValue(right["change_detail_id"])
+	}
+	return leftTime != nil && (rightTime == nil || leftTime.After(*rightTime))
+}
+
+func targetObservedAfter(left, right map[string]any) bool {
+	leftTime, rightTime := parseAnyTime(left["observed_at"]), parseAnyTime(right["observed_at"])
+	leftID, rightID := targetChangeCursorID(left, "observed"), targetChangeCursorID(right, "observed")
+	if leftTime != nil && rightTime != nil && leftTime.Equal(*rightTime) {
+		return leftID > rightID
 	}
 	return leftTime != nil && (rightTime == nil || leftTime.After(*rightTime))
 }
@@ -728,7 +762,7 @@ func (s *Server) eventTargetChanges(r *http.Request, targetTypes map[string]bool
 		report := objectValue(latest.Run["report"])
 		value := map[string]any{
 			"kind": kind, "key": key, "label": latest.Canonical.Label, "symbol": valueOrNil(displayAsset, "symbol"),
-			"market": valueOrNil(displayAsset, "market"), "target_type": latest.Canonical.TargetType, "changed_at": jsonTime(changed.ChangedAt),
+			"market": valueOrNil(displayAsset, "market"), "target_type": latest.Canonical.TargetType, "changed_at": jsonTime(changed.ChangedAt), "observed_at": jsonTime(latest.ChangedAt),
 			"previous": macroImpactState(before.Impact, before.Provisional), "current": macroImpactState(changed.Impact, changed.Provisional),
 			"latest": map[string]any{"rating": latest.Impact["rating"], "direction_score": latest.Impact["direction_score"],
 				"rating_confidence": latest.Impact["rating_confidence"], "provisional": latest.Provisional, "news_confidence": valueOrNil(report, "news_confidence")},
