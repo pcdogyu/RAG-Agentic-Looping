@@ -4055,6 +4055,11 @@ export function ResearchPolicyPage({ apiBase }: { apiBase: string }) {
 type FundamentalBundle = {
   fundamentals?: { items?: Array<{ id?: string; statement_type?: string; available_at?: string; source?: { provider?: string; url?: string } }> };
 	prices?: { items?: Array<{ id?: string; price?: number; price_field?: string; observed_at?: string; available_at?: string; currency?: string; source_name?: string; source_url?: string }> };
+	tradability?: {
+		contract_version?: string;
+		items?: Array<{ id?: string; session_date?: string; observed_at?: string; available_at?: string; status?: string; buy_executable?: boolean; sell_executable?: boolean; source_name?: string; source_document_id?: string; source_url?: string }>;
+		resolved_by_session?: Record<string, { status?: string; reason?: string; source_count?: number }>;
+	};
 	consensus?: {
 		items?: Array<{ id?: string; metric?: string; fiscal_period_end?: string; statistic?: string; estimate_value?: number; analyst_count?: number; currency?: string; available_at?: string; source_name?: string }>;
 		revisions?: Array<{ current_id?: string; metric?: string; fiscal_period_end?: string; statistic?: string; previous_value?: number; current_value?: number; absolute_change?: number; direction?: string; observed_at?: string; individual_analyst_behavior_status?: string }>;
@@ -4125,6 +4130,123 @@ type LicensedBenchmarkImportReceipt = {
 	inserted_count?: number;
 	available_at?: string;
 };
+
+type TradabilityImportReceipt = {
+	id?: string;
+	asset_id?: string;
+	market?: string;
+	currency?: string;
+	source_name?: string;
+	source_document_id?: string;
+	source_url?: string;
+	license_reference?: string;
+	approved_by?: string;
+	session_start?: string;
+	session_end?: string;
+	observation_count?: number;
+	inserted_count?: number;
+	available_at?: string;
+};
+
+type TradabilityImportPreview = {
+	observationCount: number;
+	sessionStart: string;
+	sessionEnd: string;
+	statusCounts: Record<string, number>;
+};
+
+const tradabilityStatuses = new Set(["tradable", "suspended", "limit_up", "limit_down", "delisted"]);
+
+export function tradabilityStatusLabel(status?: string) {
+	return ({ tradable: "可交易", suspended: "停牌", limit_up: "涨停", limit_down: "跌停", delisted: "退市", conflict: "来源冲突", unknown: "证据缺失" } as Record<string, string>)[status || ""] || status || "证据缺失";
+}
+
+export function tradabilityImportTemplate(assetID: string) {
+	const identity = assetID.trim().split(":");
+	const assetClass = identity[0]?.toLowerCase();
+	if ((assetClass !== "equity" && assetClass !== "etf") || identity.length < 3 || identity.some((part) => !part.trim())) return "";
+	return JSON.stringify({
+		source_name: "", source_document_id: "", source_url: "", license_reference: "", approved_by: "",
+	}, null, 2);
+}
+
+function validUTCDateOnly(value: string) {
+	if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+	const parsed = new Date(`${value}T00:00:00.000Z`);
+	return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
+
+export function tradabilityImportBody(assetID: string, metadataJSON: string, observationsText: string, now = new Date()) {
+	if (!tradabilityImportTemplate(assetID)) throw new Error("可交易状态只支持股票或 ETF 资产");
+	if (Number.isNaN(now.getTime())) throw new Error("当前校验时间无效");
+	let metadata: Record<string, unknown>;
+	try {
+		const parsed = JSON.parse(metadataJSON) as unknown;
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error();
+		metadata = parsed as Record<string, unknown>;
+	} catch {
+		throw new Error("授权信息必须是有效 JSON 对象");
+	}
+	const required = ["source_name", "source_document_id", "source_url", "license_reference", "approved_by"] as const;
+	const normalized = Object.fromEntries(required.map((field) => [field, String(metadata[field] || "").trim()])) as Record<(typeof required)[number], string>;
+	for (const field of required) {
+		if (!normalized[field]) throw new Error(`${field} 不能为空`);
+	}
+	const maximumLengths = { source_name: 120, source_document_id: 320, license_reference: 320, approved_by: 160 } as const;
+	for (const field of Object.keys(maximumLengths) as Array<keyof typeof maximumLengths>) {
+		if (normalized[field].length > maximumLengths[field]) throw new Error(`${field} 超过长度限制`);
+	}
+	try {
+		const sourceURL = new URL(normalized.source_url);
+		if (sourceURL.protocol !== "https:") throw new Error();
+		if (sourceURL.username || sourceURL.password || sourceURL.search || sourceURL.hash) throw new Error("credentials");
+	} catch (error) {
+		if (error instanceof Error && error.message === "credentials") throw new Error("source_url 不得包含用户名、密码、查询参数或片段");
+		throw new Error("source_url 必须是绝对 HTTPS 地址");
+	}
+
+	type Observation = { session_date: string; source_observed_at: string; status: string };
+	let rawObservations: Array<Record<string, unknown>>;
+	const trimmed = observationsText.trim();
+	if (!trimmed) throw new Error("必须提供可交易状态观测");
+	if (trimmed.startsWith("[")) {
+		try {
+			const parsed = JSON.parse(trimmed) as unknown;
+			if (!Array.isArray(parsed)) throw new Error();
+			rawObservations = parsed as Array<Record<string, unknown>>;
+		} catch {
+			throw new Error("观测 JSON 必须是数组");
+		}
+	} else {
+		const lines = trimmed.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+		if (lines[0]?.toLowerCase().replace(/\s/g, "") === "session_date,source_observed_at,status") lines.shift();
+		rawObservations = lines.map((line) => {
+			const cells = line.split(",").map((cell) => cell.trim());
+			if (cells.length !== 3) throw new Error("CSV 每行必须只有 session_date,source_observed_at,status 三列");
+			return { session_date: cells[0], source_observed_at: cells[1], status: cells[2] };
+		});
+	}
+	if (rawObservations.length < 1 || rawObservations.length > 1000) throw new Error("一次必须提供 1—1000 条观测");
+	const today = now.toISOString().slice(0, 10);
+	const seen = new Set<string>();
+	const observations: Observation[] = rawObservations.map((item) => {
+		if (!item || typeof item !== "object" || Array.isArray(item)) throw new Error("每条观测必须是对象");
+		const sessionDate = String(item.session_date || "").trim();
+		if (!validUTCDateOnly(sessionDate) || sessionDate > today) throw new Error("session_date 必须是非未来的有效 YYYY-MM-DD 日期");
+		if (seen.has(sessionDate)) throw new Error("同一导入中 session_date 不能重复");
+		seen.add(sessionDate);
+		const sourceObservedAt = String(item.source_observed_at || "").trim();
+		const dateOnly = validUTCDateOnly(sourceObservedAt);
+		const timestamped = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(sourceObservedAt);
+		const observedTime = dateOnly ? new Date(`${sourceObservedAt}T00:00:00.000Z`) : new Date(sourceObservedAt);
+		if ((!dateOnly && !timestamped) || Number.isNaN(observedTime.getTime()) || observedTime.getTime() > now.getTime()) throw new Error("source_observed_at 必须是非未来的 YYYY-MM-DD 或 RFC3339 时间");
+		const status = String(item.status || "").trim().toLowerCase();
+		if (!tradabilityStatuses.has(status)) throw new Error("status 只能是 tradable、suspended、limit_up、limit_down 或 delisted");
+		return { session_date: sessionDate, source_observed_at: sourceObservedAt, status };
+	});
+	observations.sort((left, right) => left.session_date.localeCompare(right.session_date));
+	return { ...normalized, observations };
+}
 
 export function scheduleDraftJSON(payload: { status?: string; schedule_draft?: Record<string, unknown> }) {
 	if (payload.status !== "available" || !payload.schedule_draft) return "";
@@ -4241,6 +4363,13 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 	const [licensedBenchmarkConfirmed, setLicensedBenchmarkConfirmed] = useState(false);
 	const [licensedBenchmarkReceipts, setLicensedBenchmarkReceipts] = useState<LicensedBenchmarkImportReceipt[]>([]);
 	const [licensedBenchmarkAuditLoaded, setLicensedBenchmarkAuditLoaded] = useState(false);
+	const [tradabilityMetadataJSON, setTradabilityMetadataJSON] = useState("");
+	const [tradabilityObservations, setTradabilityObservations] = useState("");
+	const [tradabilityRequestID, setTradabilityRequestID] = useState(() => globalThis.crypto?.randomUUID?.() || `tradability-${Date.now()}`);
+	const [tradabilityPreview, setTradabilityPreview] = useState<TradabilityImportPreview>();
+	const [tradabilityConfirmed, setTradabilityConfirmed] = useState(false);
+	const [tradabilityReceipts, setTradabilityReceipts] = useState<TradabilityImportReceipt[]>([]);
+	const [tradabilityAuditLoaded, setTradabilityAuditLoaded] = useState(false);
 	const [guidanceReviewJSON, setGuidanceReviewJSON] = useState("");
 	const [guidanceReviewRequestID, setGuidanceReviewRequestID] = useState(() => globalThis.crypto?.randomUUID?.() || `guidance-review-${Date.now()}`);
   const [scheduleRequestID, setScheduleRequestID] = useState(() => globalThis.crypto?.randomUUID?.() || `fundamental-schedule-${Date.now()}`);
@@ -4249,12 +4378,14 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
     const canonical = assetID.trim();
     if (!canonical) return;
 		setLicensedBenchmarkReceipts([]); setLicensedBenchmarkAuditLoaded(false);
+		setTradabilityReceipts([]); setTradabilityAuditLoaded(false); setTradabilityPreview(undefined); setTradabilityConfirmed(false);
     setLoading(true); setMessage("");
     const path = encodeURIComponent(canonical);
 		const endpoints = [
 			{ key: "fundamentals", route: "fundamentals" }, { key: "preparation", route: "fundamental-research", suffix: "/preparation" },
 			{ key: "analystEvidence", route: "analyst-evidence" },
 			{ key: "prices", route: "market-prices", query: "price_field=adjusted_close&limit=20" },
+			{ key: "tradability", route: "market-tradability", query: "limit=100" },
 			{ key: "consensus", route: "consensus" },
 			{ key: "guidance", route: "consensus", suffix: "/guidance" },
 			{ key: "guidanceSources", route: "consensus", suffix: "/guidance-sources" },
@@ -4390,6 +4521,104 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 			setMessage(`持牌导入回执读取失败：${error instanceof Error ? error.message : "未知错误"}`);
 		} finally { setLoading(false); }
 	}
+	function resetTradabilityApproval() {
+		setTradabilityPreview(undefined);
+		setTradabilityConfirmed(false);
+		setTradabilityRequestID(globalThis.crypto?.randomUUID?.() || `tradability-${Date.now()}`);
+	}
+	function loadTradabilityTemplate() {
+		const canonical = assetID.trim();
+		const template = tradabilityImportTemplate(canonical);
+		if (!template) {
+			setMessage("可交易状态导入只支持规范股票或 ETF 资产。");
+			return;
+		}
+		setTradabilityMetadataJSON(template);
+		setTradabilityObservations("session_date,source_observed_at,status\n");
+		resetTradabilityApproval();
+		setMessage(`已生成 ${canonical} 可交易状态导入模板；请上传或粘贴真实授权来源文件，再执行本地预校验。`);
+	}
+	async function loadTradabilityFile(file?: File) {
+		if (!file) return;
+		if (file.size > 1024 * 1024) {
+			setMessage("可交易状态文件超过 1 MiB；单次最多 1000 条，请拆分后导入。");
+			return;
+		}
+		try {
+			const body = await file.text();
+			setTradabilityObservations(body);
+			resetTradabilityApproval();
+			setMessage(`已在浏览器读取 ${file.name}；尚未上传到服务器，请继续预校验。`);
+		} catch {
+			setMessage("无法读取可交易状态文件，请改用 UTF-8 CSV/JSON 或直接粘贴内容。");
+		}
+	}
+	function previewTradabilityImport() {
+		try {
+			const body = tradabilityImportBody(assetID, tradabilityMetadataJSON, tradabilityObservations);
+			const statusCounts: Record<string, number> = {};
+			for (const item of body.observations) statusCounts[item.status] = (statusCounts[item.status] || 0) + 1;
+			const preview = {
+				observationCount: body.observations.length,
+				sessionStart: body.observations[0]?.session_date || "",
+				sessionEnd: body.observations.at(-1)?.session_date || "",
+				statusCounts,
+			};
+			setTradabilityPreview(preview);
+			setTradabilityConfirmed(false);
+			setMessage(`预校验通过：${preview.observationCount} 条，覆盖 ${preview.sessionStart} 至 ${preview.sessionEnd}。数据尚未发送，请核对状态分布后人工确认。`);
+		} catch (error) {
+			setTradabilityPreview(undefined);
+			setTradabilityConfirmed(false);
+			setMessage(`可交易状态预校验失败：${error instanceof Error ? error.message : "JSON、CSV 或授权信息无效"}`);
+		}
+	}
+	async function importTradability() {
+		const canonical = assetID.trim();
+		if (!canonical || !token || !tradabilityPreview || !tradabilityConfirmed) return;
+		setLoading(true); setMessage("");
+		try {
+			const body = tradabilityImportBody(canonical, tradabilityMetadataJSON, tradabilityObservations);
+			const response = await fetch(`${apiBase}/go/market-tradability/${encodeURIComponent(canonical)}/import`, {
+				method: "POST", headers: { "Content-Type": "application/json", "X-Admin-Token": token, "Idempotency-Key": tradabilityRequestID }, body: JSON.stringify(body),
+			});
+			const payload = await response.json() as { created?: boolean; detail?: string; receipt?: TradabilityImportReceipt };
+			if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
+			if (payload.receipt?.id) setTradabilityReceipts((items) => [payload.receipt!, ...items.filter((item) => item.id !== payload.receipt?.id)]);
+			setTradabilityAuditLoaded(true);
+			setTradabilityObservations("");
+			setTradabilityPreview(undefined);
+			setTradabilityConfirmed(false);
+			setTradabilityRequestID(globalThis.crypto?.randomUUID?.() || `tradability-${Date.now()}`);
+			let refreshed = false;
+			try {
+				const publicResponse = await fetch(`${apiBase}/go/market-tradability/${encodeURIComponent(canonical)}?limit=100`);
+				if (publicResponse.ok) {
+					const tradability = await publicResponse.json() as FundamentalBundle["tradability"];
+					setBundle((current) => ({ ...current, tradability }));
+					refreshed = true;
+				}
+			} catch { /* The immutable receipt above remains authoritative even if the public refresh fails. */ }
+			setMessage(`可交易状态${payload.created ? "已不可变导入" : "已幂等读回"}：${payload.receipt?.observation_count ?? 0} 条，首次新增 ${payload.receipt?.inserted_count ?? 0} 条，回执 ${payload.receipt?.id || "已保存"}。不会自动运行结果评价或评级。${refreshed ? "" : "公共决议刷新失败，请重新读取标的。"}`);
+		} catch (error) {
+			setMessage(`可交易状态导入失败：${error instanceof Error ? error.message : "请求无效"}`);
+		} finally { setLoading(false); }
+	}
+	async function loadTradabilityReceipts() {
+		const canonical = assetID.trim();
+		if (!canonical || !token || !tradabilityImportTemplate(canonical)) return;
+		setLoading(true); setMessage("");
+		try {
+			const response = await fetch(`${apiBase}/go/market-tradability/${encodeURIComponent(canonical)}/imports?limit=20`, { headers: { "X-Admin-Token": token } });
+			const payload = await response.json() as { items?: TradabilityImportReceipt[]; detail?: string };
+			if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
+			const items = payload.items || [];
+			setTradabilityReceipts(items); setTradabilityAuditLoaded(true);
+			setMessage(items.length ? `已读取 ${canonical} 最近 ${items.length} 份可交易状态导入回执。` : `${canonical} 尚无可交易状态导入回执；没有回执不能推断已有覆盖。`);
+		} catch (error) {
+			setMessage(`可交易状态回执读取失败：${error instanceof Error ? error.message : "未知错误"}`);
+		} finally { setLoading(false); }
+	}
 	async function syncMarketPrices() {
 		const canonical = assetID.trim();
 		if (!canonical || !token) return;
@@ -4517,6 +4746,11 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 	const benchmarkMapping = benchmarkResolution?.mapping;
 	const canonicalBenchmarkID = bundle.marketPolicy?.policy?.benchmark_id?.trim() || "";
 	const licensedBenchmarkAvailable = !!licensedBenchmarkImportTemplate(canonicalBenchmarkID);
+	const tradabilityImportAvailable = !!tradabilityImportTemplate(assetID);
+	const tradabilityItems = bundle.tradability?.items || [];
+	const tradabilitySessions = Object.entries(bundle.tradability?.resolved_by_session || {}).sort(([left], [right]) => right.localeCompare(left));
+	const latestTradability = tradabilitySessions[0];
+	const tradabilityPreviewSummary = tradabilityPreview ? Object.entries(tradabilityPreview.statusCounts).sort(([left], [right]) => left.localeCompare(right)).map(([status, count]) => `${tradabilityStatusLabel(status)} ${count}`).join(" · ") : "";
 	const preparation = bundle.preparation;
 	const prices = bundle.prices?.items || [];
 	const latestPrice = prices[0];
@@ -4531,7 +4765,7 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
   return <section className="app-page fundamental-page">
     <PageHeading eyebrow="FUNDAMENTAL & SIGNAL WORKBENCH" title="基本面评级与短期预测" copy="事件信号、基本面评级和固定期限概率彼此独立；只有通过独立校准的概率才显示数值。" />
     <form className="page-toolbar" onSubmit={load}>
-      <input aria-label="规范资产 ID" value={assetID} onChange={(event) => setAssetID(event.target.value)} />
+      <input aria-label="规范资产 ID" value={assetID} onChange={(event) => { setAssetID(event.target.value); resetTradabilityApproval(); }} />
       <button type="submit" disabled={loading}>{loading ? "读取中…" : "读取"}</button>
     </form>
     <AdminUnlock token={token} onToken={setToken} />
@@ -4550,6 +4784,16 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 		<button type="button" disabled={loading || !licensedBenchmarkMetadataJSON.trim() || !licensedBenchmarkObservations.trim() || !licensedBenchmarkConfirmed} onClick={() => void importLicensedBenchmarkPrices()}>人工导入持牌总回报行情</button>
 		<button type="button" disabled={loading || !licensedBenchmarkAvailable} onClick={() => void loadLicensedBenchmarkReceipts()}>读取持牌导入回执</button>
 		<small>只允许有授权、可追溯的 H00300/HSIDV 总回报数据；页面先校验身份、HTTPS、日期、正数和重复日。导入不会自动批准基准映射、生成评级或倒填可获得时间。</small>
+		<label>可交易状态授权信息<textarea aria-label="可交易状态授权信息 JSON" rows={7} value={tradabilityMetadataJSON} onChange={(event) => { setTradabilityMetadataJSON(event.target.value); resetTradabilityApproval(); }} placeholder="由模板填写真实来源、文档 ID、无凭据 HTTPS 地址、许可证引用和批准人。" /></label>
+		<label>选择可交易状态文件<input aria-label="选择可交易状态文件" type="file" accept=".csv,.json,text/csv,application/json" onChange={(event) => void loadTradabilityFile(event.target.files?.[0])} /></label>
+		<label>可交易状态观测<textarea aria-label="可交易状态观测 CSV 或 JSON" rows={8} value={tradabilityObservations} onChange={(event) => { setTradabilityObservations(event.target.value); resetTradabilityApproval(); }} placeholder={'CSV: session_date,source_observed_at,status\n2026-09-09,2026-09-09T20:00:00Z,tradable；状态仅可为 tradable、suspended、limit_up、limit_down、delisted。'} /></label>
+		<button type="button" disabled={loading || !tradabilityImportAvailable} onClick={loadTradabilityTemplate}>生成可交易状态导入模板</button>
+		<button type="button" disabled={loading || !tradabilityMetadataJSON.trim() || !tradabilityObservations.trim()} onClick={previewTradabilityImport}>预校验可交易状态文件</button>
+		{tradabilityPreview && <small>预览：{tradabilityPreview.observationCount} 条 · {tradabilityPreview.sessionStart} 至 {tradabilityPreview.sessionEnd} · {tradabilityPreviewSummary}</small>}
+		<label className="licensed-import-confirmation"><input type="checkbox" disabled={!tradabilityPreview} checked={tradabilityConfirmed} onChange={(event) => setTradabilityConfirmed(event.target.checked)} />我已核对预览，并确认状态文件有权使用、来源时点真实、许可证引用和批准人有效</label>
+		<button type="button" disabled={loading || !tradabilityPreview || !tradabilityConfirmed} onClick={() => void importTradability()}>人工导入不可变可交易状态</button>
+		<button type="button" disabled={loading || !tradabilityImportAvailable} onClick={() => void loadTradabilityReceipts()}>读取可交易状态导入回执</button>
+		<small>只支持股票/ETF，单批 1—1000 条；页面拒绝未来日期、重复交易日、未知状态、非 HTTPS 和 URL 凭据。服务器决定 available_at；导入不自动评价结果、生成评级或放开执行。</small>
       <label>无新闻基本面研究输入<textarea aria-label="基本面研究 JSON" rows={8} value={workflowJSON} onChange={(event) => setWorkflowJSON(event.target.value)} placeholder='粘贴含 as_of、forecast、valuation、rating 的证据化 JSON；不会自动补造假设或价格。' /></label>
 		<button type="button" disabled={loading || !preparation?.workflow_template} onClick={loadPreparationTemplate}>载入财务事实模板</button>
 		<button type="button" disabled={loading} onClick={() => void syncMarketPrices()}>同步真实复权价格</button>
@@ -4569,6 +4813,7 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 		<article><span>已批准分析师证据</span><strong>{analystEvidenceItems.length}</strong><small>任意字符串不能作为估值、基准或评级证据</small></article>
 		<article><span>PIT 基准映射</span><strong>{benchmarkResolution?.status === "available" ? "已批准" : "不可用"}</strong><small>{benchmarkMapping?.benchmark_asset_id || benchmarkResolution?.reason || bundle.marketPolicy?.policy?.benchmark_id || "等待市场策略"}</small></article>
 		<article><span>持牌总回报导入</span><strong>{licensedBenchmarkAvailable ? licensedBenchmarkAuditLoaded ? `${licensedBenchmarkReceipts.length} 份回执` : "人工入口已就绪" : "当前基准不适用"}</strong><small>{canonicalBenchmarkID || "读取资产后核对规范基准"} · 不自动获取或批准数据</small></article>
+		<article><span>可交易状态证据</span><strong>{latestTradability ? tradabilityStatusLabel(latestTradability[1].status) : "不可用"}</strong><small>{latestTradability ? `${latestTradability[0]} · ${latestTradability[1].source_count ?? 0} 个来源` : `${tradabilityItems.length} 条观测 · 禁止从价格推断`}</small></article>
 		<article><span>复权价格证据</span><strong>{typeof latestPrice?.price === "number" ? `${latestPrice.price} ${latestPrice.currency || ""}` : "不可用"}</strong><small>{latestPrice?.id || "管理员解锁后可同步真实复权价格，不自动写入研究假设"}</small></article>
 		<article><span>一致预期返回</span><strong>{consensusItems.length}</strong><small>仅返回首次观测后可用的数据</small></article>
 		<article><span>管理层指引</span><strong>{guidanceItems.length}</strong><small>与分析师一致预期分开保存</small></article>
@@ -4594,6 +4839,21 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 			<p>{licensedBenchmarkReceipts.length ? `最近覆盖 ${licensedBenchmarkReceipts[0]?.session_start || "—"} 至 ${licensedBenchmarkReceipts[0]?.session_end || "—"}，共 ${licensedBenchmarkReceipts[0]?.observation_count ?? 0} 条。` : "回执历史不会通过公开行情接口返回；没有回执不能推断已经获得或导入持牌数据。"}</p>
 			<small>许可证与审批详情仅管理员可见 · 覆盖范围从实际不可变行情观测计算</small>
 			{licensedBenchmarkReceipts.length > 0 && <details><summary>最近 20 批导入审计</summary>{licensedBenchmarkReceipts.map((item) => <p key={item.id}>{item.session_start || "—"} 至 {item.session_end || "—"} · {item.observation_count ?? 0} 条 / 首次新增 {item.inserted_count ?? 0} · {item.vendor_code || "—"} · {item.source_url ? <a href={item.source_url} target="_blank" rel="noreferrer">{item.source_name || item.source_document_id || "来源"}</a> : item.source_name || "—"} · 许可证 {item.license_reference || "—"} · 批准人 {item.approved_by || "—"} · {item.available_at ? new Date(item.available_at).toLocaleString("zh-CN") : "—"}</p>)}</details>}
+		</article>
+		<article className="conclusion-card">
+			<span>可交易状态决议</span>
+			<h3>{latestTradability ? `${latestTradability[0]} · ${tradabilityStatusLabel(latestTradability[1].status)}` : "尚无当时可用的状态证据"}</h3>
+			<p>{latestTradability ? `${latestTradability[1].source_count ?? 0} 个来源 · ${latestTradability[1].reason || "按最新来源一致性决议"}` : "没有观测时保持 unknown，不会依据收盘价、涨跌幅或公司行动推断可成交。"}</p>
+			<small>只有同一交易日所有来源的最新事实一致为可交易，入场和出场才可能解锁执行模拟</small>
+			{tradabilitySessions.length > 0 && <details><summary>最近交易日决议</summary>{tradabilitySessions.slice(0, 20).map(([session, resolution]) => <p key={session}>{session} · {tradabilityStatusLabel(resolution.status)} · {resolution.source_count ?? 0} 个来源 · {resolution.reason || "—"}</p>)}</details>}
+			{tradabilityItems.length > 0 && <details><summary>公共来源事实</summary>{tradabilityItems.slice(0, 30).map((item) => <p key={item.id}>{item.session_date?.slice(0, 10) || "—"} · {tradabilityStatusLabel(item.status)} · {item.source_url ? <a href={item.source_url} target="_blank" rel="noreferrer">{item.source_name || item.source_document_id || "来源"}</a> : item.source_name || "—"} · 可得 {item.available_at ? new Date(item.available_at).toLocaleString("zh-CN") : "—"}</p>)}</details>}
+		</article>
+		<article className="conclusion-card">
+			<span>可交易状态导入回执</span>
+			<h3>{tradabilityAuditLoaded ? tradabilityReceipts.length ? `${tradabilityReceipts.length} 批已审计导入` : "尚无导入回执" : "等待管理员主动读取"}</h3>
+			<p>{tradabilityReceipts.length ? `最近覆盖 ${tradabilityReceipts[0]?.session_start || "—"} 至 ${tradabilityReceipts[0]?.session_end || "—"}，共 ${tradabilityReceipts[0]?.observation_count ?? 0} 条。` : "许可证与批准信息仅通过管理员接口读取；没有回执不能推断已经取得或导入状态数据。"}</p>
+			<small>覆盖范围来自实际不可变观测 · 导入后不自动运行结果评价或评级</small>
+			{tradabilityReceipts.length > 0 && <details><summary>最近 20 批状态审计</summary>{tradabilityReceipts.map((item) => <p key={item.id}>{item.session_start || "—"} 至 {item.session_end || "—"} · {item.observation_count ?? 0} 条 / 首次新增 {item.inserted_count ?? 0} · {item.market || "—"} {item.currency || ""} · {item.source_url ? <a href={item.source_url} target="_blank" rel="noreferrer">{item.source_name || item.source_document_id || "来源"}</a> : item.source_name || "—"} · 许可证 {item.license_reference || "—"} · 批准人 {item.approved_by || "—"} · {item.available_at ? new Date(item.available_at).toLocaleString("zh-CN") : "—"}</p>)}</details>}
 		</article>
 		<article className="conclusion-card">
 			<span>分析师证据登记</span>

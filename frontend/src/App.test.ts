@@ -37,6 +37,9 @@ import {
 	benchmarkMappingDraftJSON,
 	licensedBenchmarkImportBody,
 	licensedBenchmarkImportTemplate,
+	tradabilityImportBody,
+	tradabilityImportTemplate,
+	tradabilityStatusLabel,
   scheduleDraftJSON,
   ModelInferenceQueuePanel,
   modelQueueRetryRequest,
@@ -750,6 +753,11 @@ describe("shared hash navigation", () => {
 		expect(markup).toContain("持牌导入回执");
 		expect(markup).toContain("许可证与审批详情仅管理员可见");
 		expect(markup).toContain("没有回执不能推断已经获得或导入持牌数据");
+		expect(markup).toContain("可交易状态证据");
+		expect(markup).toContain("可交易状态决议");
+		expect(markup).toContain("可交易状态导入回执");
+		expect(markup).toContain("禁止从价格推断");
+		expect(markup).toContain("不自动运行结果评价或评级");
 		expect(markup).toContain("自动批准：关闭");
 		expect(markup).toContain("人工研究成功后自动载入同源计划草稿，仍需管理员显式批准");
 		expect(markup).toContain("分析师一致预期");
@@ -804,6 +812,33 @@ describe("shared hash navigation", () => {
 		expect(() => licensedBenchmarkImportBody("index:HSI:HSIDV", metadata.replace("HSIRH", "HSI"), "2026-09-08,1")).toThrow("身份不一致");
 		expect(() => licensedBenchmarkImportBody("index:HSI:HSIDV", metadata.replace("agreement-1", ""), "2026-09-08,1")).toThrow("license_reference");
 		expect(() => licensedBenchmarkImportBody("equity:AMEX:SPY", metadata, "2026-09-08,1")).toThrow("不是可持牌导入");
+	});
+
+	it("prevalidates licensed tradability files before human confirmation", () => {
+		const now = new Date("2026-09-10T00:00:00Z");
+		expect(tradabilityImportTemplate("equity:XNAS:AAPL")).toContain('"source_name": ""');
+		expect(tradabilityImportTemplate("etf:ARCX:SPY")).not.toBe("");
+		expect(tradabilityImportTemplate("crypto:BINANCE:BTCUSDT")).toBe("");
+		const metadata = JSON.stringify({
+			source_name: "Licensed Exchange Feed", source_document_id: "status-export-1",
+			source_url: "https://licensed.example.test/status", license_reference: "agreement-1", approved_by: "owner",
+		});
+		const csvBody = tradabilityImportBody("equity:XNAS:AAPL", metadata, "session_date,source_observed_at,status\n2026-09-09,2026-09-09T20:00:00Z,TRADABLE\n2026-09-08,2026-09-08,limit_down", now);
+		expect(csvBody.observations).toEqual([
+			{ session_date: "2026-09-08", source_observed_at: "2026-09-08", status: "limit_down" },
+			{ session_date: "2026-09-09", source_observed_at: "2026-09-09T20:00:00Z", status: "tradable" },
+		]);
+		const jsonBody = tradabilityImportBody("equity:XNAS:AAPL", metadata, '[{"session_date":"2026-09-09","source_observed_at":"2026-09-09","status":"suspended"}]', now);
+		expect(jsonBody.observations[0]?.status).toBe("suspended");
+		expect(tradabilityStatusLabel("limit_up")).toBe("涨停");
+		expect(tradabilityStatusLabel("conflict")).toBe("来源冲突");
+		expect(() => tradabilityImportBody("crypto:BINANCE:BTCUSDT", metadata, "2026-09-09,2026-09-09,tradable", now)).toThrow("股票或 ETF");
+		expect(() => tradabilityImportBody("equity:XNAS:AAPL", metadata, "2026-09-09,2026-09-09,tradable\n2026-09-09,2026-09-09,suspended", now)).toThrow("不能重复");
+		expect(() => tradabilityImportBody("equity:XNAS:AAPL", metadata, "2026-09-11,2026-09-09,tradable", now)).toThrow("非未来");
+		expect(() => tradabilityImportBody("equity:XNAS:AAPL", metadata, "2026-09-09,2026-09-11,tradable", now)).toThrow("source_observed_at");
+		expect(() => tradabilityImportBody("equity:XNAS:AAPL", metadata, "2026-09-09,2026-09-09,open", now)).toThrow("status 只能是");
+		expect(() => tradabilityImportBody("equity:XNAS:AAPL", metadata.replace("https://", "http://"), "2026-09-09,2026-09-09,tradable", now)).toThrow("HTTPS");
+		expect(() => tradabilityImportBody("equity:XNAS:AAPL", metadata.replace("/status", "/status?token=secret"), "2026-09-09,2026-09-09,tradable", now)).toThrow("不得包含");
 	});
 });
 
