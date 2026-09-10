@@ -714,6 +714,36 @@ h1 span { color: var(--mint); font-weight: 400; }
 .readiness-gate p b { color: var(--cyan); font: 500 20px "DM Mono", monospace; }
 .readiness-gate footer { margin-top: auto; padding-top: 4px; border-top: 1px solid var(--line); }
 .readiness-gate footer a { color: var(--cyan); }
+.evaluation-workbench { display: grid; gap: 14px; margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--line); }
+.evaluation-workbench > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
+.evaluation-workbench > header span { color: var(--cyan); font: 500 10px "DM Mono", monospace; letter-spacing: .12em; }
+.evaluation-workbench > header h2, .evaluation-workbench > header p { margin: 4px 0 0; }
+.evaluation-workbench > header p { max-width: 850px; color: var(--muted); font-size: 11px; }
+.evaluation-workbench button { min-height: 38px; padding: 8px 13px; border: 1px solid var(--line); border-radius: 7px; color: var(--text); background: var(--model-surface); cursor: pointer; }
+.evaluation-workbench button:disabled { cursor: not-allowed; opacity: .45; }
+.evaluation-inventory { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 9px; }
+.evaluation-inventory article { display: grid; gap: 5px; min-width: 0; padding: 13px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel-surface); }
+.evaluation-inventory span, .evaluation-inventory small { overflow: hidden; color: var(--muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.evaluation-inventory strong { color: var(--mint); font: 500 20px "DM Mono", monospace; }
+.evaluation-editor { display: grid; gap: 12px; padding: 16px; border: 1px solid var(--line); border-left: 3px solid var(--cyan); border-radius: 10px; background: var(--panel); }
+.evaluation-editor label { display: grid; gap: 6px; color: var(--muted); font-size: 10px; }
+.evaluation-editor select, .evaluation-editor input, .evaluation-editor textarea { width: 100%; padding: 9px 10px; border: 1px solid var(--line); border-radius: 7px; color: var(--text); background: var(--model-surface); font: 11px "DM Mono", monospace; }
+.evaluation-editor textarea { resize: vertical; line-height: 1.55; }
+.evaluation-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.evaluation-variants { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; padding: 12px; border: 1px dashed var(--line); border-radius: 8px; }
+.evaluation-variants strong { grid-column: 1 / -1; color: var(--amber); font-size: 10px; }
+.evaluation-variants button { overflow: hidden; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
+.evaluation-preview { display: grid; gap: 8px; padding: 13px; border: 1px solid color-mix(in srgb, var(--mint) 45%, var(--line)); border-radius: 8px; background: color-mix(in srgb, var(--mint) 5%, var(--panel-surface)); }
+.evaluation-preview > strong { color: var(--mint); }
+.evaluation-preview > span, .evaluation-preview > small { color: var(--muted); font-size: 10px; }
+.evaluation-preview label:has(input[type="checkbox"]) { display: flex; align-items: center; gap: 8px; }
+.evaluation-preview input[type="checkbox"] { width: auto; }
+.evaluation-message { margin: 0; color: var(--muted); font-size: 10px; }
+.evaluation-audit { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.evaluation-audit h3 { grid-column: 1 / -1; margin: 0; }
+.evaluation-audit article { display: grid; gap: 5px; min-width: 0; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-surface); }
+.evaluation-audit span, .evaluation-audit small { color: var(--muted); font-size: 9px; }
+.evaluation-audit code { overflow: hidden; color: var(--cyan); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .universe-status-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 14px; }
 .universe-status { display: grid; gap: 6px; min-width: 0; padding: 16px; border: 1px solid var(--line); border-top: 3px solid var(--cyan); border-radius: 10px; background: var(--panel-surface); }
 .universe-status.failed { border-top-color: var(--red); }
@@ -826,6 +856,7 @@ h1 span { color: var(--mint); font-weight: 400; }
   .model-runtime-overview { grid-template-columns: repeat(4, minmax(105px, 1fr)); }
   .model-runtime-card-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 	.readiness-gates { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+	.evaluation-inventory { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 
 @media (max-width: 900px) {
@@ -861,6 +892,7 @@ h1 span { color: var(--mint); font-weight: 400; }
   .queue-metrics > span { flex: 1 1 calc(50% - 8px); }
   .universe-status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 	.readiness-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+	.evaluation-variants, .evaluation-audit { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media (max-width: 560px) {
@@ -909,6 +941,8 @@ h1 span { color: var(--mint); font-weight: 400; }
   .universe-status-grid { grid-template-columns: 1fr; }
 	.readiness-summary, .readiness-gates { grid-template-columns: 1fr; }
 	.readiness-toolbar { align-items: stretch; flex-direction: column; }
+	.evaluation-workbench > header { flex-direction: column; }
+	.evaluation-inventory, .evaluation-variants, .evaluation-audit { grid-template-columns: 1fr; }
   .universe-actions > button, .universe-filters > *, .universe-pagination > * { width: 100%; }
   .conclusion-score { text-align: left; }
   .event-conclusion-summary { justify-items: start; min-width: 0; text-align: left; }

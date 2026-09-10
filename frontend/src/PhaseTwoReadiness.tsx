@@ -1,5 +1,7 @@
 import { FormEvent, useCallback, useEffect, useState } from "react";
 
+import { PhaseTwoEvaluationWorkbench } from "./PhaseTwoEvaluationWorkbench";
+
 export type PhaseTwoReadinessGate = {
 	id: string;
 	stage: string;
@@ -77,7 +79,7 @@ export default function PhaseTwoReadinessPage({ apiBase }: { apiBase: string }) 
 	const [draft, setDraft] = useState("");
 	const [report, setReport] = useState<PhaseTwoReadinessReport>();
 	const [loading, setLoading] = useState(false);
-	const [message, setMessage] = useState("输入管理员令牌后读取生产事实；本页不会创建数据、批准模型或触发任务。");
+	const [message, setMessage] = useState("输入管理员令牌后读取生产事实；就绪度快照本身只读，下方人工操作台必须逐步预校验并确认才会写入。");
 	const load = useCallback(async () => {
 		if (!token) {
 			setReport(undefined);
@@ -113,8 +115,9 @@ export default function PhaseTwoReadinessPage({ apiBase }: { apiBase: string }) 
 	}
 	return <section className="app-page readiness-page">
 		<div className="page-heading"><div><span>PHASE II READINESS</span><h1>第二期生产就绪度</h1><p>按真实证据、自然成熟、人工审批和工程能力分别显示门禁；不以演示数据或代码数量代替验收。</p></div></div>
-		{token ? <div className="admin-unlock unlocked"><span>管理员只读核验已解锁，本次浏览器会话有效。</span><button type="button" onClick={lock}>锁定</button></div> : <form className="admin-unlock" onSubmit={unlock}><label>管理员令牌<input type="password" value={draft} onChange={(event) => setDraft(event.target.value)} autoComplete="off" /></label><button type="submit">解锁只读核验</button></form>}
+		{token ? <div className="admin-unlock unlocked"><span>管理员核验与人工操作已解锁，本次浏览器会话有效。</span><button type="button" onClick={lock}>锁定</button></div> : <form className="admin-unlock" onSubmit={unlock}><label>管理员令牌<input type="password" value={draft} onChange={(event) => setDraft(event.target.value)} autoComplete="off" /></label><button type="submit">解锁管理员操作</button></form>}
 		<div className="readiness-toolbar"><button type="button" disabled={!token || loading} onClick={() => void load()}>{loading ? "正在核验…" : "重新核验生产事实"}</button><span>{message}</span></div>
 		{report ? <PhaseTwoReadinessPanel report={report} /> : <div className="page-empty">尚未取得管理员就绪度快照。</div>}
+		{token && <PhaseTwoEvaluationWorkbench apiBase={apiBase} token={token} onChanged={() => void load()} />}
 	</section>;
 }
