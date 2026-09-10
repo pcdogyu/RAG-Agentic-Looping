@@ -3686,6 +3686,28 @@ type UniverseAsset = {
   last_synced_at: string | null;
 };
 
+export function fundamentalAssetSearchTerm(value: string) {
+	const normalized = value.trim();
+	if (!normalized) return "";
+	return normalized.includes(":") ? normalized.split(":").at(-1)?.trim() || normalized : normalized;
+}
+
+export function selectFundamentalAssetCandidate(value: string, items: UniverseAsset[]) {
+	const normalized = value.trim().toLocaleLowerCase();
+	const term = fundamentalAssetSearchTerm(value).toLocaleLowerCase();
+	if (!normalized || !term) throw new Error("请输入资产代码、名称或规范资产 ID");
+	const exactID = items.find((item) => item.asset_id.toLocaleLowerCase() === normalized);
+	if (exactID) return exactID;
+	const exactSymbol = items.filter((item) => item.symbol.trim().toLocaleLowerCase() === term);
+	if (exactSymbol.length === 1) return exactSymbol[0];
+	const exactNameOrAlias = items.filter((item) => item.name.trim().toLocaleLowerCase() === normalized
+		|| item.aliases.some((alias) => alias.trim().toLocaleLowerCase() === normalized));
+	if (exactNameOrAlias.length === 1) return exactNameOrAlias[0];
+	if (items.length === 1) return items[0];
+	if (exactSymbol.length > 1 || exactNameOrAlias.length > 1 || items.length > 1) throw new Error("匹配到多个资产，请输入更精确的规范资产 ID");
+	throw new Error(`未找到资产：${value.trim()}`);
+}
+
 type IndustryItem = {
   industry_id: string;
   parent_id: string | null;
@@ -4318,10 +4340,98 @@ export function licensedBenchmarkImportBody(benchmarkAssetID: string, metadataJS
 	return { ...normalized, observations };
 }
 
+const fundamentalBundleEndpoints = [
+	{ key: "fundamentals", route: "fundamentals", label: "财务快照" },
+	{ key: "preparation", route: "fundamental-research", suffix: "/preparation", label: "事实准备包" },
+	{ key: "analystEvidence", route: "analyst-evidence", label: "分析师证据" },
+	{ key: "prices", route: "market-prices", query: "price_field=adjusted_close&limit=20", label: "复权价格" },
+	{ key: "tradability", route: "market-tradability", query: "limit=100", label: "可交易状态" },
+	{ key: "consensus", route: "consensus", label: "一致预期" },
+	{ key: "guidance", route: "consensus", suffix: "/guidance", label: "管理层指引" },
+	{ key: "guidanceSources", route: "consensus", suffix: "/guidance-sources", label: "披露候选" },
+	{ key: "forecasts", route: "forecasts", label: "预测版本" },
+	{ key: "valuations", route: "valuations", label: "估值运行" },
+	{ key: "ratings", route: "ratings", label: "基本面评级" },
+	{ key: "predictions", route: "predictions", label: "短期预测" },
+	{ key: "marketPolicy", route: "market-policies", label: "市场策略" },
+	{ key: "benchmarkMapping", route: "benchmark-mappings", label: "PIT 基准映射" },
+	{ key: "schedule", route: "fundamental-research", suffix: "/schedule", label: "定时研究" },
+] as const;
+
+type FundamentalBundleRead = { bundle: FundamentalBundle; warnings: string[] };
+
+async function responseDetail(response: Response) {
+	const payload = await response.json().catch(() => ({})) as { detail?: string };
+	return payload.detail || `HTTP ${response.status}`;
+}
+
+export async function resolveFundamentalAssetID(apiBase: string, value: string) {
+	const term = fundamentalAssetSearchTerm(value);
+	if (!term) throw new Error("请输入资产代码、名称或规范资产 ID");
+	const params = new URLSearchParams({ q: term, limit: "50", active: "true" });
+	const response = await fetch(`${apiBase}/api/v1/asset-universe?${params}`);
+	if (!response.ok) throw new Error(`资产解析失败：${await responseDetail(response)}`);
+	const payload = await response.json() as { items?: UniverseAsset[] };
+	return selectFundamentalAssetCandidate(value, payload.items || []).asset_id;
+}
+
+export async function readFundamentalBundle(apiBase: string, canonical: string): Promise<FundamentalBundleRead> {
+	const path = encodeURIComponent(canonical);
+	const results = await Promise.all(fundamentalBundleEndpoints.map(async (item) => {
+		const url = `${apiBase}/go/${item.route}/${path}${"suffix" in item ? item.suffix : ""}?${"query" in item ? item.query : "limit=20"}`;
+		try {
+			const response = await fetch(url);
+			if (!response.ok) throw new Error(await responseDetail(response));
+			return { key: item.key, value: await response.json(), warning: "" };
+		} catch (error) {
+			return { key: item.key, value: undefined, warning: `${item.label}：${error instanceof Error ? error.message : "读取失败"}` };
+		}
+	}));
+	const bundle: FundamentalBundle = {};
+	const warnings: string[] = [];
+	for (const result of results) {
+		if (result.warning) warnings.push(result.warning);
+		else (bundle as Record<string, unknown>)[result.key] = result.value;
+	}
+	if (Object.keys(bundle).length === 0) throw new Error("所有基本面数据接口均读取失败");
+	return { bundle, warnings };
+}
+
+export function buildFundamentalPreparationDrafts(canonical: string, source: FundamentalBundle, evidenceType: AnalystEvidenceType, now = new Date()) {
+	const benchmarkID = source.marketPolicy?.policy?.benchmark_id?.trim() || "";
+	const analystEvidence = analystEvidenceTemplate(canonical, evidenceType, benchmarkID);
+	const benchmarkMapping = benchmarkMappingDraftJSON(canonical, source.marketPolicy, now);
+	const licensedBenchmarkMetadata = licensedBenchmarkImportTemplate(benchmarkID);
+	const tradabilityMetadata = tradabilityImportTemplate(canonical);
+	const workflow = source.preparation?.workflow_template ? JSON.stringify(source.preparation.workflow_template, null, 2) : "";
+	const generated: string[] = [];
+	if (analystEvidence) generated.push("分析师证据模板");
+	if (benchmarkMapping) generated.push("PIT 基准映射草稿");
+	if (licensedBenchmarkMetadata) generated.push("持牌总回报模板");
+	if (tradabilityMetadata) generated.push("可交易状态模板");
+	if (workflow) generated.push("财务事实研究草稿");
+	return { analystEvidence, benchmarkMapping, licensedBenchmarkMetadata, tradabilityMetadata, workflow, generated };
+}
+
+type FundamentalPreparationTask = { label: string; taskID: string };
+
+async function waitForFundamentalPreparationTask(apiBase: string, task: FundamentalPreparationTask) {
+	for (let attempt = 0; attempt < 120; attempt += 1) {
+		const response = await fetch(`${apiBase}/api/v1/tasks/${encodeURIComponent(task.taskID)}`);
+		if (!response.ok) throw new Error(`${task.label}状态读取失败：${await responseDetail(response)}`);
+		const payload = await response.json() as { state?: string; error?: string };
+		const state = String(payload.state || "PENDING").toUpperCase();
+		if (state === "COMPLETED" || state === "SUCCESS" || state === "SUCCEEDED") return;
+		if (["FAILED", "CANCELLED", "CANCELED"].includes(state)) throw new Error(`${task.label}失败：${payload.error || state}`);
+		await new Promise((resolve) => globalThis.setTimeout(resolve, 1000));
+	}
+	throw new Error(`${task.label}等待超过 120 秒；任务仍在后台运行`);
+}
+
 export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
-  const [assetID, setAssetID] = useState("equity:XNAS:AAPL");
+  const [assetID, setAssetID] = useState("AAPL");
   const [bundle, setBundle] = useState<FundamentalBundle>({});
-  const [message, setMessage] = useState("输入规范 asset_id 后读取；缺失字段保持为空，不按零处理。");
+  const [message, setMessage] = useState("输入代码、名称或规范资产 ID 后读取；缺失字段保持为空，不按零处理。");
   const [loading, setLoading] = useState(false);
   const [workflowJSON, setWorkflowJSON] = useState("");
   const [scheduleJSON, setScheduleJSON] = useState("");
@@ -4352,39 +4462,96 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 	const [guidanceReviewJSON, setGuidanceReviewJSON] = useState("");
 	const [guidanceReviewRequestID, setGuidanceReviewRequestID] = useState(() => globalThis.crypto?.randomUUID?.() || `guidance-review-${Date.now()}`);
   const [scheduleRequestID, setScheduleRequestID] = useState(() => globalThis.crypto?.randomUUID?.() || `fundamental-schedule-${Date.now()}`);
+	const [autoPreparing, setAutoPreparing] = useState(false);
+	function applyBundleRead(canonical: string, result: FundamentalBundleRead, completedMessage = "") {
+		setAssetID(canonical);
+		setBundle(result.bundle);
+		const warningText = result.warnings.length ? ` 部分数据未就绪：${result.warnings.join("；")}。` : "";
+		setMessage(`${completedMessage || `已解析为 ${canonical} 并读取可用数据。`}${warningText}`);
+	}
   async function load(event?: FormEvent, completedMessage = "") {
     event?.preventDefault();
-    const canonical = assetID.trim();
-    if (!canonical) return;
+		const input = assetID.trim();
+		if (!input) return;
 		setLicensedBenchmarkReceipts([]); setLicensedBenchmarkAuditLoaded(false);
 		setTradabilityReceipts([]); setTradabilityAuditLoaded(false); setTradabilityPreview(undefined); setTradabilityConfirmed(false);
 		setAnalystEvidencePreview(undefined); setAnalystEvidenceConfirmed(false); setWorkflowPreview(undefined); setWorkflowConfirmed(false); setSchedulePreview(undefined); setScheduleConfirmed(false);
     setLoading(true); setMessage("");
-    const path = encodeURIComponent(canonical);
-		const endpoints = [
-			{ key: "fundamentals", route: "fundamentals" }, { key: "preparation", route: "fundamental-research", suffix: "/preparation" },
-			{ key: "analystEvidence", route: "analyst-evidence" },
-			{ key: "prices", route: "market-prices", query: "price_field=adjusted_close&limit=20" },
-			{ key: "tradability", route: "market-tradability", query: "limit=100" },
-			{ key: "consensus", route: "consensus" },
-			{ key: "guidance", route: "consensus", suffix: "/guidance" },
-			{ key: "guidanceSources", route: "consensus", suffix: "/guidance-sources" },
-			{ key: "forecasts", route: "forecasts" },
-			{ key: "valuations", route: "valuations" }, { key: "ratings", route: "ratings" },
-			{ key: "predictions", route: "predictions" }, { key: "marketPolicy", route: "market-policies" },
-			{ key: "benchmarkMapping", route: "benchmark-mappings" },
-			{ key: "schedule", route: "fundamental-research", suffix: "/schedule" },
-		] as const;
     try {
-			const responses = await Promise.all(endpoints.map((item) => fetch(`${apiBase}/go/${item.route}/${path}${"suffix" in item ? item.suffix : ""}?${"query" in item ? item.query : "limit=20"}`)));
-      const failed = responses.find((response) => !response.ok);
-      if (failed) throw new Error(`HTTP ${failed.status}`);
-			const values = await Promise.all(responses.map((response) => response.json()));
-			setBundle(Object.fromEntries(endpoints.map((item, index) => [item.key, values[index]])) as FundamentalBundle);
-			if (completedMessage) setMessage(completedMessage);
+			const canonical = await resolveFundamentalAssetID(apiBase, input);
+			applyBundleRead(canonical, await readFundamentalBundle(apiBase, canonical), completedMessage);
     } catch (error) {
+			setBundle({});
       setMessage(`${completedMessage ? `${completedMessage} ` : ""}读取刷新失败：${error instanceof Error ? error.message : "未知错误"}`);
     } finally { setLoading(false); }
+	}
+	async function oneClickPrepare() {
+		const input = assetID.trim();
+		if (!input || loading) return;
+		setLoading(true); setAutoPreparing(true); setMessage("一键准备 1/4：正在解析规范资产并检查现有事实…");
+		setLicensedBenchmarkReceipts([]); setLicensedBenchmarkAuditLoaded(false);
+		setTradabilityReceipts([]); setTradabilityAuditLoaded(false);
+		try {
+			const canonical = await resolveFundamentalAssetID(apiBase, input);
+			setAssetID(canonical);
+			const initial = await readFundamentalBundle(apiBase, canonical);
+			setBundle(initial.bundle);
+			const encoded = encodeURIComponent(canonical);
+			const benchmarkID = initial.bundle.marketPolicy?.policy?.benchmark_id?.trim() || "";
+			const syncRequests = [
+				{ label: "财务事实", url: `${apiBase}/go/fundamentals/${encoded}/sync?limit=12` },
+				{ label: "标的复权行情", url: `${apiBase}/go/market-prices/${encoded}/sync?lookback_days=30` },
+				{ label: "一致预期", url: `${apiBase}/go/consensus/${encoded}/sync?limit=10` },
+				{ label: "SEC 披露候选", url: `${apiBase}/go/consensus/${encoded}/guidance-sources/sync?limit=40` },
+				...(benchmarkID ? [{ label: "规范基准复权行情", url: `${apiBase}/go/market-prices/${encodeURIComponent(benchmarkID)}/sync?lookback_days=30` }] : []),
+			];
+			setMessage(`一键准备 2/4：正在提交 ${syncRequests.length} 项真实数据同步…`);
+			const queueResults = await Promise.all(syncRequests.map(async (request) => {
+				try {
+					const response = await fetch(request.url, { method: "POST" });
+					if (!response.ok) throw new Error(await responseDetail(response));
+					const payload = await response.json() as { task_id?: string };
+					if (!payload.task_id) throw new Error("服务端未返回任务 ID");
+					return { task: { label: request.label, taskID: payload.task_id }, warning: "" };
+				} catch (error) {
+					return { task: undefined, warning: `${request.label}：${error instanceof Error ? error.message : "提交失败"}` };
+				}
+			}));
+			const tasks = queueResults.flatMap((result) => result.task ? [result.task] : []);
+			const warnings = queueResults.flatMap((result) => result.warning ? [result.warning] : []);
+			if (tasks.length > 0) {
+				setMessage(`一键准备 3/4：${tasks.length} 项同步已排队，正在等待不可变事实落库…`);
+				const taskResults = await Promise.all(tasks.map(async (task) => {
+					try { await waitForFundamentalPreparationTask(apiBase, task); return ""; }
+					catch (error) { return error instanceof Error ? error.message : `${task.label}等待失败`; }
+				}));
+				warnings.push(...taskResults.filter(Boolean));
+			}
+			setMessage("一键准备 4/4：正在重新读取事实并生成所有适用草稿…");
+			const refreshed = await readFundamentalBundle(apiBase, canonical);
+			setBundle(refreshed.bundle);
+			warnings.push(...refreshed.warnings);
+			const drafts = buildFundamentalPreparationDrafts(canonical, refreshed.bundle, analystEvidenceType);
+			setAnalystEvidenceJSON(drafts.analystEvidence);
+			setBenchmarkMappingJSON(drafts.benchmarkMapping);
+			setLicensedBenchmarkMetadataJSON(drafts.licensedBenchmarkMetadata);
+			setLicensedBenchmarkObservations(drafts.licensedBenchmarkMetadata ? "session_date,adjusted_close\n" : "");
+			setTradabilityMetadataJSON(drafts.tradabilityMetadata);
+			setTradabilityObservations(drafts.tradabilityMetadata ? "session_date,source_observed_at,status\n" : "");
+			setWorkflowJSON(drafts.workflow);
+			resetAnalystEvidenceApproval(); resetTradabilityApproval(); resetWorkflowApproval(); resetScheduleApproval();
+			setBenchmarkMappingRequestID(globalThis.crypto?.randomUUID?.() || `benchmark-mapping-${Date.now()}`);
+			setLicensedBenchmarkConfirmed(false);
+			setLicensedBenchmarkRequestID(globalThis.crypto?.randomUUID?.() || `licensed-benchmark-${Date.now()}`);
+			const generated = drafts.generated.length ? drafts.generated.join("、") : "暂无可生成草稿";
+			const uniqueWarnings = [...new Set(warnings)];
+			setMessage(`一键准备完成：${canonical}；已生成 ${generated}。真实假设、来源、许可证和批准人仍需人工填写与确认。${uniqueWarnings.length ? ` 未阻断警告：${uniqueWarnings.join("；")}。` : ""}`);
+		} catch (error) {
+			setBundle({});
+			setMessage(`一键准备失败：${error instanceof Error ? error.message : "未知错误"}`);
+		} finally {
+			setAutoPreparing(false); setLoading(false);
+		}
 	}
 	function resetAnalystEvidenceApproval() {
 		setAnalystEvidencePreview(undefined);
@@ -4802,8 +4969,10 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
   return <section className="app-page fundamental-page">
     <PageHeading eyebrow="FUNDAMENTAL & SIGNAL WORKBENCH" title="基本面评级与短期预测" copy="事件信号、基本面评级和固定期限概率彼此独立；只有通过独立校准的概率才显示数值。" />
     <form className="page-toolbar" onSubmit={load}>
-      <input aria-label="规范资产 ID" value={assetID} onChange={(event) => { setAssetID(event.target.value); resetTradabilityApproval(); resetAnalystEvidenceApproval(); resetWorkflowApproval(); resetScheduleApproval(); }} />
+		<input aria-label="资产代码、名称或规范 ID" value={assetID} onChange={(event) => { setAssetID(event.target.value); setBundle({}); setAnalystEvidenceJSON(""); setBenchmarkMappingJSON(""); setLicensedBenchmarkMetadataJSON(""); setLicensedBenchmarkObservations(""); setTradabilityMetadataJSON(""); setTradabilityObservations(""); setWorkflowJSON(""); setScheduleJSON(""); resetTradabilityApproval(); resetAnalystEvidenceApproval(); resetWorkflowApproval(); resetScheduleApproval(); }} />
       <button type="submit" disabled={loading}>{loading ? "读取中…" : "读取"}</button>
+		<button type="button" disabled={loading || !assetID.trim()} onClick={() => void oneClickPrepare()}>{autoPreparing ? "正在自动准备…" : "一键自动准备"}</button>
+		<small>支持代码、名称、旧版或规范资产 ID；自动同步真实事实并生成适用草稿，不自动填写许可证、审批人或主观假设。</small>
     </form>
     <div className="integration-editor">
 		<label>分析师证据类型<select aria-label="分析师证据类型" value={analystEvidenceType} onChange={(event) => { setAnalystEvidenceType(event.target.value as AnalystEvidenceType); resetAnalystEvidenceApproval(); }}>{analystEvidenceTypes.map((type) => <option key={type} value={type}>{analystEvidenceTypeLabels[type]}</option>)}</select></label>

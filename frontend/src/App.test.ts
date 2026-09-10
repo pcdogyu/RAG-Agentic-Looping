@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
@@ -34,7 +34,12 @@ import {
   factSourceGroupDefinitions,
   formatQueueDuration,
 	FundamentalResearchPage,
+	buildFundamentalPreparationDrafts,
+	fundamentalAssetSearchTerm,
 	ResearchPolicyPage,
+	readFundamentalBundle,
+	resolveFundamentalAssetID,
+	selectFundamentalAssetCandidate,
 	benchmarkMappingDraftJSON,
 	licensedBenchmarkImportBody,
 	licensedBenchmarkImportTemplate,
@@ -86,6 +91,8 @@ import ModelLogsPage, {
   modelTokenLabel,
   type ModelRuntimeSummary,
 } from "./ModelLogs";
+
+afterEach(() => vi.unstubAllGlobals());
 
 const baseStatus = {
   state: "idle",
@@ -738,6 +745,9 @@ describe("shared hash navigation", () => {
   it("renders the separate fundamental-rating and calibrated-prediction workbench", () => {
     const markup = renderToStaticMarkup(createElement(FundamentalResearchPage, { apiBase: "" }));
     expect(markup).toContain("基本面评级与短期预测");
+		expect(markup).toContain("一键自动准备");
+		expect(markup).toContain("支持代码、名称、旧版或规范资产 ID");
+		expect(markup).toContain('value="AAPL"');
 		expect(markup).toContain("资产政策");
 		expect(markup).toContain("分市场研究方法");
     expect(markup).toContain("未校准时不显示概率");
@@ -777,6 +787,59 @@ describe("shared hash navigation", () => {
     expect(markup).not.toContain("管理员令牌");
 		expect(markup).toContain("分析师证据登记");
   });
+
+	it("resolves a legacy exchange asset ID to the unique canonical asset", () => {
+		const candidate = {
+			asset_id: "equity:NASDAQ:AAPL", market: "US", symbol: "AAPL", name: "Apple Inc.", aliases: ["Apple", "苹果公司"],
+			sector_id: "sector:information_technology", industry_id: "industry:hardware", raw_sector: "Technology", raw_industry: "Hardware",
+			instrument_type: "common_stock", market_cap: 1, market_cap_rank: 1, association_tier: "standard" as const,
+			association_reason: "provider_verified", active: true, last_synced_at: null,
+		};
+		expect(fundamentalAssetSearchTerm("equity:XNAS:AAPL")).toBe("AAPL");
+		expect(selectFundamentalAssetCandidate("equity:XNAS:AAPL", [candidate]).asset_id).toBe("equity:NASDAQ:AAPL");
+		expect(selectFundamentalAssetCandidate("Apple", [candidate]).asset_id).toBe("equity:NASDAQ:AAPL");
+		expect(() => selectFundamentalAssetCandidate("AAPL", [candidate, { ...candidate, asset_id: "equity:OTHER:AAPL" }])).toThrow("多个资产");
+	});
+
+	it("resolves the browser input through the live asset-universe contract", async () => {
+		const fetchMock = vi.fn(async (_input: string | URL | Request) => new Response(JSON.stringify({ items: [{
+			asset_id: "equity:NASDAQ:AAPL", market: "US", symbol: "AAPL", name: "Apple Inc.", aliases: ["Apple"],
+			sector_id: "sector:information_technology", industry_id: "industry:hardware", raw_sector: "Technology", raw_industry: "Hardware",
+			instrument_type: "common_stock", market_cap: 1, market_cap_rank: 1, association_tier: "standard",
+			association_reason: "provider_verified", active: true, last_synced_at: null,
+		}] }), { status: 200, headers: { "Content-Type": "application/json" } }));
+		vi.stubGlobal("fetch", fetchMock);
+		await expect(resolveFundamentalAssetID("", "equity:XNAS:AAPL")).resolves.toBe("equity:NASDAQ:AAPL");
+		expect(String(fetchMock.mock.calls[0][0])).toContain("q=AAPL");
+	});
+
+	it("keeps successful fundamental reads when one optional endpoint fails", async () => {
+		vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+			const url = String(input);
+			if (url.includes("/market-policies/")) return new Response(JSON.stringify({ detail: "policy unavailable" }), { status: 500 });
+			return new Response(JSON.stringify({ items: [] }), { status: 200, headers: { "Content-Type": "application/json" } });
+		}));
+		const result = await readFundamentalBundle("", "equity:NASDAQ:AAPL");
+		expect(result.bundle.fundamentals).toEqual({ items: [] });
+		expect(result.bundle.marketPolicy).toBeUndefined();
+		expect(result.warnings).toEqual(["市场策略：policy unavailable"]);
+	});
+
+	it("builds every applicable preparation draft without inventing approvals", () => {
+		const drafts = buildFundamentalPreparationDrafts("equity:NASDAQ:AAPL", {
+			marketPolicy: { asset_class: "equity", market: "US", currency: "USD", policy: { version: "market-policy-v3", benchmark_id: "index:CSI:H00300" } },
+			preparation: { workflow_template: { asset_id: "equity:NASDAQ:AAPL", forecast: { assumptions: [] } } },
+		}, "forecast_assumption", new Date("2026-09-10T00:00:00Z"));
+		const evidence = JSON.parse(drafts.analystEvidence) as Record<string, unknown>;
+		const mapping = JSON.parse(drafts.benchmarkMapping) as Record<string, unknown>;
+		const licensed = JSON.parse(drafts.licensedBenchmarkMetadata) as Record<string, unknown>;
+		expect(evidence).toMatchObject({ asset_id: "equity:NASDAQ:AAPL", approved_by: "", source_name: "" });
+		expect(mapping).toMatchObject({ benchmark_asset_id: "index:CSI:H00300", approved_by: "", valid_from: "2026-09-10T00:00:00.000Z" });
+		expect(licensed).toMatchObject({ vendor_code: "H00300", license_reference: "", approved_by: "" });
+		expect(drafts.tradabilityMetadata).toContain('"approved_by": ""');
+		expect(drafts.workflow).toContain('"assumptions": []');
+		expect(drafts.generated).toEqual(["分析师证据模板", "PIT 基准映射草稿", "持牌总回报模板", "可交易状态模板", "财务事实研究草稿"]);
+	});
 
 	it("loads only a successful manual research schedule draft", () => {
 		const draft = { forecast_version_id: "forecast-1", approved_by: "", rating: { reason_codes: ["analyst_review"] } };
