@@ -790,14 +790,16 @@ describe("shared hash navigation", () => {
 
 	it("resolves a legacy exchange asset ID to the unique canonical asset", () => {
 		const candidate = {
-			asset_id: "equity:NASDAQ:AAPL", market: "US", symbol: "AAPL", name: "Apple Inc.", aliases: ["Apple", "苹果公司"],
+			asset_id: "equity:NASDAQ:AAPL", asset_class: "equity", exchange_or_provider: "NASDAQ", market: "US", symbol: "AAPL", name: "Apple Inc.", aliases: ["Apple", "苹果公司"],
 			sector_id: "sector:information_technology", industry_id: "industry:hardware", raw_sector: "Technology", raw_industry: "Hardware",
 			instrument_type: "common_stock", market_cap: 1, market_cap_rank: 1, association_tier: "standard" as const,
 			association_reason: "provider_verified", active: true, last_synced_at: null,
 		};
+		const tokenized = { ...candidate, asset_id: "crypto:coingecko:apple-tokenized", asset_class: "crypto", exchange_or_provider: "coingecko", market: "CRYPTO", name: "Apple Tokenized Stock", aliases: [] };
 		expect(fundamentalAssetSearchTerm("equity:XNAS:AAPL")).toBe("AAPL");
-		expect(selectFundamentalAssetCandidate("equity:XNAS:AAPL", [candidate]).asset_id).toBe("equity:NASDAQ:AAPL");
-		expect(selectFundamentalAssetCandidate("Apple", [candidate]).asset_id).toBe("equity:NASDAQ:AAPL");
+		expect(selectFundamentalAssetCandidate("equity:XNAS:AAPL", [tokenized, candidate]).asset_id).toBe("equity:NASDAQ:AAPL");
+		expect(selectFundamentalAssetCandidate("AAPL", [tokenized, candidate]).asset_id).toBe("equity:NASDAQ:AAPL");
+		expect(selectFundamentalAssetCandidate("Apple", [tokenized, candidate]).asset_id).toBe("equity:NASDAQ:AAPL");
 		expect(() => selectFundamentalAssetCandidate("AAPL", [candidate, { ...candidate, asset_id: "equity:OTHER:AAPL" }])).toThrow("多个资产");
 	});
 

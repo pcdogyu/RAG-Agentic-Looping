@@ -3669,9 +3669,11 @@ export function isSearchSource(item: Pick<McpSource, "enabled" | "tool_mappings"
 
 type UniverseAsset = {
   asset_id: string;
+	asset_class?: string;
   market: string;
   symbol: string;
   name: string;
+	exchange_or_provider?: string;
   aliases: string[];
   sector_id: string;
   industry_id: string;
@@ -3692,6 +3694,15 @@ export function fundamentalAssetSearchTerm(value: string) {
 	return normalized.includes(":") ? normalized.split(":").at(-1)?.trim() || normalized : normalized;
 }
 
+function normalizedAssetVenue(value: string) {
+	const normalized = value.trim().toUpperCase();
+	const aliases: Record<string, string> = {
+		XNAS: "NASDAQ", NASDAQ: "NASDAQ", XNYS: "NYSE", NYSE: "NYSE",
+		ARCX: "NYSE_ARCA", NYSE_ARCA: "NYSE_ARCA", XASE: "AMEX", AMEX: "AMEX",
+	};
+	return aliases[normalized] || normalized;
+}
+
 export function selectFundamentalAssetCandidate(value: string, items: UniverseAsset[]) {
 	const normalized = value.trim().toLocaleLowerCase();
 	const term = fundamentalAssetSearchTerm(value).toLocaleLowerCase();
@@ -3699,7 +3710,18 @@ export function selectFundamentalAssetCandidate(value: string, items: UniverseAs
 	const exactID = items.find((item) => item.asset_id.toLocaleLowerCase() === normalized);
 	if (exactID) return exactID;
 	const exactSymbol = items.filter((item) => item.symbol.trim().toLocaleLowerCase() === term);
+	const inputParts = value.trim().split(":").map((part) => part.trim()).filter(Boolean);
+	if (inputParts.length >= 3) {
+		const inputClass = inputParts[0].toLocaleLowerCase();
+		const inputVenue = normalizedAssetVenue(inputParts.at(-2) || "");
+		const typed = exactSymbol.filter((item) => (item.asset_class || item.asset_id.split(":")[0]).trim().toLocaleLowerCase() === inputClass);
+		const venueMatched = typed.filter((item) => normalizedAssetVenue(item.exchange_or_provider || item.asset_id.split(":").at(-2) || "") === inputVenue);
+		if (venueMatched.length === 1) return venueMatched[0];
+		if (typed.length === 1) return typed[0];
+	}
 	if (exactSymbol.length === 1) return exactSymbol[0];
+	const listedEquities = exactSymbol.filter((item) => (item.asset_class || item.asset_id.split(":")[0]).trim().toLocaleLowerCase() === "equity");
+	if (listedEquities.length === 1) return listedEquities[0];
 	const exactNameOrAlias = items.filter((item) => item.name.trim().toLocaleLowerCase() === normalized
 		|| item.aliases.some((alias) => alias.trim().toLocaleLowerCase() === normalized));
 	if (exactNameOrAlias.length === 1) return exactNameOrAlias[0];
