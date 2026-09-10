@@ -1,6 +1,18 @@
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 
 import AnalysisPage, { type AnalysisLog } from "./AnalysisPage";
+import {
+	analystEvidenceBody,
+	analystEvidenceTemplate,
+	analystEvidenceTypeLabels,
+	analystEvidenceTypes,
+	fundamentalScheduleBody,
+	fundamentalWorkflowBody,
+	type AnalystEvidencePreview,
+	type AnalystEvidenceType,
+	type SchedulePreview,
+	type WorkflowPreview,
+} from "./FundamentalWorkflow";
 import ModelLogsPage from "./ModelLogs";
 import { TargetTrendSummary, type TargetTrend } from "./TargetTrendSummary";
 
@@ -4095,7 +4107,7 @@ type FundamentalBundle = {
 		controls?: { automatic_assumptions?: boolean; automatic_valuation?: boolean; automatic_rating?: boolean; analyst_approval_required?: boolean };
 	};
 	analystEvidence?: {
-		items?: Array<{ id?: string; evidence_type?: string; title?: string; rationale?: string; values?: Record<string, unknown>; available_at?: string; approved_by?: string; approved_at?: string; source_name?: string; source_url?: string }>;
+		items?: Array<{ id?: string; evidence_type?: string; title?: string; rationale?: string; values?: Record<string, unknown>; observed_at?: string; available_at?: string; approved_by?: string; approved_at?: string; source_name?: string; source_url?: string }>;
 	};
 	benchmarkMapping?: {
 		resolution?: { status?: string; reason?: string; mapping?: { id?: string; scope_type?: string; scope_id?: string; benchmark_asset_id?: string; source_name?: string; mapping_reason?: string; approved_by?: string; available_at?: string } };
@@ -4354,7 +4366,14 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
   const [workflowJSON, setWorkflowJSON] = useState("");
   const [scheduleJSON, setScheduleJSON] = useState("");
 	const [analystEvidenceJSON, setAnalystEvidenceJSON] = useState("");
+	const [analystEvidenceType, setAnalystEvidenceType] = useState<AnalystEvidenceType>("forecast_assumption");
+	const [analystEvidencePreview, setAnalystEvidencePreview] = useState<AnalystEvidencePreview>();
+	const [analystEvidenceConfirmed, setAnalystEvidenceConfirmed] = useState(false);
 	const [analystEvidenceRequestID, setAnalystEvidenceRequestID] = useState(() => globalThis.crypto?.randomUUID?.() || `analyst-evidence-${Date.now()}`);
+	const [workflowPreview, setWorkflowPreview] = useState<WorkflowPreview>();
+	const [workflowConfirmed, setWorkflowConfirmed] = useState(false);
+	const [schedulePreview, setSchedulePreview] = useState<SchedulePreview>();
+	const [scheduleConfirmed, setScheduleConfirmed] = useState(false);
 	const [benchmarkMappingJSON, setBenchmarkMappingJSON] = useState("");
 	const [benchmarkMappingRequestID, setBenchmarkMappingRequestID] = useState(() => globalThis.crypto?.randomUUID?.() || `benchmark-mapping-${Date.now()}`);
 	const [licensedBenchmarkMetadataJSON, setLicensedBenchmarkMetadataJSON] = useState("");
@@ -4373,12 +4392,13 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 	const [guidanceReviewJSON, setGuidanceReviewJSON] = useState("");
 	const [guidanceReviewRequestID, setGuidanceReviewRequestID] = useState(() => globalThis.crypto?.randomUUID?.() || `guidance-review-${Date.now()}`);
   const [scheduleRequestID, setScheduleRequestID] = useState(() => globalThis.crypto?.randomUUID?.() || `fundamental-schedule-${Date.now()}`);
-  async function load(event?: FormEvent) {
+  async function load(event?: FormEvent, completedMessage = "") {
     event?.preventDefault();
     const canonical = assetID.trim();
     if (!canonical) return;
 		setLicensedBenchmarkReceipts([]); setLicensedBenchmarkAuditLoaded(false);
 		setTradabilityReceipts([]); setTradabilityAuditLoaded(false); setTradabilityPreview(undefined); setTradabilityConfirmed(false);
+		setAnalystEvidencePreview(undefined); setAnalystEvidenceConfirmed(false); setWorkflowPreview(undefined); setWorkflowConfirmed(false); setSchedulePreview(undefined); setScheduleConfirmed(false);
     setLoading(true); setMessage("");
     const path = encodeURIComponent(canonical);
 		const endpoints = [
@@ -4399,27 +4419,53 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 			const responses = await Promise.all(endpoints.map((item) => fetch(`${apiBase}/go/${item.route}/${path}${"suffix" in item ? item.suffix : ""}?${"query" in item ? item.query : "limit=20"}`)));
       const failed = responses.find((response) => !response.ok);
       if (failed) throw new Error(`HTTP ${failed.status}`);
-      const values = await Promise.all(responses.map((response) => response.json()));
+			const values = await Promise.all(responses.map((response) => response.json()));
 			setBundle(Object.fromEntries(endpoints.map((item, index) => [item.key, values[index]])) as FundamentalBundle);
+			if (completedMessage) setMessage(completedMessage);
     } catch (error) {
-      setMessage(`读取失败：${error instanceof Error ? error.message : "未知错误"}`);
+      setMessage(`${completedMessage ? `${completedMessage} ` : ""}读取刷新失败：${error instanceof Error ? error.message : "未知错误"}`);
     } finally { setLoading(false); }
+	}
+	function resetAnalystEvidenceApproval() {
+		setAnalystEvidencePreview(undefined);
+		setAnalystEvidenceConfirmed(false);
+		setAnalystEvidenceRequestID(globalThis.crypto?.randomUUID?.() || `analyst-evidence-${Date.now()}`);
+	}
+	function loadAnalystEvidenceTemplate() {
+		const template = analystEvidenceTemplate(assetID, analystEvidenceType, bundle.marketPolicy?.policy?.benchmark_id || "");
+		if (!template) {
+			setMessage("请选择受支持的分析师证据类型并先读取规范资产。");
+			return;
+		}
+		setAnalystEvidenceJSON(template);
+		resetAnalystEvidenceApproval();
+		setMessage(`已生成${analystEvidenceTypeLabels[analystEvidenceType]}模板；所有数值、时点、来源、理由和批准人都保持待人工填写。`);
+	}
+	function previewAnalystEvidence() {
+		try {
+			const preview = analystEvidenceBody(assetID, analystEvidenceJSON);
+			setAnalystEvidencePreview(preview);
+			setAnalystEvidenceConfirmed(false);
+			setMessage(`分析师证据预校验通过：${analystEvidenceTypeLabels[preview.evidenceType]} · ${preview.valueSummary} · 可得 ${new Date(preview.availableAt).toLocaleString("zh-CN")}。尚未提交。`);
+		} catch (error) {
+			setAnalystEvidencePreview(undefined);
+			setAnalystEvidenceConfirmed(false);
+			setMessage(`分析师证据预校验失败：${error instanceof Error ? error.message : "JSON 无效"}`);
+		}
 	}
 	async function registerAnalystEvidence() {
 		const canonical = assetID.trim();
-		if (!canonical || !token || !analystEvidenceJSON.trim()) return;
+		if (!canonical || !token || !analystEvidencePreview || !analystEvidenceConfirmed) return;
 		setLoading(true); setMessage("");
 		try {
-			const body = JSON.parse(analystEvidenceJSON) as Record<string, unknown>;
-			if (typeof body.asset_id === "string" && body.asset_id.trim() && body.asset_id.trim() !== canonical) throw new Error("asset_id 必须与当前标的一致");
-			body.asset_id = canonical;
+			const body = analystEvidenceBody(canonical, analystEvidenceJSON).body;
 			const response = await fetch(`${apiBase}/go/analyst-evidence`, { method: "POST", headers: { "Content-Type": "application/json", "X-Admin-Token": token, "Idempotency-Key": analystEvidenceRequestID }, body: JSON.stringify(body) });
 			const payload = await response.json() as { id?: string; detail?: string };
 			if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
-			setMessage(`分析师证据已不可变登记：${payload.id || "已保存"}。请将该 ID 引用到对应研究输入。`);
+			const completedMessage = `分析师证据已不可变登记：${payload.id || "已保存"}。请将该 ID 引用到对应研究输入。`;
 			setAnalystEvidenceJSON("");
-			setAnalystEvidenceRequestID(globalThis.crypto?.randomUUID?.() || `analyst-evidence-${Date.now()}`);
-			await load();
+			resetAnalystEvidenceApproval();
+			await load(undefined, completedMessage);
 		} catch (error) {
 			setMessage(`分析师证据登记失败：${error instanceof Error ? error.message : "JSON 或请求无效"}`);
 		} finally { setLoading(false); }
@@ -4452,9 +4498,9 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 			const response = await fetch(`${apiBase}/go/benchmark-mappings`, { method: "POST", headers: { "Content-Type": "application/json", "X-Admin-Token": token, "Idempotency-Key": benchmarkMappingRequestID }, body: JSON.stringify(body) });
 			const payload = await response.json() as { created?: boolean; mapping?: { id?: string }; detail?: string };
 			if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
-			setMessage(`PIT 基准映射${payload.created ? "已不可变批准" : "已幂等读回"}：${payload.mapping?.id || "已保存"}。不会自动生成历史映射。`);
+			const completedMessage = `PIT 基准映射${payload.created ? "已不可变批准" : "已幂等读回"}：${payload.mapping?.id || "已保存"}。不会自动生成历史映射。`;
 			setBenchmarkMappingRequestID(globalThis.crypto?.randomUUID?.() || `benchmark-mapping-${Date.now()}`);
-			await load();
+			await load(undefined, completedMessage);
 		} catch (error) {
 			setMessage(`基准映射批准失败：${error instanceof Error ? error.message : "JSON 或请求无效"}`);
 		} finally { setLoading(false); }
@@ -4670,19 +4716,34 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 			const response = await fetch(`${apiBase}/go/consensus/${encodeURIComponent(canonical)}/guidance-sources/${encodeURIComponent(sourceDocumentID)}/reviews`, { method: "POST", headers: { "Content-Type": "application/json", "X-Admin-Token": token, "Idempotency-Key": guidanceReviewRequestID }, body: JSON.stringify(body) });
 			const payload = await response.json() as { detail?: string };
 			if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
-			setMessage("披露候选核验已保存；只有 confirmed_guidance 才会生成来源化指引快照。");
 			setGuidanceReviewRequestID(globalThis.crypto?.randomUUID?.() || `guidance-review-${Date.now()}`);
-			await load();
+			await load(undefined, "披露候选核验已保存；只有 confirmed_guidance 才会生成来源化指引快照。");
 		} catch (error) {
 			setMessage(`指引核验失败：${error instanceof Error ? error.message : "JSON 或请求无效"}`);
 		} finally { setLoading(false); }
 	}
+	function resetWorkflowApproval() {
+		setWorkflowPreview(undefined);
+		setWorkflowConfirmed(false);
+	}
+	function previewWorkflowInput() {
+		try {
+			const preview = fundamentalWorkflowBody(assetID, workflowJSON);
+			setWorkflowPreview(preview);
+			setWorkflowConfirmed(false);
+			setMessage(`研究输入预校验通过：${preview.snapshotCount} 份财务快照、${preview.assumptionCount} 项批准假设、${preview.dcfScenarioCount + preview.multipleScenarioCount} 个估值情景、${preview.evidenceIDs.length} 个唯一证据引用。服务器仍会逐项核对真实记录和值。`);
+		} catch (error) {
+			setWorkflowPreview(undefined);
+			setWorkflowConfirmed(false);
+			setMessage(`研究输入预校验失败：${error instanceof Error ? error.message : "JSON 无效"}`);
+		}
+	}
   async function runWorkflow() {
     const canonical = assetID.trim();
-    if (!canonical || !token || !workflowJSON.trim()) return;
+    if (!canonical || !token || !workflowPreview || !workflowConfirmed) return;
     setLoading(true); setMessage("");
     try {
-      const body = JSON.parse(workflowJSON) as Record<string, unknown>;
+      const body = fundamentalWorkflowBody(canonical, workflowJSON).body;
       const response = await fetch(`${apiBase}/go/fundamental-research/${encodeURIComponent(canonical)}`, { method: "POST", headers: { "Content-Type": "application/json", "X-Admin-Token": token }, body: JSON.stringify(body) });
       const payload = await response.json() as { status?: string; reason?: string; detail?: string; schedule_draft?: Record<string, unknown>; schedule_draft_controls?: { approval_required?: boolean; automatic_approval?: boolean; runtime_price_field?: string } };
       if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
@@ -4690,11 +4751,11 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 		if (draftJSON) {
 			setScheduleJSON(draftJSON);
 			setScheduleRequestID(globalThis.crypto?.randomUUID?.() || `fundamental-schedule-${Date.now()}`);
-			setMessage("基本面研究已完成；同源定时计划草稿已载入。请填写 approved_by 并复核后再批准，系统不会自动启用计划。");
+			setSchedulePreview(undefined); setScheduleConfirmed(false);
+			await load(undefined, "基本面研究已完成；同源定时计划草稿已载入。请填写 approved_by、预校验并复核后再批准，系统不会自动启用计划。");
 		} else {
-			setMessage(`工作流未生成结论：${payload.reason || payload.status || "数据不足"}`);
+			await load(undefined, `工作流未生成结论：${payload.reason || payload.status || "数据不足"}`);
 		}
-      await load();
     } catch (error) {
       setMessage(`工作流失败：${error instanceof Error ? error.message : "JSON 或请求无效"}`);
     } finally { setLoading(false); }
@@ -4706,20 +4767,37 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 			return;
 		}
 		setWorkflowJSON(JSON.stringify(template, null, 2));
+		resetWorkflowApproval();
 		setMessage("已载入事实模板；估值情景、基准预期、原因码和失效规则仍需分析师补充并审核。");
+	}
+	function resetScheduleApproval() {
+		setSchedulePreview(undefined);
+		setScheduleConfirmed(false);
+		setScheduleRequestID(globalThis.crypto?.randomUUID?.() || `fundamental-schedule-${Date.now()}`);
+	}
+	function previewScheduleInput() {
+		try {
+			const preview = fundamentalScheduleBody(assetID, scheduleJSON);
+			setSchedulePreview(preview);
+			setScheduleConfirmed(false);
+			setMessage(`定时计划预校验通过：预测 ${preview.forecastVersionID} · 每 ${preview.cadenceHours} 小时 · 价格最长 ${preview.maxPriceAgeHours} 小时 · 计划最长 ${preview.maxPlanAgeDays} 天。尚未批准。`);
+		} catch (error) {
+			setSchedulePreview(undefined);
+			setScheduleConfirmed(false);
+			setMessage(`定时计划预校验失败：${error instanceof Error ? error.message : "JSON 无效"}`);
+		}
 	}
   async function approveSchedule() {
     const canonical = assetID.trim();
-    if (!canonical || !token || !scheduleJSON.trim()) return;
+    if (!canonical || !token || !schedulePreview || !scheduleConfirmed) return;
     setLoading(true); setMessage("");
     try {
-      const body = JSON.parse(scheduleJSON) as Record<string, unknown>;
+      const body = fundamentalScheduleBody(canonical, scheduleJSON).body;
       const response = await fetch(`${apiBase}/go/fundamental-research/${encodeURIComponent(canonical)}/schedule`, { method: "PUT", headers: { "Content-Type": "application/json", "X-Admin-Token": token, "Idempotency-Key": scheduleRequestID }, body: JSON.stringify(body) });
       const payload = await response.json() as { detail?: string };
       if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
-      setMessage("定时基本面研究计划已批准；系统只复用显式批准的预测和估值参数。");
-      setScheduleRequestID(globalThis.crypto?.randomUUID?.() || `fundamental-schedule-${Date.now()}`);
-      await load();
+      resetScheduleApproval();
+      await load(undefined, "定时基本面研究计划已批准；系统只复用显式批准的预测和估值参数。");
     } catch (error) {
       setMessage(`计划批准失败：${error instanceof Error ? error.message : "JSON 或请求无效"}`);
     } finally { setLoading(false); }
@@ -4731,8 +4809,7 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
     try {
       const response = await fetch(`${apiBase}/go/fundamental-research/${encodeURIComponent(canonical)}/schedule`, { method: "DELETE", headers: { "X-Admin-Token": token } });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      setMessage("定时基本面研究计划已暂停。");
-      await load();
+      await load(undefined, "定时基本面研究计划已暂停。");
     } catch (error) { setMessage(`暂停失败：${error instanceof Error ? error.message : "未知错误"}`); }
     finally { setLoading(false); }
   }
@@ -4765,13 +4842,18 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
   return <section className="app-page fundamental-page">
     <PageHeading eyebrow="FUNDAMENTAL & SIGNAL WORKBENCH" title="基本面评级与短期预测" copy="事件信号、基本面评级和固定期限概率彼此独立；只有通过独立校准的概率才显示数值。" />
     <form className="page-toolbar" onSubmit={load}>
-      <input aria-label="规范资产 ID" value={assetID} onChange={(event) => { setAssetID(event.target.value); resetTradabilityApproval(); }} />
+      <input aria-label="规范资产 ID" value={assetID} onChange={(event) => { setAssetID(event.target.value); resetTradabilityApproval(); resetAnalystEvidenceApproval(); resetWorkflowApproval(); resetScheduleApproval(); }} />
       <button type="submit" disabled={loading}>{loading ? "读取中…" : "读取"}</button>
     </form>
     <AdminUnlock token={token} onToken={setToken} />
     {token && <div className="integration-editor">
-		<label>分析师证据登记<textarea aria-label="分析师证据 JSON" rows={8} value={analystEvidenceJSON} onChange={(event) => { setAnalystEvidenceJSON(event.target.value); setAnalystEvidenceRequestID(globalThis.crypto?.randomUUID?.() || `analyst-evidence-${Date.now()}`); }} placeholder='填写 evidence_type、title、rationale、values、observed_at、available_at、source_name、source_document_id、source_url、approved_by；asset_id 使用当前标的。' /></label>
-		<button type="button" disabled={loading || !analystEvidenceJSON.trim()} onClick={() => void registerAnalystEvidence()}>登记不可变分析师证据</button>
+		<label>分析师证据类型<select aria-label="分析师证据类型" value={analystEvidenceType} onChange={(event) => { setAnalystEvidenceType(event.target.value as AnalystEvidenceType); resetAnalystEvidenceApproval(); }}>{analystEvidenceTypes.map((type) => <option key={type} value={type}>{analystEvidenceTypeLabels[type]}</option>)}</select></label>
+		<button type="button" disabled={loading || !assetID.trim()} onClick={loadAnalystEvidenceTemplate}>生成分析师证据模板</button>
+		<label>分析师证据登记<textarea aria-label="分析师证据 JSON" rows={10} value={analystEvidenceJSON} onChange={(event) => { setAnalystEvidenceJSON(event.target.value); resetAnalystEvidenceApproval(); }} placeholder='先按类型生成模板；所有数值、observed_at、available_at、来源、理由和 approved_by 必须由分析师真实填写。' /></label>
+		<button type="button" disabled={loading || !analystEvidenceJSON.trim()} onClick={previewAnalystEvidence}>预校验分析师证据</button>
+		{analystEvidencePreview && <small>预览：{analystEvidenceTypeLabels[analystEvidencePreview.evidenceType]} · {analystEvidencePreview.title} · {analystEvidencePreview.valueSummary} · 服务器仍会核对资产和批准时点</small>}
+		<label className="licensed-import-confirmation"><input type="checkbox" disabled={!analystEvidencePreview} checked={analystEvidenceConfirmed} onChange={(event) => setAnalystEvidenceConfirmed(event.target.checked)} />我确认数值、来源时点、分析理由和批准身份真实有效，并理解登记后记录不可变</label>
+		<button type="button" disabled={loading || !analystEvidencePreview || !analystEvidenceConfirmed} onClick={() => void registerAnalystEvidence()}>登记不可变分析师证据</button>
 		<label>PIT 基准映射审批<textarea aria-label="PIT 基准映射 JSON" rows={8} value={benchmarkMappingJSON} onChange={(event) => { setBenchmarkMappingJSON(event.target.value); setBenchmarkMappingRequestID(globalThis.crypto?.randomUUID?.() || `benchmark-mapping-${Date.now()}`); }} placeholder='先生成草稿，再填写 source_name、source_document_id、source_url、mapping_reason 和 approved_by；默认从当前时点生效。' /></label>
 		<button type="button" disabled={loading || !bundle.marketPolicy?.policy?.benchmark_id} onClick={loadBenchmarkMappingTemplate}>生成市场级基准映射草稿</button>
 		<button type="button" disabled={loading || !benchmarkMappingJSON.trim()} onClick={() => void approveBenchmarkMapping()}>批准不可变 PIT 基准映射</button>
@@ -4794,23 +4876,30 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 		<button type="button" disabled={loading || !tradabilityPreview || !tradabilityConfirmed} onClick={() => void importTradability()}>人工导入不可变可交易状态</button>
 		<button type="button" disabled={loading || !tradabilityImportAvailable} onClick={() => void loadTradabilityReceipts()}>读取可交易状态导入回执</button>
 		<small>只支持股票/ETF，单批 1—1000 条；页面拒绝未来日期、重复交易日、未知状态、非 HTTPS 和 URL 凭据。服务器决定 available_at；导入不自动评价结果、生成评级或放开执行。</small>
-      <label>无新闻基本面研究输入<textarea aria-label="基本面研究 JSON" rows={8} value={workflowJSON} onChange={(event) => setWorkflowJSON(event.target.value)} placeholder='粘贴含 as_of、forecast、valuation、rating 的证据化 JSON；不会自动补造假设或价格。' /></label>
+		<label>无新闻基本面研究输入<textarea aria-label="基本面研究 JSON" rows={10} value={workflowJSON} onChange={(event) => { setWorkflowJSON(event.target.value); resetWorkflowApproval(); }} placeholder='载入事实模板后补充显式批准的 forecast、valuation、rating 输入；不会自动补造假设或价格。' /></label>
 		<button type="button" disabled={loading || !preparation?.workflow_template} onClick={loadPreparationTemplate}>载入财务事实模板</button>
 		<button type="button" disabled={loading} onClick={() => void syncMarketPrices()}>同步真实复权价格</button>
 		<button type="button" disabled={loading} onClick={() => void syncConsensus()}>同步一致预期</button>
 		<button type="button" disabled={loading} onClick={() => void syncGuidanceSources()}>同步 SEC 披露候选</button>
 		<label>管理层指引人工核验<textarea aria-label="管理层指引核验 JSON" rows={8} value={guidanceReviewJSON} onChange={(event) => { setGuidanceReviewJSON(event.target.value); setGuidanceReviewRequestID(globalThis.crypto?.randomUUID?.() || `guidance-review-${Date.now()}`); }} placeholder='粘贴 source_document_id、decision、reviewed_by；确认指引时另填 guidance、evidence_url、evidence_location、evidence_excerpt。' /></label>
 		<button type="button" disabled={loading || !guidanceReviewJSON.trim()} onClick={() => void reviewGuidanceSource()}>保存指引核验</button>
-      <button type="button" disabled={loading || !workflowJSON.trim()} onClick={() => void runWorkflow()}>运行基本面研究</button>
-      <label>定时研究批准计划<textarea aria-label="定时基本面研究计划 JSON" rows={8} value={scheduleJSON} onChange={(event) => { setScheduleJSON(event.target.value); setScheduleRequestID(globalThis.crypto?.randomUUID?.() || `fundamental-schedule-${Date.now()}`); }} placeholder='粘贴 forecast_version_id、valuation、rating、approved_by 和可选 cadence_hours；价格由运行时读取真实复权价。' /></label>
-      <button type="button" disabled={loading || !scheduleJSON.trim()} onClick={() => void approveSchedule()}>批准定时研究</button>
+		<button type="button" disabled={loading || !workflowJSON.trim()} onClick={previewWorkflowInput}>预校验研究输入</button>
+		{workflowPreview && <small>预览：截至 {new Date(workflowPreview.asOf).toLocaleString("zh-CN")} · {workflowPreview.snapshotCount} 份财务快照 · {workflowPreview.assumptionCount} 项假设 · {workflowPreview.dcfScenarioCount + workflowPreview.multipleScenarioCount} 个估值情景 · {workflowPreview.evidenceIDs.length} 个唯一证据引用</small>}
+		<label className="licensed-import-confirmation"><input type="checkbox" disabled={!workflowPreview} checked={workflowConfirmed} onChange={(event) => setWorkflowConfirmed(event.target.checked)} />我确认假设、估值、基准预期、评级理由和失效规则均引用真实已批准证据</label>
+		<button type="button" disabled={loading || !workflowPreview || !workflowConfirmed} onClick={() => void runWorkflow()}>运行基本面研究</button>
+		<label>定时研究批准计划<textarea aria-label="定时基本面研究计划 JSON" rows={10} value={scheduleJSON} onChange={(event) => { setScheduleJSON(event.target.value); resetScheduleApproval(); }} placeholder='人工研究成功后载入同源草稿；填写 approved_by，预校验后再批准。运行时价格由真实复权行情重新读取。' /></label>
+		<button type="button" disabled={loading || !scheduleJSON.trim()} onClick={previewScheduleInput}>预校验定时研究计划</button>
+		{schedulePreview && <small>预览：预测 {schedulePreview.forecastVersionID} · 每 {schedulePreview.cadenceHours} 小时 · 价格最长 {schedulePreview.maxPriceAgeHours} 小时 · 计划最长 {schedulePreview.maxPlanAgeDays} 天 · {schedulePreview.evidenceIDs.length} 个唯一证据引用</small>}
+		<label className="licensed-import-confirmation"><input type="checkbox" disabled={!schedulePreview} checked={scheduleConfirmed} onChange={(event) => setScheduleConfirmed(event.target.checked)} />我确认计划复用本次人工研究的同源预测、估值和证据，并由填写的 approved_by 批准启用</label>
+		<button type="button" disabled={loading || !schedulePreview || !scheduleConfirmed} onClick={() => void approveSchedule()}>批准定时研究</button>
       <button type="button" disabled={loading || schedule?.status !== "approved"} onClick={() => void pauseSchedule()}>暂停定时研究</button>
       <small>人工研究成功后会自动载入同源计划草稿，但 approved_by 保持空白且不会自动批准；计划运行时重新读取真实复权价。出现新财报、计划过期或缺少复权价时自动停止并等待复核。</small>
     </div>}
     {message && <div className="page-message">{message}</div>}
     <div className="metric-grid">
-      <article><span>财务快照</span><strong>{bundle.fundamentals?.items?.length ?? 0}</strong><small>严格按 available_at 截止</small></article>
+		<article><span>财务快照</span><strong>{bundle.fundamentals?.items?.length ?? 0}</strong><small>严格按 available_at 截止</small></article>
 		<article><span>已批准分析师证据</span><strong>{analystEvidenceItems.length}</strong><small>任意字符串不能作为估值、基准或评级证据</small></article>
+		<article><span>人工研究门禁</span><strong>三段预校验</strong><small>证据登记 → 研究运行 → 计划批准均需再次确认</small></article>
 		<article><span>PIT 基准映射</span><strong>{benchmarkResolution?.status === "available" ? "已批准" : "不可用"}</strong><small>{benchmarkMapping?.benchmark_asset_id || benchmarkResolution?.reason || bundle.marketPolicy?.policy?.benchmark_id || "等待市场策略"}</small></article>
 		<article><span>持牌总回报导入</span><strong>{licensedBenchmarkAvailable ? licensedBenchmarkAuditLoaded ? `${licensedBenchmarkReceipts.length} 份回执` : "人工入口已就绪" : "当前基准不适用"}</strong><small>{canonicalBenchmarkID || "读取资产后核对规范基准"} · 不自动获取或批准数据</small></article>
 		<article><span>可交易状态证据</span><strong>{latestTradability ? tradabilityStatusLabel(latestTradability[1].status) : "不可用"}</strong><small>{latestTradability ? `${latestTradability[0]} · ${latestTradability[1].source_count ?? 0} 个来源` : `${tradabilityItems.length} 条观测 · 禁止从价格推断`}</small></article>
@@ -4854,6 +4943,12 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 			<p>{tradabilityReceipts.length ? `最近覆盖 ${tradabilityReceipts[0]?.session_start || "—"} 至 ${tradabilityReceipts[0]?.session_end || "—"}，共 ${tradabilityReceipts[0]?.observation_count ?? 0} 条。` : "许可证与批准信息仅通过管理员接口读取；没有回执不能推断已经取得或导入状态数据。"}</p>
 			<small>覆盖范围来自实际不可变观测 · 导入后不自动运行结果评价或评级</small>
 			{tradabilityReceipts.length > 0 && <details><summary>最近 20 批状态审计</summary>{tradabilityReceipts.map((item) => <p key={item.id}>{item.session_start || "—"} 至 {item.session_end || "—"} · {item.observation_count ?? 0} 条 / 首次新增 {item.inserted_count ?? 0} · {item.market || "—"} {item.currency || ""} · {item.source_url ? <a href={item.source_url} target="_blank" rel="noreferrer">{item.source_name || item.source_document_id || "来源"}</a> : item.source_name || "—"} · 许可证 {item.license_reference || "—"} · 批准人 {item.approved_by || "—"} · {item.available_at ? new Date(item.available_at).toLocaleString("zh-CN") : "—"}</p>)}</details>}
+		</article>
+		<article className="conclusion-card">
+			<span>无新闻人工操作闭环</span>
+			<h3>证据模板 → 研究预校验 → 同源计划审批</h3>
+			<p>模板只声明字段和数据类型，所有数值、时点、来源、假设、估值与批准身份都必须由分析师填写；null 不会被替换成零。</p>
+			<small>浏览器预校验不替代服务器 PIT、资产归属、证据类型和值一致性硬门禁 · 不自动批准</small>
 		</article>
 		<article className="conclusion-card">
 			<span>分析师证据登记</span>

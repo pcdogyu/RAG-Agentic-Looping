@@ -745,6 +745,10 @@ describe("shared hash navigation", () => {
 		expect(markup).toContain("复权价格证据");
 		expect(markup).toContain("已批准分析师证据");
 		expect(markup).toContain("任意字符串不能作为估值、基准或评级证据");
+		expect(markup).toContain("人工研究门禁");
+		expect(markup).toContain("三段预校验");
+		expect(markup).toContain("无新闻人工操作闭环");
+		expect(markup).toContain("证据模板 → 研究预校验 → 同源计划审批");
 		expect(markup).toContain("分析师证据登记");
 		expect(markup).toContain("PIT 基准映射");
 		expect(markup).toContain("时点基准治理");
