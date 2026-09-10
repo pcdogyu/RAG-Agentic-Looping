@@ -189,6 +189,50 @@ func TestDatasetStorePersistsReproducibleWalkForwardAndSealedHoldoutAgainstIsola
 	if sealedReportSamples != 0 {
 		t.Fatalf("performance report exposed %d unsealed final holdout samples", sealedReportSamples)
 	}
+	latestFold := experiment.Experiment.Folds[len(experiment.Experiment.Folds)-1]
+	selected := experimentVariantByName(latestFold.Variants, "logistic_full")
+	if selected.ArtifactDigest == "" || selected.Model == nil {
+		t.Fatalf("latest development fold has no frozen logistic artifact: %#v", selected)
+	}
+	finalInput := FinalHoldoutEvaluationInput{DatasetID: dataset.Manifest.ID, ExperimentID: experiment.Experiment.ID,
+		DevelopmentReportID: report.Report.ID, FoldIndex: latestFold.Index, VariantName: selected.Name,
+		VariantArtifactDigest: selected.ArtifactDigest, ApprovedBy: "independent final reviewer",
+		ApprovalReason: "single variant locked after development report review", IdempotencyKey: "wf-final-holdout-v1"}
+	finalStore := NewFinalHoldoutEvaluationStore(pool)
+	finalReport, created, err := finalStore.Materialize(ctx, finalInput, start.AddDate(0, 0, 183))
+	if err != nil || !created || !finalReport.FinalHoldoutAccessed || finalReport.SampleIDsShown || finalReport.AutomaticModelSelection ||
+		finalReport.SealedSampleCount != 30 || finalReport.EvaluatedSampleCount != 30 || finalReport.ArtifactDigest == "" {
+		t.Fatalf("one-time final holdout evaluation=%#v created=%v err=%v", finalReport, created, err)
+	}
+	finalBody, _ := json.Marshal(finalReport)
+	if strings.Contains(string(finalBody), "wf-prediction-130") || finalReport.SelectionDecision != FinalHoldoutSelectionDecision {
+		t.Fatalf("final holdout identifiers leaked or selection governance changed: %s", finalBody)
+	}
+	repeatedFinal, created, err := finalStore.Materialize(ctx, finalInput, start.AddDate(0, 0, 184))
+	if err != nil || created || repeatedFinal.ID != finalReport.ID {
+		t.Fatalf("final holdout evaluation was not idempotent: %#v created=%v err=%v", repeatedFinal, created, err)
+	}
+	changedSelection := finalInput
+	changedSelection.IdempotencyKey = "wf-final-holdout-second-selection"
+	changedSelection.VariantName = "simple_rule"
+	changedSelection.VariantArtifactDigest = experimentVariantByName(latestFold.Variants, "simple_rule").ArtifactDigest
+	if _, _, err = finalStore.Materialize(ctx, changedSelection, start.AddDate(0, 0, 185)); err == nil || !strings.Contains(err.Error(), "already been evaluated") {
+		t.Fatalf("a second model selection accessed the same reserved holdout: %v", err)
+	}
+	listed, err := finalStore.List(ctx, 20)
+	if err != nil || len(listed) != 1 || listed[0].ID != finalReport.ID {
+		t.Fatalf("final holdout audit list=%#v err=%v", listed, err)
+	}
+	var finalReportCount, stillSealed int
+	if err = pool.QueryRow(ctx, `SELECT count(*)::int FROM evaluation_final_holdout_reports WHERE holdout_reservation_id=$1`, reservation.ID).Scan(&finalReportCount); err != nil {
+		t.Fatal(err)
+	}
+	if err = pool.QueryRow(ctx, `SELECT count(*)::int FROM evaluation_dataset_samples WHERE dataset_id=$1 AND fold_index=-1 AND sealed=true`, dataset.Manifest.ID).Scan(&stillSealed); err != nil {
+		t.Fatal(err)
+	}
+	if finalReportCount != 1 || stillSealed != 30 {
+		t.Fatalf("final reports=%d sealed samples=%d", finalReportCount, stillSealed)
+	}
 }
 
 func experimentVariantByName(values []ExperimentVariant, name string) ExperimentVariant {

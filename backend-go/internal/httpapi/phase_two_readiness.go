@@ -30,6 +30,7 @@ type phaseTwoReadinessFacts struct {
 	TradabilityImportReceipts         int  `json:"tradability_import_receipts"`
 	SECIdentityConfigured             bool `json:"sec_identity_configured"`
 	FinalHoldoutEvaluationImplemented bool `json:"final_holdout_evaluation_implemented"`
+	FinalHoldoutEvaluations           int  `json:"final_holdout_evaluations"`
 }
 
 type phaseTwoReadinessGate struct {
@@ -77,11 +78,8 @@ func loadPhaseTwoReadinessFacts(ctx context.Context, s *Server, asOf time.Time) 
 		return phaseTwoReadinessFacts{}, fmt.Errorf("phase two readiness store is unavailable")
 	}
 	facts := phaseTwoReadinessFacts{
-		SECIdentityConfigured: consensus.ValidateSECIdentity(s.cfg.SECIdentity) == nil,
-		// The current repository seals final-holdout rows, but intentionally has
-		// no one-time reveal/evaluation endpoint yet. Keep that engineering gap
-		// explicit instead of inferring completion from a dataset or report count.
-		FinalHoldoutEvaluationImplemented: false,
+		SECIdentityConfigured:             consensus.ValidateSECIdentity(s.cfg.SECIdentity) == nil,
+		FinalHoldoutEvaluationImplemented: true,
 	}
 	err := s.db.QueryRow(ctx, `SELECT
 		(SELECT count(*)::int FROM analyst_evidence_records WHERE available_at<=$1),
@@ -106,6 +104,7 @@ func loadPhaseTwoReadinessFacts(ctx context.Context, s *Server, asOf time.Time) 
 		(SELECT count(*)::int FROM evaluation_dataset_versions WHERE created_at<=$1),
 		(SELECT count(*)::int FROM evaluation_experiments WHERE created_at<=$1),
 		(SELECT count(*)::int FROM evaluation_performance_reports WHERE created_at<=$1),
+		(SELECT count(*)::int FROM evaluation_final_holdout_reports WHERE created_at<=$1),
 		(SELECT count(*)::int FROM research_quality_reviews WHERE created_at<=$1),
 		(SELECT count(DISTINCT scenario)::int FROM model_failure_drills WHERE passed=true AND production_state_changed=false AND created_at<=$1),
 		(SELECT count(*)::int FROM prediction_models WHERE status='approved' AND created_at<=$1),
@@ -114,7 +113,7 @@ func loadPhaseTwoReadinessFacts(ctx context.Context, s *Server, asOf time.Time) 
 		&facts.AnalystEvidence, &facts.ApprovedFundamentalPlans, &facts.ActiveEquityAssets,
 		&facts.BenchmarkCoveredActiveEquities, &facts.MatureEquityOutcomes, &facts.LargestMatureEquityMarket,
 		&facts.PendingPredictionLabels, &facts.HoldoutReservations, &facts.WalkForwardDatasets,
-		&facts.DevelopmentExperiments, &facts.LayeredPerformanceReports, &facts.ResearchQualityReviews,
+		&facts.DevelopmentExperiments, &facts.LayeredPerformanceReports, &facts.FinalHoldoutEvaluations, &facts.ResearchQualityReviews,
 		&facts.PassedFailureDrillScenarios, &facts.ApprovedPredictionModels,
 		&facts.LicensedBenchmarkImportReceipts, &facts.TradabilityImportReceipts)
 	return facts, err
@@ -131,10 +130,10 @@ func buildPhaseTwoReadinessReport(facts phaseTwoReadinessFacts, asOf time.Time) 
 		readinessDependentCountGate("walk_forward_dataset", "M4", "滚动前推数据集", facts.WalkForwardDatasets, 1, "版", facts.HoldoutReservations > 0 && facts.LargestMatureEquityMarket >= 100, "ready_for_manual_action", false, []string{"mature_forward_outcomes", "sealed_holdout"}, "使用成熟 PIT 样本生成不可变数据集清单。", ""),
 		readinessDependentCountGate("development_experiment", "M4", "开发集基线、消融与校准实验", facts.DevelopmentExperiments, 1, "项", facts.WalkForwardDatasets > 0, "ready_for_manual_action", false, []string{"walk_forward_dataset"}, "在滚动训练、独立校准和未来测试折上运行可解释实验。", ""),
 		readinessDependentCountGate("layered_performance_report", "M5", "分层效果报告", facts.LayeredPerformanceReports, 1, "份", facts.DevelopmentExperiments > 0, "ready_for_manual_action", false, []string{"development_experiment"}, "生成同时披露覆盖、失败样本、收益、校准和统计不确定性的报告。", ""),
-		readinessBooleanGate("final_holdout_evaluation", "M5", "一次性最终留出评估", facts.FinalHoldoutEvaluationImplemented, "engineering_gap", false, []string{"layered_performance_report"}, "实现经人工批准、只读一次且不可用于模型选择的最终留出评估与审计记录。", ""),
+		readinessDependentCountGate("final_holdout_evaluation", "M5", "一次性最终留出评估", facts.FinalHoldoutEvaluations, 1, "份", facts.LayeredPerformanceReports > 0, "ready_for_manual_action", true, []string{"layered_performance_report"}, "在开发报告锁定单一变体后，由人工批准执行一次不可重复的最终留出评估。", ""),
 		readinessCountGate("research_quality_reviews", "M5", "人工研究质量复核", facts.ResearchQualityReviews, 1, "条", "waiting_human_input", true, nil, "复核事实、关系、引用支持和拒答是否恰当。", ""),
 		readinessCountGate("failure_drills", "M5", "五类故障与回滚演练", facts.PassedFailureDrillScenarios, 5, "类", "ready_for_manual_action", false, []string{"layered_performance_report"}, "完成数据源、模型超时、特征漂移、校准失效和人工回滚门禁演练。", ""),
-		readinessDependentCountGate("approved_prediction_model", "M5", "人工批准的预测模型", facts.ApprovedPredictionModels, 1, "个", facts.LayeredPerformanceReports > 0 && facts.FinalHoldoutEvaluationImplemented && facts.PassedFailureDrillScenarios >= 5, "waiting_human_input", true, []string{"layered_performance_report", "final_holdout_evaluation", "failure_drills"}, "只有真实独立证据和人工审批齐备后才允许批准；不得自动发布。", ""),
+		readinessDependentCountGate("approved_prediction_model", "M5", "人工批准的预测模型", facts.ApprovedPredictionModels, 1, "个", facts.LayeredPerformanceReports > 0 && facts.FinalHoldoutEvaluations > 0 && facts.PassedFailureDrillScenarios >= 5, "waiting_human_input", true, []string{"layered_performance_report", "final_holdout_evaluation", "failure_drills"}, "只有真实独立证据和人工审批齐备后才允许批准；不得自动发布。", ""),
 	}
 	report := phaseTwoReadinessReport{Version: phaseTwoReadinessVersion, AsOf: asOf.UTC(), OverallStatus: "blocked",
 		AutomaticCompletion: false, Facts: facts, Gates: gates}

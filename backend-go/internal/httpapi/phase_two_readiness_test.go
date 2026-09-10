@@ -21,7 +21,7 @@ func TestPhaseTwoReadinessKeepsMissingTruthExplicit(t *testing.T) {
 	want := map[string]string{
 		"analyst_evidence": "waiting_human_input", "approved_fundamental_plan": "blocked_by_dependency",
 		"pit_benchmark_coverage": "waiting_human_input", "mature_forward_outcomes": "waiting_natural_maturity",
-		"walk_forward_dataset": "blocked_by_dependency", "final_holdout_evaluation": "engineering_gap",
+		"walk_forward_dataset": "blocked_by_dependency", "final_holdout_evaluation": "blocked_by_dependency",
 		"approved_prediction_model": "blocked_by_dependency",
 	}
 	for _, gate := range report.Gates {
@@ -36,7 +36,7 @@ func TestPhaseTwoReadinessRequiresEveryBlockingGate(t *testing.T) {
 		AnalystEvidence: 6, ApprovedFundamentalPlans: 1, ActiveEquityAssets: 10, BenchmarkCoveredActiveEquities: 10,
 		MatureEquityOutcomes: 120, LargestMatureEquityMarket: 120, HoldoutReservations: 1, WalkForwardDatasets: 1,
 		DevelopmentExperiments: 1, LayeredPerformanceReports: 1, ResearchQualityReviews: 1, PassedFailureDrillScenarios: 5,
-		ApprovedPredictionModels: 1, SECIdentityConfigured: true, FinalHoldoutEvaluationImplemented: true,
+		ApprovedPredictionModels: 1, SECIdentityConfigured: true, FinalHoldoutEvaluationImplemented: true, FinalHoldoutEvaluations: 1,
 	}
 	report := buildPhaseTwoReadinessReport(facts, time.Now())
 	if report.OverallStatus != "eligible_for_human_acceptance" || report.CompletedGates != report.TotalBlockingGates {
@@ -84,7 +84,7 @@ func TestPhaseTwoReadinessReadsEmptyMigratedPostgres(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !facts.SECIdentityConfigured || facts.AnalystEvidence != 0 || facts.ActiveEquityAssets != 0 {
+	if !facts.SECIdentityConfigured || !facts.FinalHoldoutEvaluationImplemented || facts.FinalHoldoutEvaluations != 0 || facts.AnalystEvidence != 0 || facts.ActiveEquityAssets != 0 {
 		t.Fatalf("unexpected empty readiness facts: %#v", facts)
 	}
 	report := buildPhaseTwoReadinessReport(facts, time.Now().UTC())
