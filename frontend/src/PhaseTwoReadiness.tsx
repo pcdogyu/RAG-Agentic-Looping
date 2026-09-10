@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { PhaseTwoEvaluationWorkbench } from "./PhaseTwoEvaluationWorkbench";
 
@@ -55,7 +55,6 @@ const pendingReasonLabels: Record<string, string> = {
 	symbol_change_continuity_grace: "代码变更连续性观察期",
 };
 
-const tokenKey = "market-loop-admin-token";
 const statusLabels: Record<string, string> = {
 	completed: "已满足",
 	waiting_human_input: "等待人工输入",
@@ -74,11 +73,6 @@ const outcomeEvaluationStatusLabels: Record<string, string> = {
 	failed: "失败",
 	cancelled: "已取消",
 };
-
-function readToken() {
-	if (typeof window === "undefined") return "";
-	try { return window.sessionStorage.getItem(tokenKey) || ""; } catch { return ""; }
-}
 
 export function phaseTwoReadinessStatusLabel(status: string) {
 	return statusLabels[status] || status || "未知";
@@ -158,22 +152,16 @@ export function PhaseTwoReadinessPanel({ report, onEvaluateOutcomes, outcomeEval
 }
 
 export default function PhaseTwoReadinessPage({ apiBase }: { apiBase: string }) {
-	const [token, setToken] = useState(readToken);
-	const [draft, setDraft] = useState("");
 	const [report, setReport] = useState<PhaseTwoReadinessReport>();
 	const [loading, setLoading] = useState(false);
 	const [outcomeEvaluationBusy, setOutcomeEvaluationBusy] = useState(false);
 	const [outcomeEvaluationMessage, setOutcomeEvaluationMessage] = useState("");
 	const outcomeEvaluationAbort = useRef<AbortController | undefined>(undefined);
-	const [message, setMessage] = useState("输入管理员令牌后读取生产事实；就绪度快照本身只读，下方人工操作台必须逐步预校验并确认才会写入。");
+	const [message, setMessage] = useState("就绪度按生产事实计算；下方人工操作台仍必须逐步预校验并确认才会写入。");
 	const load = useCallback(async () => {
-		if (!token) {
-			setReport(undefined);
-			return;
-		}
 		setLoading(true);
 		try {
-			const response = await fetch(`${apiBase}/go/phase-two/readiness`, { headers: { "X-Admin-Token": token } });
+			const response = await fetch(`${apiBase}/go/phase-two/readiness`);
 			const payload = await response.json().catch(() => ({})) as PhaseTwoReadinessReport & { detail?: string };
 			if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
 			setReport(payload);
@@ -184,18 +172,18 @@ export default function PhaseTwoReadinessPage({ apiBase }: { apiBase: string }) 
 		} finally {
 			setLoading(false);
 		}
-	}, [apiBase, token]);
+	}, [apiBase]);
 	useEffect(() => { void load(); }, [load]);
 	useEffect(() => () => outcomeEvaluationAbort.current?.abort(), []);
 	async function evaluateOutcomes() {
-		if (!token || outcomeEvaluationBusy) return;
+		if (outcomeEvaluationBusy) return;
 		outcomeEvaluationAbort.current?.abort();
 		const controller = new AbortController();
 		outcomeEvaluationAbort.current = controller;
 		setOutcomeEvaluationBusy(true);
 		setOutcomeEvaluationMessage("正在提交真实结果评估任务…");
 		try {
-			const response = await fetch(`${apiBase}/go/outcome-labels/evaluate`, { method: "POST", headers: { "X-Admin-Token": token }, signal: controller.signal });
+			const response = await fetch(`${apiBase}/go/outcome-labels/evaluate`, { method: "POST", signal: controller.signal });
 			const payload = await response.json().catch(() => ({})) as { task_id?: string; early_maturity_allowed?: boolean };
 			if (!response.ok) throw new Error(`提交失败（HTTP ${response.status}）`);
 			if (!payload.task_id) throw new Error("提交失败：服务端未返回任务 ID");
@@ -203,7 +191,7 @@ export default function PhaseTwoReadinessPage({ apiBase }: { apiBase: string }) 
 			const taskID = payload.task_id;
 			setOutcomeEvaluationMessage(`任务 ${taskID} 已入队，正在等待最终状态…`);
 			for (let attempt = 0; attempt < 300; attempt += 1) {
-				const statusResponse = await fetch(`${apiBase}/go/outcome-labels/evaluations/${encodeURIComponent(taskID)}`, { headers: { "X-Admin-Token": token }, signal: controller.signal });
+				const statusResponse = await fetch(`${apiBase}/go/outcome-labels/evaluations/${encodeURIComponent(taskID)}`, { signal: controller.signal });
 				const statusPayload = await statusResponse.json().catch(() => ({})) as { status?: string; summary_status?: string; warning_count?: number };
 				if (!statusResponse.ok) throw new Error(`状态查询失败（HTTP ${statusResponse.status}）`);
 				const state = (statusPayload.status || "pending").toUpperCase();
@@ -225,27 +213,10 @@ export default function PhaseTwoReadinessPage({ apiBase }: { apiBase: string }) 
 			}
 		}
 	}
-	function unlock(event: FormEvent) {
-		event.preventDefault();
-		const value = draft.trim();
-		if (!value) return;
-		window.sessionStorage.setItem(tokenKey, value);
-		setToken(value);
-		setDraft("");
-	}
-	function lock() {
-		outcomeEvaluationAbort.current?.abort();
-		window.sessionStorage.removeItem(tokenKey);
-		setToken("");
-		setReport(undefined);
-		setOutcomeEvaluationBusy(false);
-		setOutcomeEvaluationMessage("");
-	}
 	return <section className="app-page readiness-page">
 		<div className="page-heading"><div><span>PHASE II READINESS</span><h1>第二期生产就绪度</h1><p>按真实证据、自然成熟、人工审批和工程能力分别显示门禁；不以演示数据或代码数量代替验收。</p></div></div>
-		{token ? <div className="admin-unlock unlocked"><span>管理员核验与人工操作已解锁，本次浏览器会话有效。</span><button type="button" onClick={lock}>锁定</button></div> : <form className="admin-unlock" onSubmit={unlock}><label>管理员令牌<input type="password" value={draft} onChange={(event) => setDraft(event.target.value)} autoComplete="off" /></label><button type="submit">解锁管理员操作</button></form>}
-		<div className="readiness-toolbar"><button type="button" disabled={!token || loading} onClick={() => void load()}>{loading ? "正在核验…" : "重新核验生产事实"}</button><span>{message}</span></div>
-		{report ? <PhaseTwoReadinessPanel report={report} onEvaluateOutcomes={() => void evaluateOutcomes()} outcomeEvaluationBusy={outcomeEvaluationBusy} outcomeEvaluationMessage={outcomeEvaluationMessage} /> : <div className="page-empty">尚未取得管理员就绪度快照。</div>}
-		{token && <PhaseTwoEvaluationWorkbench apiBase={apiBase} token={token} onChanged={() => void load()} />}
+		<div className="readiness-toolbar"><button type="button" disabled={loading} onClick={() => void load()}>{loading ? "正在核验…" : "重新核验生产事实"}</button><span>{message}</span></div>
+		{report ? <PhaseTwoReadinessPanel report={report} onEvaluateOutcomes={() => void evaluateOutcomes()} outcomeEvaluationBusy={outcomeEvaluationBusy} outcomeEvaluationMessage={outcomeEvaluationMessage} /> : <div className="page-empty">尚未取得生产就绪度快照。</div>}
+		<PhaseTwoEvaluationWorkbench apiBase={apiBase} onChanged={() => void load()} />
 	</section>;
 }

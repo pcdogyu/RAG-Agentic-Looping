@@ -250,7 +250,7 @@ function itemID(stage: EvaluationPipelineStage, item: unknown) {
 	return (record.id as string) || "已创建";
 }
 
-export function PhaseTwoEvaluationWorkbench({ apiBase, token, onChanged }: { apiBase: string; token: string; onChanged?: () => void }) {
+export function PhaseTwoEvaluationWorkbench({ apiBase, onChanged }: { apiBase: string; onChanged?: () => void }) {
 	const [inventory, setInventory] = useState<EvaluationInventory>(emptyInventory);
 	const [stage, setStage] = useState<EvaluationPipelineStage>("holdout");
 	const [draft, setDraft] = useState("");
@@ -262,11 +262,10 @@ export function PhaseTwoEvaluationWorkbench({ apiBase, token, onChanged }: { api
 	const [message, setMessage] = useState("先刷新服务器库存；每一步都必须单独预校验和确认，不会自动串联执行。");
 	const load = useCallback(async () => {
 		setPreview(undefined); setConfirmed(false); setFinalPhrase("");
-		if (!token) { setInventory(emptyInventory); return; }
 		setLoading(true);
 		try {
 			const paths = ["evaluation-holdouts", "evaluation-datasets", "evaluation-experiments", "evaluation-performance-reports", "evaluation-final-holdouts"];
-			const responses = await Promise.all(paths.map((path) => fetch(`${apiBase}/go/${path}?limit=50`, { headers: { "X-Admin-Token": token } })));
+			const responses = await Promise.all(paths.map((path) => fetch(`${apiBase}/go/${path}?limit=50`)));
 			const bodies = await Promise.all(responses.map((response) => response.json().catch(() => ({}))));
 			const failed = responses.findIndex((response) => !response.ok);
 			if (failed >= 0) throw new Error((bodies[failed] as { detail?: string }).detail || `HTTP ${responses[failed].status}`);
@@ -276,7 +275,7 @@ export function PhaseTwoEvaluationWorkbench({ apiBase, token, onChanged }: { api
 			setInventory(emptyInventory);
 			setMessage(`库存读取失败：${reason instanceof Error ? reason.message : "未知错误"}`);
 		} finally { setLoading(false); }
-	}, [apiBase, token]);
+	}, [apiBase]);
 	useEffect(() => { void load(); }, [load]);
 	const selectedStage = stages.find((item) => item.id === stage)!;
 	const latestVariants = useMemo(() => {
@@ -310,7 +309,7 @@ export function PhaseTwoEvaluationWorkbench({ apiBase, token, onChanged }: { api
 		if (!preview || !confirmed || preview.stage !== stage || (stage === "final" && finalPhrase !== "执行一次最终评估")) return;
 		setLoading(true);
 		try {
-			const response = await fetch(`${apiBase}${selectedStage.endpoint}`, { method: "POST", headers: { "Content-Type": "application/json", "X-Admin-Token": token, "Idempotency-Key": requestID }, body: JSON.stringify(preview.body) });
+			const response = await fetch(`${apiBase}${selectedStage.endpoint}`, { method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": requestID }, body: JSON.stringify(preview.body) });
 			const payload = await response.json().catch(() => ({})) as Record<string, unknown> & { detail?: string };
 			if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
 			setMessage(`${selectedStage.label}已写入：${itemID(stage, payload[selectedStage.responseKey])}。不会自动执行下一阶段。`);
@@ -320,7 +319,7 @@ export function PhaseTwoEvaluationWorkbench({ apiBase, token, onChanged }: { api
 		finally { setLoading(false); }
 	}
 	return <section className="evaluation-workbench">
-		<header><div><span>MANUAL EVALUATION PIPELINE</span><h2>最终留出人工操作台</h2><p>预注册 → 数据集 → 开发实验 → 开发报告 → 一次最终评估。每一步独立确认，系统不会自动选模或连锁执行；最终一步还必须输入确认短语。</p></div><button type="button" disabled={!token || loading} onClick={() => void load()}>{loading ? "处理中…" : "刷新五段库存"}</button></header>
+		<header><div><span>MANUAL EVALUATION PIPELINE</span><h2>最终留出人工操作台</h2><p>预注册 → 数据集 → 开发实验 → 开发报告 → 一次最终评估。每一步独立确认，系统不会自动选模或连锁执行；最终一步还必须输入确认短语。</p></div><button type="button" disabled={loading} onClick={() => void load()}>{loading ? "处理中…" : "刷新五段库存"}</button></header>
 		<div className="evaluation-inventory">
 			<article><span>预注册留出</span><strong>{inventory.holdouts.length}</strong><small>{inventory.holdouts[0]?.id || "尚无真实记录"}</small></article>
 			<article><span>滚动数据集</span><strong>{inventory.datasets.length}</strong><small>{inventory.datasets[0] ? datasetID(inventory.datasets[0]) : "依赖成熟标签"}</small></article>
@@ -330,7 +329,7 @@ export function PhaseTwoEvaluationWorkbench({ apiBase, token, onChanged }: { api
 		</div>
 		<div className="evaluation-editor">
 			<label>当前人工阶段<select aria-label="评估流水线阶段" value={stage} onChange={(event) => changeStage(event.target.value as EvaluationPipelineStage)}>{stages.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
-			<div className="evaluation-actions"><button type="button" disabled={!token || loading} onClick={generateTemplate}>生成当前阶段草稿</button><button type="button" disabled={!token || loading || !draft.trim()} onClick={validate}>预校验当前阶段</button></div>
+			<div className="evaluation-actions"><button type="button" disabled={loading} onClick={generateTemplate}>生成当前阶段草稿</button><button type="button" disabled={loading || !draft.trim()} onClick={validate}>预校验当前阶段</button></div>
 			<label>精确 API 请求 JSON<textarea aria-label="评估流水线 JSON" rows={14} value={draft} onChange={(event) => resetForEdit(event.target.value)} placeholder="先刷新库存并生成草稿；空值必须由真实操作员填写。" /></label>
 			{stage === "final" && latestVariants.length > 0 && <div className="evaluation-variants"><strong>最新开发折的可评估变体（必须人工选择）</strong>{latestVariants.map((variant) => <button type="button" key={`${variant.name}:${variant.artifact_digest}`} onClick={() => useVariant(variant)}>{variant.name} · {variant.status} · n={variant.metrics.sample_count}</button>)}</div>}
 			{preview && <div className="evaluation-preview"><strong>预校验通过</strong><span>{preview.summary}</span><small>幂等键：{requestID}</small><label><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} />我已复核真实输入，并确认写入不可变记录</label>{stage === "final" && <label>最终确认短语<input aria-label="最终评估确认短语" value={finalPhrase} onChange={(event) => setFinalPhrase(event.target.value)} placeholder="执行一次最终评估" /></label>}<button type="button" disabled={loading || !confirmed || (stage === "final" && finalPhrase !== "执行一次最终评估")} onClick={() => void submit()}>{stage === "final" ? "执行且仅执行一次最终评估" : `确认${selectedStage.label}`}</button></div>}

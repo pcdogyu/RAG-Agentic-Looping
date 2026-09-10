@@ -75,7 +75,7 @@ describe("phase two evaluation pipeline prevalidation", () => {
 	});
 
 	it("renders all five manual stages and the irreversible confirmation language", () => {
-		const html = renderToStaticMarkup(createElement(PhaseTwoEvaluationWorkbench, { apiBase: "", token: "" }));
+		const html = renderToStaticMarkup(createElement(PhaseTwoEvaluationWorkbench, { apiBase: "" }));
 		expect(html).toContain("最终留出人工操作台");
 		expect(html).toContain("1. 预注册未来留出");
 		expect(html).toContain("5. 执行一次最终评估");

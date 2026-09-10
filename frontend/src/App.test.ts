@@ -34,6 +34,7 @@ import {
   factSourceGroupDefinitions,
   formatQueueDuration,
 	FundamentalResearchPage,
+	ResearchPolicyPage,
 	benchmarkMappingDraftJSON,
 	licensedBenchmarkImportBody,
 	licensedBenchmarkImportTemplate,
@@ -69,6 +70,7 @@ import {
   type TargetChange,
   TopNavigation,
   UnifiedModelQueuePanel,
+	WeknoraPage,
   removeTasksFromQueueOverview,
 } from "./AppPages";
 import ModelLogsPage, {
@@ -756,7 +758,7 @@ describe("shared hash navigation", () => {
 		expect(markup).toContain("持牌总回报导入");
 		expect(markup).toContain("不自动获取或批准数据");
 		expect(markup).toContain("持牌导入回执");
-		expect(markup).toContain("许可证与审批详情仅管理员可见");
+		expect(markup).toContain("许可证与审批详情仅在管理页面显示");
 		expect(markup).toContain("没有回执不能推断已经获得或导入持牌数据");
 		expect(markup).toContain("可交易状态证据");
 		expect(markup).toContain("可交易状态决议");
@@ -764,7 +766,7 @@ describe("shared hash navigation", () => {
 		expect(markup).toContain("禁止从价格推断");
 		expect(markup).toContain("不自动运行结果评价或评级");
 		expect(markup).toContain("自动批准：关闭");
-		expect(markup).toContain("人工研究成功后自动载入同源计划草稿，仍需管理员显式批准");
+		expect(markup).toContain("人工研究成功后自动载入同源计划草稿，仍需人工显式批准");
 		expect(markup).toContain("分析师一致预期");
 		expect(markup).toContain("数据不会倒填到首次观测之前");
 		expect(markup).toContain("管理层指引修订");
@@ -772,7 +774,8 @@ describe("shared hash navigation", () => {
 		expect(markup).toContain("SEC 指引证据候选");
 		expect(markup).toContain("候选不等于管理层指引");
 		expect(markup).toContain("自动抽取");
-    expect(markup).toContain("管理员令牌");
+    expect(markup).not.toContain("管理员令牌");
+		expect(markup).toContain("分析师证据登记");
   });
 
 	it("loads only a successful manual research schedule draft", () => {
@@ -861,6 +864,23 @@ describe("asset universe page", () => {
     expect(markup).toContain("统一行业用于跨市场比较");
     expect(markup).toContain("统一行业 / 原始行业");
     expect(markup).toContain("行业 0 / 0 · 0%");
+  });
+});
+
+describe("server-authorized administration pages", () => {
+  it("renders every former administrator section without a browser token control", () => {
+    const pages = [
+      createElement(AssetUniversePage, { apiBase: "" }),
+      createElement(ResearchPolicyPage, { apiBase: "" }),
+      createElement(FundamentalResearchPage, { apiBase: "" }),
+      createElement(WeknoraPage, { apiBase: "" }),
+    ];
+    for (const page of pages) {
+      const markup = renderToStaticMarkup(page);
+      expect(markup).not.toContain("管理员令牌");
+      expect(markup).not.toContain("解锁");
+      expect(markup).not.toContain("sessionStorage");
+    }
   });
 });
 

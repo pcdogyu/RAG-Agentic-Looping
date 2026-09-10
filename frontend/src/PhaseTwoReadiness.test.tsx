@@ -2,9 +2,17 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import { isOutcomeEvaluationTerminalState, PhaseTwoReadinessPanel, phaseTwoOutcomeEvaluationStatusLabel, phaseTwoPendingReasonLabel, phaseTwoReadinessStatusLabel, type PhaseTwoReadinessReport } from "./PhaseTwoReadiness";
+import PhaseTwoReadinessPage, { isOutcomeEvaluationTerminalState, PhaseTwoReadinessPanel, phaseTwoOutcomeEvaluationStatusLabel, phaseTwoPendingReasonLabel, phaseTwoReadinessStatusLabel, type PhaseTwoReadinessReport } from "./PhaseTwoReadiness";
 
 describe("phase two readiness presentation", () => {
+	it("renders readiness and its manual workbench without a browser token control", () => {
+		const html = renderToStaticMarkup(createElement(PhaseTwoReadinessPage, { apiBase: "" }));
+		expect(html).toContain("第二期生产就绪度");
+		expect(html).toContain("最终留出人工操作台");
+		expect(html).not.toContain("管理员令牌");
+		expect(html).not.toContain("解锁");
+	});
+
 	it("keeps engineering, human input, and natural maturity states distinct", () => {
 		expect(phaseTwoReadinessStatusLabel("engineering_gap")).toBe("工程缺口");
 		expect(phaseTwoReadinessStatusLabel("waiting_human_input")).toBe("等待人工输入");

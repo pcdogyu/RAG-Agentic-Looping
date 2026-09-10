@@ -66,42 +66,6 @@ export function TopNavigation({ current }: { current: AppRoute }) {
   );
 }
 
-const tokenKey = "market-loop-admin-token";
-
-function readToken() {
-  if (typeof window === "undefined") return "";
-  try { return window.sessionStorage.getItem(tokenKey) || ""; } catch { return ""; }
-}
-
-function AdminUnlock({ token, onToken }: { token: string; onToken: (value: string) => void }) {
-  const [draft, setDraft] = useState("");
-  function unlock(event: FormEvent) {
-    event.preventDefault();
-    const value = draft.trim();
-    if (!value) return;
-    window.sessionStorage.setItem(tokenKey, value);
-    onToken(value);
-    setDraft("");
-  }
-  if (token) {
-    return (
-      <div className="admin-unlock unlocked">
-        <span>管理员功能已解锁，本次浏览器会话有效。</span>
-        <button type="button" onClick={() => {
-          window.sessionStorage.removeItem(tokenKey); onToken("");
-        }}>锁定</button>
-      </div>
-    );
-  }
-  return (
-    <form className="admin-unlock" onSubmit={unlock}>
-      <label>管理员令牌<input type="password" value={draft} onChange={(e) => setDraft(e.target.value)} /></label>
-      <button type="submit">解锁</button>
-      <small>令牌仅保存在 sessionStorage，关闭标签页后失效。</small>
-    </form>
-  );
-}
-
 function PageHeading({ eyebrow, title, copy }: { eyebrow: string; title: string; copy: string }) {
   return <div className="page-heading"><p className="eyebrow">{eyebrow}</p><h2>{title}</h2><p>{copy}</p></div>;
 }
@@ -3765,7 +3729,6 @@ function universeTime(value: string | null) {
 }
 
 export function AssetUniversePage({ apiBase }: { apiBase: string }) {
-  const [token, setToken] = useState(readToken);
   const [assets, setAssets] = useState<UniverseAsset[]>([]);
   const [industries, setIndustries] = useState<IndustryItem[]>([]);
   const [statuses, setStatuses] = useState<UniverseMarketStatus[]>([]);
@@ -3832,7 +3795,6 @@ export function AssetUniversePage({ apiBase }: { apiBase: string }) {
       if (path === "backfill") params.set("days", "30");
       const response = await fetch(`${apiBase}/api/v1/admin/asset-universe/${path}${params.size ? `?${params}` : ""}`, {
         method: "POST",
-        headers: { "X-Admin-Token": token },
       });
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.detail || "任务入队失败");
@@ -3859,7 +3821,7 @@ export function AssetUniversePage({ apiBase }: { apiBase: string }) {
     setError("");
     const response = await fetch(`${apiBase}/api/v1/admin/assets/${encodeURIComponent(editing.asset_id)}`, {
       method: "PATCH",
-      headers: { "Content-Type": "application/json", "X-Admin-Token": token },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         aliases: aliasDraft.split("\n").map((item) => item.trim()).filter(Boolean),
         industry_id: industryDraft,
@@ -3914,14 +3876,13 @@ export function AssetUniversePage({ apiBase }: { apiBase: string }) {
             <small>行业 {(status?.classified_count || 0).toLocaleString()} / {(activeCounts[key] || status?.asset_count || 0).toLocaleString()} · {((status?.classification_rate || 0) * 100).toLocaleString("zh-CN", { maximumFractionDigits: 1 })}%</small>
             <small>标准 {(status?.association_tier_counts?.standard || 0).toLocaleString()} · 精确 {(status?.association_tier_counts?.exact_only || 0).toLocaleString()} · 手动 {(status?.association_tier_counts?.manual_only || 0).toLocaleString()}</small>
             <small>{status?.status === "failed" ? `失败：${status.last_error}` : universeTime(status?.completed_at || null)}</small>
-            <button type="button" disabled={!token || status?.status === "running"} onClick={() => void queueAdminAction("refresh", key)}>{status?.status === "running" ? "同步中…" : "同步此市场"}</button>
+            <button type="button" disabled={status?.status === "running"} onClick={() => void queueAdminAction("refresh", key)}>{status?.status === "running" ? "同步中…" : "同步此市场"}</button>
           </article>;
         })}
       </div>
-      <AdminUnlock token={token} onToken={setToken} />
       <div className="universe-actions">
-        <button type="button" disabled={!token} onClick={() => void queueAdminAction("refresh")}>同步全部市场</button>
-        <button type="button" disabled={!token} onClick={() => void queueAdminAction("backfill")}>回补最近 30 天映射</button>
+        <button type="button" disabled={loading} onClick={() => void queueAdminAction("refresh")}>同步全部市场</button>
+        <button type="button" disabled={loading} onClick={() => void queueAdminAction("backfill")}>回补最近 30 天映射</button>
         <span>行业新闻自动关联每市场市值靠前代表股，关系标记为 industry_peer，最多 8 只。</span>
       </div>
       {message && <div className="page-message">{message}</div>}
@@ -3951,7 +3912,7 @@ export function AssetUniversePage({ apiBase }: { apiBase: string }) {
               <td><strong>{asset.association_tier === "standard" ? "标准" : asset.association_tier === "exact_only" ? "仅精确" : "仅手动"}</strong><small>{associationReasonLabels[asset.association_reason] || asset.association_reason}</small></td>
               <td>{asset.instrument_type || "—"}</td>
               <td>{universeTime(asset.last_synced_at)}</td>
-              <td><div className="universe-row-actions"><button type="button" disabled={researchingId === asset.asset_id || !asset.active} onClick={() => void researchAsset(asset)}>{researchingId === asset.asset_id ? "入队中…" : "研究"}</button><button type="button" disabled={!token} onClick={() => beginEdit(asset)}>编辑</button></div></td>
+              <td><div className="universe-row-actions"><button type="button" disabled={researchingId === asset.asset_id || !asset.active} onClick={() => void researchAsset(asset)}>{researchingId === asset.asset_id ? "入队中…" : "研究"}</button><button type="button" onClick={() => beginEdit(asset)}>编辑</button></div></td>
             </tr>)}
           </tbody>
         </table>
@@ -4020,13 +3981,12 @@ type ResearchPolicyEvaluation = {
 };
 
 export function ResearchPolicyPage({ apiBase }: { apiBase: string }) {
-  const [token, setToken] = useState(readToken);
   const [status, setStatus] = useState<ResearchPolicyStatus | null>(null);
   const [items, setItems] = useState<ResearchPolicyEvaluation[]>([]);
   const [reviewer, setReviewer] = useState("");
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(true);
-  const headers = { "Content-Type": "application/json", "X-Admin-Token": token };
+  const headers = { "Content-Type": "application/json" };
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
@@ -4041,7 +4001,7 @@ export function ResearchPolicyPage({ apiBase }: { apiBase: string }) {
   async function review(id: string, decision: "accepted" | "rejected") {
     if (!reviewer.trim()) { setMessage("请先填写复核人。 "); return; }
     const response = await fetch(`${apiBase}/go/research-policy/reviews`, { method: "POST", headers, body: JSON.stringify({ policy_evaluation_id: id, reviewer: reviewer.trim(), decision, note: "" }) });
-    if (!response.ok) { setMessage("保存复核失败，请检查管理员令牌或记录状态。"); return; }
+    if (!response.ok) { setMessage("保存复核失败，请检查记录状态或服务器访问配置。"); return; }
     setMessage("人工复核已保存。 "); await refresh();
   }
   async function approve() {
@@ -4059,10 +4019,9 @@ export function ResearchPolicyPage({ apiBase }: { apiBase: string }) {
       <span>批准状态<strong>{status?.approved ? "已批准" : "待批准"}</strong></span>
     </div>
     <p className="score-explanation">版本 {status?.version || "p0-evidence-v1"} · 事件影响分不等于投资评级；短期概率仅在独立校准有效时显示。</p>
-    <AdminUnlock token={token} onToken={setToken} />
-    {token && <div className="integration-editor"><label>复核人<input value={reviewer} onChange={(event) => setReviewer(event.target.value)} placeholder="姓名或工号" /></label><button type="button" disabled={!status?.ready_for_approval} onClick={() => void approve()}>批准切换资格</button><small>批准只记录资格；仍需将服务配置显式改为 enforce 才会启用。</small></div>}
+    <div className="integration-editor"><label>复核人<input value={reviewer} onChange={(event) => setReviewer(event.target.value)} placeholder="姓名或工号" /></label><button type="button" disabled={!status?.ready_for_approval} onClick={() => void approve()}>批准切换资格</button><small>批准只记录资格；仍需将服务配置显式改为 enforce 才会启用。</small></div>
     {message && <div className="page-message">{message}</div>}
-    {loading ? <div className="page-empty">正在读取影子评估…</div> : <div className="conclusion-list">{items.length === 0 ? <div className="page-empty">暂无可人工复核的有效定向影响。</div> : items.map((item) => <article className="conclusion-card" key={item.id}><span>{new Date(item.created_at).toLocaleString("zh-CN")} · {item.symbol || item.asset_id || item.event_id || "事件"}</span><h3>{item.headline || item.asset_name || "事件信号"}</h3><p>事件信号：{item.event_signal?.rating || "观望"} · {item.event_signal?.direction_score ?? 0}；证据状态：{item.evidence_quality?.status || "unknown"} · 质量 {Math.round((item.evidence_quality?.score || 0) * 100)}%</p>{item.evidence?.length > 0 && <details><summary>证据快照（最多 5 条）</summary>{item.evidence.map((evidence, index) => <p key={index}>{evidence.claim || evidence.excerpt || "证据"}{evidence.source_name ? ` · ${evidence.source_name}` : ""}</p>)}</details>}{item.decision ? <small>已由 {item.reviewer || "管理员"} 复核：{item.decision === "accepted" ? "接受" : "驳回"}</small> : token && <div><button type="button" onClick={() => void review(item.id, "accepted")}>接受</button><button type="button" onClick={() => void review(item.id, "rejected")}>驳回</button></div>}</article>)}</div>}
+    {loading ? <div className="page-empty">正在读取影子评估…</div> : <div className="conclusion-list">{items.length === 0 ? <div className="page-empty">暂无可人工复核的有效定向影响。</div> : items.map((item) => <article className="conclusion-card" key={item.id}><span>{new Date(item.created_at).toLocaleString("zh-CN")} · {item.symbol || item.asset_id || item.event_id || "事件"}</span><h3>{item.headline || item.asset_name || "事件信号"}</h3><p>事件信号：{item.event_signal?.rating || "观望"} · {item.event_signal?.direction_score ?? 0}；证据状态：{item.evidence_quality?.status || "unknown"} · 质量 {Math.round((item.evidence_quality?.score || 0) * 100)}%</p>{item.evidence?.length > 0 && <details><summary>证据快照（最多 5 条）</summary>{item.evidence.map((evidence, index) => <p key={index}>{evidence.claim || evidence.excerpt || "证据"}{evidence.source_name ? ` · ${evidence.source_name}` : ""}</p>)}</details>}{item.decision ? <small>已由 {item.reviewer || "管理员"} 复核：{item.decision === "accepted" ? "接受" : "驳回"}</small> : <div><button type="button" onClick={() => void review(item.id, "accepted")}>接受</button><button type="button" onClick={() => void review(item.id, "rejected")}>驳回</button></div>}</article>)}</div>}
   </section>;
 }
 
@@ -4364,7 +4323,6 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
   const [bundle, setBundle] = useState<FundamentalBundle>({});
   const [message, setMessage] = useState("输入规范 asset_id 后读取；缺失字段保持为空，不按零处理。");
   const [loading, setLoading] = useState(false);
-  const [token, setToken] = useState(readToken);
   const [workflowJSON, setWorkflowJSON] = useState("");
   const [scheduleJSON, setScheduleJSON] = useState("");
 	const [analystEvidenceJSON, setAnalystEvidenceJSON] = useState("");
@@ -4457,11 +4415,11 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 	}
 	async function registerAnalystEvidence() {
 		const canonical = assetID.trim();
-		if (!canonical || !token || !analystEvidencePreview || !analystEvidenceConfirmed) return;
+		if (!canonical || !analystEvidencePreview || !analystEvidenceConfirmed) return;
 		setLoading(true); setMessage("");
 		try {
 			const body = analystEvidenceBody(canonical, analystEvidenceJSON).body;
-			const response = await fetch(`${apiBase}/go/analyst-evidence`, { method: "POST", headers: { "Content-Type": "application/json", "X-Admin-Token": token, "Idempotency-Key": analystEvidenceRequestID }, body: JSON.stringify(body) });
+			const response = await fetch(`${apiBase}/go/analyst-evidence`, { method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": analystEvidenceRequestID }, body: JSON.stringify(body) });
 			const payload = await response.json() as { id?: string; detail?: string };
 			if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
 			const completedMessage = `分析师证据已不可变登记：${payload.id || "已保存"}。请将该 ID 引用到对应研究输入。`;
@@ -4484,7 +4442,7 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 	}
 	async function approveBenchmarkMapping() {
 		const canonical = assetID.trim();
-		if (!canonical || !token || !benchmarkMappingJSON.trim()) return;
+		if (!canonical || !benchmarkMappingJSON.trim()) return;
 		setLoading(true); setMessage("");
 		try {
 			const body = JSON.parse(benchmarkMappingJSON) as Record<string, unknown>;
@@ -4497,7 +4455,7 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 			for (const field of ["source_name", "source_document_id", "mapping_reason", "approved_by"] as const) {
 				if (!String(body[field] || "").trim()) throw new Error(`${field} 不能为空`);
 			}
-			const response = await fetch(`${apiBase}/go/benchmark-mappings`, { method: "POST", headers: { "Content-Type": "application/json", "X-Admin-Token": token, "Idempotency-Key": benchmarkMappingRequestID }, body: JSON.stringify(body) });
+			const response = await fetch(`${apiBase}/go/benchmark-mappings`, { method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": benchmarkMappingRequestID }, body: JSON.stringify(body) });
 			const payload = await response.json() as { created?: boolean; mapping?: { id?: string }; detail?: string };
 			if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
 			const completedMessage = `PIT 基准映射${payload.created ? "已不可变批准" : "已幂等读回"}：${payload.mapping?.id || "已保存"}。不会自动生成历史映射。`;
@@ -4509,10 +4467,10 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 	}
 	async function syncCanonicalBenchmarkPrice() {
 		const benchmarkAssetID = bundle.marketPolicy?.policy?.benchmark_id?.trim();
-		if (!benchmarkAssetID || !token) return;
+		if (!benchmarkAssetID) return;
 		setLoading(true); setMessage("");
 		try {
-			const response = await fetch(`${apiBase}/go/market-prices/${encodeURIComponent(benchmarkAssetID)}/sync?lookback_days=14`, { method: "POST", headers: { "X-Admin-Token": token } });
+			const response = await fetch(`${apiBase}/go/market-prices/${encodeURIComponent(benchmarkAssetID)}/sync?lookback_days=14`, { method: "POST" });
 			const payload = await response.json() as { task_id?: string; detail?: string };
 			if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
 			setMessage(`规范基准 ${benchmarkAssetID} 的复权行情同步任务已排队：${payload.task_id || "等待 Worker"}。该操作不批准基准映射。`);
@@ -4535,12 +4493,12 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 	}
 	async function importLicensedBenchmarkPrices() {
 		const benchmarkAssetID = bundle.marketPolicy?.policy?.benchmark_id?.trim() || "";
-		if (!benchmarkAssetID || !token || !licensedBenchmarkMetadataJSON.trim() || !licensedBenchmarkObservations.trim() || !licensedBenchmarkConfirmed) return;
+		if (!benchmarkAssetID || !licensedBenchmarkMetadataJSON.trim() || !licensedBenchmarkObservations.trim() || !licensedBenchmarkConfirmed) return;
 		setLoading(true); setMessage("");
 		try {
 			const body = licensedBenchmarkImportBody(benchmarkAssetID, licensedBenchmarkMetadataJSON, licensedBenchmarkObservations);
 			const response = await fetch(`${apiBase}/go/market-prices/${encodeURIComponent(benchmarkAssetID)}/licensed-import`, {
-				method: "POST", headers: { "Content-Type": "application/json", "X-Admin-Token": token, "Idempotency-Key": licensedBenchmarkRequestID }, body: JSON.stringify(body),
+				method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": licensedBenchmarkRequestID }, body: JSON.stringify(body),
 			});
 			const payload = await response.json() as { created?: boolean; detail?: string; receipt?: LicensedBenchmarkImportReceipt };
 			if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
@@ -4556,10 +4514,10 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 	}
 	async function loadLicensedBenchmarkReceipts() {
 		const benchmarkAssetID = bundle.marketPolicy?.policy?.benchmark_id?.trim() || "";
-		if (!benchmarkAssetID || !token || !licensedBenchmarkImportTemplate(benchmarkAssetID)) return;
+		if (!benchmarkAssetID || !licensedBenchmarkImportTemplate(benchmarkAssetID)) return;
 		setLoading(true); setMessage("");
 		try {
-			const response = await fetch(`${apiBase}/go/market-prices/${encodeURIComponent(benchmarkAssetID)}/licensed-imports?limit=20`, { headers: { "X-Admin-Token": token } });
+			const response = await fetch(`${apiBase}/go/market-prices/${encodeURIComponent(benchmarkAssetID)}/licensed-imports?limit=20`);
 			const payload = await response.json() as { items?: LicensedBenchmarkImportReceipt[]; detail?: string };
 			if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
 			const items = payload.items || [];
@@ -4623,12 +4581,12 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 	}
 	async function importTradability() {
 		const canonical = assetID.trim();
-		if (!canonical || !token || !tradabilityPreview || !tradabilityConfirmed) return;
+		if (!canonical || !tradabilityPreview || !tradabilityConfirmed) return;
 		setLoading(true); setMessage("");
 		try {
 			const body = tradabilityImportBody(canonical, tradabilityMetadataJSON, tradabilityObservations);
 			const response = await fetch(`${apiBase}/go/market-tradability/${encodeURIComponent(canonical)}/import`, {
-				method: "POST", headers: { "Content-Type": "application/json", "X-Admin-Token": token, "Idempotency-Key": tradabilityRequestID }, body: JSON.stringify(body),
+				method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": tradabilityRequestID }, body: JSON.stringify(body),
 			});
 			const payload = await response.json() as { created?: boolean; detail?: string; receipt?: TradabilityImportReceipt };
 			if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
@@ -4654,10 +4612,10 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 	}
 	async function loadTradabilityReceipts() {
 		const canonical = assetID.trim();
-		if (!canonical || !token || !tradabilityImportTemplate(canonical)) return;
+		if (!canonical || !tradabilityImportTemplate(canonical)) return;
 		setLoading(true); setMessage("");
 		try {
-			const response = await fetch(`${apiBase}/go/market-tradability/${encodeURIComponent(canonical)}/imports?limit=20`, { headers: { "X-Admin-Token": token } });
+			const response = await fetch(`${apiBase}/go/market-tradability/${encodeURIComponent(canonical)}/imports?limit=20`);
 			const payload = await response.json() as { items?: TradabilityImportReceipt[]; detail?: string };
 			if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
 			const items = payload.items || [];
@@ -4669,10 +4627,10 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 	}
 	async function syncMarketPrices() {
 		const canonical = assetID.trim();
-		if (!canonical || !token) return;
+		if (!canonical) return;
 		setLoading(true); setMessage("");
 		try {
-			const response = await fetch(`${apiBase}/go/market-prices/${encodeURIComponent(canonical)}/sync?lookback_days=14`, { method: "POST", headers: { "X-Admin-Token": token } });
+			const response = await fetch(`${apiBase}/go/market-prices/${encodeURIComponent(canonical)}/sync?lookback_days=14`, { method: "POST" });
 			const payload = await response.json() as { task_id?: string; detail?: string };
 			if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
 			setMessage(`真实复权价格同步任务已排队：${payload.task_id || "等待 Worker"}。完成后重新读取即可引用不可变价格证据。`);
@@ -4682,10 +4640,10 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 	}
 	async function syncConsensus() {
 		const canonical = assetID.trim();
-		if (!canonical || !token) return;
+		if (!canonical) return;
 		setLoading(true); setMessage("");
 		try {
-			const response = await fetch(`${apiBase}/go/consensus/${encodeURIComponent(canonical)}/sync?limit=10`, { method: "POST", headers: { "X-Admin-Token": token } });
+			const response = await fetch(`${apiBase}/go/consensus/${encodeURIComponent(canonical)}/sync?limit=10`, { method: "POST" });
 			const payload = await response.json() as { task_id?: string; detail?: string };
 			if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
 			setMessage(`一致预期首次观测任务已排队：${payload.task_id || "等待 Worker"}。完成后重新读取即可查看；不会倒填历史。`);
@@ -4695,10 +4653,10 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 	}
 	async function syncGuidanceSources() {
 		const canonical = assetID.trim();
-		if (!canonical || !token) return;
+		if (!canonical) return;
 		setLoading(true); setMessage("");
 		try {
-			const response = await fetch(`${apiBase}/go/consensus/${encodeURIComponent(canonical)}/guidance-sources/sync?limit=40`, { method: "POST", headers: { "X-Admin-Token": token } });
+			const response = await fetch(`${apiBase}/go/consensus/${encodeURIComponent(canonical)}/guidance-sources/sync?limit=40`, { method: "POST" });
 			const payload = await response.json() as { task_id?: string; detail?: string };
 			if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
 			setMessage(`SEC 官方披露候选同步任务已排队：${payload.task_id || "等待 Worker"}。候选不会自动变成管理层指引。`);
@@ -4708,14 +4666,14 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 	}
 	async function reviewGuidanceSource() {
 		const canonical = assetID.trim();
-		if (!canonical || !token || !guidanceReviewJSON.trim()) return;
+		if (!canonical || !guidanceReviewJSON.trim()) return;
 		setLoading(true); setMessage("");
 		try {
 			const body = JSON.parse(guidanceReviewJSON) as Record<string, unknown>;
 			const sourceDocumentID = typeof body.source_document_id === "string" ? body.source_document_id.trim() : "";
 			if (!sourceDocumentID) throw new Error("source_document_id 不能为空");
 			delete body.source_document_id;
-			const response = await fetch(`${apiBase}/go/consensus/${encodeURIComponent(canonical)}/guidance-sources/${encodeURIComponent(sourceDocumentID)}/reviews`, { method: "POST", headers: { "Content-Type": "application/json", "X-Admin-Token": token, "Idempotency-Key": guidanceReviewRequestID }, body: JSON.stringify(body) });
+			const response = await fetch(`${apiBase}/go/consensus/${encodeURIComponent(canonical)}/guidance-sources/${encodeURIComponent(sourceDocumentID)}/reviews`, { method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": guidanceReviewRequestID }, body: JSON.stringify(body) });
 			const payload = await response.json() as { detail?: string };
 			if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
 			setGuidanceReviewRequestID(globalThis.crypto?.randomUUID?.() || `guidance-review-${Date.now()}`);
@@ -4742,11 +4700,11 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 	}
   async function runWorkflow() {
     const canonical = assetID.trim();
-    if (!canonical || !token || !workflowPreview || !workflowConfirmed) return;
+    if (!canonical || !workflowPreview || !workflowConfirmed) return;
     setLoading(true); setMessage("");
     try {
       const body = fundamentalWorkflowBody(canonical, workflowJSON).body;
-      const response = await fetch(`${apiBase}/go/fundamental-research/${encodeURIComponent(canonical)}`, { method: "POST", headers: { "Content-Type": "application/json", "X-Admin-Token": token }, body: JSON.stringify(body) });
+      const response = await fetch(`${apiBase}/go/fundamental-research/${encodeURIComponent(canonical)}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       const payload = await response.json() as { status?: string; reason?: string; detail?: string; schedule_draft?: Record<string, unknown>; schedule_draft_controls?: { approval_required?: boolean; automatic_approval?: boolean; runtime_price_field?: string } };
       if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
 		const draftJSON = scheduleDraftJSON(payload);
@@ -4791,11 +4749,11 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 	}
   async function approveSchedule() {
     const canonical = assetID.trim();
-    if (!canonical || !token || !schedulePreview || !scheduleConfirmed) return;
+    if (!canonical || !schedulePreview || !scheduleConfirmed) return;
     setLoading(true); setMessage("");
     try {
       const body = fundamentalScheduleBody(canonical, scheduleJSON).body;
-      const response = await fetch(`${apiBase}/go/fundamental-research/${encodeURIComponent(canonical)}/schedule`, { method: "PUT", headers: { "Content-Type": "application/json", "X-Admin-Token": token, "Idempotency-Key": scheduleRequestID }, body: JSON.stringify(body) });
+      const response = await fetch(`${apiBase}/go/fundamental-research/${encodeURIComponent(canonical)}/schedule`, { method: "PUT", headers: { "Content-Type": "application/json", "Idempotency-Key": scheduleRequestID }, body: JSON.stringify(body) });
       const payload = await response.json() as { detail?: string };
       if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
       resetScheduleApproval();
@@ -4806,10 +4764,10 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
   }
   async function pauseSchedule() {
     const canonical = assetID.trim();
-    if (!canonical || !token) return;
+    if (!canonical) return;
     setLoading(true); setMessage("");
     try {
-      const response = await fetch(`${apiBase}/go/fundamental-research/${encodeURIComponent(canonical)}/schedule`, { method: "DELETE", headers: { "X-Admin-Token": token } });
+      const response = await fetch(`${apiBase}/go/fundamental-research/${encodeURIComponent(canonical)}/schedule`, { method: "DELETE" });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       await load(undefined, "定时基本面研究计划已暂停。");
     } catch (error) { setMessage(`暂停失败：${error instanceof Error ? error.message : "未知错误"}`); }
@@ -4847,8 +4805,7 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
       <input aria-label="规范资产 ID" value={assetID} onChange={(event) => { setAssetID(event.target.value); resetTradabilityApproval(); resetAnalystEvidenceApproval(); resetWorkflowApproval(); resetScheduleApproval(); }} />
       <button type="submit" disabled={loading}>{loading ? "读取中…" : "读取"}</button>
     </form>
-    <AdminUnlock token={token} onToken={setToken} />
-    {token && <div className="integration-editor">
+    <div className="integration-editor">
 		<label>分析师证据类型<select aria-label="分析师证据类型" value={analystEvidenceType} onChange={(event) => { setAnalystEvidenceType(event.target.value as AnalystEvidenceType); resetAnalystEvidenceApproval(); }}>{analystEvidenceTypes.map((type) => <option key={type} value={type}>{analystEvidenceTypeLabels[type]}</option>)}</select></label>
 		<button type="button" disabled={loading || !assetID.trim()} onClick={loadAnalystEvidenceTemplate}>生成分析师证据模板</button>
 		<label>分析师证据登记<textarea aria-label="分析师证据 JSON" rows={10} value={analystEvidenceJSON} onChange={(event) => { setAnalystEvidenceJSON(event.target.value); resetAnalystEvidenceApproval(); }} placeholder='先按类型生成模板；所有数值、observed_at、available_at、来源、理由和 approved_by 必须由分析师真实填写。' /></label>
@@ -4896,7 +4853,7 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 		<button type="button" disabled={loading || !schedulePreview || !scheduleConfirmed} onClick={() => void approveSchedule()}>批准定时研究</button>
       <button type="button" disabled={loading || schedule?.status !== "approved"} onClick={() => void pauseSchedule()}>暂停定时研究</button>
       <small>人工研究成功后会自动载入同源计划草稿，但 approved_by 保持空白且不会自动批准；计划运行时重新读取真实复权价。出现新财报、计划过期或缺少复权价时自动停止并等待复核。</small>
-    </div>}
+		</div>
     {message && <div className="page-message">{message}</div>}
     <div className="metric-grid">
 		<article><span>财务快照</span><strong>{bundle.fundamentals?.items?.length ?? 0}</strong><small>严格按 available_at 截止</small></article>
@@ -4905,7 +4862,7 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 		<article><span>PIT 基准映射</span><strong>{benchmarkResolution?.status === "available" ? "已批准" : "不可用"}</strong><small>{benchmarkMapping?.benchmark_asset_id || benchmarkResolution?.reason || bundle.marketPolicy?.policy?.benchmark_id || "等待市场策略"}</small></article>
 		<article><span>持牌总回报导入</span><strong>{licensedBenchmarkAvailable ? licensedBenchmarkAuditLoaded ? `${licensedBenchmarkReceipts.length} 份回执` : "人工入口已就绪" : "当前基准不适用"}</strong><small>{canonicalBenchmarkID || "读取资产后核对规范基准"} · 不自动获取或批准数据</small></article>
 		<article><span>可交易状态证据</span><strong>{latestTradability ? tradabilityStatusLabel(latestTradability[1].status) : "不可用"}</strong><small>{latestTradability ? `${latestTradability[0]} · ${latestTradability[1].source_count ?? 0} 个来源` : `${tradabilityItems.length} 条观测 · 禁止从价格推断`}</small></article>
-		<article><span>复权价格证据</span><strong>{typeof latestPrice?.price === "number" ? `${latestPrice.price} ${latestPrice.currency || ""}` : "不可用"}</strong><small>{latestPrice?.id || "管理员解锁后可同步真实复权价格，不自动写入研究假设"}</small></article>
+		<article><span>复权价格证据</span><strong>{typeof latestPrice?.price === "number" ? `${latestPrice.price} ${latestPrice.currency || ""}` : "不可用"}</strong><small>{latestPrice?.id || "可按需同步真实复权价格，不自动写入研究假设"}</small></article>
 		<article><span>一致预期返回</span><strong>{consensusItems.length}</strong><small>仅返回首次观测后可用的数据</small></article>
 		<article><span>管理层指引</span><strong>{guidanceItems.length}</strong><small>与分析师一致预期分开保存</small></article>
 		<article><span>官方披露候选</span><strong>{guidanceSourceItems.length}</strong><small>候选不等于管理层指引</small></article>
@@ -4915,7 +4872,7 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
       <article><span>基本面评级</span><strong>{rating?.result?.rating || rating?.result?.status || "不可用"}</strong><small>{rating?.result?.reason || rating?.state?.effective_at || "等待完整输入"}</small></article>
 		<article><span>短期预测</span><strong>{prediction?.status || "不可用"}</strong><small>{prediction?.status === "calibrated" && typeof prediction.probability === "number" ? `${Math.round(prediction.probability * 100)}%` : "未校准时不显示概率"}</small></article>
 		<article><span>资产政策</span><strong>{bundle.marketPolicy?.asset_class || "不可用"} · {bundle.marketPolicy?.market || "—"}</strong><small>{bundle.marketPolicy?.policy?.fundamental_supported ? "基本面可用" : "基本面不适用"} · {bundle.marketPolicy?.policy?.prediction_supported ? "短期预测可用" : "短期预测不适用"}</small></article>
-      <article><span>定时研究</span><strong>{schedule?.status || "未配置"}</strong><small>{schedule?.last_run_reason || schedule?.last_run_status || schedule?.next_run_at || "人工研究成功后自动载入同源计划草稿，仍需管理员显式批准"}</small></article>
+      <article><span>定时研究</span><strong>{schedule?.status || "未配置"}</strong><small>{schedule?.last_run_reason || schedule?.last_run_status || schedule?.next_run_at || "人工研究成功后自动载入同源计划草稿，仍需人工显式批准"}</small></article>
     </div>
 	<div className="conclusion-list">
 		<article className="conclusion-card">
@@ -4926,23 +4883,23 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 		</article>
 		<article className="conclusion-card">
 			<span>持牌导入回执</span>
-			<h3>{licensedBenchmarkAuditLoaded ? licensedBenchmarkReceipts.length ? `${licensedBenchmarkReceipts.length} 批已审计导入` : "尚无导入回执" : "等待管理员主动读取"}</h3>
+			<h3>{licensedBenchmarkAuditLoaded ? licensedBenchmarkReceipts.length ? `${licensedBenchmarkReceipts.length} 批已审计导入` : "尚无导入回执" : "等待主动读取"}</h3>
 			<p>{licensedBenchmarkReceipts.length ? `最近覆盖 ${licensedBenchmarkReceipts[0]?.session_start || "—"} 至 ${licensedBenchmarkReceipts[0]?.session_end || "—"}，共 ${licensedBenchmarkReceipts[0]?.observation_count ?? 0} 条。` : "回执历史不会通过公开行情接口返回；没有回执不能推断已经获得或导入持牌数据。"}</p>
-			<small>许可证与审批详情仅管理员可见 · 覆盖范围从实际不可变行情观测计算</small>
+			<small>许可证与审批详情仅在管理页面显示 · 覆盖范围从实际不可变行情观测计算</small>
 			{licensedBenchmarkReceipts.length > 0 && <details><summary>最近 20 批导入审计</summary>{licensedBenchmarkReceipts.map((item) => <p key={item.id}>{item.session_start || "—"} 至 {item.session_end || "—"} · {item.observation_count ?? 0} 条 / 首次新增 {item.inserted_count ?? 0} · {item.vendor_code || "—"} · {item.source_url ? <a href={item.source_url} target="_blank" rel="noreferrer">{item.source_name || item.source_document_id || "来源"}</a> : item.source_name || "—"} · 许可证 {item.license_reference || "—"} · 批准人 {item.approved_by || "—"} · {item.available_at ? new Date(item.available_at).toLocaleString("zh-CN") : "—"}</p>)}</details>}
 		</article>
 		<article className="conclusion-card">
 			<span>可交易状态决议</span>
 			<h3>{latestTradability ? `${latestTradability[0]} · ${tradabilityStatusLabel(latestTradability[1].status)}` : "尚无当时可用的状态证据"}</h3>
 			<p>{latestTradability ? `${latestTradability[1].source_count ?? 0} 个来源 · ${latestTradability[1].reason || "按最新来源一致性决议"}` : "没有观测时保持 unknown，不会依据收盘价、涨跌幅或公司行动推断可成交。"}</p>
-			<small>只有同一交易日所有来源的最新事实一致为可交易，入场和出场才可能解锁执行模拟</small>
+			<small>只有同一交易日所有来源的最新事实一致为可交易，入场和出场才可能启用执行模拟</small>
 			{tradabilitySessions.length > 0 && <details><summary>最近交易日决议</summary>{tradabilitySessions.slice(0, 20).map(([session, resolution]) => <p key={session}>{session} · {tradabilityStatusLabel(resolution.status)} · {resolution.source_count ?? 0} 个来源 · {resolution.reason || "—"}</p>)}</details>}
 			{tradabilityItems.length > 0 && <details><summary>公共来源事实</summary>{tradabilityItems.slice(0, 30).map((item) => <p key={item.id}>{item.session_date?.slice(0, 10) || "—"} · {tradabilityStatusLabel(item.status)} · {item.source_url ? <a href={item.source_url} target="_blank" rel="noreferrer">{item.source_name || item.source_document_id || "来源"}</a> : item.source_name || "—"} · 可得 {item.available_at ? new Date(item.available_at).toLocaleString("zh-CN") : "—"}</p>)}</details>}
 		</article>
 		<article className="conclusion-card">
 			<span>可交易状态导入回执</span>
-			<h3>{tradabilityAuditLoaded ? tradabilityReceipts.length ? `${tradabilityReceipts.length} 批已审计导入` : "尚无导入回执" : "等待管理员主动读取"}</h3>
-			<p>{tradabilityReceipts.length ? `最近覆盖 ${tradabilityReceipts[0]?.session_start || "—"} 至 ${tradabilityReceipts[0]?.session_end || "—"}，共 ${tradabilityReceipts[0]?.observation_count ?? 0} 条。` : "许可证与批准信息仅通过管理员接口读取；没有回执不能推断已经取得或导入状态数据。"}</p>
+			<h3>{tradabilityAuditLoaded ? tradabilityReceipts.length ? `${tradabilityReceipts.length} 批已审计导入` : "尚无导入回执" : "等待主动读取"}</h3>
+			<p>{tradabilityReceipts.length ? `最近覆盖 ${tradabilityReceipts[0]?.session_start || "—"} 至 ${tradabilityReceipts[0]?.session_end || "—"}，共 ${tradabilityReceipts[0]?.observation_count ?? 0} 条。` : "许可证与批准信息仅通过管理接口读取；没有回执不能推断已经取得或导入状态数据。"}</p>
 			<small>覆盖范围来自实际不可变观测 · 导入后不自动运行结果评价或评级</small>
 			{tradabilityReceipts.length > 0 && <details><summary>最近 20 批状态审计</summary>{tradabilityReceipts.map((item) => <p key={item.id}>{item.session_start || "—"} 至 {item.session_end || "—"} · {item.observation_count ?? 0} 条 / 首次新增 {item.inserted_count ?? 0} · {item.market || "—"} {item.currency || ""} · {item.source_url ? <a href={item.source_url} target="_blank" rel="noreferrer">{item.source_name || item.source_document_id || "来源"}</a> : item.source_name || "—"} · 许可证 {item.license_reference || "—"} · 批准人 {item.approved_by || "—"} · {item.available_at ? new Date(item.available_at).toLocaleString("zh-CN") : "—"}</p>)}</details>}
 		</article>
@@ -4970,7 +4927,7 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 		<article className="conclusion-card">
 			<span>分析师一致预期</span>
 			<h3>{consensusItems.length > 0 ? `${consensusItems.length} 条最近观测` : "尚无可用观测"}</h3>
-			<p>{consensusItems[0]?.available_at ? `最近观测：${new Date(consensusItems[0].available_at).toLocaleString("zh-CN")}` : "管理员可启动单标的 FMP 同步；数据不会倒填到首次观测之前。"}</p>
+			<p>{consensusItems[0]?.available_at ? `最近观测：${new Date(consensusItems[0].available_at).toLocaleString("zh-CN")}` : "可启动单标的 FMP 同步；数据不会倒填到首次观测之前。"}</p>
 			<small>供应商发布时间不可用：{consensus?.provider_publication_time_available === false ? "是" : "未确认"} · 历史倒填：{consensus?.historical_backfill === false ? "关闭" : "未确认"} · 自动评级：{consensus?.automatic_rating === false ? "关闭" : "未确认"}</small>
 			{consensusItems.length > 0 && <details><summary>观测明细（最多 12 条）</summary>{consensusItems.slice(0, 12).map((item) => <p key={item.id}>{item.metric || "指标"} · {item.statistic || "统计"} · {typeof item.estimate_value === "number" ? item.estimate_value : "—"} {item.currency || ""} · {item.fiscal_period_end || "—"}{item.analyst_count ? ` · ${item.analyst_count} 位分析师` : ""}</p>)}</details>}
 			{!!consensus?.revisions?.length && <details><summary>聚合预期修订</summary>{consensus.revisions.slice(0, 10).map((item) => <p key={item.current_id}>{item.metric || "指标"} · {item.statistic || "统计"} · {item.direction || "—"} {typeof item.absolute_change === "number" ? item.absolute_change : "—"} · 不推断单个分析师行为</p>)}</details>}
@@ -5021,12 +4978,12 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 }
 
 export function WeknoraPage({ apiBase }: { apiBase: string }) {
-  const [token, setToken] = useState(readToken); const [url, setUrl] = useState("http://10.15.0.28/"); const [draft, setDraft] = useState(url); const [message, setMessage] = useState(""); const [failed, setFailed] = useState(false);
+  const [url, setUrl] = useState("http://10.15.0.28/"); const [draft, setDraft] = useState(url); const [message, setMessage] = useState(""); const [failed, setFailed] = useState(false);
   useEffect(() => { fetch(`${apiBase}/api/v1/integrations/weknora`).then((r) => r.json()).then((payload: { url: string }) => { setUrl(payload.url); setDraft(payload.url); }).catch(() => setMessage("无法读取 WeKnora 配置，已使用默认地址。")); }, [apiBase]);
-  const headers = { "Content-Type": "application/json", "X-Admin-Token": token };
-  async function save() { const response = await fetch(`${apiBase}/api/v1/admin/integrations/weknora`, { method: "PUT", headers, body: JSON.stringify({ url: draft }) }); if (response.ok) { setUrl((await response.json()).url); setFailed(false); setMessage("WeKnora 地址已保存。"); } else setMessage("保存失败，请检查管理员令牌和 URL。"); }
+  const headers = { "Content-Type": "application/json" };
+  async function save() { const response = await fetch(`${apiBase}/api/v1/admin/integrations/weknora`, { method: "PUT", headers, body: JSON.stringify({ url: draft }) }); if (response.ok) { setUrl((await response.json()).url); setFailed(false); setMessage("WeKnora 地址已保存。"); } else setMessage("保存失败，请检查服务器访问配置和 URL。"); }
   async function test() { const response = await fetch(`${apiBase}/api/v1/admin/integrations/weknora/test`, { method: "POST", headers, body: JSON.stringify({ url: draft }) }); const payload = await response.json(); setMessage(payload.ok ? `连接成功（HTTP ${payload.status_code}）。` : `连接失败：${payload.error || payload.status_code}`); }
-  return <section className="app-page weknora-page"><PageHeading eyebrow="LOCAL KNOWLEDGE WORKBENCH" title="WeKnora" copy="内嵌本地知识库工作台；若服务禁止 iframe，可在新窗口中继续。" /><div className="weknora-toolbar"><a href={url} target="_blank" rel="noreferrer">新窗口打开</a><span>{failed ? "内嵌加载失败，请使用“新窗口打开”。" : "若下方为空白或提示拒绝连接，请使用“新窗口打开”。"}</span></div><div className="weknora-frame"><iframe title="WeKnora 本地知识库" src={url} onError={() => setFailed(true)} /></div><AdminUnlock token={token} onToken={setToken} />{token && <div className="integration-editor"><label>WeKnora URL<input type="url" value={draft} onChange={(e) => setDraft(e.target.value)} /></label><button type="button" onClick={test}>连接测试</button><button type="button" onClick={save}>保存</button></div>}{message && <div className="page-message">{message}</div>}</section>;
+  return <section className="app-page weknora-page"><PageHeading eyebrow="LOCAL KNOWLEDGE WORKBENCH" title="WeKnora" copy="内嵌本地知识库工作台；若服务禁止 iframe，可在新窗口中继续。" /><div className="weknora-toolbar"><a href={url} target="_blank" rel="noreferrer">新窗口打开</a><span>{failed ? "内嵌加载失败，请使用“新窗口打开”。" : "若下方为空白或提示拒绝连接，请使用“新窗口打开”。"}</span></div><div className="weknora-frame"><iframe title="WeKnora 本地知识库" src={url} onError={() => setFailed(true)} /></div><div className="integration-editor"><label>WeKnora URL<input type="url" value={draft} onChange={(e) => setDraft(e.target.value)} /></label><button type="button" onClick={test}>连接测试</button><button type="button" onClick={save}>保存</button></div>{message && <div className="page-message">{message}</div>}</section>;
 }
 
 export function RoutedPage({

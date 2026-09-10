@@ -23,6 +23,8 @@ const branch = process.env.VITE_BUILD_BRANCH
   || process.env.GITHUB_REF_NAME
   || gitValue(["branch", "--show-current"], "detached");
 const apiProxyTarget = process.env.VITE_API_PROXY_TARGET || "http://localhost:8000";
+const adminProxyToken = process.env.ADMIN_API_TOKEN || "";
+const adminProxyHeaders = adminProxyToken ? { "X-Admin-Token": adminProxyToken } : undefined;
 
 export default defineConfig({
   plugins: [react()],
@@ -36,6 +38,12 @@ export default defineConfig({
       "/api": {
         target: apiProxyTarget,
         changeOrigin: true,
+        headers: adminProxyHeaders,
+      },
+      "/go": {
+        target: apiProxyTarget,
+        changeOrigin: true,
+        headers: adminProxyHeaders,
       },
     },
   },
