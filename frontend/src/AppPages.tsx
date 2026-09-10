@@ -14,9 +14,10 @@ import {
 	type WorkflowPreview,
 } from "./FundamentalWorkflow";
 import ModelLogsPage from "./ModelLogs";
+import PhaseTwoReadinessPage from "./PhaseTwoReadiness";
 import { TargetTrendSummary, type TargetTrend } from "./TargetTrendSummary";
 
-export type AppRoute = "home" | "source-filter" | "sources" | "asset-universe" | "news" | "queue" | "analysis" | "conclusions" | "targets" | "fundamental" | "model-logs" | "policy" | "search" | "weknora";
+export type AppRoute = "home" | "source-filter" | "sources" | "asset-universe" | "news" | "queue" | "analysis" | "conclusions" | "targets" | "fundamental" | "readiness" | "model-logs" | "policy" | "search" | "weknora";
 
 export const navigationGroups: Record<"left" | "right", Array<{ route: AppRoute; label: string }>> = {
   left: [
@@ -29,6 +30,7 @@ export const navigationGroups: Record<"left" | "right", Array<{ route: AppRoute;
     { route: "conclusions", label: "结论" },
     { route: "targets", label: "标的" },
     { route: "fundamental", label: "基本面与预测" },
+		{ route: "readiness", label: "二期就绪度" },
   ],
   right: [
     { route: "model-logs", label: "模型日志" },
@@ -5038,6 +5040,7 @@ export function RoutedPage({
   if (route === "conclusions") return <ConclusionsPage apiBase={apiBase} />;
   if (route === "targets") return <ChangedTargetsPage apiBase={apiBase} />;
   if (route === "fundamental") return <FundamentalResearchPage apiBase={apiBase} />;
+	if (route === "readiness") return <PhaseTwoReadinessPage apiBase={apiBase} />;
   if (route === "sources") return <SourcesPage apiBase={apiBase} />;
   if (route === "asset-universe") return <AssetUniversePage apiBase={apiBase} />;
   if (route === "news") return <NewsPage apiBase={apiBase} />;

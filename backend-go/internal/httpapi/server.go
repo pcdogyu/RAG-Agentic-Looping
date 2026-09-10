@@ -80,6 +80,7 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) (*Serve
 	r.Post("/go/counter-research/ablation", s.counterResearchAblation)
 	r.Post("/go/model-evaluation/segmented-report", s.segmentedEvaluationReport)
 	r.Get("/go/model-evaluation/market-readiness", s.marketModelReadiness)
+	r.Get("/go/phase-two/readiness", s.phaseTwoReadiness)
 	r.Post("/go/consensus/{assetID}/estimates", s.importConsensusEstimate)
 	r.Post("/go/consensus/{assetID}/guidance", s.importManagementGuidance)
 	r.Get("/go/consensus/{assetID}", s.consensusAt)

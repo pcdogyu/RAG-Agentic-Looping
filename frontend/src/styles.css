@@ -693,6 +693,27 @@ h1 span { color: var(--mint); font-weight: 400; }
 .integration-editor label { flex: 1 1 320px; }
 .integration-editor .licensed-import-confirmation { display: flex; flex: 1 1 100%; align-items: center; grid-template-columns: none; gap: 9px; color: var(--amber); }
 .integration-editor .licensed-import-confirmation input { width: 17px; height: 17px; min-height: 0; padding: 0; accent-color: var(--mint); }
+.readiness-toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; padding: 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+.readiness-toolbar button { min-height: 38px; padding: 8px 14px; border: 1px solid var(--line); border-radius: 7px; color: var(--text); background: var(--model-surface); cursor: pointer; }
+.readiness-toolbar button:disabled { cursor: not-allowed; opacity: .45; }
+.readiness-toolbar span { color: var(--muted); font-size: 11px; }
+.readiness-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 14px; }
+.readiness-summary article { display: grid; gap: 6px; min-width: 0; padding: 16px; border: 1px solid var(--line); border-top: 3px solid var(--cyan); border-radius: 10px; background: var(--panel-surface); }
+.readiness-summary span, .readiness-summary small { color: var(--muted); font-size: 10px; }
+.readiness-summary strong { color: var(--mint); font: 500 21px "DM Mono", monospace; }
+.readiness-gates { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.readiness-gate { display: grid; align-content: start; gap: 9px; min-width: 0; padding: 16px; border: 1px solid var(--line); border-left: 3px solid var(--amber); border-radius: 10px; background: var(--panel-surface); }
+.readiness-gate.completed { border-left-color: var(--mint); }
+.readiness-gate.engineering_gap { border-left-color: var(--red); }
+.readiness-gate header, .readiness-gate footer { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.readiness-gate header span, .readiness-gate small, .readiness-gate footer { color: var(--muted); font-size: 10px; }
+.readiness-gate header strong { color: var(--amber); font-size: 10px; }
+.readiness-gate.completed header strong { color: var(--mint); }
+.readiness-gate.engineering_gap header strong { color: var(--red); }
+.readiness-gate h3, .readiness-gate p { margin: 0; }
+.readiness-gate p b { color: var(--cyan); font: 500 20px "DM Mono", monospace; }
+.readiness-gate footer { margin-top: auto; padding-top: 4px; border-top: 1px solid var(--line); }
+.readiness-gate footer a { color: var(--cyan); }
 .universe-status-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 14px; }
 .universe-status { display: grid; gap: 6px; min-width: 0; padding: 16px; border: 1px solid var(--line); border-top: 3px solid var(--cyan); border-radius: 10px; background: var(--panel-surface); }
 .universe-status.failed { border-top-color: var(--red); }
@@ -804,6 +825,7 @@ h1 span { color: var(--mint); font-weight: 400; }
   .unified-target-change-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .model-runtime-overview { grid-template-columns: repeat(4, minmax(105px, 1fr)); }
   .model-runtime-card-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+	.readiness-gates { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media (max-width: 900px) {
@@ -838,6 +860,7 @@ h1 span { color: var(--mint); font-weight: 400; }
   .queue-metrics { flex-wrap: wrap; }
   .queue-metrics > span { flex: 1 1 calc(50% - 8px); }
   .universe-status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+	.readiness-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media (max-width: 560px) {
@@ -884,6 +907,8 @@ h1 span { color: var(--mint); font-weight: 400; }
   .target-change-card { min-height: 0; padding: 13px; }
   .target-change-error, .target-detail-error { align-items: stretch; flex-direction: column; }
   .universe-status-grid { grid-template-columns: 1fr; }
+	.readiness-summary, .readiness-gates { grid-template-columns: 1fr; }
+	.readiness-toolbar { align-items: stretch; flex-direction: column; }
   .universe-actions > button, .universe-filters > *, .universe-pagination > * { width: 100%; }
   .conclusion-score { text-align: left; }
   .event-conclusion-summary { justify-items: start; min-width: 0; text-align: left; }

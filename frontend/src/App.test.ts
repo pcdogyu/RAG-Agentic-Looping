@@ -692,6 +692,7 @@ describe("shared hash navigation", () => {
     expect(routeFromHash("#/news")).toBe("news");
     expect(routeFromHash("#/queue")).toBe("queue");
     expect(routeFromHash("#/analysis")).toBe("analysis");
+		expect(routeFromHash("#/readiness")).toBe("readiness");
     expect(routeFromHash("#/model-logs")).toBe("model-logs");
     expect(routeFromHash("#/policy")).toBe("policy");
     expect(routeFromHash("#/search")).toBe("search");
@@ -702,7 +703,7 @@ describe("shared hash navigation", () => {
 
   it("renders grouped menu links in order and exposes the current page accessibly", () => {
     expect(navigationGroups.left.map((item) => item.route)).toEqual([
-      "home", "source-filter", "sources", "news", "queue", "analysis", "conclusions", "targets", "fundamental",
+			"home", "source-filter", "sources", "news", "queue", "analysis", "conclusions", "targets", "fundamental", "readiness",
     ]);
     expect(navigationGroups.right.map((item) => item.route)).toEqual([
       "model-logs", "policy", "asset-universe", "search", "weknora",
@@ -712,7 +713,7 @@ describe("shared hash navigation", () => {
     const queueMarkup = renderToStaticMarkup(createElement(TopNavigation, { current: "queue" }));
     const analysisMarkup = renderToStaticMarkup(createElement(TopNavigation, { current: "analysis" }));
     const targetsMarkup = renderToStaticMarkup(createElement(TopNavigation, { current: "targets" }));
-    expect((markup.match(/<a /g) || []).length).toBe(14);
+		expect((markup.match(/<a /g) || []).length).toBe(15);
     expect(markup).toContain('href="#/source-filter" aria-current="page"');
     expect(newsMarkup).toContain('href="#/news" aria-current="page"');
     expect(queueMarkup).toContain('href="#/queue" aria-current="page"');
