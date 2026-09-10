@@ -15,17 +15,35 @@ import (
 const phaseTwoReadinessVersion = "phase-two-readiness-v1"
 
 type phaseTwoOutcomeEvaluationFacts struct {
-	JobID          string         `json:"job_id"`
-	Status         string         `json:"status"`
-	CreatedAt      *time.Time     `json:"created_at,omitempty"`
-	CompletedAt    *time.Time     `json:"completed_at,omitempty"`
-	Selected       int            `json:"selected"`
-	Matured        int            `json:"matured"`
-	Pending        int            `json:"pending"`
-	Unavailable    int            `json:"unavailable"`
-	Excluded       int            `json:"excluded"`
-	Failed         int            `json:"failed"`
-	PendingReasons map[string]int `json:"pending_reasons"`
+	JobID                        string                            `json:"job_id"`
+	Status                       string                            `json:"status"`
+	SummaryStatus                string                            `json:"summary_status"`
+	CreatedAt                    *time.Time                        `json:"created_at,omitempty"`
+	CompletedAt                  *time.Time                        `json:"completed_at,omitempty"`
+	Selected                     int                               `json:"selected"`
+	Matured                      int                               `json:"matured"`
+	Pending                      int                               `json:"pending"`
+	Unavailable                  int                               `json:"unavailable"`
+	Excluded                     int                               `json:"excluded"`
+	Failed                       int                               `json:"failed"`
+	PendingReasons               map[string]int                    `json:"pending_reasons"`
+	WarningCount                 int                               `json:"warning_count"`
+	LegacyRecommendationOutcomes phaseTwoLegacyRecommendationFacts `json:"legacy_recommendation_outcomes"`
+}
+
+type phaseTwoLegacyRecommendationFacts struct {
+	Created int `json:"created"`
+	Pending int `json:"pending"`
+	Skipped int `json:"skipped"`
+	Failed  int `json:"failed"`
+}
+
+type phaseTwoOutcomeEvaluationResult struct {
+	Outcomes           int                            `json:"outcomes"`
+	Pending            int                            `json:"pending"`
+	Skipped            int                            `json:"skipped"`
+	Failed             int                            `json:"failed"`
+	PredictionOutcomes phaseTwoOutcomeEvaluationFacts `json:"prediction_outcomes"`
 }
 
 type phaseTwoReadinessFacts struct {
@@ -101,7 +119,7 @@ func loadPhaseTwoReadinessFacts(ctx context.Context, s *Server, asOf time.Time) 
 		SECIdentityConfigured:             consensus.ValidateSECIdentity(s.cfg.SECIdentity) == nil,
 		FinalHoldoutEvaluationImplemented: true,
 		LatestOutcomeEvaluation: phaseTwoOutcomeEvaluationFacts{
-			Status: "not_run", PendingReasons: map[string]int{},
+			Status: "not_run", SummaryStatus: "not_run", PendingReasons: map[string]int{},
 		},
 	}
 	err := s.db.QueryRow(ctx, `WITH active_equity_coverage AS (
@@ -164,7 +182,7 @@ func loadPhaseTwoReadinessFacts(ctx context.Context, s *Server, asOf time.Time) 
 	}
 	var summaryJSON []byte
 	err = s.db.QueryRow(ctx, `SELECT id::text,status,created_at,completed_at,
-		coalesce(result->'prediction_outcomes','{}'::jsonb)::jsonb
+		coalesce(result,'{}'::jsonb)::jsonb
 		FROM go_jobs WHERE task_type='market_loop.evaluate_outcomes' AND created_at<=$1
 		ORDER BY created_at DESC,id DESC LIMIT 1`, asOf).Scan(
 		&facts.LatestOutcomeEvaluation.JobID, &facts.LatestOutcomeEvaluation.Status,
@@ -175,13 +193,39 @@ func loadPhaseTwoReadinessFacts(ctx context.Context, s *Server, asOf time.Time) 
 	if err != nil {
 		return facts, fmt.Errorf("load latest prediction outcome evaluation: %w", err)
 	}
-	if err = json.Unmarshal(summaryJSON, &facts.LatestOutcomeEvaluation); err != nil {
+	if err = applyPhaseTwoOutcomeEvaluationResult(&facts.LatestOutcomeEvaluation, summaryJSON); err != nil {
 		return facts, fmt.Errorf("decode latest prediction outcome evaluation: %w", err)
 	}
-	if facts.LatestOutcomeEvaluation.PendingReasons == nil {
-		facts.LatestOutcomeEvaluation.PendingReasons = map[string]int{}
-	}
 	return facts, nil
+}
+
+func applyPhaseTwoOutcomeEvaluationResult(facts *phaseTwoOutcomeEvaluationFacts, resultJSON []byte) error {
+	result := phaseTwoOutcomeEvaluationResult{}
+	if len(resultJSON) > 0 && string(resultJSON) != "null" {
+		if err := json.Unmarshal(resultJSON, &result); err != nil {
+			return err
+		}
+	}
+	prediction := result.PredictionOutcomes
+	facts.Selected = prediction.Selected
+	facts.Matured = prediction.Matured
+	facts.Pending = prediction.Pending
+	facts.Unavailable = prediction.Unavailable
+	facts.Excluded = prediction.Excluded
+	facts.Failed = prediction.Failed
+	facts.PendingReasons = prediction.PendingReasons
+	if facts.PendingReasons == nil {
+		facts.PendingReasons = map[string]int{}
+	}
+	facts.LegacyRecommendationOutcomes = phaseTwoLegacyRecommendationFacts{
+		Created: result.Outcomes, Pending: result.Pending, Skipped: result.Skipped, Failed: result.Failed,
+	}
+	facts.WarningCount = result.Failed + prediction.Failed
+	facts.SummaryStatus = facts.Status
+	if facts.Status == "completed" && facts.WarningCount > 0 {
+		facts.SummaryStatus = "completed_with_warnings"
+	}
+	return nil
 }
 
 func buildPhaseTwoReadinessReport(facts phaseTwoReadinessFacts, asOf time.Time) phaseTwoReadinessReport {

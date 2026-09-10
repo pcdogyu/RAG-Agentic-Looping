@@ -2,7 +2,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import { isOutcomeEvaluationTerminalState, PhaseTwoReadinessPanel, phaseTwoPendingReasonLabel, phaseTwoReadinessStatusLabel, type PhaseTwoReadinessReport } from "./PhaseTwoReadiness";
+import { isOutcomeEvaluationTerminalState, PhaseTwoReadinessPanel, phaseTwoOutcomeEvaluationStatusLabel, phaseTwoPendingReasonLabel, phaseTwoReadinessStatusLabel, type PhaseTwoReadinessReport } from "./PhaseTwoReadiness";
 
 describe("phase two readiness presentation", () => {
 	it("keeps engineering, human input, and natural maturity states distinct", () => {
@@ -18,6 +18,24 @@ describe("phase two readiness presentation", () => {
 		expect(isOutcomeEvaluationTerminalState("cancelled")).toBe(true);
 		expect(isOutcomeEvaluationTerminalState("running")).toBe(false);
 		expect(isOutcomeEvaluationTerminalState("pending")).toBe(false);
+		expect(phaseTwoOutcomeEvaluationStatusLabel("completed_with_warnings")).toBe("已完成（有警告）");
+	});
+
+	it("separates prediction labels from safe legacy outcome warnings", () => {
+		const report: PhaseTwoReadinessReport = {
+			version: "phase-two-readiness-v1", as_of: "2026-09-10T00:00:00Z", overall_status: "blocked",
+			completed_gates: 0, total_blocking_gates: 0, automatic_completion: false,
+			facts: {
+				pending_prediction_labels: 111, licensed_benchmark_import_receipts: 0, tradability_import_receipts: 0,
+				latest_outcome_evaluation: { job_id: "job-warning", status: "completed", summary_status: "completed_with_warnings", selected: 111, matured: 0, pending: 111, unavailable: 0, excluded: 0, failed: 0, pending_reasons: { awaiting_price_sessions: 111 }, warning_count: 10, legacy_recommendation_outcomes: { created: 0, pending: 28, skipped: 499, failed: 10 } },
+			},
+			gates: [],
+		};
+		const html = renderToStaticMarkup(createElement(PhaseTwoReadinessPanel, { report }));
+		expect(html).toContain("已完成（有警告）");
+		expect(html).toContain("同任务存在 10 条分支级警告");
+		expect(html).toContain("预测标签失败 0；历史推荐结果失败 10");
+		expect(html).toContain("原始失败文本和内部地址不在此页面返回或展示");
 	});
 
 	it("renders blocked truth and actionable dependencies without claiming completion", () => {

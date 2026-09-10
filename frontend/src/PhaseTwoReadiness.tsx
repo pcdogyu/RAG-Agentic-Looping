@@ -32,6 +32,7 @@ export type PhaseTwoReadinessReport = {
 		latest_outcome_evaluation?: {
 			job_id: string;
 			status: string;
+			summary_status?: string;
 			created_at?: string;
 			completed_at?: string;
 			selected: number;
@@ -41,6 +42,8 @@ export type PhaseTwoReadinessReport = {
 			excluded: number;
 			failed: number;
 			pending_reasons: Record<string, number>;
+			warning_count?: number;
+			legacy_recommendation_outcomes?: { created: number; pending: number; skipped: number; failed: number };
 		};
 	};
 	gates: PhaseTwoReadinessGate[];
@@ -61,6 +64,16 @@ const statusLabels: Record<string, string> = {
 	ready_for_manual_action: "可人工执行",
 	engineering_gap: "工程缺口",
 };
+const outcomeEvaluationStatusLabels: Record<string, string> = {
+	not_run: "尚未运行",
+	queued: "排队中",
+	running: "运行中",
+	retrying: "重试中",
+	completed: "已完成",
+	completed_with_warnings: "已完成（有警告）",
+	failed: "失败",
+	cancelled: "已取消",
+};
 
 function readToken() {
 	if (typeof window === "undefined") return "";
@@ -73,6 +86,10 @@ export function phaseTwoReadinessStatusLabel(status: string) {
 
 export function phaseTwoPendingReasonLabel(reason: string) {
 	return pendingReasonLabels[reason] || reason || "未提供原因";
+}
+
+export function phaseTwoOutcomeEvaluationStatusLabel(status: string) {
+	return outcomeEvaluationStatusLabels[status] || status || "未知";
 }
 
 export function isOutcomeEvaluationTerminalState(state: string) {
@@ -103,6 +120,8 @@ type PhaseTwoReadinessPanelProps = {
 export function PhaseTwoReadinessPanel({ report, onEvaluateOutcomes, outcomeEvaluationBusy = false, outcomeEvaluationMessage = "" }: PhaseTwoReadinessPanelProps) {
 	const completed = report.gates.filter((gate) => gate.status === "completed").length;
 	const latest = report.facts.latest_outcome_evaluation || { job_id: "", status: "not_run", selected: 0, matured: 0, pending: 0, unavailable: 0, excluded: 0, failed: 0, pending_reasons: {} };
+	const summaryStatus = latest.summary_status || latest.status;
+	const legacy = latest.legacy_recommendation_outcomes || { created: 0, pending: 0, skipped: 0, failed: 0 };
 	return <>
 		<div className="readiness-summary">
 			<article><span>总体状态</span><strong>{report.overall_status === "eligible_for_human_acceptance" ? "可人工验收" : "尚未完成"}</strong><small>系统不会自动标记第二期完成</small></article>
@@ -111,9 +130,10 @@ export function PhaseTwoReadinessPanel({ report, onEvaluateOutcomes, outcomeEval
 			<article><span>授权导入回执</span><strong>{report.facts.licensed_benchmark_import_receipts + report.facts.tradability_import_receipts}</strong><small>持牌基准 + 可交易状态</small></article>
 		</div>
 		<section className="readiness-outcome-evaluation">
-			<header><div><span>LATEST OUTCOME EVALUATION</span><h2>最近一次真实结果评估</h2></div><div className="readiness-outcome-actions"><strong>{latest.status === "not_run" ? "尚未运行" : latest.status}</strong>{onEvaluateOutcomes && <button type="button" disabled={outcomeEvaluationBusy} onClick={onEvaluateOutcomes}>{outcomeEvaluationBusy ? "检查中…" : "重新检查成熟标签"}</button>}</div></header>
+			<header><div><span>LATEST OUTCOME EVALUATION</span><h2>最近一次真实结果评估</h2></div><div className="readiness-outcome-actions"><strong className={summaryStatus === "completed_with_warnings" ? "warning" : ""}>{phaseTwoOutcomeEvaluationStatusLabel(summaryStatus)}</strong>{onEvaluateOutcomes && <button type="button" disabled={outcomeEvaluationBusy} onClick={onEvaluateOutcomes}>{outcomeEvaluationBusy ? "检查中…" : "重新检查成熟标签"}</button>}</div></header>
 			<p className="readiness-outcome-note">严格按冻结的 1/5/20 个交易日门槛检查，不允许提前成熟；已有活动任务时复用同一任务 ID。</p>
 			{outcomeEvaluationMessage && <p className="readiness-outcome-message" role="status">{outcomeEvaluationMessage}</p>}
+			{(latest.warning_count || 0) > 0 && <div className="readiness-outcome-warning" role="status"><strong>同任务存在 {latest.warning_count} 条分支级警告</strong><span>预测标签失败 {latest.failed}；历史推荐结果失败 {legacy.failed}。原始失败文本和内部地址不在此页面返回或展示。</span></div>}
 			{latest.status === "not_run" ? <p>生产库还没有同源结果任务记录。</p> : <>
 				<div className="readiness-outcome-counts">
 					<span>选中 <b>{latest.selected}</b></span><span>成熟 <b>{latest.matured}</b></span><span>等待 <b>{latest.pending}</b></span><span>不可用 <b>{latest.unavailable}</b></span><span>排除 <b>{latest.excluded}</b></span><span>失败 <b>{latest.failed}</b></span>
@@ -183,13 +203,13 @@ export default function PhaseTwoReadinessPage({ apiBase }: { apiBase: string }) 
 			const taskID = payload.task_id;
 			setOutcomeEvaluationMessage(`任务 ${taskID} 已入队，正在等待最终状态…`);
 			for (let attempt = 0; attempt < 300; attempt += 1) {
-				const statusResponse = await fetch(`${apiBase}/api/v1/tasks/${encodeURIComponent(taskID)}`, { signal: controller.signal });
-				const statusPayload = await statusResponse.json().catch(() => ({})) as { state?: string };
+				const statusResponse = await fetch(`${apiBase}/go/outcome-labels/evaluations/${encodeURIComponent(taskID)}`, { headers: { "X-Admin-Token": token }, signal: controller.signal });
+				const statusPayload = await statusResponse.json().catch(() => ({})) as { status?: string; summary_status?: string; warning_count?: number };
 				if (!statusResponse.ok) throw new Error(`状态查询失败（HTTP ${statusResponse.status}）`);
-				const state = (statusPayload.state || "PENDING").toUpperCase();
+				const state = (statusPayload.status || "pending").toUpperCase();
 				if (isOutcomeEvaluationTerminalState(state)) {
 					await load();
-					setOutcomeEvaluationMessage(state === "COMPLETED" ? `任务 ${taskID} 已完成，成熟度统计已刷新。` : `任务 ${taskID} 已${state === "CANCELLED" ? "取消" : "失败"}；未展示内部错误详情，请检查服务日志。`);
+					setOutcomeEvaluationMessage(state === "COMPLETED" ? `任务 ${taskID} 已完成${statusPayload.summary_status === "completed_with_warnings" ? `，含 ${statusPayload.warning_count || 0} 条安全汇总警告` : ""}；成熟度统计已刷新。` : `任务 ${taskID} 已${state === "CANCELLED" ? "取消" : "失败"}；未展示内部错误详情，请检查服务日志。`);
 					return;
 				}
 				await waitForOutcomeEvaluationPoll(controller.signal);

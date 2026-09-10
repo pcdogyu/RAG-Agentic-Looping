@@ -56,6 +56,7 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) (*Serve
 	r.Get("/go/market-data-quality", s.marketDataQuality)
 	r.Get("/go/outcome-labels/{assetID}", s.predictionOutcomeLabels)
 	r.Post("/go/outcome-labels/evaluate", s.evaluatePredictionOutcomes)
+	r.Get("/go/outcome-labels/evaluations/{taskID}", s.predictionOutcomeEvaluationStatus)
 	r.Get("/go/evaluation-holdouts", s.listEvaluationHoldouts)
 	r.Post("/go/evaluation-holdouts", s.createEvaluationHoldout)
 	r.Get("/go/evaluation-datasets", s.listEvaluationDatasets)

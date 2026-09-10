@@ -37,6 +37,7 @@ func TestEvaluationDatasetEndpointsRequireAdminToken(t *testing.T) {
 		{http.MethodGet, "/go/model-governance/failure-drills"},
 		{http.MethodPost, "/go/model-governance/failure-drills"},
 		{http.MethodGet, "/go/phase-two/readiness"},
+		{http.MethodGet, "/go/outcome-labels/evaluations/11111111-1111-4111-8111-111111111111"},
 	} {
 		response := httptest.NewRecorder()
 		server.Handler().ServeHTTP(response, httptest.NewRequest(request.method, request.path, nil))

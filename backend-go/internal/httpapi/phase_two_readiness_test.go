@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
@@ -12,6 +13,24 @@ import (
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/config"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/migrate"
 )
+
+func TestOutcomeEvaluationSummaryReportsPartialSuccessWithoutRawFailures(t *testing.T) {
+	facts := phaseTwoOutcomeEvaluationFacts{Status: "completed"}
+	result := []byte(`{"outcomes":2,"pending":3,"skipped":4,"failed":10,"failures":["provider URL and detail"],"prediction_outcomes":{"selected":111,"matured":0,"pending":111,"failed":0,"pending_reasons":{"awaiting_price_sessions":111}}}`)
+	if err := applyPhaseTwoOutcomeEvaluationResult(&facts, result); err != nil {
+		t.Fatal(err)
+	}
+	if facts.SummaryStatus != "completed_with_warnings" || facts.WarningCount != 10 || facts.LegacyRecommendationOutcomes.Failed != 10 || facts.Pending != 111 {
+		t.Fatalf("partial success was not summarized: %#v", facts)
+	}
+	encoded, err := json.Marshal(facts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "provider URL") || strings.Contains(string(encoded), "failures") {
+		t.Fatalf("raw failure detail escaped safe summary: %s", encoded)
+	}
+}
 
 func TestPhaseTwoReadinessKeepsMissingTruthExplicit(t *testing.T) {
 	report := buildPhaseTwoReadinessReport(phaseTwoReadinessFacts{ActiveEquityAssets: 12, PendingPredictionLabels: 66}, time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC))
@@ -146,7 +165,7 @@ func TestPhaseTwoReadinessReadsEmptyMigratedPostgres(t *testing.T) {
 	jobID := "11111111-1111-4111-8111-111111111111"
 	if _, err = pool.Exec(ctx, `INSERT INTO go_jobs(id,queue,task_type,payload,status,result,created_at,completed_at)
 		VALUES($1,'outcomes','market_loop.evaluate_outcomes','{}','completed',
-		'{"prediction_outcomes":{"selected":96,"matured":0,"pending":96,"unavailable":0,"excluded":0,"failed":0,"pending_reasons":{"awaiting_price_sessions":96}}}',
+		'{"outcomes":0,"pending":28,"skipped":499,"failed":10,"failures":["provider URL and detail"],"prediction_outcomes":{"selected":96,"matured":0,"pending":96,"unavailable":0,"excluded":0,"failed":0,"pending_reasons":{"awaiting_price_sessions":96}}}',
 		$2,$2)`, jobID, time.Now().UTC().Add(-time.Minute)); err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +174,7 @@ func TestPhaseTwoReadinessReadsEmptyMigratedPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	latest := facts.LatestOutcomeEvaluation
-	if latest.JobID != jobID || latest.Status != "completed" || latest.Selected != 96 || latest.Pending != 96 || latest.PendingReasons["awaiting_price_sessions"] != 96 || latest.CreatedAt == nil || latest.CompletedAt == nil {
+	if latest.JobID != jobID || latest.Status != "completed" || latest.SummaryStatus != "completed_with_warnings" || latest.WarningCount != 10 || latest.LegacyRecommendationOutcomes.Failed != 10 || latest.Selected != 96 || latest.Pending != 96 || latest.PendingReasons["awaiting_price_sessions"] != 96 || latest.CreatedAt == nil || latest.CompletedAt == nil {
 		t.Fatalf("latest outcome evaluation was not summarized safely: %#v", latest)
 	}
 }

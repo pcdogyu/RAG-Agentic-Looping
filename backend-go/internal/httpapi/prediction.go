@@ -8,6 +8,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/governance"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/marketpolicy"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/prediction"
@@ -32,6 +33,38 @@ func (s *Server) evaluatePredictionOutcomes(w http.ResponseWriter, r *http.Reque
 		"task_id": queuedID, "status": "queued", "task_type": "market_loop.evaluate_outcomes",
 		"label_definition_version": "prediction-outcome-label-v1", "early_maturity_allowed": false,
 	})
+}
+
+// predictionOutcomeEvaluationStatus exposes only branch counts and a derived
+// summary state. The generic task endpoint remains backward compatible, while
+// the administrator workbench never needs to download raw provider failures.
+func (s *Server) predictionOutcomeEvaluationStatus(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	taskID, err := uuid.Parse(chi.URLParam(r, "taskID"))
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "task_id path is invalid")
+		return
+	}
+	facts := phaseTwoOutcomeEvaluationFacts{PendingReasons: map[string]int{}}
+	var resultJSON []byte
+	err = s.db.QueryRow(r.Context(), `SELECT id::text,status,created_at,completed_at,coalesce(result,'{}'::jsonb)::jsonb
+		FROM go_jobs WHERE id=$1 AND task_type='market_loop.evaluate_outcomes'`, taskID).Scan(
+		&facts.JobID, &facts.Status, &facts.CreatedAt, &facts.CompletedAt, &resultJSON)
+	if err == pgx.ErrNoRows {
+		writeError(w, http.StatusNotFound, "outcome evaluation task not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "outcome evaluation status query failed")
+		return
+	}
+	if err = applyPhaseTwoOutcomeEvaluationResult(&facts, resultJSON); err != nil {
+		writeError(w, http.StatusInternalServerError, "outcome evaluation status decode failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, facts)
 }
 
 func (s *Server) registerPredictionModel(w http.ResponseWriter, r *http.Request) {
