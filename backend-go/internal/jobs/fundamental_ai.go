@@ -155,7 +155,8 @@ func (runtime *researchRuntime) prepareFundamentalAI(ctx context.Context, job Jo
 			return fail(err)
 		}
 		prompt := fundamentalAIPrompt(assetID, symbol, name, preparation, available)
-		modelErr := runtime.callResearchModel(ctx, runID, "fundamental_ai_run", "fundamental_ai_reasoning", fundamentalAISystemPrompt(), prompt, fundamentalAISchema(), instanceID, researchProfileFast, "fundamental_ai_prepare", &draft)
+		system := resolveModelPrompt(ctx, runtime.db, PromptFundamentalAI, fundamentalAISystemPrompt())
+		modelErr := runtime.callResearchModel(ctx, runID, "fundamental_ai_run", "fundamental_ai_reasoning", system, prompt, fundamentalAISchema(), instanceID, researchProfileFast, "fundamental_ai_prepare", &draft)
 		releaseInstance()
 		if modelErr != nil {
 			return fail(modelErr)

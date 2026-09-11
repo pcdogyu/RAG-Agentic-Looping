@@ -14,10 +14,11 @@ import {
 	type WorkflowPreview,
 } from "./FundamentalWorkflow";
 import ModelLogsPage from "./ModelLogs";
+import ModelPromptsPage from "./ModelPrompts";
 import PhaseTwoReadinessPage from "./PhaseTwoReadiness";
 import { TargetTrendSummary, type TargetTrend } from "./TargetTrendSummary";
 
-export type AppRoute = "home" | "source-filter" | "sources" | "asset-universe" | "news" | "queue" | "analysis" | "conclusions" | "targets" | "fundamental" | "readiness" | "model-logs" | "policy" | "search" | "weknora";
+export type AppRoute = "home" | "source-filter" | "sources" | "asset-universe" | "news" | "queue" | "analysis" | "conclusions" | "targets" | "fundamental" | "readiness" | "model-prompts" | "model-logs" | "policy" | "search" | "weknora";
 
 export const navigationGroups: Record<"left" | "right", Array<{ route: AppRoute; label: string }>> = {
   left: [
@@ -33,6 +34,7 @@ export const navigationGroups: Record<"left" | "right", Array<{ route: AppRoute;
 		{ route: "readiness", label: "二期就绪度" },
   ],
   right: [
+    { route: "model-prompts", label: "模型提示词" },
     { route: "model-logs", label: "模型日志" },
     { route: "policy", label: "策略影子期" },
     { route: "asset-universe", label: "资产主数据" },
@@ -5197,6 +5199,7 @@ export function RoutedPage({
 }: {
   route: Exclude<AppRoute, "home">; apiBase: string; analysisLogs: AnalysisLog[];
 }) {
+  if (route === "model-prompts") return <ModelPromptsPage apiBase={apiBase} />;
   if (route === "model-logs") return <ModelLogsPage apiBase={apiBase} onBack={() => { window.location.hash = "/home"; }} embedded />;
   if (route === "policy") return <ResearchPolicyPage apiBase={apiBase} />;
   if (route === "source-filter") return <SourceFilterPage apiBase={apiBase} />;

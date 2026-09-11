@@ -703,6 +703,7 @@ describe("shared hash navigation", () => {
     expect(routeFromHash("#/queue")).toBe("queue");
     expect(routeFromHash("#/analysis")).toBe("analysis");
 		expect(routeFromHash("#/readiness")).toBe("readiness");
+    expect(routeFromHash("#/model-prompts")).toBe("model-prompts");
     expect(routeFromHash("#/model-logs")).toBe("model-logs");
     expect(routeFromHash("#/policy")).toBe("policy");
     expect(routeFromHash("#/search")).toBe("search");
@@ -716,14 +717,14 @@ describe("shared hash navigation", () => {
 			"home", "source-filter", "sources", "news", "queue", "analysis", "conclusions", "targets", "fundamental", "readiness",
     ]);
     expect(navigationGroups.right.map((item) => item.route)).toEqual([
-      "model-logs", "policy", "asset-universe", "search", "weknora",
+      "model-prompts", "model-logs", "policy", "asset-universe", "search", "weknora",
     ]);
     const markup = renderToStaticMarkup(createElement(TopNavigation, { current: "source-filter" }));
     const newsMarkup = renderToStaticMarkup(createElement(TopNavigation, { current: "news" }));
     const queueMarkup = renderToStaticMarkup(createElement(TopNavigation, { current: "queue" }));
     const analysisMarkup = renderToStaticMarkup(createElement(TopNavigation, { current: "analysis" }));
     const targetsMarkup = renderToStaticMarkup(createElement(TopNavigation, { current: "targets" }));
-		expect((markup.match(/<a /g) || []).length).toBe(15);
+		expect((markup.match(/<a /g) || []).length).toBe(16);
     expect(markup).toContain('href="#/source-filter" aria-current="page"');
     expect(newsMarkup).toContain('href="#/news" aria-current="page"');
     expect(queueMarkup).toContain('href="#/queue" aria-current="page"');
@@ -737,6 +738,7 @@ describe("shared hash navigation", () => {
     expect(markup.indexOf("结论")).toBeLessThan(markup.indexOf("标的"));
     expect(markup.indexOf("标的")).toBeLessThan(markup.indexOf("模型日志"));
     expect(markup.indexOf("结论")).toBeLessThan(markup.indexOf("模型日志"));
+    expect(markup.indexOf("模型提示词")).toBeLessThan(markup.indexOf("模型日志"));
     expect(markup.indexOf("模型日志")).toBeLessThan(markup.indexOf("资产主数据"));
     expect(markup.indexOf("资产主数据")).toBeLessThan(markup.indexOf("搜索引擎"));
     expect(markup).toContain("搜索引擎");

@@ -121,6 +121,9 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) (*Serve
 	r.Get("/go/research-policy/evaluations", s.researchPolicyEvaluations)
 	r.Post("/go/research-policy/reviews", s.reviewResearchPolicyImpact)
 	r.Post("/go/research-policy/approve", s.approveResearchPolicy)
+	r.Get("/go/model-prompts", s.modelPrompts)
+	r.Put("/go/model-prompts/{promptKey}", s.updateModelPrompt)
+	r.Delete("/go/model-prompts/{promptKey}", s.resetModelPrompt)
 	for _, item := range s.nativeOperations {
 		r.MethodFunc(item.Method, item.Path, item.Handler)
 	}

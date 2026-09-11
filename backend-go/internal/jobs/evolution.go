@@ -208,8 +208,9 @@ func (runtime *evolutionRuntime) propose(ctx context.Context, failures []any, in
 }
 
 func (runtime *evolutionRuntime) callCodeModel(ctx context.Context, prompt string, schema map[string]any, instanceID string, target any) error {
+	system := resolveModelPrompt(ctx, runtime.db, PromptCodeEvolution, codeEvolutionSystemPrompt)
 	messages := []map[string]string{
-		{"role": "system", "content": "你是 Go 代码演进代理。只允许修改 backend-go/ 下的 Go 实现与 Go 测试；输出最小 unified diff，不读取或生成密钥，不添加实盘交易。修改必须对应一个可测量失败模式。"},
+		{"role": "system", "content": system},
 		{"role": "user", "content": prompt + "\n\n只返回符合format JSON Schema的JSON。"},
 	}
 	request := map[string]any{

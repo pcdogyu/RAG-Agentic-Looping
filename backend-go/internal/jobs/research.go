@@ -915,7 +915,8 @@ func (runtime *researchRuntime) generateEventDraft(ctx context.Context, runID uu
 执行要求：过滤项不得生成 impact；每个 impact 必须通过目标准入；非零方向必须具有完整传导链和经济终点；每个 impact 必须输出恰好五项 target_evaluation；没有确认目标时返回 impacts=[] 并记录 no_confirmed_target；所有 ID 必须逐字来自输入。`, jsonString(eventContext), jsonString(assets), jsonString(filter), compactResearchEvidence(evidence, 12000))
 	schema := eventDraftSchema()
 	var result eventResearchDraft
-	err := runtime.callResearchModel(ctx, runID, "event_research_run", "event_report_drafting", eventResearchSystemPrompt, prompt, schema, instanceID, profile, routeReason, &result)
+	system := resolveModelPrompt(ctx, runtime.db, PromptEventResearch, eventResearchSystemPrompt)
+	err := runtime.callResearchModel(ctx, runID, "event_research_run", "event_report_drafting", system, prompt, schema, instanceID, profile, routeReason, &result)
 	if err != nil {
 		return eventResearchDraft{}, err
 	}
@@ -934,7 +935,8 @@ func (runtime *researchRuntime) generateCounterResearchDraft(ctx context.Context
 <evidence>%s</evidence>
 只报告由新的、独立原始来源证据支持的竞争机制。候选反证不会自动被当成事实或改写主研报。`, jsonString(claims), jsonString(baselineEvidence), compactResearchEvidence(evidence, 12000))
 	result := counterResearchDraft{Findings: []counterResearchFindingDraft{}}
-	if err := runtime.callResearchModel(ctx, runID, "event_research_run", "counter_research", counterResearchSystemPrompt, prompt, counterResearchSchema(), instanceID, profile, routeReason, &result); err != nil {
+	system := resolveModelPrompt(ctx, runtime.db, PromptCounterResearch, counterResearchSystemPrompt)
+	if err := runtime.callResearchModel(ctx, runID, "event_research_run", "counter_research", system, prompt, counterResearchSchema(), instanceID, profile, routeReason, &result); err != nil {
 		return counterResearchDraft{}, err
 	}
 	return result, nil
@@ -1018,7 +1020,8 @@ func (runtime *researchRuntime) generateAssetDraft(ctx context.Context, runID uu
 fundamental_context 是截止到 as_of 已公开的财务背景，不是本次事件、目标关系或传导的证据；不得将其写入 evidence_id/action_id，也不得以它单独证明本次事件。只有 context 状态为 available/partial 时，才可在 financials_and_growth 中复述其中明确给出的数值并保留不确定性；状态 unavailable/unsupported 或字段缺失时不得编造财务数字、预测、估值或评级。
 所有 evidence_id 和 action_id 必须逐字来自输入。输出一个 direction_score 和恰好五项 target_evaluation；评级、新闻可信度和研报置信度由 Go 程序计算。`, jsonString(asset), jsonString(withoutKey(event, "analysis_steps")), jsonString(fundamentalContext), compactResearchEvidence(evidence, 14000))
 	var result assetResearchDraft
-	err := runtime.callResearchModel(ctx, runID, "research_run", "report_drafting", assetResearchSystemPrompt, prompt, assetDraftSchema(), instanceID, profile, routeReason, &result)
+	system := resolveModelPrompt(ctx, runtime.db, PromptAssetResearch, assetResearchSystemPrompt)
+	err := runtime.callResearchModel(ctx, runID, "research_run", "report_drafting", system, prompt, assetDraftSchema(), instanceID, profile, routeReason, &result)
 	if err != nil {
 		return assetResearchDraft{}, err
 	}
