@@ -107,12 +107,25 @@ func (s *Server) startFundamentalAIBatch(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	queued := 0
+	reused := 0
+	actualTaskIDs := make([]uuid.UUID, 0, len(assetIDs))
 	for index, assetID := range assetIDs {
-		if _, _, enqueueErr := s.enqueueFundamentalAIRunWithTask(r, assetID, &batch.ID, key+"|"+assetID, taskIDs[index]); enqueueErr == nil {
+		run, runCreated, enqueueErr := s.enqueueFundamentalAIRunWithTask(r, assetID, &batch.ID, key+"|"+assetID, taskIDs[index])
+		if enqueueErr != nil {
+			continue
+		}
+		actualTaskIDs = append(actualTaskIDs, run.TaskID)
+		if runCreated {
 			queued++
+		} else {
+			reused++
 		}
 	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"batch_id": batch.ID, "status": "queued", "requested": len(assetIDs), "queued": queued, "task_ids": taskIDs})
+	if err := fundamentalai.NewStore(s.db).SetBatchTaskIDs(r.Context(), batch.ID, actualTaskIDs); err != nil {
+		writeError(w, http.StatusInternalServerError, "AI preparation batch tasks could not be persisted")
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"batch_id": batch.ID, "status": "queued", "requested": len(assetIDs), "queued": queued, "reused": reused, "task_ids": actualTaskIDs})
 }
 
 func (s *Server) getFundamentalAIBatch(w http.ResponseWriter, r *http.Request) {

@@ -258,7 +258,17 @@ func (s *Store) GetBatch(ctx context.Context, id uuid.UUID) (Batch, error) {
 		return Batch{}, err
 	}
 	batch.Counts = map[string]int{"waiting": 0, "searching": 0, "reasoning": 0, "released": 0, "insufficient_data": 0, "failed": 0}
-	rows, err := s.db.Query(ctx, `SELECT status,stage,count(*)::int FROM fundamental_ai_runs WHERE batch_id=$1 GROUP BY status,stage`, id)
+	if missing := batch.RequestedCount - len(batch.TaskIDs); missing > 0 {
+		batch.Counts["failed"] = missing
+	}
+	rows, err := s.db.Query(ctx, `WITH requested AS (
+			SELECT DISTINCT value::uuid AS task_id FROM fundamental_ai_batches batch
+			CROSS JOIN LATERAL jsonb_array_elements_text(batch.task_ids) value WHERE batch.id=$1
+		), latest AS (
+			SELECT requested.task_id,run.status,run.stage FROM requested
+			JOIN LATERAL (SELECT status,stage FROM fundamental_ai_runs WHERE task_id=requested.task_id ORDER BY created_at DESC,id DESC LIMIT 1) run ON true
+		)
+		SELECT status,stage,count(*)::int FROM latest GROUP BY status,stage`, id)
 	if err != nil {
 		return Batch{}, err
 	}
@@ -285,6 +295,29 @@ func (s *Store) GetBatch(ctx context.Context, id uuid.UUID) (Batch, error) {
 		}
 	}
 	return batch, rows.Err()
+}
+
+func (s *Store) SetBatchTaskIDs(ctx context.Context, id uuid.UUID, taskIDs []uuid.UUID) error {
+	if s.db == nil || id == uuid.Nil {
+		return fmt.Errorf("AI preparation batch identity is required")
+	}
+	unique := make([]uuid.UUID, 0, len(taskIDs))
+	seen := map[uuid.UUID]bool{}
+	for _, taskID := range taskIDs {
+		if taskID != uuid.Nil && !seen[taskID] {
+			seen[taskID] = true
+			unique = append(unique, taskID)
+		}
+	}
+	body, _ := json.Marshal(unique)
+	result, err := s.db.Exec(ctx, `UPDATE fundamental_ai_batches SET task_ids=$2::jsonb WHERE id=$1 AND requested_count>=$3`, id, body, len(unique))
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() != 1 {
+		return fmt.Errorf("AI preparation batch task count exceeds request")
+	}
+	return nil
 }
 
 const runSelect = `SELECT id,batch_id,asset_id,task_id,status,stage,policy_version,model_version,prompt_version,as_of,summary::jsonb,blockers::jsonb,started_at,completed_at,created_at,updated_at FROM fundamental_ai_runs`

@@ -64,4 +64,19 @@ func TestStoreUpdateRunUsesOneExplicitStatusType(t *testing.T) {
 	if stored.Status != "insufficient_data" || stored.Stage != "completed" || stored.StartedAt == nil || stored.CompletedAt == nil {
 		t.Fatalf("unexpected stored run: %#v", stored)
 	}
+	batchID := uuid.New()
+	batch, batchCreated, err := NewStore(pool).CreateBatch(ctx, Batch{ID: batchID, Market: "US", Scope: "pending_predictions", RequestedCount: 2}, "batch-"+batchID.String())
+	if err != nil || !batchCreated {
+		t.Fatalf("batch=%#v wasCreated=%v err=%v", batch, batchCreated, err)
+	}
+	if err = NewStore(pool).SetBatchTaskIDs(ctx, batch.ID, []uuid.UUID{run.TaskID, run.TaskID, uuid.Nil}); err != nil {
+		t.Fatal(err)
+	}
+	batch, err = NewStore(pool).GetBatch(ctx, batch.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(batch.TaskIDs) != 1 || batch.TaskIDs[0] != run.TaskID || batch.Counts["insufficient_data"] != 1 || batch.Counts["failed"] != 1 {
+		t.Fatalf("unexpected batch task aggregation: %#v", batch)
+	}
 }
