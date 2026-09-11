@@ -134,7 +134,7 @@ func TestMaintenanceReplayResearchUsesBoundedPriorityAndAgeBypass(t *testing.T) 
 		analysisStep("full_event_research", "queued", "go-maintenance", "replay", map[string]any{"maintenance_version": eventResearchPromptVersion}),
 	}}
 	priority, source, routeReason, bypass := forcedEventResearchQueuePolicy(run)
-	if priority != 8 || source != "maintenance" || routeReason != "maintenance_replay" || !bypass {
+	if priority != 0 || source != "maintenance" || routeReason != "maintenance_replay" || !bypass {
 		t.Fatalf("unexpected maintenance replay queue policy: priority=%d source=%s route=%s bypass=%t", priority, source, routeReason, bypass)
 	}
 	priority, source, routeReason, bypass = forcedEventResearchQueuePolicy(map[string]any{})

@@ -946,7 +946,7 @@ func (runtime *ExtractRuntime) enqueueResearchAfterMapping(ctx context.Context, 
 func forcedEventResearchQueuePolicy(run map[string]any) (priority int16, source, routeReason string, bypassNewsAge bool) {
 	step := latestAnalysisStep(run, "full_event_research")
 	if stringValue(objectValue(step["metrics"])["maintenance_version"]) == eventResearchPromptVersion {
-		return 8, "maintenance", "maintenance_replay", true
+		return 0, "maintenance", "maintenance_replay", true
 	}
 	return 1, "manual", "manual_research", false
 }

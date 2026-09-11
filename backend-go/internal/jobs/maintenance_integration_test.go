@@ -188,8 +188,9 @@ func TestRecentEventResearchReplayIsVersionedAndIdempotent(t *testing.T) {
 		t.Fatalf("recent replay should continue after queueing: %v", err)
 	}
 	var queued int
-	if err := pool.QueryRow(ctx, `SELECT count(*)::int FROM go_jobs WHERE dedupe_key=$1 AND task_type=$2`, "event-research-v6-reextract:"+eventID.String(), reextractTask).Scan(&queued); err != nil || queued != 1 {
-		t.Fatalf("recent replay queue count=%d err=%v", queued, err)
+	var priority int
+	if err := pool.QueryRow(ctx, `SELECT count(*)::int,min(priority)::int FROM go_jobs WHERE dedupe_key=$1 AND task_type=$2`, "event-research-v6-reextract:"+eventID.String(), reextractTask).Scan(&queued, &priority); err != nil || queued != 1 || priority != 0 {
+		t.Fatalf("recent replay queue count=%d priority=%d err=%v", queued, priority, err)
 	}
 	_, err = runtime.replayRecentEventResearch(ctx, Job{ID: uuid.New(), Payload: payload})
 	if !errors.As(err, &continuation) {

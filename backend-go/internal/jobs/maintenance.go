@@ -301,7 +301,7 @@ func (runtime *maintenanceRuntime) queueRecentEventReplay(ctx context.Context, c
 	}
 	jobBody, _ := json.Marshal(taskEnvelope{Args: []any{candidate.EventID.String(), candidate.RunID.String()}, Kwargs: map[string]any{"model_instance_id": instanceID, "source": "maintenance"}})
 	if _, err := tx.Exec(ctx, `INSERT INTO go_jobs(id,queue,task_type,payload,status,priority,max_attempts,available_at,dedupe_key,created_at,updated_at)
-		VALUES($1,'extract',$2,$3,'queued',5,3,now(),$4,now(),now())`, taskID, reextractTask, jobBody, "event-research-v6-reextract:"+candidate.EventID.String()); err != nil {
+		VALUES($1,'extract',$2,$3,'queued',0,3,now(),$4,now(),now())`, taskID, reextractTask, jobBody, "event-research-v6-reextract:"+candidate.EventID.String()); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
