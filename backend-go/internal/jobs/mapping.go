@@ -903,6 +903,7 @@ func (runtime *ExtractRuntime) enqueueResearchAfterMapping(ctx context.Context, 
 	if err := runtime.applyRecentResearchFilter(ctx, event, filterRecentResearch); err != nil {
 		return "", "", err
 	}
+	priority, source, routeReason, bypassNewsAge := forcedEventResearchQueuePolicy(run)
 	previousStatus, previousTask := stringValue(run["status"]), stringValue(run["celery_task_id"])
 	if report := run["report"]; report != nil {
 		history := anySlice(run["report_history"])
@@ -914,20 +915,23 @@ func (runtime *ExtractRuntime) enqueueResearchAfterMapping(ctx context.Context, 
 	instanceID := runtime.selectDownstreamInstance(ctx, "research", len(runtime.cfg.ResearchURLs))
 	run["status"], run["as_of"], run["verification_round"] = "queued", iso(time.Now()), 0
 	run["filter_recent_research"] = filterRecentResearch
-	run["research_profile"], run["route_reason"], run["matched_whitelist_keywords"] = researchProfileDeep, "manual_research", []string{}
+	run["research_profile"], run["route_reason"], run["matched_whitelist_keywords"] = researchProfileDeep, routeReason, []string{}
 	run["escalated_to_deep"], run["waiting_for_deep_slot"] = false, false
 	run["missing_requirements"], run["contradictions"], run["error"], run["retryable_reason"] = []any{}, []any{}, nil, nil
 	run["celery_task_id"], run["model_instance_id"], run["updated_at"] = taskID, instanceID, iso(time.Now())
-	appendAnalysisStep(run, analysisStep("forced_event_research_queue", "queued", "go-worker", "已保留当前事件研报，并创建完整事件重新调研任务。", map[string]any{"instance_id": instanceID, "priority": 1, "previous_status": previousStatus, "archived_report_count": len(anySlice(run["report_history"]))}))
+	appendAnalysisStep(run, analysisStep("forced_event_research_queue", "queued", "go-worker", "已保留当前事件研报，并创建完整事件重新调研任务。", map[string]any{"instance_id": instanceID, "priority": priority, "source": source, "previous_status": previousStatus, "archived_report_count": len(anySlice(run["report_history"]))}))
 	encoded, _ := json.Marshal(run)
 	if _, err := runtime.db.Exec(ctx, `UPDATE event_research_runs SET status='queued',payload=$2,updated_at=now() WHERE id=$1`, runID, encoded); err != nil {
 		return "", "", err
 	}
-	kwargs := map[string]any{"model_instance_id": instanceID, "filter_recent_research": filterRecentResearch, "research_profile": researchProfileDeep, "route_reason": "manual_research", "source": "manual"}
+	kwargs := map[string]any{"model_instance_id": instanceID, "filter_recent_research": filterRecentResearch, "research_profile": researchProfileDeep, "route_reason": routeReason, "source": source}
+	if bypassNewsAge {
+		kwargs["news_age_filter_bypass"] = true
+	}
 	if forceWebSearch {
 		kwargs["force_web_search"] = true
 	}
-	_, queueErr := NewStore(runtime.db).Enqueue(ctx, EnqueueParams{ID: uuid.MustParse(taskID), Queue: "research", TaskType: researchEventTask, Payload: map[string]any{"args": []any{stringValue(event["id"]), runID.String()}, "kwargs": kwargs}, Priority: 1, MaxAttempts: 3, DedupeKey: "research-run:" + runID.String()})
+	_, queueErr := NewStore(runtime.db).Enqueue(ctx, EnqueueParams{ID: uuid.MustParse(taskID), Queue: "research", TaskType: researchEventTask, Payload: map[string]any{"args": []any{stringValue(event["id"]), runID.String()}, "kwargs": kwargs}, Priority: priority, MaxAttempts: 3, DedupeKey: "research-run:" + runID.String()})
 	if queueErr != nil {
 		run["status"], run["celery_task_id"], run["error"] = previousStatus, previousTask, "event research refresh queue failed"
 		appendAnalysisStep(run, analysisStep("forced_event_research_queue", "failed", "go-worker", "事件重新调研入队失败，已保留原研报。", map[string]any{}))
@@ -935,8 +939,16 @@ func (runtime *ExtractRuntime) enqueueResearchAfterMapping(ctx context.Context, 
 		_, _ = runtime.db.Exec(ctx, `UPDATE event_research_runs SET status=$2,payload=$3,updated_at=now() WHERE id=$1`, runID, previousStatus, failed)
 		return "", "", queueErr
 	}
-	runtime.recordModelTask(ctx, "research", taskID, "event_research", runID.String(), stringValue(event["headline"]), stringValue(event["event_type"]), "manual", instanceID)
+	runtime.recordModelTask(ctx, "research", taskID, "event_research", runID.String(), stringValue(event["headline"]), stringValue(event["event_type"]), source, instanceID)
 	return taskID, runID.String(), nil
+}
+
+func forcedEventResearchQueuePolicy(run map[string]any) (priority int16, source, routeReason string, bypassNewsAge bool) {
+	step := latestAnalysisStep(run, "full_event_research")
+	if stringValue(objectValue(step["metrics"])["maintenance_version"]) == eventResearchPromptVersion {
+		return 8, "maintenance", "maintenance_replay", true
+	}
+	return 1, "manual", "manual_research", false
 }
 
 func mappingCandidate(asset mappingAsset, relationship string, relevance, confidence float64, rationale string, basis []string) map[string]any {

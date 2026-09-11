@@ -129,6 +129,20 @@ func TestMappingShortlistRejectsOrdinaryWordsAndKeepsExplicitTickers(t *testing.
 	}
 }
 
+func TestMaintenanceReplayResearchUsesBoundedPriorityAndAgeBypass(t *testing.T) {
+	run := map[string]any{"analysis_steps": []any{
+		analysisStep("full_event_research", "queued", "go-maintenance", "replay", map[string]any{"maintenance_version": eventResearchPromptVersion}),
+	}}
+	priority, source, routeReason, bypass := forcedEventResearchQueuePolicy(run)
+	if priority != 8 || source != "maintenance" || routeReason != "maintenance_replay" || !bypass {
+		t.Fatalf("unexpected maintenance replay queue policy: priority=%d source=%s route=%s bypass=%t", priority, source, routeReason, bypass)
+	}
+	priority, source, routeReason, bypass = forcedEventResearchQueuePolicy(map[string]any{})
+	if priority != 1 || source != "manual" || routeReason != "manual_research" || bypass {
+		t.Fatalf("manual refresh queue policy changed: priority=%d source=%s route=%s bypass=%t", priority, source, routeReason, bypass)
+	}
+}
+
 func TestMappingShortlistUsesSelectedSpaceXMasterAsset(t *testing.T) {
 	assets := []mappingAsset{
 		{ID: "crypto:coingecko:spacex-prestocks-2", Symbol: "SPACEX", Name: "SpaceX PreStocks", Aliases: []string{"SpaceX"}, AssociationTier: "exact_only", MarketCap: 10},

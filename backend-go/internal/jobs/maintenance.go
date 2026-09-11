@@ -129,7 +129,10 @@ func (runtime *maintenanceRuntime) replayRecentEventResearch(ctx context.Context
 	if err != nil {
 		return nil, err
 	}
-	capacity := max(0, maxActive-active)
+	// The production queue can legitimately contain a large pre-existing
+	// backlog. Limit this versioned campaign itself instead of waiting for the
+	// entire unrelated backlog to fall below the campaign ceiling.
+	capacity := max(0, maxActive-campaignActive)
 	selected := min(batchSize, min(capacity, len(candidates)))
 	results, queued, failures := make([]any, 0, selected), 0, 0
 	for _, candidate := range candidates[:selected] {

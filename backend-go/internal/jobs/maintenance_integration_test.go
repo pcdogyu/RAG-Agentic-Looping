@@ -181,7 +181,7 @@ func TestRecentEventResearchReplayIsVersionedAndIdempotent(t *testing.T) {
 		t.Fatalf("stale queue row changed active business capacity: before=%d after=%d err=%v", baselineActive, activeAfterStaleJob, err)
 	}
 
-	payload, _ := json.Marshal(taskEnvelope{Kwargs: map[string]any{"batch_size": 1, "max_active": baselineActive + 1}})
+	payload, _ := json.Marshal(taskEnvelope{Kwargs: map[string]any{"batch_size": 1, "max_active": 1}})
 	_, err = runtime.replayRecentEventResearch(ctx, Job{ID: uuid.New(), Payload: payload})
 	var continuation *continuationError
 	if !errors.As(err, &continuation) {
