@@ -162,6 +162,15 @@ func TestStepLimitedRatingReplayRequiresFourEventsToReverseFromStronglyBearish(t
 	}
 }
 
+func TestPublicRatingBoundariesMatchResearchContract(t *testing.T) {
+	cases := map[float64]string{-76: "strongly_bearish", -75: "bearish", -26: "bearish", -25: "watch", 25: "watch", 26: "bullish", 75: "bullish", 76: "strongly_bullish"}
+	for score, want := range cases {
+		if got := ratingForScore(score); got != want {
+			t.Fatalf("score %.0f produced %s, want %s", score, got, want)
+		}
+	}
+}
+
 func TestStepLimitedRatingReplayIgnoresIneligibleManualAndDuplicateEvents(t *testing.T) {
 	base := time.Date(2026, 9, 5, 3, 0, 0, 0, time.UTC)
 	values := []targetRatingSignal{

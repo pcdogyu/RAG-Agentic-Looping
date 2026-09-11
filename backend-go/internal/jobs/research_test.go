@@ -81,7 +81,7 @@ func TestEventResearchTrackingLabelsPreserveNewsHeadline(t *testing.T) {
 }
 
 func TestRatingForScoreUsesFiveStableBands(t *testing.T) {
-	cases := map[int]string{-100: "strongly_bearish", -70: "strongly_bearish", -69: "bearish", -30: "bearish", -29: "watch", 29: "watch", 30: "bullish", 69: "bullish", 70: "strongly_bullish", 100: "strongly_bullish"}
+	cases := map[int]string{-100: "strongly_bearish", -76: "strongly_bearish", -75: "bearish", -26: "bearish", -25: "watch", 25: "watch", 26: "bullish", 75: "bullish", 76: "strongly_bullish", 100: "strongly_bullish"}
 	for score, expected := range cases {
 		if actual := ratingForScore(score); actual != expected {
 			t.Fatalf("score %d: expected %s, got %s", score, expected, actual)
@@ -546,7 +546,7 @@ func TestEventDraftUsesEvidenceFirstSystemPromptAndParsesSchema(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			t.Fatalf("decode research request: %v", err)
 		}
-		response := map[string]any{"summary": "公司获得订单。", "affected_markets": []string{}, "affected_sectors": []string{}, "scenarios": []string{}, "catalysts": []string{}, "risks": []string{}, "unresolved_questions": []string{}, "evidence_ids": []string{"ev-1"}, "impacts": []map[string]any{{"target_type": "tradable_asset", "target_name": "Acme", "asset_id": "asset-1", "action_id": nil, "direction_score": 40, "transmission_path": []string{"订单增加", "收入预期上修"}, "rationale": "订单是收入的直接证据。", "evidence_ids": []string{"ev-1"}, "missing_information": []string{}}}, "missing_information": []string{}}
+		response := map[string]any{"summary": "公司获得订单。", "affected_markets": []string{}, "affected_sectors": []string{}, "scenarios": []string{}, "catalysts": []string{}, "risks": []string{}, "unresolved_questions": []string{}, "evidence_ids": []string{"ev-1"}, "news_credibility": map[string]any{"score": 83, "reason": "原始公司公告", "evidence_ids": []string{"ev-1"}, "conflicts": []string{}}, "impacts": []map[string]any{{"target_type": "tradable_asset", "target_name": "Acme", "asset_id": "asset-1", "action_id": nil, "direction_score": 40, "report_confidence": map[string]any{"score": 71, "reason": "当前事件支持", "evidence_ids": []string{"ev-1"}, "conflicts": []string{}}, "transmission_path": []string{"订单增加", "收入预期上修"}, "rationale": "订单是收入的直接证据。", "evidence_ids": []string{"ev-1"}, "missing_information": []string{}}}, "missing_information": []string{}}
 		_ = json.NewEncoder(w).Encode(map[string]any{"message": map[string]any{"content": jsonString(response)}})
 	}))
 	defer server.Close()
@@ -560,7 +560,7 @@ func TestEventDraftUsesEvidenceFirstSystemPromptAndParsesSchema(t *testing.T) {
 	if len(request.Messages) != 2 || request.Messages[0]["role"] != "system" || request.Messages[0]["content"] != eventResearchSystemPrompt {
 		t.Fatalf("unexpected event system message: %#v", request.Messages)
 	}
-	if len(draft.Impacts) != 1 || draft.Impacts[0].AssetID != "asset-1" || draft.Impacts[0].EvidenceIDs[0] != "ev-1" {
+	if len(draft.Impacts) != 1 || draft.Impacts[0].AssetID != "asset-1" || draft.Impacts[0].EvidenceIDs[0] != "ev-1" || draft.NewsCredibility.Score != 83 || draft.Impacts[0].ReportConfidence.Score != 71 {
 		t.Fatalf("event draft did not parse expected schema: %#v", draft)
 	}
 }
@@ -573,7 +573,7 @@ func TestAssetDraftUsesEvidenceFirstSystemPromptAndParsesSchema(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			t.Fatalf("decode research request: %v", err)
 		}
-		response := map[string]any{"summary": "订单增加可能改善收入。", "historical_context": "", "financials_and_growth": "", "products_or_protocol": "", "competition": "", "valuation_or_tokenomics": "", "catalysts": []string{}, "risks": []string{}, "invalidation_conditions": []string{}, "evidence_ids": []string{"ev-1"}, "direction_score": 35, "transmission_path": []string{"订单增加", "收入预期上修"}, "missing_information": []string{}}
+		response := map[string]any{"summary": "订单增加可能改善收入。", "historical_context": "", "financials_and_growth": "", "products_or_protocol": "", "competition": "", "valuation_or_tokenomics": "", "catalysts": []string{}, "risks": []string{}, "invalidation_conditions": []string{}, "evidence_ids": []string{"ev-1"}, "news_credibility": map[string]any{"score": 80, "reason": "当前来源可信", "evidence_ids": []string{"ev-1"}, "conflicts": []string{}}, "report_confidence": map[string]any{"score": 64, "reason": "当前事件与历史上下文支持", "evidence_ids": []string{"ev-1"}, "conflicts": []string{}}, "direction_score": 35, "transmission_path": []string{"订单增加", "收入预期上修"}, "missing_information": []string{}}
 		_ = json.NewEncoder(w).Encode(map[string]any{"message": map[string]any{"content": jsonString(response)}})
 	}))
 	defer server.Close()
@@ -590,7 +590,7 @@ func TestAssetDraftUsesEvidenceFirstSystemPromptAndParsesSchema(t *testing.T) {
 	if !strings.Contains(request.Messages[1]["content"], "<fundamental_context>") || !strings.Contains(request.Messages[1]["content"], "snapshot-1") || !strings.Contains(request.Messages[1]["content"], "\"revenue\":100") {
 		t.Fatalf("fundamental context was not passed to asset research: %s", request.Messages[1]["content"])
 	}
-	if draft.DirectionScore != 35 || len(draft.TransmissionPath) != 2 || draft.EvidenceIDs[0] != "ev-1" {
+	if draft.DirectionScore != 35 || len(draft.TransmissionPath) != 2 || draft.EvidenceIDs[0] != "ev-1" || draft.NewsCredibility.Score != 80 || draft.ReportConfidence.Score != 64 {
 		t.Fatalf("asset draft did not parse expected schema: %#v", draft)
 	}
 }
@@ -886,6 +886,66 @@ func TestReportConfidenceNeverExceedsNewsConfidence(t *testing.T) {
 	verification.EvidenceComplete = false
 	if actual := reportConfidenceScore(.9, []int{90}, verification); actual != .49 {
 		t.Fatalf("evidence gate did not cap report confidence: %v", actual)
+	}
+}
+
+func TestModelConfidenceValidationPreservesRawScoreAndAppliesEvidenceRules(t *testing.T) {
+	asOf := time.Date(2026, 9, 11, 8, 0, 0, 0, time.UTC)
+	evidence := []researchEvidence{
+		{ID: "current", ContextRole: "current_event", ContentMode: "original", PublishedAt: asOf.Add(-time.Hour), ObservedAt: asOf.Add(-time.Hour), AsOf: asOf.Add(-time.Hour)},
+		{ID: "history", ContextRole: "historical_context", ContentMode: "summary_only", PublishedAt: asOf.Add(-24 * time.Hour), ObservedAt: asOf.Add(-24 * time.Hour), AsOf: asOf.Add(-24 * time.Hour)},
+	}
+	value := modelConfidenceDraft{Score: 88, Reason: "来源可信且上下文一致", EvidenceIDs: []string{"current", "history"}}
+	actual := modelConfidenceAssessment(value, evidence, asOf, true, nil)
+	if int(numberValue(actual["model_score"])) != 88 || int(numberValue(actual["validated_score"])) != 69 || stringValue(actual["status"]) != "limited" {
+		t.Fatalf("summary-only evidence cap was not auditable: %#v", actual)
+	}
+	invalid := modelConfidenceAssessment(value, evidence, asOf, true, []string{"target_specific_evidence:tradable_asset:wrong"})
+	if invalid["validated_score"] != nil || stringValue(invalid["status"]) != "unavailable" {
+		t.Fatalf("asset-mismatched confidence remained available: %#v", invalid)
+	}
+	future := append([]researchEvidence{}, evidence...)
+	future[0].PublishedAt = asOf.Add(time.Minute)
+	invalid = modelConfidenceAssessment(modelConfidenceDraft{Score: 77, Reason: "future", EvidenceIDs: []string{"current"}}, future, asOf, false, nil)
+	if invalid["validated_score"] != nil || !containsString(stringSlice(invalid["reasons"]), "future_evidence:current") {
+		t.Fatalf("future confidence citation remained available: %#v", invalid)
+	}
+	clamped := modelConfidenceAssessment(modelConfidenceDraft{Score: 120, Reason: "out of range", EvidenceIDs: []string{"current"}}, evidence, asOf, false, nil)
+	if int(numberValue(clamped["model_score"])) != 120 || int(numberValue(clamped["validated_score"])) != 100 {
+		t.Fatalf("raw model confidence was not preserved while validation clamped it: %#v", clamped)
+	}
+}
+
+func TestProvisionalResearchSignalNeverBecomesTradeEligible(t *testing.T) {
+	signal := researchSignalContract(62, "equity:XNAS:TEST", true, false, []string{"evidence_gate"})
+	if !boolValue(signal["available"]) || !boolValue(signal["provisional"]) || boolValue(signal["trade_eligible"]) || int(numberValue(signal["direction_score"])) != 62 {
+		t.Fatalf("provisional model tendency leaked into governance: %#v", signal)
+	}
+	validated := researchSignalContract(62, "equity:XNAS:TEST", true, true, nil)
+	if boolValue(validated["provisional"]) || boolValue(validated["trade_eligible"]) || stringValue(validated["status"]) != "validated" {
+		t.Fatalf("research signal duplicated governed trade eligibility: %#v", validated)
+	}
+	unavailable := researchSignalContract(0, "", false, false, []string{"no_verified_target"})
+	if unavailable["direction_score"] != nil || unavailable["rating"] != nil || boolValue(unavailable["available"]) {
+		t.Fatalf("missing target was represented as zero/watch: %#v", unavailable)
+	}
+}
+
+func TestVerifierKeepsProvisionalDirectionSeparateFromGovernedSignal(t *testing.T) {
+	event, evidence, impact := researchQualityFixture()
+	evidence[0].SourceQuality = "professional"
+	impact.DirectionScore = 58
+	draft := eventResearchDraft{Summary: "provisional", EvidenceIDs: []string{"ev-1"}, Impacts: []eventImpactDraft{impact}}
+	verification := verifyEventDraft(&draft, event, evidence, time.Time{})
+	if draft.Impacts[0].DirectionScore != 0 || draft.Impacts[0].ResearchDirectionScore != 58 {
+		t.Fatalf("verifier did not separate raw and governed scores: %#v", draft.Impacts[0])
+	}
+	report := (&researchRuntime{}).finalizeEventReport(event, draft, evidence, verification)
+	publicImpact := objectValue(anySlice(report["impacts"])[0])
+	research := objectValue(publicImpact["research_signal"])
+	governed := objectValue(publicImpact["governed_signal"])
+	if int(numberValue(research["direction_score"])) != 58 || !boolValue(research["provisional"]) || boolValue(research["trade_eligible"]) || int(numberValue(governed["direction_score"])) != 0 {
+		t.Fatalf("provisional direction leaked into governed output: research=%#v governed=%#v", research, governed)
 	}
 }
 

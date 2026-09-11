@@ -123,6 +123,7 @@ jobs:
           MAPPING_TEST_ISOLATED: "1"
           COMMAND_TEST_ISOLATED: "1"
           TARGET_RATING_TEST_ISOLATED: "1"
+          RESEARCH_HISTORY_TEST_ISOLATED: "1"
         run: |
-          go test -race ./internal/jobs -run '^(TestExtractRetryGoldenStateAgainstIsolatedServices|TestMappingGoldenStateAgainstIsolatedServices|TestMaintenanceHandlersAgainstPostgres)$' -count=1 -v
+          go test -race ./internal/jobs -run '^(TestExtractRetryGoldenStateAgainstIsolatedServices|TestMappingGoldenStateAgainstIsolatedServices|TestMaintenanceHandlersAgainstPostgres|TestRecentEventResearchReplayIsVersionedAndIdempotent|TestHistoricalNewsEvidenceUsesPointInTimeRelationPriority)$' -count=1 -v
           go test -race ./internal/httpapi -run '^(TestBatchThreeCommandsAgainstIsolatedServices|TestStepLimitedRatingAgainstIsolatedPostgres)$' -count=1 -v

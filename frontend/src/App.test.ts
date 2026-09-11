@@ -1144,7 +1144,13 @@ describe("changed targets page", () => {
       asset: null,
       event: { id: "event-1", headline: "能源政策调整", event_type: "regulation" },
       recommendation: null,
-      report: { confidence: 0.6, news_confidence: 0.82, direction_score: -45, rating: "bearish", impact_count: 1, affected_markets: ["COMMODITY"], affected_sectors: ["能源"], scoring_version: "event-report-v1" },
+      report: {
+        confidence: 0.6, news_confidence: 0.82, direction_score: 0, rating: "watch", impact_count: 1,
+        affected_markets: ["COMMODITY"], affected_sectors: ["能源"], scoring_version: "llm-direction-v4",
+        research_signal: { status: "provisional", available: true, provisional: true, direction_score: -45, rating: "bearish", asset_id: "equity:XNAS:TEST", trade_eligible: false, reasons: ["evidence_gate"], version: "research-signal-v1" },
+        news_credibility_assessment: { model_score: 82, validated_score: 72, status: "limited", reason: "来源可信", reasons: ["summary_only_cap_69"], evidence_ids: ["evidence-1"], conflicts: [], history_window_days: null, version: "model-confidence-v1" },
+        report_confidence_assessment: { model_score: 66, validated_score: 60, status: "limited", reason: "三日信息支持", reasons: [], evidence_ids: ["evidence-1"], conflicts: [], history_window_days: 3, version: "model-confidence-v1" },
+      },
     } as ResearchConclusionItem;
     const card = renderToStaticMarkup(createElement(EventConclusionCard, {
       item,
@@ -1153,22 +1159,32 @@ describe("changed targets page", () => {
       onResearch: () => undefined,
     }));
     expect(card).toContain("-45 · 看空");
-    expect(card).toContain("新闻可信度 82%");
-    expect(card).toContain("研报置信度 60%");
+    expect(card).toContain("新闻可信度 72/100");
+    expect(card).toContain("模型 82，规则调整");
+    expect(card).toContain("研报置信度 60/100");
+    expect(card).toContain("暂定 · 证据未完成 · 不可交易");
     expect(card).toContain("影响目标 1 个");
     expect(card).toContain("重新研究");
-    expect(card.indexOf("研报置信度 60%")).toBeLessThan(card.indexOf("重新研究"));
+    expect(card.indexOf("研报置信度 60/100")).toBeLessThan(card.indexOf("重新研究"));
     expect((card.match(/<button/g) || [])).toHaveLength(3);
     expect(card).not.toContain("证据不足");
     expect(card).not.toContain("资料覆盖不足");
 
+    const rejectedConfidenceCard = renderToStaticMarkup(createElement(EventConclusionCard, {
+      item: { ...item, report: { ...item.report!, news_credibility_assessment: { ...item.report!.news_credibility_assessment!, validated_score: null, status: "unavailable" } } },
+      onOpen: () => undefined,
+      onResearch: () => undefined,
+    }));
+    expect(rejectedConfidenceCard).toContain("新闻可信度 —/100");
+    expect(rejectedConfidenceCard).not.toContain("新闻可信度 82/100");
+
     const emptyCard = renderToStaticMarkup(createElement(EventConclusionCard, {
-      item: { ...item, report: { ...item.report!, direction_score: null, rating: null, impact_count: 0 } },
+      item: { ...item, report: { ...item.report!, direction_score: null, rating: null, impact_count: 0, research_signal: { status: "unavailable", available: false, provisional: false, direction_score: null, rating: null, asset_id: null, trade_eligible: false, reasons: ["no_verified_target"], version: "research-signal-v1" } } },
       researchState: { status: "queued" },
       onOpen: () => undefined,
       onResearch: () => undefined,
     }));
-    expect(emptyCard).toContain("本次事件信号：0 · 观望");
+    expect(emptyCard).toContain("未识别到可验证标的");
     expect(emptyCard).toContain("影响目标 0 个");
     expect(emptyCard).toContain("已进入队列");
     expect(eventRefreshResearchState({ status: "running", stage: "web_search", error: null })).toEqual({ status: "queued" });
@@ -1206,7 +1222,7 @@ describe("changed targets page", () => {
         macro_factors: [{ id: "factor-1", name: "原油供给", description: "供给收缩", strength: 0.7 }], missing_information: ["政策细则"],
       },
       news: [{ id: "news-1", title: "政策新闻", url: "https://example.com/news", source: "Example" }],
-      evidence: [{ id: "evidence-1", claim: "政策已宣布", source_name: "Official", source_url: "https://example.com/evidence", excerpt: "摘要" }],
+      evidence: [{ id: "evidence-1", claim: "政策已宣布", source_name: "Official", source_url: "https://example.com/evidence", excerpt: "摘要", context_role: "historical_context", related_by: "issuer", content_mode: "summary_only", content_hash: "1234567890abcdef" }],
     } as EventConclusionDetail;
     const modal = renderToStaticMarkup(createElement(EventConclusionDetailModal, { detail, onClose: () => undefined }));
     expect(modal).toContain("事件结论摘要");
@@ -1226,6 +1242,7 @@ describe("changed targets page", () => {
     expect(modal).toContain("缺失信息 / Missing information");
     expect(modal).toContain("政策细则 / Additional verified information is required for this item");
     expect(modal).toContain("政策新闻");
+    expect(modal).toContain("三日关联上下文 · 仅摘要 · 关联：同发行人 · 哈希 1234567890ab");
 
     const emptyModal = renderToStaticMarkup(createElement(EventConclusionDetailModal, {
       detail: { ...detail, report: { ...detail.report, impacts: [], report_confidence: 0, report_confidence_score: 0 } },

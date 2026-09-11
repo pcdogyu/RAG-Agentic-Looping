@@ -104,7 +104,8 @@ func (s *Server) queryConclusions(r *http.Request, kind, search, market, rating,
 			SELECT 'event', er.id, er.updated_at, er.payload::jsonb, NULL::jsonb, e.payload::jsonb, 0
 			FROM event_research_runs er
 			LEFT JOIN news_events e ON e.id=er.event_id
-			WHERE $1 IN ('all','event') AND $3='' AND $4=''
+			WHERE $1 IN ('all','event') AND $3=''
+			  AND ($4='' OR coalesce(er.payload::jsonb #>> '{report,research_signal,rating}',er.payload::jsonb #>> '{report,rating}')=$4)
 			  AND er.status IN ('completed','insufficient_evidence')
 			  AND (er.payload->>'retryable_reason') IS NULL
 			  AND er.payload->'report' IS NOT NULL
@@ -157,6 +158,10 @@ func conclusionItem(row conclusionRow) (map[string]any, error) {
 	}
 	impacts := sanitizePublishedImpacts(report["impacts"])
 	directionScore, rating, signalAvailable := representativeImpact(impacts)
+	researchSignal := objectValue(report["research_signal"])
+	if researchSignal == nil {
+		researchSignal = legacyResearchSignal(directionScore, rating, signalAvailable)
+	}
 	var confidenceReason any
 	if !signalAvailable {
 		confidenceReason = "no_valid_target"
@@ -170,10 +175,18 @@ func conclusionItem(row conclusionRow) (map[string]any, error) {
 		"refresh":        publicFullEventResearch(payload),
 		"report": map[string]any{"confidence": report["confidence"], "report_confidence": report["report_confidence"], "report_confidence_score": report["report_confidence_score"], "news_confidence": report["news_confidence"], "news_credibility_score": report["news_credibility_score"],
 			"direction_score": directionScore, "rating": rating,
+			"research_signal": researchSignal, "governed_signal": report["governed_signal"], "news_credibility_assessment": report["news_credibility_assessment"], "report_confidence_assessment": report["report_confidence_assessment"],
 			"signal_available": signalAvailable, "report_confidence_reason": confidenceReason,
 			"impact_count": len(impacts), "affected_markets": defaultAny(report["affected_markets"], []any{}),
 			"affected_sectors": defaultAny(report["affected_sectors"], []any{}), "scoring_version": report["scoring_version"], "prompt_version": report["prompt_version"]},
 	}, nil
+}
+
+func legacyResearchSignal(score, rating any, available bool) map[string]any {
+	if !available {
+		return map[string]any{"status": "unavailable", "available": false, "provisional": false, "direction_score": nil, "rating": nil, "trade_eligible": false, "reasons": []any{"no_verified_target"}, "version": "legacy"}
+	}
+	return map[string]any{"status": "validated", "available": true, "provisional": false, "direction_score": score, "rating": rating, "trade_eligible": false, "reasons": []any{}, "version": "legacy"}
 }
 
 func representativeImpact(impacts []any) (any, any, bool) {
@@ -215,7 +228,7 @@ func publicRecommendation(payload map[string]any) {
 	status := stringValue(payload["signal_status"])
 	version := stringValue(payload["scoring_version"])
 	directionVerified := boolValue(payload["direction_verified"])
-	available := status != "technical_failure" && (version == "llm-direction-v3" || version == "short-term-impact-v1" || (directionVerified && status != "insufficient_evidence"))
+	available := status != "technical_failure" && (version == "llm-direction-v3" || version == "llm-direction-v4" || version == "short-term-impact-v1" || (directionVerified && status != "insufficient_evidence"))
 	payload["score_available"] = available
 	if !available {
 		for _, key := range []string{"score", "direction_score", "model_score", "raw_score"} {

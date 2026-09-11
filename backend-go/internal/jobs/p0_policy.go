@@ -14,7 +14,7 @@ const p0TimeContractVersion = "p0-time-v1"
 func signalAvailableAt(event map[string]any, evidence []researchEvidence, generated time.Time) time.Time {
 	available := generated.UTC()
 	for _, item := range evidence {
-		for _, stamp := range []time.Time{item.PublishedAt, item.ObservedAt, item.AsOf} {
+		for _, stamp := range []time.Time{item.PublishedAt, item.ObservedAt, item.AsOf, item.RetrievedAt} {
 			if stamp.After(available) {
 				available = stamp
 			}

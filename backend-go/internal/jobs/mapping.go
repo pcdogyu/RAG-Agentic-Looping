@@ -438,7 +438,7 @@ func shortlistMappingAssets(source string, assets []mappingAsset, limit int) []m
 			score = 100
 		}
 		for _, term := range append([]string{asset.Name}, asset.Aliases...) {
-			if meaningfulTerm(term) && explicitTerm(source, term) && score < 90 {
+			if meaningfulIssuerTerm(term) && explicitTerm(source, term) && score < 90 {
 				score = 90
 			}
 		}
@@ -483,7 +483,7 @@ func preferredMappingAssetAllowed(source string, asset mappingAsset) bool {
 		if !mentioned || asset.ID == preference.assetID {
 			continue
 		}
-		if explicitTerm(source, asset.Name) {
+		if meaningfulIssuerTerm(asset.Name) && explicitTerm(source, asset.Name) {
 			genericName := false
 			for _, term := range preference.terms {
 				genericName = genericName || normalizedText(asset.Name) == normalizedText(term)
@@ -504,7 +504,7 @@ func preferredMappingAssetAllowed(source string, asset mappingAsset) bool {
 }
 
 func exactOnlyAssetShadowedByStandard(source string, asset mappingAsset, assets []mappingAsset) bool {
-	if asset.AssociationTier != "exact_only" || explicitTerm(source, asset.Name) {
+	if asset.AssociationTier != "exact_only" || (meaningfulIssuerTerm(asset.Name) && explicitTerm(source, asset.Name)) {
 		return false
 	}
 	symbol := normalizedText(asset.Symbol)
@@ -575,9 +575,9 @@ func validateMappingHint(hint mappingHint, source string, newsItems []newsRecord
 		for _, news := range newsItems {
 			sourceSymbol = sourceSymbol || (sourceSymbolAssetAllowed(news.Source, asset.Class, asset.Market) && containsStringFold(news.Symbols, asset.Symbol))
 		}
-		issuerMention := explicitTerm(hint.SourceMention, asset.Name)
+		issuerMention := meaningfulIssuerTerm(asset.Name) && explicitTerm(hint.SourceMention, asset.Name)
 		for _, alias := range asset.Aliases {
-			issuerMention = issuerMention || (meaningfulTerm(alias) && explicitTerm(hint.SourceMention, alias))
+			issuerMention = issuerMention || (meaningfulIssuerTerm(alias) && explicitTerm(hint.SourceMention, alias))
 		}
 		if !sourceSymbol && !issuerMention {
 			continue
@@ -682,11 +682,11 @@ func automaticMappingAssetAllowed(source string, asset mappingAsset) bool {
 	if asset.AssociationTier != "exact_only" {
 		return true
 	}
-	if explicitSymbol(source, asset.Symbol, false) || explicitTerm(source, asset.Name) {
+	if explicitSymbol(source, asset.Symbol, false) || (meaningfulIssuerTerm(asset.Name) && explicitTerm(source, asset.Name)) {
 		return true
 	}
 	for _, alias := range asset.Aliases {
-		if meaningfulTerm(alias) && explicitTerm(source, alias) {
+		if meaningfulIssuerTerm(alias) && explicitTerm(source, alias) {
 			return true
 		}
 	}

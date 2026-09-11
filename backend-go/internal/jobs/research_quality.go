@@ -102,6 +102,7 @@ func verifyEventDraft(draft *eventResearchDraft, event map[string]any, evidence 
 
 	for _, original := range draft.Impacts {
 		item := original
+		item.ResearchDirectionScore = clampInt(original.DirectionScore, -100, 100)
 		missingStart := len(verification.Missing)
 		conditionalStart := len(verification.Conditional)
 		contradictionStart := len(verification.Contradictions)
@@ -484,7 +485,7 @@ func validateEvidenceTimes(evidence []researchEvidence, asOf time.Time) map[stri
 		if !item.AsOf.IsZero() && !item.ObservedAt.IsZero() && item.AsOf.After(item.ObservedAt) {
 			check.Contradictions = append(check.Contradictions, "evidence_as_of_after_observed:"+item.ID)
 		}
-		if (!item.PublishedAt.IsZero() && item.PublishedAt.After(asOf)) || (!item.ObservedAt.IsZero() && item.ObservedAt.After(asOf)) || (!item.AsOf.IsZero() && item.AsOf.After(asOf)) {
+		if (!item.PublishedAt.IsZero() && item.PublishedAt.After(asOf)) || (!item.ObservedAt.IsZero() && item.ObservedAt.After(asOf)) || (!item.AsOf.IsZero() && item.AsOf.After(asOf)) || (!item.RetrievedAt.IsZero() && item.RetrievedAt.After(asOf)) {
 			check.Contradictions = append(check.Contradictions, "point-in-time boundary violation:"+item.ID)
 		}
 		if len(check.Missing)+len(check.Contradictions) > 0 {
@@ -513,7 +514,7 @@ func verifyAssetDraft(draft *assetResearchDraft, asset, event map[string]any, ev
 	verification := verifyEventDraft(&eventDraft, eventCopy, evidence, asOf)
 	if len(eventDraft.Impacts) == 1 {
 		impact := eventDraft.Impacts[0]
-		draft.DirectionScore, draft.ConclusionStatus, draft.ImpactChannel = impact.DirectionScore, impact.ConclusionStatus, impact.ImpactChannel
+		draft.DirectionScore, draft.ResearchDirectionScore, draft.ConclusionStatus, draft.ImpactChannel = impact.DirectionScore, impact.ResearchDirectionScore, impact.ConclusionStatus, impact.ImpactChannel
 		draft.Claims, draft.TransmissionSteps, draft.TransmissionPath, draft.TargetRelation = impact.Claims, impact.TransmissionSteps, impact.TransmissionPath, impact.TargetRelation
 		draft.EvidenceIDs, draft.MissingInformation = impact.EvidenceIDs, impact.Missing
 		draft.Verification = impact.Verification
@@ -527,6 +528,7 @@ func eventImpactFromAssetDraft(draft assetResearchDraft, asset map[string]any) e
 	return eventImpactDraft{
 		TargetType: "tradable_asset", TargetName: stringValue(asset["name"]), AssetID: stringValue(asset["asset_id"]),
 		ConclusionStatus: draft.ConclusionStatus, ImpactChannel: draft.ImpactChannel, DirectionScore: draft.DirectionScore,
+		ResearchDirectionScore: draft.ResearchDirectionScore, ReportConfidence: draft.ReportConfidence,
 		Claims: draft.Claims, TransmissionSteps: draft.TransmissionSteps, TransmissionPath: draft.TransmissionPath, TargetRelation: draft.TargetRelation,
 		TargetEvaluation: draft.TargetEvaluation, Rationale: draft.Summary, EvidenceIDs: draft.EvidenceIDs, Missing: draft.MissingInformation,
 	}
@@ -625,7 +627,9 @@ func impactHasTargetSpecificEvidence(item eventImpactDraft, event map[string]any
 	allowedEvidence, allowedActions := stringSet(evidenceIDs), stringSet(actionIDs)
 	mentioned, currentEventSupport := false, false
 	for _, current := range evidence {
-		if allowedEvidence[current.ID] && containsTargetIdentity(current.Claim+" "+current.Excerpt, identity) {
+		content := current.Claim + " " + current.Excerpt
+		symbolMention := asset != nil && explicitSymbol(content, stringValue(asset["symbol"]), false)
+		if allowedEvidence[current.ID] && (containsTargetIdentity(content, identity) || symbolMention) {
 			mentioned = true
 			currentEventSupport = current.ContextRole != "historical_context"
 			break
@@ -668,15 +672,27 @@ func impactHasTargetSpecificEvidence(item eventImpactDraft, event map[string]any
 }
 
 func targetIdentityTerms(target string, asset map[string]any) []string {
-	values := []string{target}
+	values := []string{}
+	if meaningfulIssuerTerm(target) {
+		values = append(values, target)
+	}
 	if asset != nil {
-		values = append(values, stringValue(asset["name"]), stringValue(asset["symbol"]))
-		values = append(values, stringSlice(asset["aliases"])...)
+		// The canonical issuer name came from verified security master data. It
+		// may be short (for example Acme), while free-form model target names and
+		// aliases must pass the stricter ambiguity filter.
+		if name := strings.TrimSpace(stringValue(asset["name"])); meaningfulTerm(name) {
+			values = append(values, name)
+		}
+		for _, alias := range stringSlice(asset["aliases"]) {
+			if meaningfulIssuerTerm(alias) {
+				values = append(values, alias)
+			}
+		}
 	}
 	result := make([]string, 0, len(values))
 	for _, value := range values {
 		value = strings.TrimSpace(value)
-		if len([]rune(value)) >= 2 && !containsString(result, value) {
+		if value != "" && !containsString(result, value) {
 			result = append(result, value)
 		}
 	}
@@ -856,6 +872,108 @@ func reportConfidenceScore(newsConfidence float64, targetScores []int, verificat
 		value = math.Min(value, .39)
 	}
 	return round4(value)
+}
+
+func modelConfidenceAssessment(value modelConfidenceDraft, evidence []researchEvidence, asOf time.Time, requireHistory bool, contradictions []string) map[string]any {
+	valid := map[string]researchEvidence{}
+	for _, item := range evidence {
+		valid[item.ID] = item
+	}
+	ids := uniqueStrings(value.EvidenceIDs)
+	reasons := []string{}
+	accepted := []string{}
+	currentCount, historyCount := 0, 0
+	summaryOnly := false
+	for _, id := range ids {
+		item, ok := valid[id]
+		if !ok {
+			reasons = append(reasons, "unknown_evidence_id:"+id)
+			continue
+		}
+		if !asOf.IsZero() && ((!item.PublishedAt.IsZero() && item.PublishedAt.After(asOf)) || (!item.ObservedAt.IsZero() && item.ObservedAt.After(asOf)) || (!item.AsOf.IsZero() && item.AsOf.After(asOf)) || (!item.RetrievedAt.IsZero() && item.RetrievedAt.After(asOf))) {
+			reasons = append(reasons, "future_evidence:"+id)
+			continue
+		}
+		accepted = append(accepted, id)
+		if item.ContextRole == "historical_context" {
+			historyCount++
+		} else {
+			currentCount++
+		}
+		if item.ContentMode != "original" {
+			summaryOnly = true
+		}
+	}
+	if strings.TrimSpace(value.Reason) == "" {
+		reasons = append(reasons, "missing_reason")
+	}
+	if len(accepted) == 0 || currentCount == 0 {
+		reasons = append(reasons, "missing_current_event_evidence")
+	}
+	if !requireHistory && historyCount > 0 {
+		reasons = append(reasons, "news_credibility_cited_historical_context")
+	}
+	for _, issue := range contradictions {
+		if hardConfidenceValidationIssue(issue) {
+			reasons = append(reasons, issue)
+		}
+	}
+	if len(reasons) > 0 {
+		return map[string]any{
+			"model_score": value.Score, "validated_score": nil, "status": "unavailable", "reason": value.Reason,
+			"reasons": uniqueStrings(reasons), "evidence_ids": accepted, "conflicts": nonNilStrings(value.Conflicts),
+			"history_window_days": ternaryAny(requireHistory, 3, nil), "version": modelConfidenceVersion,
+		}
+	}
+	validated, status, adjustments := clampInt(value.Score, 0, 100), "validated", []string{}
+	if value.Score < 0 || value.Score > 100 {
+		status = "limited"
+		adjustments = append(adjustments, "score_clamped_to_0_100")
+	}
+	if summaryOnly {
+		validated = min(validated, 69)
+		status = "limited"
+		adjustments = append(adjustments, "summary_only_cap_69")
+	}
+	if requireHistory && historyCount == 0 {
+		validated = min(validated, 69)
+		status = "limited"
+		adjustments = append(adjustments, "no_recent_asset_context_cap_69")
+	}
+	conflicts := uniqueStrings(append(append([]string{}, value.Conflicts...), contradictions...))
+	if len(conflicts) > 0 {
+		validated = min(validated, 49)
+		status = "conflicted"
+		adjustments = append(adjustments, "source_conflict_cap_49")
+	}
+	return map[string]any{
+		"model_score": value.Score, "validated_score": validated, "status": status, "reason": value.Reason,
+		"reasons": uniqueStrings(adjustments), "evidence_ids": accepted, "conflicts": conflicts,
+		"history_window_days": ternaryAny(requireHistory, 3, nil), "version": modelConfidenceVersion,
+	}
+}
+
+func hardConfidenceValidationIssue(value string) bool {
+	for _, prefix := range []string{"unknown evidence id:", "target_specific_evidence:", "evidence_missing_", "evidence_observed_before_published:", "evidence_as_of_after_observed:", "point-in-time boundary violation:"} {
+		if strings.HasPrefix(value, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func ternaryAny(condition bool, yes, no any) any {
+	if condition {
+		return yes
+	}
+	return no
+}
+
+func isoOrNil(value time.Time) any {
+	if value.IsZero() {
+		return nil
+	}
+	return iso(value)
 }
 
 func nonNilClaims(values []claimDraft) []claimDraft {

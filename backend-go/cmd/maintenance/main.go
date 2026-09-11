@@ -17,20 +17,21 @@ import (
 )
 
 func main() {
-	task := flag.String("task", "", "compact-research-backlog, reprocess-target-impacts-v2, or seed-assets")
+	task := flag.String("task", "", "compact-research-backlog, reprocess-target-impacts-v2, replay-recent-event-research-v6, or seed-assets")
 	dryRun := flag.Bool("dry-run", true, "preview backlog compaction without changing research runs")
 	batchSize := flag.Int("batch-size", 25, "target-impact replay batch size")
 	maxActive := flag.Int("max-active", 50, "target-impact replay active-run ceiling")
 	flag.Parse()
 
 	taskTypes := map[string]string{
-		"compact-research-backlog":    jobs.CompactResearchBacklogTask,
-		"reprocess-target-impacts-v2": jobs.ReprocessTargetImpactsTask,
-		"seed-assets":                 jobs.SeedAssetsTask,
+		"compact-research-backlog":        jobs.CompactResearchBacklogTask,
+		"reprocess-target-impacts-v2":     jobs.ReprocessTargetImpactsTask,
+		"replay-recent-event-research-v6": jobs.ReplayRecentEventResearchTask,
+		"seed-assets":                     jobs.SeedAssetsTask,
 	}
 	taskType := taskTypes[strings.TrimSpace(*task)]
 	if taskType == "" {
-		fmt.Fprintln(os.Stderr, "-task must be compact-research-backlog, reprocess-target-impacts-v2, or seed-assets")
+		fmt.Fprintln(os.Stderr, "-task must be compact-research-backlog, reprocess-target-impacts-v2, replay-recent-event-research-v6, or seed-assets")
 		os.Exit(2)
 	}
 	if *batchSize < 1 || *maxActive < 1 {
@@ -63,7 +64,7 @@ func main() {
 	if taskType == jobs.CompactResearchBacklogTask {
 		kwargs["dry_run"] = *dryRun
 	}
-	if taskType == jobs.ReprocessTargetImpactsTask {
+	if taskType == jobs.ReprocessTargetImpactsTask || taskType == jobs.ReplayRecentEventResearchTask {
 		kwargs["batch_size"], kwargs["max_active"] = *batchSize, *maxActive
 	}
 	id, err := jobs.NewStore(dependencies.DB).Enqueue(ctx, jobs.EnqueueParams{

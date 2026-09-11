@@ -828,7 +828,7 @@ func (runtime *ExtractRuntime) matchAssets(ctx context.Context, news newsRecord,
 		issuerMatch := meaningfulIssuerTerm(name) && explicitTerm(text, name)
 		if !issuerMatch {
 			for _, alias := range aliases {
-				if meaningfulTerm(alias) && explicitTerm(text, alias) {
+				if meaningfulIssuerTerm(alias) && explicitTerm(text, alias) {
 					issuerMatch = true
 					break
 				}
@@ -1407,7 +1407,7 @@ func meaningfulIssuerTerm(value string) bool {
 		return false
 	}
 	compact := normalizedText(value)
-	if map[string]bool{"机器人": true, "one": true, "real": true, "data": true, "money": true, "race": true, "fight": true, "team": true, "tech": true, "five": true, "bank": true, "stock": true}[compact] {
+	if map[string]bool{"机器人": true, "one": true, "real": true, "data": true, "money": true, "race": true, "fight": true, "team": true, "tech": true, "five": true, "bank": true, "stock": true, "more": true, "here": true}[compact] {
 		return false
 	}
 	return hasHan(value) || strings.ContainsAny(strings.TrimSpace(value), " .,&-/") || len(compact) >= 5

@@ -1292,13 +1292,13 @@ func macroRatingSignals(values []macroSnapshot) []targetRatingSignal {
 
 func ratingForScore(score float64) string {
 	switch {
-	case score >= 70:
+	case score > 75:
 		return "strongly_bullish"
-	case score >= 30:
+	case score > 25:
 		return "bullish"
-	case score <= -70:
+	case score < -75:
 		return "strongly_bearish"
-	case score <= -30:
+	case score < -25:
 		return "bearish"
 	default:
 		return "watch"

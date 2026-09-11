@@ -398,7 +398,7 @@ func frozenMappedAssets(record frozenEventCase, assets []frozenAsset) (map[strin
 		issuerMatch := meaningfulIssuerTerm(asset.Name) && explicitTerm(text, asset.Name)
 		if !issuerMatch {
 			for _, alias := range asset.Aliases {
-				if meaningfulTerm(alias) && explicitTerm(text, alias) {
+				if meaningfulIssuerTerm(alias) && explicitTerm(text, alias) {
 					issuerMatch = true
 					break
 				}

@@ -690,6 +690,17 @@
             "title": "Claim",
             "type": "string"
           },
+          "content_hash": {
+            "type": "string"
+          },
+          "content_mode": {
+            "enum": ["original", "summary_only"],
+            "type": "string"
+          },
+          "context_role": {
+            "enum": ["current_event", "historical_context"],
+            "type": "string"
+          },
           "excerpt": {
             "maxLength": 1000,
             "title": "Excerpt",
@@ -735,6 +746,16 @@
             "format": "date-time",
             "title": "Published At",
             "type": "string"
+          },
+          "related_by": {
+            "enum": ["current_event", "asset", "issuer"],
+            "type": "string"
+          },
+          "retrieval_detail": {
+            "type": "string"
+          },
+          "retrieved_at": {
+            "anyOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }]
           },
           "run_id": {
             "format": "uuid",
@@ -2760,6 +2781,19 @@
             "minimum": 0,
             "type": "integer"
           },
+          "news_credibility_assessment": {
+            "$ref": "#/components/schemas/ModelConfidenceAssessment"
+          },
+          "report_confidence_assessment": {
+            "$ref": "#/components/schemas/ModelConfidenceAssessment"
+          },
+          "research_signal": {
+            "$ref": "#/components/schemas/ResearchSignal"
+          },
+          "governed_signal": {
+            "additionalProperties": true,
+            "type": "object"
+          },
           "confidence_factors": {
             "anyOf": [
               {
@@ -3909,6 +3943,38 @@
         "required": ["score", "reason", "evidence_ids", "action_ids", "missing_information"],
         "type": "object"
       },
+      "ModelConfidenceAssessment": {
+        "additionalProperties": false,
+        "properties": {
+          "model_score": { "anyOf": [{ "type": "integer" }, { "type": "null" }] },
+          "validated_score": { "anyOf": [{ "type": "integer", "minimum": 0, "maximum": 100 }, { "type": "null" }] },
+          "status": { "type": "string", "enum": ["validated", "limited", "conflicted", "unavailable"] },
+          "reason": { "type": "string" },
+          "reasons": { "type": "array", "items": { "type": "string" } },
+          "evidence_ids": { "type": "array", "items": { "type": "string" } },
+          "conflicts": { "type": "array", "items": { "type": "string" } },
+          "history_window_days": { "anyOf": [{ "type": "integer", "const": 3 }, { "type": "null" }] },
+          "version": { "type": "string", "const": "model-confidence-v1" }
+        },
+        "required": ["model_score", "validated_score", "status", "reason", "reasons", "evidence_ids", "conflicts", "history_window_days", "version"],
+        "type": "object"
+      },
+      "ResearchSignal": {
+        "additionalProperties": false,
+        "properties": {
+          "status": { "type": "string", "enum": ["provisional", "validated", "unavailable"] },
+          "available": { "type": "boolean" },
+          "provisional": { "type": "boolean" },
+          "direction_score": { "anyOf": [{ "type": "integer", "minimum": -100, "maximum": 100 }, { "type": "null" }] },
+          "rating": { "anyOf": [{ "$ref": "#/components/schemas/Rating" }, { "type": "null" }] },
+          "asset_id": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+          "trade_eligible": { "type": "boolean", "const": false },
+          "reasons": { "type": "array", "items": { "type": "string" } },
+          "version": { "type": "string" }
+        },
+        "required": ["status", "available", "provisional", "direction_score", "rating", "asset_id", "trade_eligible", "reasons", "version"],
+        "type": "object"
+      },
       "ResearchClaim": {
         "additionalProperties": false,
         "properties": {
@@ -4004,6 +4070,19 @@
               }
             ],
             "title": "Direction Score"
+          },
+          "research_signal": {
+            "$ref": "#/components/schemas/ResearchSignal"
+          },
+          "news_credibility_assessment": {
+            "$ref": "#/components/schemas/ModelConfidenceAssessment"
+          },
+          "report_confidence_assessment": {
+            "$ref": "#/components/schemas/ModelConfidenceAssessment"
+          },
+          "governed_signal": {
+            "additionalProperties": true,
+            "type": "object"
           },
           "evidence_ids": {
             "items": {

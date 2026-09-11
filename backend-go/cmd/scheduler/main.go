@@ -42,6 +42,7 @@ func main() {
 	outcomes := jobs.NewOutcomeScheduler(cfg, dependencies.DB, dependencies.Redis)
 	masterdata := jobs.NewMasterdataScheduler(cfg, dependencies.DB, dependencies.Redis)
 	operations := jobs.NewOperationsScheduler(cfg, dependencies.DB, dependencies.Redis)
+	maintenance := jobs.NewMaintenanceScheduler(cfg, dependencies.DB, dependencies.Redis)
 	for {
 		select {
 		case <-ctx.Done():
@@ -70,6 +71,11 @@ func main() {
 			if operations.Enabled() {
 				if err := operations.Tick(ctx); err != nil {
 					slog.Error("schedule operational maintenance", "error", err)
+				}
+			}
+			if maintenance.Enabled() {
+				if err := maintenance.Tick(ctx); err != nil {
+					slog.Error("schedule versioned research replay", "error", err)
 				}
 			}
 		case <-reconcileTicker.C:

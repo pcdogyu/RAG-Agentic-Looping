@@ -1339,6 +1339,30 @@ type TransmissionStep = {
   missing_information: string[];
 };
 
+export type ResearchSignal = {
+  status: "validated" | "provisional" | "unavailable";
+  available: boolean;
+  provisional: boolean;
+  direction_score: number | null;
+  rating: string | null;
+  asset_id?: string | null;
+  trade_eligible: boolean;
+  reasons: string[];
+  version: string;
+};
+
+export type ModelConfidenceAssessment = {
+  model_score: number | null;
+  validated_score: number | null;
+  status: "validated" | "limited" | "conflicted" | "unavailable";
+  reason: string;
+  reasons: string[];
+  evidence_ids: string[];
+  conflicts: string[];
+  history_window_days?: number | null;
+  version: string;
+};
+
 export type Recommendation = {
   id: string;
   run_id: string;
@@ -1352,6 +1376,10 @@ export type Recommendation = {
   news_credibility_score?: number;
   report_confidence?: number;
   report_confidence_score?: number;
+	research_signal?: ResearchSignal;
+	governed_signal?: { status?: string; direction_score?: number; rating?: string };
+	news_credibility_assessment?: ModelConfidenceAssessment;
+	report_confidence_assessment?: ModelConfidenceAssessment;
   evidence_complete: boolean;
   directional_evidence_complete?: boolean;
   direction_verified?: boolean;
@@ -1503,7 +1531,21 @@ export type ConclusionDetail = {
   recommendation: Recommendation;
   event: { headline: string } | null;
   news: Array<{ id: string; title: string; url: string; source: string }>;
-  evidence: Array<{ id: string; claim: string; source_name: string; source_url: string; excerpt: string }>;
+  evidence: ConclusionEvidence[];
+};
+
+export type ConclusionEvidence = {
+  id: string;
+  claim: string;
+  source_name: string;
+  source_url: string;
+  excerpt: string;
+  context_role?: "current_event" | "historical_context";
+  related_by?: "current_event" | "asset" | "issuer";
+  content_mode?: "original" | "summary_only";
+  content_hash?: string;
+  retrieval_detail?: string;
+  retrieved_at?: string;
 };
 
 export type EventTargetImpact = {
@@ -1530,6 +1572,10 @@ export type EventTargetImpact = {
   target_evaluation?: TargetEvaluation;
   model_target_evaluation?: TargetEvaluation;
   applied_caps?: string[];
+	research_signal?: ResearchSignal;
+	governed_signal?: { status?: string; direction_score?: number; rating?: string };
+	news_credibility_assessment?: ModelConfidenceAssessment;
+	report_confidence_assessment?: ModelConfidenceAssessment;
   impact_verification?: {
     quality?: {
       structurally_valid: boolean;
@@ -1567,6 +1613,10 @@ export type EventConclusionDetail = {
     rating?: string;
     signal_available?: boolean;
     report_confidence_reason?: "no_valid_target" | null;
+		research_signal?: ResearchSignal;
+		governed_signal?: { status?: string; direction_score?: number; rating?: string };
+		news_credibility_assessment?: ModelConfidenceAssessment;
+		report_confidence_assessment?: ModelConfidenceAssessment;
     impacts: EventTargetImpact[];
     macro_factors: Array<{ id: string; name: string; description: string; strength: number }>;
     missing_information: string[];
@@ -1584,7 +1634,7 @@ export type EventConclusionDetail = {
 		};
   };
   news: Array<{ id: string; title: string; url: string; source: string }>;
-  evidence: Array<{ id: string; claim: string; source_name: string; source_url: string; excerpt: string }>;
+  evidence: ConclusionEvidence[];
 };
 
 export type ResearchConclusionItem = {
@@ -1609,6 +1659,10 @@ export type ResearchConclusionItem = {
     rating: string | null;
     signal_available?: boolean;
     report_confidence_reason?: "no_valid_target" | null;
+		research_signal?: ResearchSignal;
+		governed_signal?: { status?: string; direction_score?: number; rating?: string };
+		news_credibility_assessment?: ModelConfidenceAssessment;
+		report_confidence_assessment?: ModelConfidenceAssessment;
     impact_count: number;
     affected_markets: string[];
     affected_sectors: string[];
@@ -1650,7 +1704,7 @@ export function changedTargetLatestRecommendationId(item: ChangedTarget) {
   return item.latest_recommendation_id || item.recommendation_id;
 }
 
-type ConclusionReference = { label: string; url: string; source: string };
+type ConclusionReference = { label: string; url: string; source: string; audit?: string };
 
 export type FailedResearch = {
   kind: "asset" | "event";
@@ -1828,6 +1882,13 @@ export function conclusionReferences(
       label: item.claim,
       url: item.source_url,
       source: item.source_name,
+      audit: [
+        item.context_role === "historical_context" ? "三日关联上下文" : item.context_role === "current_event" ? "当前事件" : "",
+        item.content_mode === "original" ? "原文正文" : item.content_mode === "summary_only" ? "仅摘要" : "",
+        item.related_by && item.related_by !== "current_event" ? `关联：${item.related_by === "issuer" ? "同发行人" : "同资产"}` : "",
+        item.content_hash ? `哈希 ${item.content_hash.slice(0, 12)}` : "",
+        item.retrieved_at ? `获取 ${new Date(item.retrieved_at).toLocaleString("zh-CN")}` : "",
+      ].filter(Boolean).join(" · "),
     })),
   ];
   const seenUrls = new Set<string>();
@@ -2282,6 +2343,37 @@ export function recommendationAssetKey(recommendation: Pick<Recommendation, "ass
   return recommendation.asset.asset_id || `${recommendation.asset.market}:${recommendation.asset.symbol}`;
 }
 
+function assessedConfidence(value: ModelConfidenceAssessment | undefined, fallback: number | undefined) {
+  if (value) return typeof value.validated_score === "number" ? value.validated_score : null;
+  if (typeof fallback === "number") return Math.round(fallback * 100);
+  return null;
+}
+
+function assessmentAdjustment(value: ModelConfidenceAssessment | undefined) {
+  if (!value || typeof value.model_score !== "number" || typeof value.validated_score !== "number" || value.model_score === value.validated_score) return "";
+  return `（模型 ${value.model_score}，规则调整）`;
+}
+
+function ResearchSignalScore({ signal, news, report, fallbackNews, fallbackReport, compact = false }: {
+  signal: ResearchSignal;
+  news?: ModelConfidenceAssessment;
+  report?: ModelConfidenceAssessment;
+  fallbackNews?: number;
+  fallbackReport?: number;
+  compact?: boolean;
+}) {
+  const score = signal.direction_score;
+  const tone = typeof score !== "number" ? "neutral" : score < 0 ? "negative" : score > 0 ? "positive" : "neutral";
+  const newsScore = assessedConfidence(news, fallbackNews);
+  const reportScore = assessedConfidence(report, fallbackReport);
+  return <div className={`conclusion-score ${tone}`}>
+    <strong>{signal.available && typeof score === "number" ? `${score > 0 ? "+" : ""}${score}` : "—"}</strong>
+    <span>{signal.available && signal.rating ? `研究倾向：${recommendationRatingLabel(signal.rating)}` : "未识别到可验证标的"}</span>
+    <small>{signal.provisional ? "暂定 · 证据未完成 · 不可交易" : signal.available ? "治理信号已通过" : "暂无标的方向评分"}</small>
+    {!compact && <small>新闻可信度 {newsScore ?? "—"}/100{assessmentAdjustment(news)} · 研报置信度 {reportScore ?? "—"}/100{assessmentAdjustment(report)}</small>}
+  </div>;
+}
+
 export function ConclusionCard({
   item,
   researchState,
@@ -2296,7 +2388,13 @@ export function ConclusionCard({
   return <article className="conclusion-card">
     <button type="button" className="conclusion-card-details" onClick={onOpen} aria-label={`查看 ${item.asset.symbol} 研究详情`}>
       <div className="conclusion-card-copy"><span>{item.asset.market} · {new Date(item.as_of).toLocaleString("zh-CN")}</span><strong>{item.asset.symbol} · {item.asset.name}</strong><p>{item.thesis.summary}</p></div>
-      <ConclusionScore
+      {item.research_signal ? <ResearchSignalScore
+        signal={item.research_signal}
+        news={item.news_credibility_assessment}
+        report={item.report_confidence_assessment}
+        fallbackNews={item.news_confidence}
+        fallbackReport={item.report_confidence ?? item.confidence}
+      /> : <ConclusionScore
         score={item.score}
         directionScore={item.direction_score}
         rating={item.rating}
@@ -2312,7 +2410,7 @@ export function ConclusionCard({
         scoringVersion={item.scoring_version}
         scoreSource={item.score_source}
         compact
-      />
+      />}
     </button>
     <ResearchAgainButton state={researchState} onResearch={onResearch} />
   </article>;
@@ -2335,8 +2433,9 @@ export function EventConclusionCard({
   onResearch: () => void;
 }) {
   const report = item.report;
-  const score = report?.direction_score;
-  const rating = report?.rating;
+  const researchSignal = report?.research_signal;
+  const score = researchSignal?.direction_score ?? report?.direction_score;
+  const rating = researchSignal?.rating ?? report?.rating;
   const scoreTone = score === null || score === undefined ? "neutral" : score < 0 ? "negative" : score > 0 ? "positive" : "neutral";
   return <article className="conclusion-card event-conclusion-card">
     <button type="button" className="conclusion-card-details" onClick={onOpen} aria-label={`查看 ${item.title} 事件研报`}>
@@ -2348,13 +2447,15 @@ export function EventConclusionCard({
     </button>
     <div className="event-conclusion-side">
       <button type="button" className={`event-conclusion-summary ${scoreTone}`} onClick={onOpen} aria-label={`查看 ${item.title} 事件研报评分`}>
-        <strong>{report?.signal_available === false
-          ? "本次事件信号：0 · 观望"
+        <strong>{researchSignal && !researchSignal.available
+          ? "未识别到可验证标的"
+          : report?.signal_available === false
+          ? "未识别到可验证标的"
           : score === null || score === undefined
-            ? "本次事件信号：0 · 观望"
-            : `本次事件信号：${score > 0 ? "+" : ""}${score} · ${rating ? recommendationRatingLabel(rating) : "观望"}`}</strong>
+            ? "研究倾向：暂无评分"
+            : `研究倾向：${score > 0 ? "+" : ""}${score} · ${rating ? recommendationRatingLabel(rating) : "观望"}`}</strong>
         <span>影响目标 {report?.impact_count ?? 0} 个</span>
-        <small>新闻可信度 {Math.round((report?.news_confidence ?? 0) * 100)}% · 研报置信度 {Math.round((report?.confidence ?? 0) * 100)}%{report?.report_confidence_reason === "no_valid_target" ? "（无有效影响目标）" : ""}</small>
+        <small>{researchSignal?.provisional ? "暂定 · 证据未完成 · 不可交易 · " : ""}新闻可信度 {assessedConfidence(report?.news_credibility_assessment, report?.news_confidence) ?? "—"}/100{assessmentAdjustment(report?.news_credibility_assessment)} · 研报置信度 {assessedConfidence(report?.report_confidence_assessment, report?.confidence) ?? "—"}/100{assessmentAdjustment(report?.report_confidence_assessment)}</small>
       </button>
       <ResearchAgainButton state={researchState} onResearch={onResearch} label="重新研究" />
     </div>
@@ -2436,7 +2537,7 @@ export function ChangedTargetsContent({
 }
 
 export function ConclusionDetailModal({ detail, onClose }: { detail: ConclusionDetail; onClose: () => void }) {
-  const isV3 = detail.recommendation.scoring_version === "llm-direction-v3";
+  const isV3 = ["llm-direction-v3", "llm-direction-v4"].includes(detail.recommendation.scoring_version || "");
   const isShortTerm = detail.recommendation.scoring_version === "short-term-impact-v1"
     || detail.recommendation.horizon_unit === "trading_sessions";
   return <div className="modal-backdrop" onClick={onClose}>
@@ -2444,7 +2545,13 @@ export function ConclusionDetailModal({ detail, onClose }: { detail: ConclusionD
       <button type="button" className="close" aria-label="关闭调研详情" onClick={onClose}>×</button>
       <p className="eyebrow">{detail.recommendation.asset.market} · {detail.recommendation.asset.symbol} · {new Date(detail.recommendation.as_of).toLocaleString("zh-CN")}</p>
       <h2>{detail.recommendation.asset.name}</h2>
-      <ConclusionScore
+      {detail.recommendation.research_signal ? <ResearchSignalScore
+        signal={detail.recommendation.research_signal}
+        news={detail.recommendation.news_credibility_assessment}
+        report={detail.recommendation.report_confidence_assessment}
+        fallbackNews={detail.recommendation.news_confidence}
+        fallbackReport={detail.recommendation.report_confidence ?? detail.recommendation.confidence}
+      /> : <ConclusionScore
         score={detail.recommendation.score}
         directionScore={detail.recommendation.direction_score}
         rating={detail.recommendation.rating}
@@ -2461,7 +2568,10 @@ export function ConclusionDetailModal({ detail, onClose }: { detail: ConclusionD
         horizonUnit={detail.recommendation.horizon_unit}
         scoringVersion={detail.recommendation.scoring_version}
         scoreSource={detail.recommendation.score_source}
-      />
+      />}
+      {detail.recommendation.research_signal?.provisional && <div className="page-message">当前研究倾向为暂定结果；正式治理信号仍不可用于交易或预测。</div>}
+      <ConfidenceAssessmentDetails title="新闻可信度判断" value={detail.recommendation.news_credibility_assessment} />
+      <ConfidenceAssessmentDetails title="研报置信度判断" value={detail.recommendation.report_confidence_assessment} />
       <p className="score-explanation">{isV3
 		? (detail.recommendation.target_evaluation
 		  ? "方向分由模型判断；五级评级、五项评价封顶、新闻可信度和研报置信度均由系统确定性计算。"
@@ -2498,7 +2608,7 @@ export function ConclusionDetailModal({ detail, onClose }: { detail: ConclusionD
       <h3>失效条件</h3><ul>{detail.recommendation.thesis.invalidation_conditions.map((item) => <li key={item}>{item}</li>)}</ul>
       {!!detail.recommendation.claim_assessments?.length && <><h3>{isV3 || isShortTerm ? "逐观点证据核验" : "逐观点证据门禁"}</h3><div className="claim-assessments">{detail.recommendation.claim_assessments.map((item, index) => <article key={`${item.claim_kind}-${index}`}><span>{item.claim_kind} · {item.verdict}</span><strong>{item.claim}</strong><small>证据核验 {Math.round(item.confidence * 100)}%{item.reason ? ` · ${item.reason}` : ""}</small></article>)}</div></>}
       {detail.event && <><h3>关联事件</h3><p>{detail.event.headline}</p></>}
-      <h3>新闻与证据</h3><div className="evidence-links">{conclusionReferences(detail).map((item) => <a key={`${item.url}-${item.label}`} href={item.url} target="_blank" rel="noreferrer"><strong>{item.label}</strong><span>{item.source}</span></a>)}</div>
+      <h3>新闻与证据</h3><div className="evidence-links">{conclusionReferences(detail).map((item) => <a key={`${item.url}-${item.label}`} href={item.url} target="_blank" rel="noreferrer"><strong>{item.label}</strong><span>{item.source}</span>{item.audit && <small>{item.audit}</small>}</a>)}</div>
     </article>
   </div>;
 }
@@ -2566,8 +2676,19 @@ export function describeMissingInformation(value: string) {
   return `缺少相关信息：${readable} / Missing information: ${readable}`;
 }
 
+function ConfidenceAssessmentDetails({ title, value }: { title: string; value?: ModelConfidenceAssessment }) {
+  if (!value) return null;
+  return <details><summary>{title}：{value.validated_score ?? "不可用"}/100{assessmentAdjustment(value)}</summary>
+    <p>{value.reason || "模型未提供理由"}</p>
+    <small>状态：{value.status} · 证据 {value.evidence_ids.length} 条{value.history_window_days ? ` · 关联窗口 ${value.history_window_days} 天` : ""}</small>
+    {!!value.reasons.length && <p>校验调整：{value.reasons.join("；")}</p>}
+    {!!value.conflicts.length && <p>冲突：{value.conflicts.join("；")}</p>}
+  </details>;
+}
+
 export function EventConclusionDetailModal({ detail, onClose }: { detail: EventConclusionDetail; onClose: () => void }) {
   const report = detail.report;
+	const researchSignal = report.research_signal;
   return <div className="modal-backdrop" onClick={onClose}>
     <article className="modal conclusion-modal event-conclusion-modal" onClick={(event) => event.stopPropagation()}>
       <button type="button" className="close" aria-label="关闭事件研报详情" onClick={onClose}>×</button>
@@ -2575,10 +2696,14 @@ export function EventConclusionDetailModal({ detail, onClose }: { detail: EventC
       <h2>{detail.event?.headline ?? "事件研报"}</h2>
       <div className="event-report-metrics">
         <span>研究状态<strong>{eventConclusionStatusLabels[detail.run.status] ?? detail.run.status}</strong></span>
-        <span>新闻可信度<strong>{report.news_credibility_score ?? Math.round(report.news_confidence * 100)}/100</strong></span>
-        <span>研报置信度<strong>{report.report_confidence_score ?? Math.round((report.report_confidence ?? report.confidence) * 100)}/100{report.report_confidence_reason === "no_valid_target" ? " · 无有效影响目标" : ""}</strong></span>
+        <span>研究倾向<strong>{researchSignal?.available && typeof researchSignal.direction_score === "number" ? `${researchSignal.direction_score > 0 ? "+" : ""}${researchSignal.direction_score} · ${recommendationRatingLabel(researchSignal.rating ?? "watch")}` : "未识别到可验证标的"}</strong></span>
+        <span>新闻可信度<strong>{assessedConfidence(report.news_credibility_assessment, report.news_confidence) ?? "—"}/100</strong></span>
+        <span>研报置信度<strong>{assessedConfidence(report.report_confidence_assessment, report.report_confidence ?? report.confidence) ?? "—"}/100</strong></span>
         <span>影响目标<strong>{report.impacts.length}</strong></span>
       </div>
+		{researchSignal?.provisional && <div className="page-message">当前研究倾向为暂定结果；证据门禁尚未通过，不可用于交易、预测或治理放行。</div>}
+		<ConfidenceAssessmentDetails title="新闻可信度判断" value={report.news_credibility_assessment} />
+		<ConfidenceAssessmentDetails title="研报置信度判断" value={report.report_confidence_assessment} />
       {!report.evidence_complete && <div className="page-message">该报告可追溯，但资料覆盖不足，不应视为可直接交易的确定性结论。</div>}
 		{report.counter_research?.enabled && <div className="page-message">反方研究：{report.counter_research.status} · 候选错误 {report.counter_research.candidate_errors_found ?? 0} · 独立来源 {report.counter_research.independent_origin_count ?? 0}。候选反证不改变置信度，确认错误需独立真值复核。</div>}
 		{!!report.counter_research?.challenged_claims?.length && <details><summary>反方研究候选</summary>{report.counter_research.challenged_claims.map((claim, index) => <p key={`${claim}-${index}`}>{claim}{report.counter_research?.competing_mechanisms?.[index] ? `：${report.counter_research.competing_mechanisms[index]}` : ""}</p>)}</details>}
@@ -2592,7 +2717,9 @@ export function EventConclusionDetailModal({ detail, onClose }: { detail: EventC
       {!!report.impacts.length && <><h3>目标影响</h3><div className="event-impact-grid">{report.impacts.map((impact, index) => <article key={`${impact.target_type}-${impact.target_name}-${index}`}>
         <span>{targetTypeLabels[impact.target_type] ?? impact.target_type}{impact.asset?.symbol ? ` · ${impact.asset.symbol}` : ""}</span>
         <strong>{impact.target_name}</strong>
-        <div><b>本次事件信号：{recommendationRatingLabel(impact.rating)}</b><b>{impact.direction_score > 0 ? "+" : ""}{impact.direction_score}</b><b>目标评价 {impact.target_evaluation_score ?? Math.round(impact.rating_confidence * 100)}/100</b></div>
+        <div><b>{impact.research_signal?.available ? `研究倾向：${recommendationRatingLabel(impact.research_signal.rating ?? "watch")}` : "研究倾向：不可用"}</b><b>{typeof impact.research_signal?.direction_score === "number" ? `${impact.research_signal.direction_score > 0 ? "+" : ""}${impact.research_signal.direction_score}` : "—"}</b><b>目标评价 {impact.target_evaluation_score ?? Math.round(impact.rating_confidence * 100)}/100</b></div>
+		{impact.research_signal?.provisional && <small>暂定 · 证据未完成 · 不可交易</small>}
+		<ConfidenceAssessmentDetails title="该标的研报置信度" value={impact.report_confidence_assessment} />
         {impact.news_credibility_score !== undefined && <small>目标证据可信度：{impact.news_credibility_score}/100</small>}
         {(impact.conclusion_status || impact.impact_channel) && <small>{conclusionStatusLabels[impact.conclusion_status ?? ""] ?? impact.conclusion_status ?? ""}{impact.impact_channel ? ` · ${impactChannelLabels[impact.impact_channel] ?? impact.impact_channel}` : ""}</small>}
         {impact.impact_verification?.quality && <small>目标证据门禁：{impact.impact_verification.quality.evidence_complete ? "通过" : "未通过"}</small>}
@@ -2611,7 +2738,7 @@ export function EventConclusionDetailModal({ detail, onClose }: { detail: EventC
       {!!report.unresolved_questions.length && <><h3>待确认问题</h3><ul>{report.unresolved_questions.map((item) => <li key={item}>{item}</li>)}</ul></>}
       {!!report.conditional_information?.length && <><h3>条件与情景边界</h3><ul>{report.conditional_information.map((item) => <li key={item}>{item}</li>)}</ul></>}
       {!!report.missing_information.length && <><h3>缺失信息 / Missing information</h3><ul>{report.missing_information.map((item) => <li key={item}>{describeMissingInformation(item)}</li>)}</ul></>}
-      <h3>新闻与证据</h3><div className="evidence-links">{conclusionReferences(detail).map((item) => <a key={`${item.url}-${item.label}`} href={item.url} target="_blank" rel="noreferrer"><strong>{item.label}</strong><span>{item.source}</span></a>)}</div>
+      <h3>新闻与证据</h3><div className="evidence-links">{conclusionReferences(detail).map((item) => <a key={`${item.url}-${item.label}`} href={item.url} target="_blank" rel="noreferrer"><strong>{item.label}</strong><span>{item.source}</span>{item.audit && <small>{item.audit}</small>}</a>)}</div>
     </article>
   </div>;
 }

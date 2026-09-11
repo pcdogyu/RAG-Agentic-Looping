@@ -513,6 +513,7 @@ export default function ModelLogsPage({ apiBase, onBack, embedded = false }: { a
                         {Object.keys(detail.schema || {}).length > 0 && <ContentBlock title="JSON Schema" value={pretty(detail.schema)} />}
                         <ContentBlock title="模型原始输出" value={detail.raw_response} />
                         {detail.parsed_response !== null && <ContentBlock title="解析后 JSON" value={pretty(detail.parsed_response)} />}
+                        {detail.metrics.validation !== undefined && <ContentBlock title="Go 校验结果" value={pretty(detail.metrics.validation)} />}
                         {detail.error && <ContentBlock title="错误" value={detail.error} />}
                       </>
                     )}

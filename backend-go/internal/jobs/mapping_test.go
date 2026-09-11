@@ -106,6 +106,29 @@ func TestMappingShortlistHonorsAssociationTiers(t *testing.T) {
 	}
 }
 
+func TestMappingShortlistRejectsOrdinaryWordsAndKeepsExplicitTickers(t *testing.T) {
+	assets := []mappingAsset{
+		{ID: "crypto:coingecko:moonveil", Symbol: "MORE", Name: "Moonveil", Aliases: []string{"More"}, AssociationTier: "standard"},
+		{ID: "equity:NASDAQ:HERE", Symbol: "HERE", Name: "Here Group", Aliases: []string{"Here"}, AssociationTier: "standard"},
+		{ID: "equity:NASDAQ:STRL", Symbol: "STRL", Name: "Sterling Infrastructure", AssociationTier: "standard"},
+		{ID: "equity:NASDAQ:CVRX", Symbol: "CVRX", Name: "CVRx", AssociationTier: "standard"},
+	}
+	for _, source := range []string{"Markets brace for more volatility", "Here's what investors should know"} {
+		if got := shortlistMappingAssets(source, assets, 30); len(got) != 0 {
+			t.Fatalf("ordinary words created a security mapping for %q: %#v", source, got)
+		}
+	}
+	for source, assetID := range map[string]string{
+		"Sterling Infrastructure (STRL) wins a contract": "equity:NASDAQ:STRL",
+		"CVRX reports quarterly results":                 "equity:NASDAQ:CVRX",
+	} {
+		got := shortlistMappingAssets(source, assets, 30)
+		if len(got) != 1 || got[0].ID != assetID {
+			t.Fatalf("explicit ticker %q did not resolve correctly: %#v", source, got)
+		}
+	}
+}
+
 func TestMappingShortlistUsesSelectedSpaceXMasterAsset(t *testing.T) {
 	assets := []mappingAsset{
 		{ID: "crypto:coingecko:spacex-prestocks-2", Symbol: "SPACEX", Name: "SpaceX PreStocks", Aliases: []string{"SpaceX"}, AssociationTier: "exact_only", MarketCap: 10},

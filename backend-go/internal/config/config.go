@@ -146,7 +146,7 @@ func Load() (Config, error) {
 		ResearchFastMaxOutput:   envInt("OLLAMA_RESEARCH_FAST_MAX_OUTPUT_TOKENS", 4096),
 		ResearchDeepConcurrency: envInt("OLLAMA_RESEARCH_DEEP_MAX_CONCURRENCY", 1),
 		ResearchThink:           envBool("OLLAMA_RESEARCH_THINK", false),
-		ResearchHistoryWindow:   time.Duration(envInt("RESEARCH_HISTORY_WINDOW_DAYS", 90)) * 24 * time.Hour,
+		ResearchHistoryWindow:   time.Duration(envInt("RESEARCH_HISTORY_WINDOW_DAYS", 3)) * 24 * time.Hour,
 		ResearchHistoryItems:    envInt("RESEARCH_HISTORY_MAX_ITEMS", 20),
 		ResearchPolicyMode:      strings.ToLower(env("RESEARCH_POLICY_MODE", "shadow")),
 		ResearchPolicyVersion:   env("RESEARCH_POLICY_VERSION", "p0-evidence-v1"),

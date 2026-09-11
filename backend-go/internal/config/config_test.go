@@ -39,14 +39,14 @@ func TestResearchLimitsAndModelUseConfiguredDefaults(t *testing.T) {
 	}
 }
 
-func TestResearchHistoryDefaultsToNinetyDaysAndTwentyItems(t *testing.T) {
+func TestResearchHistoryDefaultsToThreeDaysAndTwentyItems(t *testing.T) {
 	t.Setenv("RESEARCH_HISTORY_WINDOW_DAYS", "")
 	t.Setenv("RESEARCH_HISTORY_MAX_ITEMS", "")
 	cfg, err := Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.ResearchHistoryWindow != 90*24*time.Hour || cfg.ResearchHistoryItems != 20 {
+	if cfg.ResearchHistoryWindow != 3*24*time.Hour || cfg.ResearchHistoryItems != 20 {
 		t.Fatalf("unexpected research history config: window=%s items=%d", cfg.ResearchHistoryWindow, cfg.ResearchHistoryItems)
 	}
 }

@@ -296,6 +296,9 @@ func (s *Server) eventConclusionDetail(w http.ResponseWriter, r *http.Request) {
 	publicReport["impacts"] = impacts
 	directionScore, rating, signalAvailable := representativeImpact(impacts)
 	publicReport["direction_score"], publicReport["rating"], publicReport["signal_available"] = directionScore, rating, signalAvailable
+	if objectValue(publicReport["research_signal"]) == nil {
+		publicReport["research_signal"] = legacyResearchSignal(directionScore, rating, signalAvailable)
+	}
 	if !signalAvailable {
 		publicReport["report_confidence_reason"] = "no_valid_target"
 	}

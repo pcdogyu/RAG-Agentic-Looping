@@ -16,10 +16,12 @@ import (
 )
 
 const (
-	CompactResearchBacklogTask = "market_loop.compact_research_backlog"
-	ReprocessTargetImpactsTask = "market_loop.reprocess_target_impacts_v2"
-	SeedAssetsTask             = "market_loop.seed_assets"
-	currentEventScoringVersion = "llm-direction-v3"
+	CompactResearchBacklogTask    = "market_loop.compact_research_backlog"
+	ReprocessTargetImpactsTask    = "market_loop.reprocess_target_impacts_v2"
+	ReplayRecentEventResearchTask = "market_loop.replay_recent_event_research_v6"
+	SeedAssetsTask                = "market_loop.seed_assets"
+	currentEventScoringVersion    = "llm-direction-v4"
+	recentEventReplaySetting      = "maintenance:recent-event-research-v6"
 )
 
 type maintenanceRuntime struct {
@@ -47,10 +49,260 @@ type targetReplayCandidate struct {
 func NewMaintenanceHandlers(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) map[string]Handler {
 	runtime := &maintenanceRuntime{cfg: cfg, db: db, redis: redisClient}
 	return map[string]Handler{
-		CompactResearchBacklogTask: runtime.compactResearchBacklog,
-		ReprocessTargetImpactsTask: runtime.reprocessTargetImpacts,
-		SeedAssetsTask:             runtime.seedAssets,
+		CompactResearchBacklogTask:    runtime.compactResearchBacklog,
+		ReprocessTargetImpactsTask:    runtime.reprocessTargetImpacts,
+		ReplayRecentEventResearchTask: runtime.replayRecentEventResearch,
+		SeedAssetsTask:                runtime.seedAssets,
 	}
+}
+
+type MaintenanceScheduler struct {
+	db    *pgxpool.Pool
+	store *Store
+}
+
+func NewMaintenanceScheduler(_ config.Config, db *pgxpool.Pool, _ *redis.Client) *MaintenanceScheduler {
+	return &MaintenanceScheduler{db: db, store: NewStore(db)}
+}
+
+func (scheduler *MaintenanceScheduler) Enabled() bool { return scheduler.db != nil }
+
+// Tick installs each versioned replay once. The durable setting keeps a
+// scheduler or Redis restart from creating a second maintenance campaign.
+func (scheduler *MaintenanceScheduler) Tick(ctx context.Context) error {
+	if !scheduler.Enabled() {
+		return nil
+	}
+	var body []byte
+	err := scheduler.db.QueryRow(ctx, `SELECT payload::jsonb FROM integration_settings WHERE key=$1`, recentEventReplaySetting).Scan(&body)
+	setting := map[string]any{}
+	if err == nil {
+		if err := json.Unmarshal(body, &setting); err != nil {
+			return err
+		}
+		if stringValue(setting["status"]) == "completed" {
+			return nil
+		}
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	} else {
+		now := time.Now().UTC()
+		setting = map[string]any{"version": eventResearchPromptVersion, "status": "queued", "cutoff_at": iso(now.Add(-72 * time.Hour)), "created_at": iso(now), "updated_at": iso(now)}
+		encoded, _ := json.Marshal(setting)
+		if _, err := scheduler.db.Exec(ctx, `INSERT INTO integration_settings(key,payload,updated_at) VALUES($1,$2,now()) ON CONFLICT(key) DO NOTHING`, recentEventReplaySetting, encoded); err != nil {
+			return err
+		}
+	}
+	_, err = scheduler.store.Enqueue(ctx, EnqueueParams{
+		Queue: "maintenance", TaskType: ReplayRecentEventResearchTask,
+		Payload:  taskEnvelope{Args: []any{}, Kwargs: map[string]any{"batch_size": 10, "max_active": 50}},
+		Priority: 5, MaxAttempts: 3, DedupeKey: "maintenance:" + ReplayRecentEventResearchTask,
+	})
+	return err
+}
+
+func (runtime *maintenanceRuntime) replayRecentEventResearch(ctx context.Context, job Job) (any, error) {
+	envelope, err := decodeTaskEnvelope(job.Payload)
+	if err != nil {
+		return nil, permanentJobError{err}
+	}
+	batchSize, maxActive := int(numberValue(envelope.Kwargs["batch_size"])), int(numberValue(envelope.Kwargs["max_active"]))
+	if batchSize < 1 {
+		batchSize = 10
+	}
+	if maxActive < 1 {
+		maxActive = 50
+	}
+	setting, cutoff, err := runtime.recentEventReplayState(ctx)
+	if err != nil {
+		return nil, err
+	}
+	candidates, noSource, err := runtime.recentEventReplayCandidates(ctx, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	active, err := runtime.activeRecentEventPipelines(ctx)
+	if err != nil {
+		return nil, err
+	}
+	campaignActive, err := runtime.activeRecentEventReplayCount(ctx, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	capacity := max(0, maxActive-active)
+	selected := min(batchSize, min(capacity, len(candidates)))
+	results, queued, failures := make([]any, 0, selected), 0, 0
+	for _, candidate := range candidates[:selected] {
+		result, queueErr := runtime.queueRecentEventReplay(ctx, candidate)
+		if queueErr != nil {
+			failures++
+			results = append(results, map[string]any{"event_id": candidate.EventID, "status": "failed", "detail": queueErr.Error()})
+			continue
+		}
+		results = append(results, result)
+		if stringValue(objectValue(result)["status"]) == "queued" {
+			queued++
+		}
+	}
+	pending := len(candidates)
+	complete := pending == 0 && campaignActive == 0
+	setting["status"], setting["updated_at"] = ternaryString(complete, "completed", "running"), iso(time.Now())
+	setting["pending"], setting["active"], setting["queued"], setting["failed"] = pending, campaignActive, queued, failures
+	setting["skipped_no_source"], setting["scoring_version"] = noSource, currentEventScoringVersion
+	if complete {
+		setting["completed_at"] = iso(time.Now())
+	}
+	if err := runtime.saveRecentEventReplayState(ctx, setting); err != nil {
+		return nil, err
+	}
+	summary := map[string]any{"version": eventResearchPromptVersion, "cutoff_at": iso(cutoff), "pending": pending, "active": campaignActive, "global_pipeline_active": active, "capacity": capacity, "selected": selected, "queued": queued, "failed": failures, "skipped_no_source": noSource, "complete": complete, "results": results}
+	if complete {
+		return summary, nil
+	}
+	return nil, &continuationError{Payload: taskEnvelope{Args: []any{}, Kwargs: map[string]any{"batch_size": batchSize, "max_active": maxActive}}, Progress: summary, Delay: 60 * time.Second}
+}
+
+func (runtime *maintenanceRuntime) recentEventReplayState(ctx context.Context) (map[string]any, time.Time, error) {
+	var body []byte
+	err := runtime.db.QueryRow(ctx, `SELECT payload::jsonb FROM integration_settings WHERE key=$1`, recentEventReplaySetting).Scan(&body)
+	setting := map[string]any{}
+	if errors.Is(err, pgx.ErrNoRows) {
+		now := time.Now().UTC()
+		setting = map[string]any{"version": eventResearchPromptVersion, "status": "running", "cutoff_at": iso(now.Add(-72 * time.Hour)), "created_at": iso(now)}
+		if err := runtime.saveRecentEventReplayState(ctx, setting); err != nil {
+			return nil, time.Time{}, err
+		}
+	} else if err != nil {
+		return nil, time.Time{}, err
+	} else if err := json.Unmarshal(body, &setting); err != nil {
+		return nil, time.Time{}, err
+	}
+	cutoff := parseTime(setting["cutoff_at"])
+	if cutoff.IsZero() {
+		cutoff = time.Now().UTC().Add(-72 * time.Hour)
+		setting["cutoff_at"] = iso(cutoff)
+	}
+	return setting, cutoff, nil
+}
+
+func (runtime *maintenanceRuntime) saveRecentEventReplayState(ctx context.Context, setting map[string]any) error {
+	body, _ := json.Marshal(setting)
+	_, err := runtime.db.Exec(ctx, `INSERT INTO integration_settings(key,payload,updated_at) VALUES($1,$2,now()) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload,updated_at=now()`, recentEventReplaySetting, body)
+	return err
+}
+
+func (runtime *maintenanceRuntime) recentEventReplayCandidates(ctx context.Context, cutoff time.Time) ([]targetReplayCandidate, int, error) {
+	rows, err := runtime.db.Query(ctx, `SELECT e.id,e.published_at,e.payload::jsonb,r.id,r.status,r.payload::jsonb,
+		EXISTS(SELECT 1 FROM jsonb_array_elements_text(coalesce(e.payload::jsonb->'news_item_ids','[]'::jsonb)) linked(news_id) JOIN news_items n ON n.id::text=linked.news_id) AS has_source
+		FROM event_research_runs r JOIN news_events e ON e.id=r.event_id
+		WHERE r.updated_at >= $1 AND r.status IN ('completed','insufficient_evidence','failed')
+		ORDER BY r.updated_at,e.id`, cutoff)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	result, noSource := []targetReplayCandidate{}, 0
+	for rows.Next() {
+		var candidate targetReplayCandidate
+		var eventBody, runBody []byte
+		var hasSource bool
+		if err := rows.Scan(&candidate.EventID, &candidate.PublishedAt, &eventBody, &candidate.RunID, &candidate.RunStatus, &runBody, &hasSource); err != nil {
+			return nil, 0, err
+		}
+		if err := json.Unmarshal(eventBody, &candidate.Event); err != nil {
+			return nil, 0, err
+		}
+		if err := json.Unmarshal(runBody, &candidate.Run); err != nil {
+			return nil, 0, err
+		}
+		if eventRunHasCurrentScoring(candidate.Run) || recentEventReplayActive(candidate.Run) {
+			continue
+		}
+		if !hasSource || candidate.Run["report"] == nil {
+			noSource++
+			continue
+		}
+		result = append(result, candidate)
+	}
+	return result, noSource, rows.Err()
+}
+
+func recentEventReplayActive(run map[string]any) bool {
+	step := latestAnalysisStep(run, "full_event_research")
+	status := stringValue(step["status"])
+	return status == "queued" || status == "running" || status == "retrying"
+}
+
+func (runtime *maintenanceRuntime) activeRecentEventPipelines(ctx context.Context) (int, error) {
+	var count int
+	err := runtime.db.QueryRow(ctx, `SELECT count(*)::int FROM go_jobs WHERE status IN ('queued','running','retrying') AND task_type=ANY($1::text[])`, []string{reextractTask, mappingTask, researchEventTask}).Scan(&count)
+	return count, err
+}
+
+func (runtime *maintenanceRuntime) activeRecentEventReplayCount(ctx context.Context, cutoff time.Time) (int, error) {
+	rows, err := runtime.db.Query(ctx, `SELECT r.status,r.payload::jsonb FROM event_research_runs r WHERE r.updated_at >= $1`, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	count := 0
+	for rows.Next() {
+		var status string
+		var body []byte
+		if err := rows.Scan(&status, &body); err != nil {
+			return 0, err
+		}
+		run := map[string]any{}
+		if json.Unmarshal(body, &run) != nil || eventRunHasCurrentScoring(run) {
+			continue
+		}
+		step := latestAnalysisStep(run, "full_event_research")
+		if stringValue(objectValue(step["metrics"])["maintenance_version"]) == eventResearchPromptVersion && (recentEventReplayActive(run) || activeResearchStatus(status)) {
+			count++
+		}
+	}
+	return count, rows.Err()
+}
+
+func (runtime *maintenanceRuntime) queueRecentEventReplay(ctx context.Context, candidate targetReplayCandidate) (any, error) {
+	tx, err := runtime.db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	var body []byte
+	var status string
+	if err := tx.QueryRow(ctx, `SELECT status,payload::jsonb FROM event_research_runs WHERE id=$1 FOR UPDATE`, candidate.RunID).Scan(&status, &body); err != nil {
+		return nil, err
+	}
+	run := map[string]any{}
+	if err := json.Unmarshal(body, &run); err != nil {
+		return nil, err
+	}
+	if eventRunHasCurrentScoring(run) {
+		return map[string]any{"event_id": candidate.EventID, "status": "already_current"}, tx.Commit(ctx)
+	}
+	if activeResearchStatus(status) || recentEventReplayActive(run) {
+		return map[string]any{"event_id": candidate.EventID, "status": "active"}, tx.Commit(ctx)
+	}
+	taskID := uuid.New()
+	instanceID := (&ExtractRuntime{cfg: runtime.cfg, db: runtime.db, redis: runtime.redis}).selectDownstreamInstance(ctx, "extract", len(runtime.cfg.ExtractURLs))
+	appendAnalysisStep(run, analysisStep("full_event_research", "queued", "go-maintenance", "已创建三日关联研究 V6 的事件抽取、证券映射和研究重跑任务。", map[string]any{"stage": "event_extraction", "task_id": taskID.String(), "maintenance_version": eventResearchPromptVersion}))
+	run["updated_at"] = iso(time.Now())
+	updated, _ := json.Marshal(run)
+	if _, err := tx.Exec(ctx, `UPDATE event_research_runs SET payload=$2,updated_at=now() WHERE id=$1`, candidate.RunID, updated); err != nil {
+		return nil, err
+	}
+	jobBody, _ := json.Marshal(taskEnvelope{Args: []any{candidate.EventID.String(), candidate.RunID.String()}, Kwargs: map[string]any{"model_instance_id": instanceID, "source": "maintenance"}})
+	if _, err := tx.Exec(ctx, `INSERT INTO go_jobs(id,queue,task_type,payload,status,priority,max_attempts,available_at,dedupe_key,created_at,updated_at)
+		VALUES($1,'extract',$2,$3,'queued',5,3,now(),$4,now(),now())`, taskID, reextractTask, jobBody, "event-research-v6-reextract:"+candidate.EventID.String()); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	(&ExtractRuntime{cfg: runtime.cfg, db: runtime.db, redis: runtime.redis}).recordModelTask(ctx, "extract", taskID.String(), "event_reextraction", candidate.EventID.String(), stringValue(candidate.Event["headline"]), "三日关联研究 V6 重跑", "maintenance", instanceID)
+	return map[string]any{"event_id": candidate.EventID, "run_id": candidate.RunID, "task_id": taskID, "status": "queued"}, nil
 }
 
 func (runtime *maintenanceRuntime) compactResearchBacklog(ctx context.Context, job Job) (any, error) {

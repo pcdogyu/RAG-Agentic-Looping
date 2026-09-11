@@ -500,7 +500,7 @@ describe("open source and search settings", () => {
     )).toBe("/api/v1/research-runs/asset-run/retry?instance_id=research-2");
   });
 
-  it("renders a missing event signal as zero and watch with a confidence reason", () => {
+  it("renders a missing event target as unavailable instead of zero and watch", () => {
     const item: ResearchConclusionItem = {
       kind: "event", id: "event-run", occurred_at: "2026-09-05T00:00:00Z", status: "insufficient_evidence",
       evidence_complete: false, title: "No target event", summary: "summary", asset: null,
@@ -512,8 +512,9 @@ describe("open source and search settings", () => {
       },
     };
     const markup = renderToStaticMarkup(createElement(EventConclusionCard, { item, onOpen: () => undefined, onResearch: () => undefined }));
-    expect(markup).toContain("本次事件信号：0 · 观望");
-    expect(markup).toContain("研报置信度 0%（无有效影响目标）");
+    expect(markup).toContain("未识别到可验证标的");
+    expect(markup).toContain("研报置信度 0/100");
+    expect(markup).not.toContain("0 · 观望");
   });
 
   it("posts one direct bulk retry request and formats the partial result", async () => {
