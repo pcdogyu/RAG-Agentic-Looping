@@ -146,12 +146,19 @@ func (runtime *researchRuntime) prepareFundamentalAI(ctx context.Context, job Jo
 	draft := fundamentalAIDraft{Suggestions: []fundamentalAISuggestionDraft{}, Missing: []string{}, Conflicts: []string{}}
 	available := availableAISources(sources)
 	if len(available) > 0 {
-		if err := store.UpdateRun(ctx, runID, "running", "ai_reasoning", map[string]any{"source_count": len(available)}, nil); err != nil {
+		instanceID, releaseInstance, acquireErr := runtime.acquireResearchInstance(ctx, stringValue(envelope.Kwargs["model_instance_id"]))
+		if acquireErr != nil {
+			return fail(acquireErr)
+		}
+		if err := store.UpdateRun(ctx, runID, "running", "ai_reasoning", map[string]any{"source_count": len(available), "model_instance_id": instanceID}, nil); err != nil {
+			releaseInstance()
 			return fail(err)
 		}
 		prompt := fundamentalAIPrompt(assetID, symbol, name, preparation, available)
-		if err := runtime.callResearchModel(ctx, runID, "fundamental_ai_run", "fundamental_ai_reasoning", fundamentalAISystemPrompt(), prompt, fundamentalAISchema(), stringValue(envelope.Kwargs["model_instance_id"]), researchProfileFast, "fundamental_ai_prepare", &draft); err != nil {
-			return fail(err)
+		modelErr := runtime.callResearchModel(ctx, runID, "fundamental_ai_run", "fundamental_ai_reasoning", fundamentalAISystemPrompt(), prompt, fundamentalAISchema(), instanceID, researchProfileFast, "fundamental_ai_prepare", &draft)
+		releaseInstance()
+		if modelErr != nil {
+			return fail(modelErr)
 		}
 	}
 	if err := store.UpdateRun(ctx, runID, "running", "counterevidence", map[string]any{"suggestion_count": len(draft.Suggestions)}, nil); err != nil {
