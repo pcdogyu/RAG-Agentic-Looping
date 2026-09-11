@@ -19,6 +19,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/config"
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/evaluation"
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/fundamentalai"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/marketdata"
 	"github.com/redis/go-redis/v9"
 )
@@ -146,10 +148,78 @@ func (runtime *outcomeRuntime) evaluateOutcomes(ctx context.Context, _ Job) (any
 			}
 		}
 	}
+	artifactSummary := runtime.advancePhaseTwoArtifacts(ctx, now)
 	return map[string]any{
 		"outcomes": created, "pending": pending, "skipped": skipped,
-		"failed": failed, "failures": failures, "prediction_outcomes": predictionSummary,
+		"failed": failed, "failures": failures, "prediction_outcomes": predictionSummary, "phase_two_artifacts": artifactSummary,
 	}, nil
+}
+
+func (runtime *outcomeRuntime) advancePhaseTwoArtifacts(ctx context.Context, now time.Time) map[string]any {
+	result := map[string]any{"datasets": 0, "experiments": 0, "reports": 0, "skipped": 0, "automatic_final_holdout_reveal": false, "automatic_model_release": false}
+	holdouts, err := evaluation.NewDatasetStore(runtime.db).ListHoldouts(ctx, 200)
+	if err != nil {
+		result["warning"] = "holdout_query_failed"
+		return result
+	}
+	for _, holdout := range holdouts {
+		if holdout.LabelCutoff.After(now) {
+			result["skipped"] = result["skipped"].(int) + 1
+			continue
+		}
+		var count int
+		var start, end *time.Time
+		err := runtime.db.QueryRow(ctx, `SELECT count(*)::int,min(p.signal_available_at),max(p.signal_available_at)
+			FROM prediction_runs p JOIN outcome_records o ON o.prediction_run_id=p.id
+			WHERE p.asset_class=$1 AND p.objective=$2 AND p.horizon_sessions=$3
+			AND EXISTS(SELECT 1 FROM assets a WHERE a.id=p.asset_id AND a.market=$4)
+			AND o.status='completed' AND o.label_available_at<=$5 AND p.signal_available_at<$6`,
+			holdout.AssetClass, holdout.Objective, holdout.HorizonSessions, holdout.Market, now, holdout.SignalStart).Scan(&count, &start, &end)
+		if err != nil || count < 100 || start == nil || end == nil {
+			result["skipped"] = result["skipped"].(int) + 1
+			continue
+		}
+		developmentEnd := end.UTC().Add(24 * time.Hour)
+		latestDevelopmentEnd := holdout.SignalStart.Add(-24 * time.Hour)
+		if developmentEnd.After(latestDevelopmentEnd) {
+			developmentEnd = latestDevelopmentEnd
+		}
+		days := int(developmentEnd.Sub(start.UTC()).Hours() / 24)
+		if days < 7 {
+			result["skipped"] = result["skipped"].(int) + 1
+			continue
+		}
+		trainDays := maxInt(1, days/2)
+		calibrationDays := maxInt(1, days/5)
+		testDays := maxInt(1, days-trainDays-calibrationDays-2)
+		dataset, _, err := evaluation.NewDatasetStore(runtime.db).Materialize(ctx, evaluation.DatasetBuildInput{
+			HoldoutReservationID: holdout.ID, AvailableAsOf: now, DevelopmentStart: start.UTC(), DevelopmentEnd: developmentEnd,
+			TrainWindowDays: trainDays, CalibrationWindowDays: calibrationDays, TestWindowDays: testDays,
+			StepDays: maxInt(1, testDays/2), EmbargoDays: 1, CreatedBy: fundamentalai.PolicyActor,
+			IdempotencyKey: fundamentalai.PolicyVersion + "|dataset|" + holdout.ID,
+		}, now)
+		if err != nil {
+			result["skipped"] = result["skipped"].(int) + 1
+			continue
+		}
+		result["datasets"] = result["datasets"].(int) + 1
+		experiment, _, err := evaluation.NewExperimentStore(runtime.db).Materialize(ctx, evaluation.ExperimentBuildInput{DatasetID: dataset.Manifest.ID, CreatedBy: fundamentalai.PolicyActor, IdempotencyKey: fundamentalai.PolicyVersion + "|experiment|" + dataset.Manifest.ID}, now)
+		if err != nil {
+			continue
+		}
+		result["experiments"] = result["experiments"].(int) + 1
+		if _, _, err := evaluation.NewPerformanceReportStore(runtime.db).Materialize(ctx, evaluation.PerformanceReportInput{ExperimentID: experiment.Experiment.ID, CreatedBy: fundamentalai.PolicyActor, IdempotencyKey: fundamentalai.PolicyVersion + "|report|" + experiment.Experiment.ID}, now); err == nil {
+			result["reports"] = result["reports"].(int) + 1
+		}
+	}
+	return result
+}
+
+func maxInt(left, right int) int {
+	if left > right {
+		return left
+	}
+	return right
 }
 
 func appendOutcomeFailure(values []string, id uuid.UUID, cause error) []string {

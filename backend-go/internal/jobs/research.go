@@ -296,8 +296,9 @@ func publicImpactVerification(value impactVerification) map[string]any {
 func NewResearchHandlers(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) map[string]Handler {
 	runtime := newResearchRuntime(cfg, db, redisClient)
 	return map[string]Handler{
-		researchEventTask: runtime.researchEvent,
-		researchAssetTask: runtime.researchAsset,
+		researchEventTask:        runtime.researchEvent,
+		researchAssetTask:        runtime.researchAsset,
+		fundamentalAIPrepareTask: runtime.prepareFundamentalAI,
 	}
 }
 

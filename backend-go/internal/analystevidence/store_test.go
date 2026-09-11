@@ -50,3 +50,21 @@ func TestValidateSubmissionRequiresTypedValuesAndPointInTimeApproval(t *testing.
 		t.Fatal("future analyst evidence was accepted")
 	}
 }
+
+func TestValidateSubmissionDistinguishesPolicyFromHumanApproval(t *testing.T) {
+	approved := time.Date(2026, 9, 9, 0, 0, 0, 0, time.UTC)
+	policy := validSubmission(ValuationMultiple, map[string]any{"selected_multiple": 20.0})
+	policy.ApprovalKind, policy.PolicyVersion, policy.ApprovedBy = "policy", "fundamental-ai-policy-v1", "policy:fundamental-ai-policy-v1"
+	if err := validateSubmission(normalizeSubmission(policy), approved); err != nil {
+		t.Fatalf("explicit policy approval was rejected: %v", err)
+	}
+	policy.ApprovedBy = "analyst-name"
+	if err := validateSubmission(normalizeSubmission(policy), approved); err == nil {
+		t.Fatal("policy evidence disguised as a human actor was accepted")
+	}
+	human := validSubmission(ValuationMultiple, map[string]any{"selected_multiple": 20.0})
+	human.PolicyVersion = "fundamental-ai-policy-v1"
+	if err := validateSubmission(normalizeSubmission(human), approved); err == nil {
+		t.Fatal("human evidence was allowed to claim a policy version")
+	}
+}

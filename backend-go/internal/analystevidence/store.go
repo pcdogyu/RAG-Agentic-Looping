@@ -1,6 +1,7 @@
-// Package analystevidence stores explicit, immutable human-approved evidence
-// for governed fundamental-research inputs. It is a provenance registry, not
-// an inference engine: it never chooses assumptions, multiples or benchmarks.
+// Package analystevidence stores explicit, immutable human- or policy-approved
+// evidence for governed fundamental-research inputs. It is a provenance
+// registry, not an inference engine: it never chooses assumptions, multiples
+// or benchmarks.
 package analystevidence
 
 import (
@@ -19,7 +20,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const ContractVersion = "analyst-evidence-v1"
+const ContractVersion = "analyst-evidence-v2"
 
 const (
 	ForecastAssumption   = "forecast_assumption"
@@ -47,6 +48,9 @@ type Submission struct {
 	SourceDocumentID string         `json:"source_document_id"`
 	SourceURL        string         `json:"source_url"`
 	ApprovedBy       string         `json:"approved_by"`
+	ApprovalKind     string         `json:"approval_kind,omitempty"`
+	PolicyVersion    string         `json:"policy_version,omitempty"`
+	Provenance       map[string]any `json:"provenance,omitempty"`
 	IdempotencyKey   string         `json:"-"`
 }
 
@@ -64,6 +68,9 @@ type Record struct {
 	SourceDocumentID string         `json:"source_document_id"`
 	SourceURL        string         `json:"source_url"`
 	ApprovedBy       string         `json:"approved_by"`
+	ApprovalKind     string         `json:"approval_kind"`
+	PolicyVersion    string         `json:"policy_version,omitempty"`
+	Provenance       map[string]any `json:"provenance"`
 	ApprovedAt       time.Time      `json:"approved_at"`
 	CreatedAt        time.Time      `json:"created_at"`
 	RequestHash      string         `json:"-"`
@@ -99,9 +106,10 @@ func (s *Store) Create(ctx context.Context, input Submission, approvedAt time.Ti
 		return Record{}, false, err
 	}
 	values, _ := json.Marshal(input.Values)
+	provenance, _ := json.Marshal(input.Provenance)
 	id := stableID(input.IdempotencyKey)
-	tag, err := s.db.Exec(ctx, `INSERT INTO analyst_evidence_records(id,asset_id,evidence_type,title,rationale,values,observed_at,available_at,source_name,source_document_id,source_url,approved_by,approved_at,idempotency_key,request_hash)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) ON CONFLICT(idempotency_key) DO NOTHING`, id, input.AssetID, input.EvidenceType, input.Title, input.Rationale, values, input.ObservedAt, input.AvailableAt, input.SourceName, input.SourceDocumentID, input.SourceURL, input.ApprovedBy, approvedAt, input.IdempotencyKey, requestHash)
+	tag, err := s.db.Exec(ctx, `INSERT INTO analyst_evidence_records(id,asset_id,evidence_type,title,rationale,values,observed_at,available_at,source_name,source_document_id,source_url,approved_by,approval_kind,policy_version,provenance,approved_at,idempotency_key,request_hash)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) ON CONFLICT(idempotency_key) DO NOTHING`, id, input.AssetID, input.EvidenceType, input.Title, input.Rationale, values, input.ObservedAt, input.AvailableAt, input.SourceName, input.SourceDocumentID, input.SourceURL, input.ApprovedBy, input.ApprovalKind, input.PolicyVersion, provenance, approvedAt, input.IdempotencyKey, requestHash)
 	if err != nil {
 		return Record{}, false, fmt.Errorf("insert analyst evidence: %w", err)
 	}
@@ -193,18 +201,21 @@ func StringValue(record Record, key string) string {
 	return stringValue(record.Values, key)
 }
 
-const recordSelect = `SELECT id,asset_id,evidence_type,title,rationale,values::jsonb,observed_at,available_at,source_name,source_document_id,source_url,approved_by,approved_at,created_at,request_hash FROM analyst_evidence_records`
+const recordSelect = `SELECT id,asset_id,evidence_type,title,rationale,values::jsonb,observed_at,available_at,source_name,source_document_id,source_url,approved_by,approval_kind,policy_version,provenance::jsonb,approved_at,created_at,request_hash FROM analyst_evidence_records`
 
 type rowScanner interface{ Scan(...any) error }
 
 func scanRecord(row rowScanner) (Record, error) {
 	var record Record
-	var values []byte
-	if err := row.Scan(&record.ID, &record.AssetID, &record.EvidenceType, &record.Title, &record.Rationale, &values, &record.ObservedAt, &record.AvailableAt, &record.SourceName, &record.SourceDocumentID, &record.SourceURL, &record.ApprovedBy, &record.ApprovedAt, &record.CreatedAt, &record.RequestHash); err != nil {
+	var values, provenance []byte
+	if err := row.Scan(&record.ID, &record.AssetID, &record.EvidenceType, &record.Title, &record.Rationale, &values, &record.ObservedAt, &record.AvailableAt, &record.SourceName, &record.SourceDocumentID, &record.SourceURL, &record.ApprovedBy, &record.ApprovalKind, &record.PolicyVersion, &provenance, &record.ApprovedAt, &record.CreatedAt, &record.RequestHash); err != nil {
 		return Record{}, err
 	}
 	if err := json.Unmarshal(values, &record.Values); err != nil {
 		return Record{}, fmt.Errorf("decode analyst evidence values: %w", err)
+	}
+	if err := json.Unmarshal(provenance, &record.Provenance); err != nil {
+		return Record{}, fmt.Errorf("decode analyst evidence provenance: %w", err)
 	}
 	record.ContractVersion = ContractVersion
 	return record, nil
@@ -223,11 +234,19 @@ func normalizeSubmission(input Submission) Submission {
 	input.SourceDocumentID = strings.TrimSpace(input.SourceDocumentID)
 	input.SourceURL = sanitizeURL(input.SourceURL)
 	input.ApprovedBy = strings.TrimSpace(input.ApprovedBy)
+	input.ApprovalKind = strings.ToLower(strings.TrimSpace(input.ApprovalKind))
+	if input.ApprovalKind == "" {
+		input.ApprovalKind = "human"
+	}
+	input.PolicyVersion = strings.TrimSpace(input.PolicyVersion)
 	input.IdempotencyKey = strings.TrimSpace(input.IdempotencyKey)
 	input.ObservedAt = input.ObservedAt.UTC()
 	input.AvailableAt = input.AvailableAt.UTC()
 	if input.Values == nil {
 		input.Values = map[string]any{}
+	}
+	if input.Provenance == nil {
+		input.Provenance = map[string]any{}
 	}
 	return input
 }
@@ -238,6 +257,15 @@ func validateSubmission(input Submission, approvedAt time.Time) error {
 	}
 	if !supportedTypes[input.EvidenceType] {
 		return fmt.Errorf("unsupported analyst evidence type")
+	}
+	if input.ApprovalKind != "human" && input.ApprovalKind != "policy" {
+		return fmt.Errorf("analyst evidence approval_kind must be human or policy")
+	}
+	if input.ApprovalKind == "policy" && (input.PolicyVersion == "" || !strings.HasPrefix(input.ApprovedBy, "policy:")) {
+		return fmt.Errorf("policy-approved analyst evidence requires policy_version and an explicit policy actor")
+	}
+	if input.ApprovalKind == "human" && input.PolicyVersion != "" {
+		return fmt.Errorf("human-approved analyst evidence must not claim a policy version")
 	}
 	if input.ObservedAt.IsZero() || input.AvailableAt.IsZero() || input.AvailableAt.Before(input.ObservedAt) || approvedAt.Before(input.AvailableAt) {
 		return fmt.Errorf("analyst evidence observed_at, available_at and approved_at are invalid")

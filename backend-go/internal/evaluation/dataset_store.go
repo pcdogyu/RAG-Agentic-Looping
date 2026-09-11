@@ -20,6 +20,8 @@ type HoldoutReservationInput struct {
 	SignalEnd       time.Time `json:"signal_end"`
 	LabelCutoff     time.Time `json:"label_cutoff"`
 	ApprovedBy      string    `json:"approved_by"`
+	ApprovalKind    string    `json:"approval_kind,omitempty"`
+	PolicyVersion   string    `json:"policy_version,omitempty"`
 	IdempotencyKey  string    `json:"-"`
 }
 
@@ -36,6 +38,8 @@ type HoldoutReservation struct {
 	LabelCutoff            time.Time `json:"label_cutoff"`
 	UsagePolicy            string    `json:"usage_policy"`
 	ApprovedBy             string    `json:"approved_by"`
+	ApprovalKind           string    `json:"approval_kind"`
+	PolicyVersion          string    `json:"policy_version,omitempty"`
 	RequestDigest          string    `json:"request_digest"`
 	CreatedAt              time.Time `json:"created_at"`
 }
@@ -76,10 +80,24 @@ func (s *DatasetStore) CreateHoldoutReservation(ctx context.Context, input Holdo
 	input.Market = strings.ToUpper(strings.TrimSpace(input.Market))
 	input.Objective = strings.ToLower(strings.TrimSpace(input.Objective))
 	input.ApprovedBy = strings.TrimSpace(input.ApprovedBy)
+	input.ApprovalKind = strings.ToLower(strings.TrimSpace(input.ApprovalKind))
+	if input.ApprovalKind == "" {
+		input.ApprovalKind = "human"
+	}
+	input.PolicyVersion = strings.TrimSpace(input.PolicyVersion)
 	input.IdempotencyKey = strings.TrimSpace(input.IdempotencyKey)
 	now = now.UTC()
 	if input.AssetClass != "equity" || input.Market == "" || input.ApprovedBy == "" || input.IdempotencyKey == "" {
 		return HoldoutReservation{}, false, fmt.Errorf("equity scope, market, approved_by and idempotency key are required")
+	}
+	if input.ApprovalKind != "human" && input.ApprovalKind != "policy" {
+		return HoldoutReservation{}, false, fmt.Errorf("approval_kind must be human or policy")
+	}
+	if input.ApprovalKind == "policy" && (input.PolicyVersion == "" || !strings.HasPrefix(input.ApprovedBy, "policy:")) {
+		return HoldoutReservation{}, false, fmt.Errorf("policy holdout requires policy_version and an explicit policy actor")
+	}
+	if input.ApprovalKind == "human" && input.PolicyVersion != "" {
+		return HoldoutReservation{}, false, fmt.Errorf("human holdout must not claim a policy version")
 	}
 	if _, err := ResolveHorizonPolicy(input.Objective, input.HorizonSessions); err != nil {
 		return HoldoutReservation{}, false, err
@@ -88,19 +106,19 @@ func (s *DatasetStore) CreateHoldoutReservation(ctx context.Context, input Holdo
 		return HoldoutReservation{}, false, fmt.Errorf("final holdout must be reserved before a valid future signal and label window")
 	}
 	identity := struct {
-		Contract, Label, AssetClass, Market, Objective, ApprovedBy string
-		Horizon                                                    int
-		SignalStart, SignalEnd, LabelCutoff                        time.Time
-	}{WalkForwardDatasetContractVersion, OutcomeLabelDefinitionVersion, input.AssetClass, input.Market, input.Objective, input.ApprovedBy,
+		Contract, Label, AssetClass, Market, Objective, ApprovedBy, ApprovalKind, PolicyVersion string
+		Horizon                                                                                 int
+		SignalStart, SignalEnd, LabelCutoff                                                     time.Time
+	}{WalkForwardDatasetContractVersion, OutcomeLabelDefinitionVersion, input.AssetClass, input.Market, input.Objective, input.ApprovedBy, input.ApprovalKind, input.PolicyVersion,
 		input.HorizonSessions, input.SignalStart.UTC(), input.SignalEnd.UTC(), input.LabelCutoff.UTC()}
 	digest := digestValue(identity)
 	id := "holdout-" + digest[:32]
 	tag, err := s.db.Exec(ctx, `INSERT INTO evaluation_holdout_reservations(
 		id,contract_version,label_definition_version,asset_class,market,objective,horizon_sessions,signal_start,signal_end,label_cutoff,
-		usage_policy,approved_by,request_digest,idempotency_key,created_at)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) ON CONFLICT(idempotency_key) DO NOTHING`,
+		usage_policy,approved_by,approval_kind,policy_version,request_digest,idempotency_key,created_at)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) ON CONFLICT(idempotency_key) DO NOTHING`,
 		id, WalkForwardDatasetContractVersion, OutcomeLabelDefinitionVersion, input.AssetClass, input.Market, input.Objective, input.HorizonSessions,
-		input.SignalStart.UTC(), input.SignalEnd.UTC(), input.LabelCutoff.UTC(), FinalHoldoutUsagePolicy, input.ApprovedBy, digest, input.IdempotencyKey, now)
+		input.SignalStart.UTC(), input.SignalEnd.UTC(), input.LabelCutoff.UTC(), FinalHoldoutUsagePolicy, input.ApprovedBy, input.ApprovalKind, input.PolicyVersion, digest, input.IdempotencyKey, now)
 	if err != nil {
 		return HoldoutReservation{}, false, fmt.Errorf("reserve final holdout: %w", err)
 	}
@@ -116,7 +134,7 @@ func (s *DatasetStore) CreateHoldoutReservation(ctx context.Context, input Holdo
 
 func (s *DatasetStore) GetHoldout(ctx context.Context, id string) (HoldoutReservation, error) {
 	return s.scanHoldout(s.db.QueryRow(ctx, `SELECT id,contract_version,label_definition_version,asset_class,market,objective,horizon_sessions,
-		signal_start,signal_end,label_cutoff,usage_policy,approved_by,request_digest,created_at FROM evaluation_holdout_reservations WHERE id=$1`, strings.TrimSpace(id)))
+		signal_start,signal_end,label_cutoff,usage_policy,approved_by,approval_kind,policy_version,request_digest,created_at FROM evaluation_holdout_reservations WHERE id=$1`, strings.TrimSpace(id)))
 }
 
 func (s *DatasetStore) ListHoldouts(ctx context.Context, limit int) ([]HoldoutReservation, error) {
@@ -124,7 +142,7 @@ func (s *DatasetStore) ListHoldouts(ctx context.Context, limit int) ([]HoldoutRe
 		return nil, fmt.Errorf("invalid final holdout query")
 	}
 	rows, err := s.db.Query(ctx, `SELECT id,contract_version,label_definition_version,asset_class,market,objective,horizon_sessions,
-		signal_start,signal_end,label_cutoff,usage_policy,approved_by,request_digest,created_at
+		signal_start,signal_end,label_cutoff,usage_policy,approved_by,approval_kind,policy_version,request_digest,created_at
 		FROM evaluation_holdout_reservations ORDER BY created_at DESC,id LIMIT $1`, limit)
 	if err != nil {
 		return nil, err
@@ -393,7 +411,7 @@ func saveDatasetMember(ctx context.Context, tx pgx.Tx, datasetID string, foldInd
 
 func (s *DatasetStore) getHoldoutByIdempotencyKey(ctx context.Context, key string) (HoldoutReservation, error) {
 	return s.scanHoldout(s.db.QueryRow(ctx, `SELECT id,contract_version,label_definition_version,asset_class,market,objective,horizon_sessions,
-		signal_start,signal_end,label_cutoff,usage_policy,approved_by,request_digest,created_at FROM evaluation_holdout_reservations WHERE idempotency_key=$1`, key))
+		signal_start,signal_end,label_cutoff,usage_policy,approved_by,approval_kind,policy_version,request_digest,created_at FROM evaluation_holdout_reservations WHERE idempotency_key=$1`, key))
 }
 
 type rowScanner interface{ Scan(...any) error }
@@ -401,7 +419,7 @@ type rowScanner interface{ Scan(...any) error }
 func (s *DatasetStore) scanHoldout(row rowScanner) (HoldoutReservation, error) {
 	var item HoldoutReservation
 	err := row.Scan(&item.ID, &item.ContractVersion, &item.LabelDefinitionVersion, &item.AssetClass, &item.Market, &item.Objective,
-		&item.HorizonSessions, &item.SignalStart, &item.SignalEnd, &item.LabelCutoff, &item.UsagePolicy, &item.ApprovedBy, &item.RequestDigest, &item.CreatedAt)
+		&item.HorizonSessions, &item.SignalStart, &item.SignalEnd, &item.LabelCutoff, &item.UsagePolicy, &item.ApprovedBy, &item.ApprovalKind, &item.PolicyVersion, &item.RequestDigest, &item.CreatedAt)
 	return item, err
 }
 

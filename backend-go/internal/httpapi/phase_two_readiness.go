@@ -230,19 +230,19 @@ func applyPhaseTwoOutcomeEvaluationResult(facts *phaseTwoOutcomeEvaluationFacts,
 
 func buildPhaseTwoReadinessReport(facts phaseTwoReadinessFacts, asOf time.Time) phaseTwoReadinessReport {
 	gates := []phaseTwoReadinessGate{
-		readinessCountGate("analyst_evidence", "M1", "真实分析师证据", facts.AnalystEvidence, 1, "条", "waiting_human_input", true, nil, "在基本面工作台登记有来源、时点和批准人的真实证据。", "/fundamental"),
-		readinessDependentCountGate("approved_fundamental_plan", "M1", "已批准无新闻定时计划", facts.ApprovedFundamentalPlans, 1, "份", facts.AnalystEvidence > 0, "waiting_human_input", true, []string{"analyst_evidence"}, "用同源人工研究输入完成计划审批；系统不得自动批准。", "/fundamental"),
-		readinessBooleanGate("sec_identity", "M1", "可识别 SEC 访问身份", facts.SECIdentityConfigured, "waiting_human_input", true, nil, "在服务器环境配置符合 SEC 要求的机构名称与联系邮箱，不在页面或日志展示身份内容。", "/sources"),
-		readinessCountGate("pit_benchmark_coverage", "M2", "股票市场 PIT 基准完整覆盖", facts.BenchmarkReadyEquityMarkets, 1, "个市场", "waiting_human_input", true, nil, "至少选择一个股票市场，批准有来源和有效期的 PIT 基准映射；全市场资产覆盖数仍保留在 facts 中披露。", "/fundamental"),
+		readinessCountGate("analyst_evidence", "M1", "真实分析证据", facts.AnalystEvidence, 1, "条", "ai_automatable", false, nil, "由一键 AI 研究搜索原文，通过数值、资产、时点和来源独立性硬校验后以 policy 身份放行。", "/fundamental"),
+		readinessDependentCountGate("approved_fundamental_plan", "M1", "已批准无新闻定时计划", facts.ApprovedFundamentalPlans, 1, "份", facts.AnalystEvidence > 0, "ai_automatable", false, []string{"analyst_evidence"}, "只有完整证据组合通过 fundamental-ai-policy-v1 后才自动建立同源计划。", "/fundamental"),
+		readinessBooleanGate("sec_identity", "M1", "可识别 SEC 访问身份", facts.SECIdentityConfigured, "waiting_external_configuration", true, nil, "在服务器环境一次性配置符合 SEC 要求的机构名称与联系邮箱，不在页面或日志展示内容。", "/sources"),
+		readinessCountGate("pit_benchmark_coverage", "M2", "股票市场 PIT 基准完整覆盖", facts.BenchmarkReadyEquityMarkets, 1, "个市场", "ai_automatable", false, nil, "US/USD 由政策核对后映射到 equity:AMEX:SPY；市场、币种、有效期或来源不匹配时拒绝。", "/fundamental"),
 		readinessCountGate("mature_forward_outcomes", "M3", "单一股票市场成熟前瞻标签", facts.LargestMatureEquityMarket, 100, "条", "waiting_natural_maturity", false, nil, "等待预登记的 1/5/20 交易日预测自然成熟并执行结果任务。", ""),
-		readinessCountGate("sealed_holdout", "M4", "预注册最终留出集", facts.HoldoutReservations, 1, "份", "waiting_human_input", true, nil, "现在、且必须在查看未来结果前，由人工预注册未来留出时段和用途。", ""),
+		readinessCountGate("sealed_holdout", "M4", "预注册最终留出集", facts.HoldoutReservations, 1, "份", "ai_automatable", false, nil, "达到样本门槛后，政策从下一个完整 XNYS 交易日起预注册 30 个交易日；最终揭盲仍需独立治理。", ""),
 		readinessDependentCountGate("walk_forward_dataset", "M4", "滚动前推数据集", facts.WalkForwardDatasets, 1, "版", facts.DatasetReadyEvaluationScopes > 0, "ready_for_manual_action", false, []string{"pit_benchmark_coverage", "mature_forward_outcomes", "sealed_holdout"}, "同一市场、目标和期限具备完整基准、至少 100 条成熟样本且留出截止已到达后，生成不可变数据集清单。", ""),
 		readinessDependentCountGate("development_experiment", "M4", "开发集基线、消融与校准实验", facts.DevelopmentExperiments, 1, "项", facts.WalkForwardDatasets > 0, "ready_for_manual_action", false, []string{"walk_forward_dataset"}, "在滚动训练、独立校准和未来测试折上运行可解释实验。", ""),
 		readinessDependentCountGate("layered_performance_report", "M5", "分层效果报告", facts.LayeredPerformanceReports, 1, "份", facts.DevelopmentExperiments > 0, "ready_for_manual_action", false, []string{"development_experiment"}, "生成同时披露覆盖、失败样本、收益、校准和统计不确定性的报告。", ""),
-		readinessDependentCountGate("final_holdout_evaluation", "M5", "一次性最终留出评估", facts.FinalHoldoutEvaluations, 1, "份", facts.LayeredPerformanceReports > 0, "ready_for_manual_action", true, []string{"layered_performance_report"}, "在开发报告锁定单一变体后，由人工批准执行一次不可重复的最终留出评估。", ""),
-		readinessCountGate("research_quality_reviews", "M5", "人工研究质量复核", facts.ResearchQualityReviews, 1, "条", "waiting_human_input", true, nil, "复核事实、关系、引用支持和拒答是否恰当。", ""),
+		readinessDependentCountGate("final_holdout_evaluation", "M5", "一次性最终留出评估", facts.FinalHoldoutEvaluations, 1, "份", facts.LayeredPerformanceReports > 0, "waiting_governance_approval", true, []string{"layered_performance_report"}, "在开发报告锁定单一变体后，由独立治理批准执行一次不可重复的最终留出评估。", ""),
+		readinessCountGate("research_quality_reviews", "M5", "人工研究质量复核", facts.ResearchQualityReviews, 1, "条", "waiting_governance_approval", true, nil, "独立复核事实、关系、引用支持和拒答是否恰当。", ""),
 		readinessCountGate("failure_drills", "M5", "五类故障与回滚演练", facts.PassedFailureDrillScenarios, 5, "类", "ready_for_manual_action", false, []string{"layered_performance_report"}, "完成数据源、模型超时、特征漂移、校准失效和人工回滚门禁演练。", ""),
-		readinessDependentCountGate("approved_prediction_model", "M5", "人工批准的预测模型", facts.ApprovedPredictionModels, 1, "个", facts.LayeredPerformanceReports > 0 && facts.FinalHoldoutEvaluations > 0 && facts.PassedFailureDrillScenarios >= 5, "waiting_human_input", true, []string{"layered_performance_report", "final_holdout_evaluation", "failure_drills"}, "只有真实独立证据和人工审批齐备后才允许批准；不得自动发布。", ""),
+		readinessDependentCountGate("approved_prediction_model", "M5", "治理批准的预测模型", facts.ApprovedPredictionModels, 1, "个", facts.LayeredPerformanceReports > 0 && facts.FinalHoldoutEvaluations > 0 && facts.PassedFailureDrillScenarios >= 5, "waiting_governance_approval", true, []string{"layered_performance_report", "final_holdout_evaluation", "failure_drills"}, "只有真实独立证据和治理审批齐备后才允许晋级；AI 不得自动发布。", ""),
 	}
 	report := phaseTwoReadinessReport{Version: phaseTwoReadinessVersion, AsOf: asOf.UTC(), OverallStatus: "blocked",
 		AutomaticCompletion: false, Facts: facts, Gates: gates}

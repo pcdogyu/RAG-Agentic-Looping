@@ -41,8 +41,8 @@ func TestPhaseTwoReadinessKeepsMissingTruthExplicit(t *testing.T) {
 		t.Fatalf("builder unexpectedly invented an outcome evaluation: %#v", report.Facts.LatestOutcomeEvaluation)
 	}
 	want := map[string]string{
-		"analyst_evidence": "waiting_human_input", "approved_fundamental_plan": "blocked_by_dependency",
-		"pit_benchmark_coverage": "waiting_human_input", "mature_forward_outcomes": "waiting_natural_maturity",
+		"analyst_evidence": "ai_automatable", "approved_fundamental_plan": "blocked_by_dependency",
+		"sec_identity": "waiting_external_configuration", "pit_benchmark_coverage": "ai_automatable", "mature_forward_outcomes": "waiting_natural_maturity",
 		"walk_forward_dataset": "blocked_by_dependency", "final_holdout_evaluation": "blocked_by_dependency",
 		"approved_prediction_model": "blocked_by_dependency",
 	}

@@ -65,9 +65,9 @@ type Result struct {
 	ScheduleDraftControls *ScheduleDraftControls `json:"schedule_draft_controls,omitempty"`
 }
 
-// ScheduleDraft carries the exact governed inputs from a successful manual
+// ScheduleDraft carries the exact governed inputs from a successful research
 // workflow into the separate schedule-approval step. It deliberately excludes
-// the manual run's point-in-time price: scheduled runs must resolve a fresh,
+// the run's point-in-time price: scheduled runs must resolve a fresh,
 // immutable adjusted-close observation at execution time. ApprovedBy remains
 // empty so producing a draft can never approve or activate a schedule.
 type ScheduleDraft struct {

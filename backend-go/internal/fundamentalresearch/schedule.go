@@ -42,6 +42,8 @@ type PlanSubmission struct {
 	MaxPriceAgeHours  int                 `json:"max_price_age_hours"`
 	MaxPlanAgeDays    int                 `json:"max_plan_age_days"`
 	ApprovedBy        string              `json:"approved_by"`
+	ApprovalKind      string              `json:"approval_kind,omitempty"`
+	PolicyVersion     string              `json:"policy_version,omitempty"`
 	IdempotencyKey    string              `json:"-"`
 }
 
@@ -56,6 +58,8 @@ type Plan struct {
 	MaxPlanAgeDays          int                 `json:"max_plan_age_days"`
 	Status                  string              `json:"status"`
 	ApprovedBy              string              `json:"approved_by"`
+	ApprovalKind            string              `json:"approval_kind"`
+	PolicyVersion           string              `json:"policy_version,omitempty"`
 	ApprovedAt              time.Time           `json:"approved_at"`
 	EvidenceContractVersion string              `json:"evidence_contract_version"`
 	NextRunAt               time.Time           `json:"next_run_at"`
@@ -91,9 +95,23 @@ func (s *PlanStore) Approve(ctx context.Context, submission PlanSubmission, appr
 	submission.AssetID = strings.TrimSpace(submission.AssetID)
 	submission.ForecastVersionID = strings.TrimSpace(submission.ForecastVersionID)
 	submission.ApprovedBy = strings.TrimSpace(submission.ApprovedBy)
+	submission.ApprovalKind = strings.ToLower(strings.TrimSpace(submission.ApprovalKind))
+	if submission.ApprovalKind == "" {
+		submission.ApprovalKind = "human"
+	}
+	submission.PolicyVersion = strings.TrimSpace(submission.PolicyVersion)
 	submission.IdempotencyKey = strings.TrimSpace(submission.IdempotencyKey)
 	if submission.AssetID == "" || submission.ForecastVersionID == "" || submission.ApprovedBy == "" || submission.IdempotencyKey == "" {
 		return Plan{}, false, fmt.Errorf("asset_id, forecast_version_id, approved_by and idempotency key are required")
+	}
+	if submission.ApprovalKind != "human" && submission.ApprovalKind != "policy" {
+		return Plan{}, false, fmt.Errorf("approval_kind must be human or policy")
+	}
+	if submission.ApprovalKind == "policy" && (submission.PolicyVersion == "" || !strings.HasPrefix(submission.ApprovedBy, "policy:")) {
+		return Plan{}, false, fmt.Errorf("policy-approved research plans require policy_version and an explicit policy actor")
+	}
+	if submission.ApprovalKind == "human" && submission.PolicyVersion != "" {
+		return Plan{}, false, fmt.Errorf("human-approved research plans must not claim a policy version")
 	}
 	if submission.CadenceHours == 0 {
 		submission.CadenceHours = 24
@@ -166,8 +184,8 @@ func (s *PlanStore) Approve(ctx context.Context, submission PlanSubmission, appr
 	if _, err := tx.Exec(ctx, `UPDATE fundamental_research_plans SET status='paused',updated_at=$2 WHERE asset_id=$1 AND status='approved'`, submission.AssetID, approvedAt); err != nil {
 		return Plan{}, false, err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO fundamental_research_plans(id,asset_id,forecast_version_id,valuation_plan,rating_plan,cadence_hours,max_price_age_hours,max_plan_age_days,status,idempotency_key,approved_by,approved_at,next_run_at,evidence_contract_version)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8,'approved',$9,$10,$11,$11,$12)`, id, submission.AssetID, submission.ForecastVersionID, valuationBody, ratingBody, submission.CadenceHours, submission.MaxPriceAgeHours, submission.MaxPlanAgeDays, submission.IdempotencyKey, submission.ApprovedBy, approvedAt, analystevidence.ContractVersion)
+	_, err = tx.Exec(ctx, `INSERT INTO fundamental_research_plans(id,asset_id,forecast_version_id,valuation_plan,rating_plan,cadence_hours,max_price_age_hours,max_plan_age_days,status,idempotency_key,approved_by,approval_kind,policy_version,approved_at,next_run_at,evidence_contract_version)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,'approved',$9,$10,$11,$12,$13,$13,$14)`, id, submission.AssetID, submission.ForecastVersionID, valuationBody, ratingBody, submission.CadenceHours, submission.MaxPriceAgeHours, submission.MaxPlanAgeDays, submission.IdempotencyKey, submission.ApprovedBy, submission.ApprovalKind, submission.PolicyVersion, approvedAt, analystevidence.ContractVersion)
 	if err != nil {
 		return Plan{}, false, err
 	}
@@ -183,17 +201,17 @@ func (s *PlanStore) Approve(ctx context.Context, submission PlanSubmission, appr
 
 func samePlanSubmission(plan Plan, submission PlanSubmission) bool {
 	left, _ := json.Marshal(struct {
-		AssetID, ForecastVersionID, ApprovedBy         string
-		Valuation                                      ValuationPlan
-		Rating                                         ScheduledRatingPlan
-		CadenceHours, MaxPriceAgeHours, MaxPlanAgeDays int
-	}{plan.AssetID, plan.ForecastVersionID, plan.ApprovedBy, plan.Valuation, plan.Rating, plan.CadenceHours, plan.MaxPriceAgeHours, plan.MaxPlanAgeDays})
+		AssetID, ForecastVersionID, ApprovedBy, ApprovalKind, PolicyVersion string
+		Valuation                                                           ValuationPlan
+		Rating                                                              ScheduledRatingPlan
+		CadenceHours, MaxPriceAgeHours, MaxPlanAgeDays                      int
+	}{plan.AssetID, plan.ForecastVersionID, plan.ApprovedBy, plan.ApprovalKind, plan.PolicyVersion, plan.Valuation, plan.Rating, plan.CadenceHours, plan.MaxPriceAgeHours, plan.MaxPlanAgeDays})
 	right, _ := json.Marshal(struct {
-		AssetID, ForecastVersionID, ApprovedBy         string
-		Valuation                                      ValuationPlan
-		Rating                                         ScheduledRatingPlan
-		CadenceHours, MaxPriceAgeHours, MaxPlanAgeDays int
-	}{submission.AssetID, submission.ForecastVersionID, submission.ApprovedBy, submission.Valuation, submission.Rating, submission.CadenceHours, submission.MaxPriceAgeHours, submission.MaxPlanAgeDays})
+		AssetID, ForecastVersionID, ApprovedBy, ApprovalKind, PolicyVersion string
+		Valuation                                                           ValuationPlan
+		Rating                                                              ScheduledRatingPlan
+		CadenceHours, MaxPriceAgeHours, MaxPlanAgeDays                      int
+	}{submission.AssetID, submission.ForecastVersionID, submission.ApprovedBy, submission.ApprovalKind, submission.PolicyVersion, submission.Valuation, submission.Rating, submission.CadenceHours, submission.MaxPriceAgeHours, submission.MaxPlanAgeDays})
 	return string(left) == string(right)
 }
 
@@ -254,12 +272,12 @@ func validateScheduledPlans(valuationPlan ValuationPlan, ratingPlan ScheduledRat
 	return nil
 }
 
-const planSelect = `SELECT id,asset_id,forecast_version_id,valuation_plan::jsonb,rating_plan::jsonb,cadence_hours,max_price_age_hours,max_plan_age_days,status,approved_by,approved_at,coalesce(evidence_contract_version,''),next_run_at,last_run_at,last_run_status,last_run_reason,last_result::jsonb,created_at,updated_at FROM fundamental_research_plans`
+const planSelect = `SELECT id,asset_id,forecast_version_id,valuation_plan::jsonb,rating_plan::jsonb,cadence_hours,max_price_age_hours,max_plan_age_days,status,approved_by,approval_kind,policy_version,approved_at,coalesce(evidence_contract_version,''),next_run_at,last_run_at,last_run_status,last_run_reason,last_result::jsonb,created_at,updated_at FROM fundamental_research_plans`
 
 func scanPlan(row pgx.Row) (Plan, error) {
 	var plan Plan
 	var valuationRaw, ratingRaw, resultRaw any
-	err := row.Scan(&plan.ID, &plan.AssetID, &plan.ForecastVersionID, &valuationRaw, &ratingRaw, &plan.CadenceHours, &plan.MaxPriceAgeHours, &plan.MaxPlanAgeDays, &plan.Status, &plan.ApprovedBy, &plan.ApprovedAt, &plan.EvidenceContractVersion, &plan.NextRunAt, &plan.LastRunAt, &plan.LastRunStatus, &plan.LastRunReason, &resultRaw, &plan.CreatedAt, &plan.UpdatedAt)
+	err := row.Scan(&plan.ID, &plan.AssetID, &plan.ForecastVersionID, &valuationRaw, &ratingRaw, &plan.CadenceHours, &plan.MaxPriceAgeHours, &plan.MaxPlanAgeDays, &plan.Status, &plan.ApprovedBy, &plan.ApprovalKind, &plan.PolicyVersion, &plan.ApprovedAt, &plan.EvidenceContractVersion, &plan.NextRunAt, &plan.LastRunAt, &plan.LastRunStatus, &plan.LastRunReason, &resultRaw, &plan.CreatedAt, &plan.UpdatedAt)
 	if err != nil {
 		return Plan{}, err
 	}

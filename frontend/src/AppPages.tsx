@@ -4115,7 +4115,7 @@ type FundamentalBundle = {
 		controls?: { automatic_assumptions?: boolean; automatic_valuation?: boolean; automatic_rating?: boolean; analyst_approval_required?: boolean };
 	};
 	analystEvidence?: {
-		items?: Array<{ id?: string; evidence_type?: string; title?: string; rationale?: string; values?: Record<string, unknown>; observed_at?: string; available_at?: string; approved_by?: string; approved_at?: string; source_name?: string; source_url?: string }>;
+		items?: Array<{ id?: string; evidence_type?: string; title?: string; rationale?: string; values?: Record<string, unknown>; observed_at?: string; available_at?: string; approved_by?: string; approved_at?: string; approval_kind?: string; policy_version?: string; source_name?: string; source_url?: string }>;
 	};
 	benchmarkMapping?: {
 		resolution?: { status?: string; reason?: string; mapping?: { id?: string; scope_type?: string; scope_id?: string; benchmark_asset_id?: string; source_name?: string; mapping_reason?: string; approved_by?: string; available_at?: string } };
@@ -4132,8 +4132,30 @@ type FundamentalBundle = {
   }> };
   predictions?: { items?: Array<{ status?: string; probability?: number; signal_available_at?: string; horizon_sessions?: number; model_version?: string; calibration_version?: string; exclusion_reason?: string }> };
 	marketPolicy?: { asset_class?: string; market?: string; currency?: string; policy?: { version?: string; fundamental_method?: string; fundamental_supported?: boolean; prediction_supported?: boolean; prediction_scope?: string; benchmark_id?: string; benchmark_policy?: string; reason?: string; required_inputs?: string[] } };
-  schedule?: { items?: Array<{ id?: string; status?: string; forecast_version_id?: string; cadence_hours?: number; next_run_at?: string; last_run_status?: string; last_run_reason?: string; approved_by?: string; approved_at?: string }> };
+  schedule?: { items?: Array<{ id?: string; status?: string; forecast_version_id?: string; cadence_hours?: number; next_run_at?: string; last_run_status?: string; last_run_reason?: string; approved_by?: string; approved_at?: string; approval_kind?: string; policy_version?: string }> };
 };
+
+type FundamentalAIPreparation = {
+	asset_id?: string;
+	status?: string;
+	run?: {
+		id?: string;
+		task_id?: string;
+		status?: string;
+		stage?: string;
+		policy_version?: string;
+		model_version?: string;
+		summary?: Record<string, unknown>;
+		blockers?: string[];
+		created_at?: string;
+		updated_at?: string;
+	};
+	sources?: Array<{ id?: string; title?: string; source_name?: string; source_class?: string; source_url?: string; published_at?: string; available_at?: string; content_type?: string; content_hash?: string; retrieval_status?: string; retrieval_detail?: string }>;
+	candidates?: Array<{ id?: string; evidence_type?: string; title?: string; rationale?: string; values?: Record<string, unknown>; source_snapshot_ids?: string[]; evidence_quote?: string; evidence_location?: string; status?: string; validation?: Record<string, unknown>; approved_evidence_id?: string }>;
+	search_snippets_are_evidence?: boolean;
+	automatic_model_release?: boolean;
+};
+const fundamentalAIStageLabels: Record<string, string> = { queued: "等待", data_sync: "数据同步", local_search: "本地搜索", original_fetch: "原文抓取", ai_reasoning: "AI 推理", counterevidence: "反证检查", policy_validation: "政策校验", completed: "已完成", failed: "失败" };
 
 type LicensedBenchmarkImportReceipt = {
 	id?: string;
@@ -4440,17 +4462,18 @@ export function buildFundamentalPreparationDrafts(canonical: string, source: Fun
 
 type FundamentalPreparationTask = { label: string; taskID: string };
 
-async function waitForFundamentalPreparationTask(apiBase: string, task: FundamentalPreparationTask) {
-	for (let attempt = 0; attempt < 120; attempt += 1) {
+async function waitForFundamentalPreparationTask(apiBase: string, task: FundamentalPreparationTask, onPoll?: () => Promise<void>) {
+	for (let attempt = 0; attempt < 2100; attempt += 1) {
 		const response = await fetch(`${apiBase}/api/v1/tasks/${encodeURIComponent(task.taskID)}`);
 		if (!response.ok) throw new Error(`${task.label}状态读取失败：${await responseDetail(response)}`);
 		const payload = await response.json() as { state?: string; error?: string };
+		if (onPoll) await onPoll();
 		const state = String(payload.state || "PENDING").toUpperCase();
 		if (state === "COMPLETED" || state === "SUCCESS" || state === "SUCCEEDED") return;
 		if (["FAILED", "CANCELLED", "CANCELED"].includes(state)) throw new Error(`${task.label}失败：${payload.error || state}`);
 		await new Promise((resolve) => globalThis.setTimeout(resolve, 1000));
 	}
-	throw new Error(`${task.label}等待超过 120 秒；任务仍在后台运行`);
+	throw new Error(`${task.label}等待超过 35 分钟；任务仍在后台运行`);
 }
 
 export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
@@ -4488,6 +4511,7 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 	const [guidanceReviewRequestID, setGuidanceReviewRequestID] = useState(() => globalThis.crypto?.randomUUID?.() || `guidance-review-${Date.now()}`);
   const [scheduleRequestID, setScheduleRequestID] = useState(() => globalThis.crypto?.randomUUID?.() || `fundamental-schedule-${Date.now()}`);
 	const [autoPreparing, setAutoPreparing] = useState(false);
+	const [aiPreparation, setAIPreparation] = useState<FundamentalAIPreparation>();
 	function applyBundleRead(canonical: string, result: FundamentalBundleRead, completedMessage = "") {
 		setAssetID(canonical);
 		setBundle(result.bundle);
@@ -4513,67 +4537,44 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
 	async function oneClickPrepare() {
 		const input = assetID.trim();
 		if (!input || loading) return;
-		setLoading(true); setAutoPreparing(true); setMessage("一键准备 1/4：正在解析规范资产并检查现有事实…");
+		setLoading(true); setAutoPreparing(true); setMessage("AI 研究 1/3：正在解析规范资产…");
 		setLicensedBenchmarkReceipts([]); setLicensedBenchmarkAuditLoaded(false);
 		setTradabilityReceipts([]); setTradabilityAuditLoaded(false);
 		try {
 			const canonical = await resolveFundamentalAssetID(apiBase, input);
 			setAssetID(canonical);
-			const initial = await readFundamentalBundle(apiBase, canonical);
-			setBundle(initial.bundle);
 			const encoded = encodeURIComponent(canonical);
-			const benchmarkID = initial.bundle.marketPolicy?.policy?.benchmark_id?.trim() || "";
-			const syncRequests = [
-				{ label: "财务事实", url: `${apiBase}/go/fundamentals/${encoded}/sync?limit=12` },
-				{ label: "标的复权行情", url: `${apiBase}/go/market-prices/${encoded}/sync?lookback_days=30` },
-				{ label: "一致预期", url: `${apiBase}/go/consensus/${encoded}/sync?limit=10` },
-				{ label: "SEC 披露候选", url: `${apiBase}/go/consensus/${encoded}/guidance-sources/sync?limit=40` },
-				...(benchmarkID ? [{ label: "规范基准复权行情", url: `${apiBase}/go/market-prices/${encodeURIComponent(benchmarkID)}/sync?lookback_days=30` }] : []),
-			];
-			setMessage(`一键准备 2/4：正在提交 ${syncRequests.length} 项真实数据同步…`);
-			const queueResults = await Promise.all(syncRequests.map(async (request) => {
+			setMessage("AI 研究 2/3：数据同步、本地搜索、原文抓取、Ollama 推理和政策校验正在服务端执行…");
+			const requestID = globalThis.crypto?.randomUUID?.() || `fundamental-ai-${Date.now()}`;
+			const response = await fetch(`${apiBase}/go/fundamental-research/${encoded}/ai-prepare`, { method: "POST", headers: { "Idempotency-Key": requestID } });
+			const queued = await response.json().catch(() => ({})) as { task_id?: string; run_id?: string; detail?: string };
+			if (!response.ok) throw new Error(queued.detail || `HTTP ${response.status}`);
+			if (!queued.task_id) throw new Error("服务端未返回 AI 任务 ID");
+			await waitForFundamentalPreparationTask(apiBase, { label: "AI 研究", taskID: queued.task_id }, async () => {
 				try {
-					const response = await fetch(request.url, { method: "POST" });
-					if (!response.ok) throw new Error(await responseDetail(response));
-					const payload = await response.json() as { task_id?: string };
-					if (!payload.task_id) throw new Error("服务端未返回任务 ID");
-					return { task: { label: request.label, taskID: payload.task_id }, warning: "" };
-				} catch (error) {
-					return { task: undefined, warning: `${request.label}：${error instanceof Error ? error.message : "提交失败"}` };
+					const progressResponse = await fetch(`${apiBase}/go/fundamental-research/${encoded}/ai-preparation`);
+					if (!progressResponse.ok) return;
+					const progress = await progressResponse.json() as FundamentalAIPreparation;
+					setAIPreparation(progress);
+					const stage = progress.run?.stage || "queued";
+					setMessage(`AI 研究进度：${fundamentalAIStageLabels[stage] || stage}…`);
+				} catch {
+					// Task polling remains authoritative when the optional progress read is transiently unavailable.
 				}
-			}));
-			const tasks = queueResults.flatMap((result) => result.task ? [result.task] : []);
-			const warnings = queueResults.flatMap((result) => result.warning ? [result.warning] : []);
-			if (tasks.length > 0) {
-				setMessage(`一键准备 3/4：${tasks.length} 项同步已排队，正在等待不可变事实落库…`);
-				const taskResults = await Promise.all(tasks.map(async (task) => {
-					try { await waitForFundamentalPreparationTask(apiBase, task); return ""; }
-					catch (error) { return error instanceof Error ? error.message : `${task.label}等待失败`; }
-				}));
-				warnings.push(...taskResults.filter(Boolean));
-			}
-			setMessage("一键准备 4/4：正在重新读取事实并生成所有适用草稿…");
+			});
+			setMessage("AI 研究 3/3：正在读取来源、候选和政策结果…");
+			const aiResponse = await fetch(`${apiBase}/go/fundamental-research/${encoded}/ai-preparation`);
+			const ai = await aiResponse.json().catch(() => ({})) as FundamentalAIPreparation & { detail?: string };
+			if (!aiResponse.ok) throw new Error(ai.detail || `HTTP ${aiResponse.status}`);
+			setAIPreparation(ai);
 			const refreshed = await readFundamentalBundle(apiBase, canonical);
 			setBundle(refreshed.bundle);
-			warnings.push(...refreshed.warnings);
-			const drafts = buildFundamentalPreparationDrafts(canonical, refreshed.bundle, analystEvidenceType);
-			setAnalystEvidenceJSON(drafts.analystEvidence);
-			setBenchmarkMappingJSON(drafts.benchmarkMapping);
-			setLicensedBenchmarkMetadataJSON(drafts.licensedBenchmarkMetadata);
-			setLicensedBenchmarkObservations(drafts.licensedBenchmarkMetadata ? "session_date,adjusted_close\n" : "");
-			setTradabilityMetadataJSON(drafts.tradabilityMetadata);
-			setTradabilityObservations(drafts.tradabilityMetadata ? "session_date,source_observed_at,status\n" : "");
-			setWorkflowJSON(drafts.workflow);
-			resetAnalystEvidenceApproval(); resetTradabilityApproval(); resetWorkflowApproval(); resetScheduleApproval();
-			setBenchmarkMappingRequestID(globalThis.crypto?.randomUUID?.() || `benchmark-mapping-${Date.now()}`);
-			setLicensedBenchmarkConfirmed(false);
-			setLicensedBenchmarkRequestID(globalThis.crypto?.randomUUID?.() || `licensed-benchmark-${Date.now()}`);
-			const generated = drafts.generated.length ? drafts.generated.join("、") : "暂无可生成草稿";
-			const uniqueWarnings = [...new Set(warnings)];
-			setMessage(`一键准备完成：${canonical}；已生成 ${generated}。真实假设、来源、许可证和批准人仍需人工填写与确认。${uniqueWarnings.length ? ` 未阻断警告：${uniqueWarnings.join("；")}。` : ""}`);
+			const sources = ai.sources?.filter((item) => item.retrieval_status === "available").length || 0;
+			const approved = ai.candidates?.filter((item) => !!item.approved_evidence_id).length || 0;
+			const blockers = ai.run?.blockers || [];
+			setMessage(`AI 研究${ai.run?.status === "completed" ? "完成" : "已结束"}：${canonical}；可核验原文 ${sources} 份，政策放行证据 ${approved} 条。${blockers.length ? ` 仍有阻塞：${blockers.join("、")}。` : ""}${refreshed.warnings.length ? ` 读取警告：${refreshed.warnings.join("；")}。` : ""}`);
 		} catch (error) {
-			setBundle({});
-			setMessage(`一键准备失败：${error instanceof Error ? error.message : "未知错误"}`);
+			setMessage(`AI 研究失败：${error instanceof Error ? error.message : "未知错误"}`);
 		} finally {
 			setAutoPreparing(false); setLoading(false);
 		}
@@ -4994,12 +4995,22 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
   return <section className="app-page fundamental-page">
     <PageHeading eyebrow="FUNDAMENTAL & SIGNAL WORKBENCH" title="基本面评级与短期预测" copy="事件信号、基本面评级和固定期限概率彼此独立；只有通过独立校准的概率才显示数值。" />
     <form className="page-toolbar" onSubmit={load}>
-		<input aria-label="资产代码、名称或规范 ID" value={assetID} onChange={(event) => { setAssetID(event.target.value); setBundle({}); setAnalystEvidenceJSON(""); setBenchmarkMappingJSON(""); setLicensedBenchmarkMetadataJSON(""); setLicensedBenchmarkObservations(""); setTradabilityMetadataJSON(""); setTradabilityObservations(""); setWorkflowJSON(""); setScheduleJSON(""); resetTradabilityApproval(); resetAnalystEvidenceApproval(); resetWorkflowApproval(); resetScheduleApproval(); }} />
+		<input aria-label="资产代码、名称或规范 ID" value={assetID} onChange={(event) => { setAssetID(event.target.value); setBundle({}); setAIPreparation(undefined); setAnalystEvidenceJSON(""); setBenchmarkMappingJSON(""); setLicensedBenchmarkMetadataJSON(""); setLicensedBenchmarkObservations(""); setTradabilityMetadataJSON(""); setTradabilityObservations(""); setWorkflowJSON(""); setScheduleJSON(""); resetTradabilityApproval(); resetAnalystEvidenceApproval(); resetWorkflowApproval(); resetScheduleApproval(); }} />
       <button type="submit" disabled={loading}>{loading ? "读取中…" : "读取"}</button>
-		<button type="button" disabled={loading || !assetID.trim()} onClick={() => void oneClickPrepare()}>{autoPreparing ? "正在自动准备…" : "一键自动准备"}</button>
-		<small>支持代码、名称、旧版或规范资产 ID；自动同步真实事实并生成适用草稿，不自动填写许可证、审批人或主观假设。</small>
+		<button type="button" disabled={loading || !assetID.trim()} onClick={() => void oneClickPrepare()}>{autoPreparing ? "AI 研究中…" : "一键 AI 研究"}</button>
+		<small>服务端自动完成数据同步、本地搜索、原文抓取、AI 推理、反证和政策校验；外部许可、SEC 身份、自然成熟和最终治理批准不会被伪造或越过。</small>
     </form>
-    <div className="integration-editor">
+	{aiPreparation && <section className="fundamental-ai-preparation" aria-label="AI 研究进度">
+		<header><div><span>FUNDAMENTAL AI · {aiPreparation.run?.policy_version || "fundamental-ai-policy-v1"}</span><h2>{fundamentalAIStageLabels[aiPreparation.run?.stage || ""] || aiPreparation.run?.stage || aiPreparation.status || "尚未运行"}</h2></div><strong>{aiPreparation.run?.status || aiPreparation.status || "not_run"}</strong></header>
+		<div className="readiness-outcome-counts"><span>原文 <b>{aiPreparation.sources?.length || 0}</b></span><span>候选 <b>{aiPreparation.candidates?.length || 0}</b></span><span>已放行 <b>{aiPreparation.candidates?.filter((item) => !!item.approved_evidence_id).length || 0}</b></span><span>资料不足 <b>{aiPreparation.candidates?.filter((item) => item.status === "insufficient_data" || item.status === "rejected").length || 0}</b></span></div>
+		{!!aiPreparation.run?.blockers?.length && <p className="readiness-outcome-warning">阻塞：{aiPreparation.run.blockers.join("、")}</p>}
+		{!!aiPreparation.sources?.length && <details><summary>搜索与原文抓取</summary>{aiPreparation.sources.map((source) => <p key={source.id}>{source.source_class || "public_web"} · {source.retrieval_status || "unknown"} · {source.source_url ? <a href={source.source_url} target="_blank" rel="noreferrer">{source.title || source.source_name || source.source_url}</a> : source.title || "无地址"}{source.content_hash ? ` · ${source.content_hash.slice(0, 12)}` : ""}</p>)}</details>}
+		{!!aiPreparation.candidates?.length && <details><summary>AI 建议与政策结果</summary>{aiPreparation.candidates.map((candidate) => <p key={candidate.id}>{candidate.evidence_type || "unknown"} · {candidate.status || "unknown"} · {candidate.title || "未命名"}{candidate.approved_evidence_id ? ` · policy 证据 ${candidate.approved_evidence_id}` : ""}</p>)}</details>}
+		<small>Search-MCP 摘要只发现链接，不作证据；AI 不自我批准最终留出集、模型晋级或发布。</small>
+	</section>}
+	<details className="fundamental-manual-fallback">
+		<summary>高级人工兜底工具</summary>
+		<div className="integration-editor">
 		<label>分析师证据类型<select aria-label="分析师证据类型" value={analystEvidenceType} onChange={(event) => { setAnalystEvidenceType(event.target.value as AnalystEvidenceType); resetAnalystEvidenceApproval(); }}>{analystEvidenceTypes.map((type) => <option key={type} value={type}>{analystEvidenceTypeLabels[type]}</option>)}</select></label>
 		<button type="button" disabled={loading || !assetID.trim()} onClick={loadAnalystEvidenceTemplate}>生成分析师证据模板</button>
 		<label>分析师证据登记<textarea aria-label="分析师证据 JSON" rows={10} value={analystEvidenceJSON} onChange={(event) => { setAnalystEvidenceJSON(event.target.value); resetAnalystEvidenceApproval(); }} placeholder='先按类型生成模板；所有数值、observed_at、available_at、来源、理由和 approved_by 必须由分析师真实填写。' /></label>
@@ -5048,6 +5059,7 @@ export function FundamentalResearchPage({ apiBase }: { apiBase: string }) {
       <button type="button" disabled={loading || schedule?.status !== "approved"} onClick={() => void pauseSchedule()}>暂停定时研究</button>
       <small>人工研究成功后会自动载入同源计划草稿，但 approved_by 保持空白且不会自动批准；计划运行时重新读取真实复权价。出现新财报、计划过期或缺少复权价时自动停止并等待复核。</small>
 		</div>
+	</details>
     {message && <div className="page-message">{message}</div>}
     <div className="metric-grid">
 		<article><span>财务快照</span><strong>{bundle.fundamentals?.items?.length ?? 0}</strong><small>严格按 available_at 截止</small></article>

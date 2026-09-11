@@ -58,6 +58,9 @@ const pendingReasonLabels: Record<string, string> = {
 const statusLabels: Record<string, string> = {
 	completed: "已满足",
 	waiting_human_input: "等待人工输入",
+	ai_automatable: "AI 可处理",
+	waiting_external_configuration: "需要一次性外部配置",
+	waiting_governance_approval: "需要最终治理批准",
 	waiting_natural_maturity: "等待自然成熟",
 	blocked_by_dependency: "依赖未满足",
 	ready_for_manual_action: "可人工执行",
@@ -73,6 +76,7 @@ const outcomeEvaluationStatusLabels: Record<string, string> = {
 	failed: "失败",
 	cancelled: "已取消",
 };
+const aiBatchCountLabels: Record<string, string> = { waiting: "等待", searching: "搜索", reasoning: "推理", released: "已放行", insufficient_data: "资料不足", failed: "失败" };
 
 export function phaseTwoReadinessStatusLabel(status: string) {
 	return statusLabels[status] || status || "未知";
@@ -156,8 +160,10 @@ export default function PhaseTwoReadinessPage({ apiBase }: { apiBase: string }) 
 	const [loading, setLoading] = useState(false);
 	const [outcomeEvaluationBusy, setOutcomeEvaluationBusy] = useState(false);
 	const [outcomeEvaluationMessage, setOutcomeEvaluationMessage] = useState("");
+	const [aiBatchBusy, setAIBatchBusy] = useState(false);
+	const [aiBatch, setAIBatch] = useState<{ id?: string; status?: string; requested_count?: number; counts?: Record<string, number> }>();
 	const outcomeEvaluationAbort = useRef<AbortController | undefined>(undefined);
-	const [message, setMessage] = useState("就绪度按生产事实计算；下方人工操作台仍必须逐步预校验并确认才会写入。");
+	const [message, setMessage] = useState("就绪度按生产事实计算；AI 处理可自动化输入，不会越过自然成熟、外部配置和最终治理批准。");
 	const load = useCallback(async () => {
 		setLoading(true);
 		try {
@@ -213,9 +219,36 @@ export default function PhaseTwoReadinessPage({ apiBase }: { apiBase: string }) 
 			}
 		}
 	}
+	async function prepareAIBatch() {
+		if (aiBatchBusy) return;
+		setAIBatchBusy(true);
+		setMessage("正在将 US 待成熟预测按资产去重后提交到研究 Worker…");
+		try {
+			const requestID = globalThis.crypto?.randomUUID?.() || `fundamental-ai-batch-${Date.now()}`;
+			const response = await fetch(`${apiBase}/go/fundamental-research/ai-prepare-batches`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", "Idempotency-Key": requestID },
+				body: JSON.stringify({ market: "US", scope: "pending_predictions", limit: 200 }),
+			});
+			const payload = await response.json().catch(() => ({})) as { batch_id?: string; status?: string; requested?: number; queued?: number; batch?: { id?: string }; detail?: string };
+			if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
+			const batchID = payload.batch_id || payload.batch?.id;
+			if (!batchID) throw new Error("服务端未返回批次 ID");
+			const statusResponse = await fetch(`${apiBase}/go/fundamental-research/ai-prepare-batches/${encodeURIComponent(batchID)}`);
+			const statusPayload = await statusResponse.json().catch(() => ({})) as { batch?: { id?: string; status?: string; requested_count?: number; counts?: Record<string, number> } };
+			if (statusResponse.ok) setAIBatch(statusPayload.batch);
+			setMessage(`AI 批次 ${batchID} 已提交：选中 ${payload.requested ?? 0} 个标的，新入队 ${payload.queued ?? 0} 个；重复的活动任务会被幂等复用。`);
+		} catch (reason) {
+			setMessage(`批量 AI 自动准备失败：${reason instanceof Error ? reason.message : "未知错误"}`);
+		} finally {
+			setAIBatchBusy(false);
+		}
+	}
 	return <section className="app-page readiness-page">
-		<div className="page-heading"><div><span>PHASE II READINESS</span><h1>第二期生产就绪度</h1><p>按真实证据、自然成熟、人工审批和工程能力分别显示门禁；不以演示数据或代码数量代替验收。</p></div></div>
-		<div className="readiness-toolbar"><button type="button" disabled={loading} onClick={() => void load()}>{loading ? "正在核验…" : "重新核验生产事实"}</button><span>{message}</span></div>
+		<div className="page-heading"><div><span>PHASE II READINESS</span><h1>第二期生产就绪度</h1><p>门禁分为 AI 可处理、等待自然成熟、一次性外部配置和最终治理批准；不以演示数据或代码数量代替验收。</p></div></div>
+		<div className="readiness-toolbar"><button type="button" disabled={loading} onClick={() => void load()}>{loading ? "正在核验…" : "重新核验生产事实"}</button><button type="button" disabled={aiBatchBusy} onClick={() => void prepareAIBatch()}>{aiBatchBusy ? "批量入队中…" : "批量 AI 自动准备"}</button><span>{message}</span></div>
+		{aiBatch && <div className="readiness-outcome-message" role="status">批次 {aiBatch.id || "—"} · {aiBatch.requested_count ?? 0} 个标的{aiBatch.counts ? ` · ${Object.entries(aiBatch.counts).map(([status, count]) => `${aiBatchCountLabels[status] || status} ${count}`).join(" · ")}` : ""}
+		</div>}
 		{report ? <PhaseTwoReadinessPanel report={report} onEvaluateOutcomes={() => void evaluateOutcomes()} outcomeEvaluationBusy={outcomeEvaluationBusy} outcomeEvaluationMessage={outcomeEvaluationMessage} /> : <div className="page-empty">尚未取得生产就绪度快照。</div>}
 		<PhaseTwoEvaluationWorkbench apiBase={apiBase} onChanged={() => void load()} />
 	</section>;

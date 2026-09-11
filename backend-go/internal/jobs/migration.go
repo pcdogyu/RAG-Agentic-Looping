@@ -33,7 +33,7 @@ var workerLaneDefinitions = []MigrationLane{
 		"market_loop.resolve_event_assets",
 	}},
 	{ID: "research", Order: 3, GoQueue: "research", TaskTypes: []string{
-		"market_loop.research_event", "market_loop.research_asset",
+		"market_loop.research_event", "market_loop.research_asset", "market_loop.prepare_fundamental_ai",
 	}},
 	{ID: "evolution", Order: 4, GoQueue: "code", TaskTypes: []string{
 		"market_loop.evolve_from_outcomes", "market_loop.evolve_failures",

@@ -15,6 +15,7 @@ import AnalysisPage, {
   type AnalysisLog,
 } from "./AnalysisPage";
 import BuildFooter, { buildInfo } from "./BuildFooter";
+import { phaseTwoReadinessStatusLabel } from "./PhaseTwoReadiness";
 import {
   applyCancelledTaskTombstone,
   AssetUniversePage,
@@ -745,8 +746,9 @@ describe("shared hash navigation", () => {
   it("renders the separate fundamental-rating and calibrated-prediction workbench", () => {
     const markup = renderToStaticMarkup(createElement(FundamentalResearchPage, { apiBase: "" }));
     expect(markup).toContain("基本面评级与短期预测");
-		expect(markup).toContain("一键自动准备");
-		expect(markup).toContain("支持代码、名称、旧版或规范资产 ID");
+		expect(markup).toContain("一键 AI 研究");
+		expect(markup).toContain("本地搜索、原文抓取、AI 推理、反证和政策校验");
+		expect(markup).toContain("高级人工兜底工具");
 		expect(markup).toContain('value="AAPL"');
 		expect(markup).toContain("资产政策");
 		expect(markup).toContain("分市场研究方法");
@@ -787,6 +789,12 @@ describe("shared hash navigation", () => {
     expect(markup).not.toContain("管理员令牌");
 		expect(markup).toContain("分析师证据登记");
   });
+
+	it("labels AI, external configuration, and final governance gates distinctly", () => {
+		expect(phaseTwoReadinessStatusLabel("ai_automatable")).toBe("AI 可处理");
+		expect(phaseTwoReadinessStatusLabel("waiting_external_configuration")).toBe("需要一次性外部配置");
+		expect(phaseTwoReadinessStatusLabel("waiting_governance_approval")).toBe("需要最终治理批准");
+	});
 
 	it("resolves a legacy exchange asset ID to the unique canonical asset", () => {
 		const candidate = {
