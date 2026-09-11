@@ -135,9 +135,10 @@ func TestRecentEventResearchReplayIsVersionedAndIdempotent(t *testing.T) {
 	defer redisClient.Close()
 
 	now := time.Now().UTC()
-	eventID, runID, newsID := uuid.New(), uuid.New(), uuid.New()
+	eventID, runID, newsID, staleJobID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	t.Cleanup(func() {
 		_, _ = pool.Exec(context.Background(), `DELETE FROM go_jobs WHERE dedupe_key=$1`, "event-research-v6-reextract:"+eventID.String())
+		_, _ = pool.Exec(context.Background(), `DELETE FROM go_jobs WHERE id=$1`, staleJobID)
 		_, _ = pool.Exec(context.Background(), `DELETE FROM integration_settings WHERE key=$1`, recentEventReplaySetting)
 		_, _ = pool.Exec(context.Background(), `DELETE FROM event_research_runs WHERE id=$1`, runID)
 		_, _ = pool.Exec(context.Background(), `DELETE FROM news_events WHERE id=$1`, eventID)
@@ -166,9 +167,13 @@ func TestRecentEventResearchReplayIsVersionedAndIdempotent(t *testing.T) {
 	if _, err := pool.Exec(ctx, `INSERT INTO integration_settings(key,payload,updated_at) VALUES($1,$2,now())`, recentEventReplaySetting, settingBody); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := pool.Exec(ctx, `INSERT INTO go_jobs(id,queue,task_type,payload,status,priority,max_attempts,available_at,dedupe_key,created_at,updated_at)
+		VALUES($1,'research',$2,'{}','retrying',1,3,now(),$3,now()-interval '1 day',now()-interval '1 day')`, staleJobID, researchAssetTask, "stale-research-job:"+staleJobID.String()); err != nil {
+		t.Fatal(err)
+	}
 
 	runtime := &maintenanceRuntime{cfg: config.Config{ExtractURLs: []string{"http://extract.test"}}, db: pool, redis: redisClient}
-	payload, _ := json.Marshal(taskEnvelope{Kwargs: map[string]any{"batch_size": 1, "max_active": 10}})
+	payload, _ := json.Marshal(taskEnvelope{Kwargs: map[string]any{"batch_size": 1, "max_active": 1}})
 	_, err = runtime.replayRecentEventResearch(ctx, Job{ID: uuid.New(), Payload: payload})
 	var continuation *continuationError
 	if !errors.As(err, &continuation) {

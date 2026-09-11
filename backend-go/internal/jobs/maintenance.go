@@ -235,7 +235,10 @@ func recentEventReplayActive(run map[string]any) bool {
 
 func (runtime *maintenanceRuntime) activeRecentEventPipelines(ctx context.Context) (int, error) {
 	var count int
-	err := runtime.db.QueryRow(ctx, `SELECT count(*)::int FROM go_jobs WHERE status IN ('queued','running','retrying') AND task_type=ANY($1::text[])`, []string{reextractTask, mappingTask, researchEventTask}).Scan(&count)
+	err := runtime.db.QueryRow(ctx, `SELECT (
+		(SELECT count(*) FROM research_runs WHERE status IN ('queued','running','verifying')) +
+		(SELECT count(*) FROM event_research_runs WHERE status IN ('queued','running','verifying'))
+	)::int`).Scan(&count)
 	return count, err
 }
 
