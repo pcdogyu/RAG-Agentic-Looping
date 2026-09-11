@@ -129,9 +129,9 @@ func (s *Store) UpdateRun(ctx context.Context, id uuid.UUID, status, stage strin
 	}
 	summaryJSON, _ := json.Marshal(summary)
 	blockersJSON, _ := json.Marshal(blockers)
-	_, err := s.db.Exec(ctx, `UPDATE fundamental_ai_runs SET status=$2,stage=$3,summary=$4,blockers=$5,
-		started_at=CASE WHEN $2='running' THEN coalesce(started_at,now()) ELSE started_at END,
-		completed_at=CASE WHEN $2 IN ('completed','insufficient_data','failed','cancelled') THEN now() ELSE NULL END,updated_at=now() WHERE id=$1`,
+	_, err := s.db.Exec(ctx, `UPDATE fundamental_ai_runs SET status=$2::varchar(32),stage=$3,summary=$4,blockers=$5,
+		started_at=CASE WHEN $2::varchar(32)='running' THEN coalesce(started_at,now()) ELSE started_at END,
+		completed_at=CASE WHEN $2::varchar(32) IN ('completed','insufficient_data','failed','cancelled') THEN now() ELSE NULL END,updated_at=now() WHERE id=$1`,
 		id, status, stage, summaryJSON, blockersJSON)
 	return err
 }
