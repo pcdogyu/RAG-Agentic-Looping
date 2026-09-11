@@ -167,13 +167,21 @@ func TestRecentEventResearchReplayIsVersionedAndIdempotent(t *testing.T) {
 	if _, err := pool.Exec(ctx, `INSERT INTO integration_settings(key,payload,updated_at) VALUES($1,$2,now())`, recentEventReplaySetting, settingBody); err != nil {
 		t.Fatal(err)
 	}
+	runtime := &maintenanceRuntime{cfg: config.Config{ExtractURLs: []string{"http://extract.test"}}, db: pool, redis: redisClient}
+	baselineActive, err := runtime.activeRecentEventPipelines(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := pool.Exec(ctx, `INSERT INTO go_jobs(id,queue,task_type,payload,status,priority,max_attempts,available_at,dedupe_key,created_at,updated_at)
 		VALUES($1,'research',$2,'{}','retrying',1,3,now(),$3,now()-interval '1 day',now()-interval '1 day')`, staleJobID, researchAssetTask, "stale-research-job:"+staleJobID.String()); err != nil {
 		t.Fatal(err)
 	}
+	activeAfterStaleJob, err := runtime.activeRecentEventPipelines(ctx)
+	if err != nil || activeAfterStaleJob != baselineActive {
+		t.Fatalf("stale queue row changed active business capacity: before=%d after=%d err=%v", baselineActive, activeAfterStaleJob, err)
+	}
 
-	runtime := &maintenanceRuntime{cfg: config.Config{ExtractURLs: []string{"http://extract.test"}}, db: pool, redis: redisClient}
-	payload, _ := json.Marshal(taskEnvelope{Kwargs: map[string]any{"batch_size": 1, "max_active": 1}})
+	payload, _ := json.Marshal(taskEnvelope{Kwargs: map[string]any{"batch_size": 1, "max_active": baselineActive + 1}})
 	_, err = runtime.replayRecentEventResearch(ctx, Job{ID: uuid.New(), Payload: payload})
 	var continuation *continuationError
 	if !errors.As(err, &continuation) {
