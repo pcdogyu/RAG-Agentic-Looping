@@ -41,3 +41,17 @@ func TestObservedTargetCursorUsesObservationIdentity(t *testing.T) {
 		t.Fatalf("unexpected observed cursor id %q", id)
 	}
 }
+
+func TestPublishableEventImpactRequiresVerifiedRelationForNewMacroPrompts(t *testing.T) {
+	verified := map[string]any{"impact_verification": map[string]any{"relation_verified": true}}
+	unverified := map[string]any{"impact_verification": map[string]any{"relation_verified": false}}
+	if !publishableEventImpact(map[string]any{"prompt_version": "event-research-prompt-v6.0-three-day"}, unverified) {
+		t.Fatal("legacy report compatibility was not preserved")
+	}
+	if publishableEventImpact(map[string]any{"prompt_version": "event-research-prompt-v6.1-macro-observation"}, unverified) {
+		t.Fatal("unverified v6.1 observation impact was published")
+	}
+	if !publishableEventImpact(map[string]any{"prompt_version": "event-research-prompt-v6.2-action-observation"}, verified) {
+		t.Fatal("verified v6.2 observation impact was hidden")
+	}
+}

@@ -682,7 +682,7 @@ func TestEventDraftAllowsEvidenceNamedMacroObservation(t *testing.T) {
 	event, evidence, impact := researchQualityFixture()
 	impact.TargetType, impact.TargetName, impact.AssetID = "economy", "客户订单", ""
 	impact.TargetRelation = targetRelationDraft{
-		Kind: "direct", RelationshipType: "macro_indicator", Subject: "客户订单",
+		Kind: "direct", RelationshipType: "issuer", Subject: "客户订单",
 		EvidenceIDs: []string{"ev-1"}, ActionIDs: []string{"action-1"}, MissingInformation: []string{},
 	}
 	draft := eventResearchDraft{Summary: "订单事件", Impacts: []eventImpactDraft{impact}}
@@ -692,6 +692,9 @@ func TestEventDraftAllowsEvidenceNamedMacroObservation(t *testing.T) {
 	}
 	if !impactHasTargetSpecificEvidence(draft.Impacts[0], event, evidence) {
 		t.Fatalf("macro observation relation was not verified: %#v", draft.Impacts[0])
+	}
+	if draft.Impacts[0].TargetRelation.RelationshipType != "macro_indicator" {
+		t.Fatalf("legacy relationship label was not normalized: %#v", draft.Impacts[0].TargetRelation)
 	}
 	report := (&researchRuntime{}).finalizeEventReport(event, draft, evidence, verification)
 	public := objectValue(anySlice(report["impacts"])[0])

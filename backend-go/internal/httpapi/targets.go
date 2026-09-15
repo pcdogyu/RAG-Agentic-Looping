@@ -672,6 +672,9 @@ func (s *Server) eventTargetChanges(r *http.Request, targetTypes map[string]bool
 			if impact == nil {
 				continue
 			}
+			if !publishableEventImpact(report, impact) {
+				continue
+			}
 			// A generic noun or calendar year can coincide with a token in the
 			// provider catalogue. It is not enough evidence to publish it as a
 			// concrete tradable target.
@@ -775,6 +778,15 @@ func (s *Server) eventTargetChanges(r *http.Request, targetTypes map[string]bool
 	}
 	sort.SliceStable(output, func(i, j int) bool { return targetChangeAfter(output[i], output[j]) })
 	return output, nil
+}
+
+func publishableEventImpact(report, impact map[string]any) bool {
+	version := stringValue(report["prompt_version"])
+	if !strings.HasPrefix(version, "event-research-prompt-v6.1-") && !strings.HasPrefix(version, "event-research-prompt-v6.2-") {
+		return true
+	}
+	verification := objectValue(impact["impact_verification"])
+	return verification != nil && boolValue(verification["relation_verified"])
 }
 
 func (s *Server) targetTaxonomy(r *http.Request) (map[string]canonicalTarget, error) {

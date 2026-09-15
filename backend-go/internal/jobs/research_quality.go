@@ -149,6 +149,11 @@ func verifyEventDraft(draft *eventResearchDraft, event map[string]any, evidence 
 			allComplete = false
 			continue
 		}
+		if item.TargetType != "tradable_asset" && !normalizeObservableTargetRelation(&item) {
+			verification.Missing = append(verification.Missing, "invalid observable target relation: "+item.TargetName)
+			allComplete = false
+			continue
+		}
 		key := item.TargetType + ":" + strings.ToLower(fallbackString(item.AssetID, normalizedText(item.TargetName)))
 		if seen[key] {
 			verification.Missing = append(verification.Missing, "duplicate_target:"+key)
@@ -690,14 +695,6 @@ func observableTargetExplicitlyNamed(target string, event map[string]any, eviden
 	if target == "" {
 		return false
 	}
-	for _, current := range evidence {
-		if current.ContextRole == "historical_context" {
-			continue
-		}
-		if strings.Contains(normalizedText(current.Claim+" "+current.Excerpt), target) {
-			return true
-		}
-	}
 	for _, raw := range anySlice(event["actions"]) {
 		action := objectValue(raw)
 		text := stringValue(action["actor"]) + " " + stringValue(action["object"]) + " " + stringValue(action["scope"])
@@ -706,6 +703,34 @@ func observableTargetExplicitlyNamed(target string, event map[string]any, eviden
 		}
 	}
 	return false
+}
+
+func normalizeObservableTargetRelation(item *eventImpactDraft) bool {
+	if item == nil || item.TargetType == "tradable_asset" {
+		return false
+	}
+	relation := &item.TargetRelation
+	if relation.Kind == "direct" && containsString([]string{"macro_indicator", "sector_exposure", "market_exposure"}, relation.RelationshipType) {
+		return true
+	}
+	if relation.Kind == "indirect" && containsString([]string{"sector_exposure", "market_exposure"}, relation.RelationshipType) {
+		return true
+	}
+	// Models can retain a security-oriented label after selecting a
+	// non-tradable observation. Normalize only that label after the target has
+	// passed the structured-action allowlist; execution remains unsupported.
+	if relation.Kind != "direct" || !containsString([]string{"issuer", "security_identifier", "business_exposure"}, relation.RelationshipType) {
+		return false
+	}
+	switch item.TargetType {
+	case "sector":
+		relation.RelationshipType = "sector_exposure"
+	case "risk_asset", "shipping", "other":
+		relation.RelationshipType = "market_exposure"
+	default:
+		relation.RelationshipType = "macro_indicator"
+	}
+	return true
 }
 
 func targetIdentityTerms(target string, asset map[string]any) []string {
