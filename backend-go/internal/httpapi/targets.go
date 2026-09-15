@@ -823,8 +823,16 @@ func (s *Server) targetTaxonomy(r *http.Request) (map[string]canonicalTarget, er
 }
 
 func (s *Server) activeSecurityAssets(r *http.Request) ([]map[string]any, error) {
-	rows, err := s.db.Query(r.Context(), `SELECT `+assetJSON+` FROM assets
-		WHERE active=true AND asset_class IN ('equity','crypto') ORDER BY id`)
+	s.targetAssetsMu.Lock()
+	defer s.targetAssetsMu.Unlock()
+	if s.targetAssets != nil && time.Since(s.targetAssetsAt) < 30*time.Second {
+		return s.targetAssets, nil
+	}
+	rows, err := s.db.Query(r.Context(), `SELECT jsonb_build_object(
+		'asset_id',id,'asset_class',asset_class,'market',market,'symbol',symbol,'name',name,
+		'aliases',aliases::jsonb,'instrument_type',instrument_type,'market_cap',market_cap,
+		'association_tier',association_tier,'active',active) FROM assets
+		WHERE active=true AND asset_class IN ('equity','crypto')`)
 	if err != nil {
 		return nil, err
 	}
@@ -842,7 +850,12 @@ func (s *Server) activeSecurityAssets(r *http.Request) ([]map[string]any, error)
 		normalizeAsset(asset)
 		assets = append(assets, asset)
 	}
-	return assets, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	s.targetAssets = assets
+	s.targetAssetsAt = time.Now()
+	return s.targetAssets, nil
 }
 
 func securityAssetAliases(assets []map[string]any) (map[string]bool, map[string]bool) {

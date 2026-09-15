@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -23,6 +24,9 @@ type Server struct {
 	redis            *redis.Client
 	router           http.Handler
 	nativeOperations []operation
+	targetAssetsMu   sync.Mutex
+	targetAssets     []map[string]any
+	targetAssetsAt   time.Time
 }
 
 const totalContractOperations = 82
