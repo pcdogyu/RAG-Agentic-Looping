@@ -25,6 +25,7 @@ import {
   ChangedTargetsContent,
   ChangedTargetsPage,
   buildTargetChangeQuery,
+  targetChangePageSize,
   ConclusionDetailModal,
   describeMissingInformation,
   type ConclusionDetail,
@@ -981,8 +982,9 @@ describe("changed targets page", () => {
 
   it("builds trimmed server-side search and cursor parameters", () => {
     expect(targetChangeSearchDebounceMs).toBe(300);
-    expect(buildTargetChangeQuery("asset", "  tgt  ")).toBe("kind=asset&scope=observed&limit=50&q=tgt");
-    expect(buildTargetChangeQuery("macro", "", "next-page")).toBe("kind=macro&scope=observed&limit=50&cursor=next-page");
+    expect(targetChangePageSize).toBe(12);
+    expect(buildTargetChangeQuery("asset", "  tgt  ")).toBe("kind=asset&scope=observed&limit=12&q=tgt");
+    expect(buildTargetChangeQuery("macro", "", "next-page")).toBe("kind=macro&scope=observed&limit=12&cursor=next-page");
   });
 
   it("does not let periodic refresh supersede an in-flight target request", () => {

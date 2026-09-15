@@ -2804,6 +2804,7 @@ export function targetChangeResearchKey(item: TargetChange) {
 }
 
 export const targetChangeSearchDebounceMs = 300;
+export const targetChangePageSize = 12;
 
 export function shouldSkipTargetChangeRefresh(silent: boolean, inFlight: boolean) {
   return silent && inFlight;
@@ -2814,7 +2815,7 @@ export function buildTargetChangeQuery(
   query: string,
   cursor: string | null = null,
 ) {
-  const params = new URLSearchParams({ kind, scope: "observed", limit: "50" });
+  const params = new URLSearchParams({ kind, scope: "observed", limit: String(targetChangePageSize) });
   const normalizedQuery = query.trim();
   if (normalizedQuery) params.set("q", normalizedQuery);
   if (cursor) params.set("cursor", cursor);

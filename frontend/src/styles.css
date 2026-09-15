@@ -498,6 +498,7 @@ h1 span { color: var(--mint); font-weight: 400; }
 .target-change-identity { display: grid; flex: 1 1 auto; justify-items: start; gap: 5px; min-width: 0; padding: 0; border: 0; color: inherit; background: transparent; text-align: left; cursor: pointer; }
 .target-change-identity > strong, .target-change-identity > small { max-width: 100%; }
 .unified-target-change-grid .target-change-identity > strong, .unified-target-change-grid .target-change-identity > small { display: block; overflow: hidden; line-height: 1.3; text-overflow: ellipsis; white-space: nowrap; }
+.unified-target-change-grid .target-change-identity { align-content: start; min-height: 41px; }
 .unified-target-change-grid .target-change-identity > strong { font-size: 18px; }
 .target-change-identity:hover > strong { color: var(--mint); }
 .target-change-identity:focus-visible { outline: 2px solid var(--mint); outline-offset: 3px; border-radius: 3px; }
