@@ -613,8 +613,13 @@ func (s *Server) eventTargetChanges(r *http.Request, targetTypes map[string]bool
 	}
 	securityResolver := newPublishedSecurityResolver(masterAssets)
 	securityNames, securitySymbols := securityAssetAliases(masterAssets)
-	rows, err := s.db.Query(r.Context(), `SELECT er.id,er.event_id,er.status,er.updated_at,er.payload::jsonb,e.published_at
-		FROM event_research_runs er LEFT JOIN news_events e ON e.id=er.event_id ORDER BY er.updated_at,er.id`)
+	rows, err := s.db.Query(r.Context(), `SELECT er.id,er.event_id,er.status,er.updated_at,
+		jsonb_build_object('as_of',er.payload::jsonb->'as_of','report',er.payload::jsonb->'report'),e.published_at
+		FROM event_research_runs er LEFT JOIN news_events e ON e.id=er.event_id
+		WHERE jsonb_typeof(er.payload::jsonb->'report')='object'
+		  AND er.payload->>'retryable_reason' IS NULL
+		  AND (er.status IN ('completed','insufficient_evidence')
+		       OR jsonb_array_length(coalesce(er.payload::jsonb->'report_history','[]'::jsonb))>0)`)
 	if err != nil {
 		return nil, err
 	}
