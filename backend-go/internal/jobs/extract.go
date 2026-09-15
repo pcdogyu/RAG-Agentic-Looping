@@ -1349,9 +1349,6 @@ func explicitSymbol(text, symbol string, allowBare bool) bool {
 			for _, current := range candidate {
 				allDigits = allDigits && unicode.IsDigit(current)
 			}
-			if allDigits && explicitTerm(text, candidate) {
-				return true
-			}
 			if !allDigits {
 				pattern := `(^|[^A-Za-z0-9])` + regexp.QuoteMeta(strings.ToUpper(candidate)) + `([^A-Za-z0-9]|$)`
 				if matched, _ := regexp.MatchString(pattern, text); matched {
@@ -1367,7 +1364,8 @@ func explicitSymbol(text, symbol string, allowBare bool) bool {
 			`(?i)(^|[^a-z0-9])\$\s*` + quoted + `([^a-z0-9]|$)`,
 			`(?i)[\(\[]\s*` + quoted + `\s*[\)\]]`,
 			`(?i)(^|[^a-z0-9])(nasdaq|nyse|amex|otc|hkex|hkg|sh|sz)\s*:\s*` + quoted + `([^a-z0-9]|$)`,
-			`(?i)(^|[^a-z0-9])` + quoted + `\.(ax|l|n|o|oq|pk|us)([^a-z0-9]|$)`,
+			`(?i)(^|[^a-z0-9])` + quoted + `\.(ax|hk|l|n|o|oq|pk|us)([^a-z0-9]|$)`,
+			`(?i)(股票|证券|港股|沪股|深股)?代码\s*[:：]?\s*` + quoted + `([^a-z0-9]|$)`,
 		}
 		for _, pattern := range patterns {
 			if matched, _ := regexp.MatchString(pattern, text); matched {

@@ -145,6 +145,12 @@ func TestSecuritySymbolAndProductMatchingSafety(t *testing.T) {
 	if !explicitSymbol("Alibaba (9988) rises", "09988", false) {
 		t.Fatal("Hong Kong leading-zero variant did not match")
 	}
+	if explicitSymbol("101名经济学家预计美联储加息", "00101", false) {
+		t.Fatal("natural-language count matched a numeric security code")
+	}
+	if !explicitSymbol("恒隆地产（00101.HK）发布公告", "00101", false) || !explicitSymbol("港股代码：00101", "00101", false) {
+		t.Fatal("qualified numeric security code did not match")
+	}
 	if meaningfulProduct("云服务") || !meaningfulProduct("阿里云") {
 		t.Fatal("generic and branded products were not distinguished")
 	}
