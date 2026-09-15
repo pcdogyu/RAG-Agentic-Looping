@@ -120,6 +120,9 @@ func (s *Store) Claim(ctx context.Context, workerID string, queues []string, lea
 		WITH candidate AS (
 			SELECT j.id
 			FROM go_jobs j
+			LEFT JOIN news_items news
+			  ON j.task_type='market_loop.retry_news_item'
+			 AND news.id=j.payload->'args'->>0
 			WHERE j.queue = ANY($1)
 			  AND j.status IN ('queued','retrying')
 			  AND j.available_at <= now()
@@ -129,9 +132,17 @@ func (s *Store) Claim(ctx context.Context, workerID string, queues []string, lea
 				JOIN go_jobs parent ON parent.id=d.depends_on_job_id
 				WHERE d.job_id=j.id AND parent.status <> 'completed'
 			  )
-			-- A smaller number is a higher priority throughout the Go queues.
-			ORDER BY j.priority ASC, j.available_at, j.created_at
-			FOR UPDATE SKIP LOCKED
+			-- Automatic extraction that has already missed the research freshness
+			-- window must not keep newly discovered news behind a historical
+			-- backlog. Explicit retries retain their normal priority.
+			ORDER BY CASE
+				WHEN j.task_type='market_loop.retry_news_item'
+				 AND coalesce((j.payload->'kwargs'->>'force_asset_mapping')::boolean,false)=false
+				 AND (news.published_at IS NULL OR news.published_at<=now()-interval '24 hours') THEN 1
+				ELSE 0
+			END,
+			j.priority ASC, j.available_at, j.created_at
+			FOR UPDATE OF j SKIP LOCKED
 			LIMIT 1
 		)
 		UPDATE go_jobs j
@@ -164,6 +175,14 @@ func (s *Store) ClaimResearch(ctx context.Context, workerID string, queues []str
 		WITH candidate AS (
 			SELECT j.id
 			FROM go_jobs j
+			LEFT JOIN event_research_runs event_run
+			  ON j.task_type='market_loop.research_event'
+			 AND event_run.id=j.payload->'args'->>1
+			LEFT JOIN research_runs asset_run
+			  ON j.task_type='market_loop.research_asset'
+			 AND asset_run.id=j.payload->'args'->>2
+			LEFT JOIN news_events event
+			  ON event.id=coalesce(event_run.event_id,asset_run.event_id)
 			WHERE j.queue = ANY($1)
 			  AND j.status IN ('queued','retrying')
 			  AND j.available_at <= now()
@@ -176,6 +195,12 @@ func (s *Store) ClaimResearch(ctx context.Context, workerID string, queues []str
 			  )
 			ORDER BY
 				CASE
+					WHEN lower(coalesce(j.payload->'kwargs'->>'source',''))='manual' THEN 0
+					WHEN event.published_at>now()-interval '24 hours' THEN 1
+					WHEN coalesce((j.payload->'kwargs'->>'news_age_filter_bypass')::boolean,false) THEN 3
+					ELSE 2
+				END,
+				CASE
 					WHEN $4::text='preferred'
 						AND j.task_type='market_loop.research_asset'
 						AND split_part(coalesce(j.payload->'args'->>0,''),':',2) IN ('NASDAQ','NYSE','AMEX') THEN 0
@@ -184,7 +209,7 @@ func (s *Store) ClaimResearch(ctx context.Context, workerID string, queues []str
 				END,
 				CASE WHEN $4::text='preferred' AND coalesce(nullif(j.payload->'kwargs'->>'research_profile',''),CASE WHEN j.task_type='market_loop.research_asset' THEN 'deep' ELSE 'fast' END)='deep' THEN 0 ELSE 1 END,
 				j.priority ASC,j.available_at,j.created_at
-			FOR UPDATE SKIP LOCKED
+			FOR UPDATE OF j SKIP LOCKED
 			LIMIT 1
 		)
 		UPDATE go_jobs j

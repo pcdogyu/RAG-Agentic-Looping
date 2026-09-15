@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"strings"
@@ -276,5 +277,121 @@ func TestStoreClaimsSmallerPriorityFirst(t *testing.T) {
 	}
 	if job.ID != high {
 		t.Fatalf("claimed priority %d job %s, want priority 1 job %s", job.Priority, job.ID, high)
+	}
+}
+
+func TestStoreClaimPrioritizesFreshAutomaticExtractionAgainstPostgres(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		dsn = os.Getenv("DATABASE_URL")
+	}
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL is not set")
+	}
+	dsn = strings.Replace(dsn, "postgresql+psycopg://", "postgresql://", 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err := migrate.Up(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(pool)
+	now := time.Now().UTC()
+	oldNewsID, freshNewsID := uuid.New(), uuid.New()
+	insertNews := func(id uuid.UUID, published time.Time, suffix string) {
+		t.Helper()
+		_, insertErr := pool.Exec(ctx, `INSERT INTO news_items(id,source,source_quality,title,summary,url,language,published_at,observed_at,as_of,content_hash,symbols,raw_metadata)
+			VALUES($1,'claim-test','professional',$2,'summary',$3,'en',$4,$4,$4,$5,'[]','{}')`,
+			id, "claim "+suffix, "https://example.test/"+suffix, published, strings.Repeat(suffix, 64)[:64])
+		if insertErr != nil {
+			t.Fatal(insertErr)
+		}
+	}
+	insertNews(oldNewsID, now.Add(-48*time.Hour), "a")
+	insertNews(freshNewsID, now.Add(-time.Hour), "b")
+	queue := "extract-fresh-" + uuid.NewString()[:8]
+	oldJobID, err := store.Enqueue(ctx, EnqueueParams{Queue: queue, TaskType: retryNewsTask, Payload: taskEnvelope{Args: []any{oldNewsID.String()}, Kwargs: map[string]any{}}, Priority: 0, MaxAttempts: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	freshJobID, err := store.Enqueue(ctx, EnqueueParams{Queue: queue, TaskType: retryNewsTask, Payload: taskEnvelope{Args: []any{freshNewsID.String()}, Kwargs: map[string]any{}}, Priority: 9, MaxAttempts: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM go_jobs WHERE id=ANY($1)`, []uuid.UUID{oldJobID, freshJobID})
+		_, _ = pool.Exec(context.Background(), `DELETE FROM news_items WHERE id=ANY($1)`, []uuid.UUID{oldNewsID, freshNewsID})
+	}()
+	job, err := store.Claim(ctx, "fresh-extract-worker", []string{queue}, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.ID != freshJobID {
+		t.Fatalf("claimed stale extraction %s instead of fresh extraction %s", job.ID, freshJobID)
+	}
+}
+
+func TestClaimResearchPrioritizesFreshEventOverReplayAgainstPostgres(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		dsn = os.Getenv("DATABASE_URL")
+	}
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL is not set")
+	}
+	dsn = strings.Replace(dsn, "postgresql+psycopg://", "postgresql://", 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err := migrate.Up(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(pool)
+	now := time.Now().UTC()
+	oldEventID, freshEventID := uuid.New(), uuid.New()
+	oldRunID, freshRunID := uuid.New(), uuid.New()
+	insertEventRun := func(eventID, runID uuid.UUID, published time.Time, label string) {
+		t.Helper()
+		eventPayload := map[string]any{"id": eventID.String(), "headline": label, "published_at": iso(published), "observed_at": iso(published), "as_of": iso(published), "news_item_ids": []any{}}
+		runPayload := map[string]any{"id": runID.String(), "event_id": eventID.String(), "status": "queued"}
+		eventBody, _ := json.Marshal(eventPayload)
+		runBody, _ := json.Marshal(runPayload)
+		if _, insertErr := pool.Exec(ctx, `INSERT INTO news_events(id,headline,event_type,payload,priority,published_at,observed_at,as_of) VALUES($1,$2,'other',$3,.5,$4,$4,$4)`, eventID, label, eventBody, published); insertErr != nil {
+			t.Fatal(insertErr)
+		}
+		if _, insertErr := pool.Exec(ctx, `INSERT INTO event_research_runs(id,event_id,status,payload,created_at,updated_at) VALUES($1,$2,'queued',$3,$4,$4)`, runID, eventID, runBody, published); insertErr != nil {
+			t.Fatal(insertErr)
+		}
+	}
+	insertEventRun(oldEventID, oldRunID, now.Add(-48*time.Hour), "old replay")
+	insertEventRun(freshEventID, freshRunID, now.Add(-time.Hour), "fresh event")
+	queue := "research-fresh-" + uuid.NewString()[:8]
+	oldJobID, err := store.Enqueue(ctx, EnqueueParams{Queue: queue, TaskType: researchEventTask, Payload: taskEnvelope{Args: []any{oldEventID.String(), oldRunID.String()}, Kwargs: map[string]any{"research_profile": "deep", "source": "maintenance", "news_age_filter_bypass": true}}, Priority: 0, MaxAttempts: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	freshJobID, err := store.Enqueue(ctx, EnqueueParams{Queue: queue, TaskType: researchEventTask, Payload: taskEnvelope{Args: []any{freshEventID.String(), freshRunID.String()}, Kwargs: map[string]any{"research_profile": "deep", "source": "automatic"}}, Priority: 9, MaxAttempts: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM go_jobs WHERE id=ANY($1)`, []uuid.UUID{oldJobID, freshJobID})
+		_, _ = pool.Exec(context.Background(), `DELETE FROM event_research_runs WHERE id=ANY($1)`, []uuid.UUID{oldRunID, freshRunID})
+		_, _ = pool.Exec(context.Background(), `DELETE FROM news_events WHERE id=ANY($1)`, []uuid.UUID{oldEventID, freshEventID})
+	}()
+	job, err := store.ClaimResearch(ctx, "fresh-research-worker", []string{queue}, time.Minute, "preferred")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.ID != freshJobID {
+		t.Fatalf("claimed stale replay %s instead of fresh research %s", job.ID, freshJobID)
 	}
 }
