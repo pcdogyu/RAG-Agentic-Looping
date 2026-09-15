@@ -230,6 +230,10 @@ func TestBatchThreeCommandsAgainstIsolatedServices(t *testing.T) {
 	if stringValue(refreshed["stage"]) != "event_extraction" || stringValue(refreshed["task_id"]) == "" {
 		t.Fatalf("event conclusion refresh was not queued from JSON-linked news: %v", refreshed)
 	}
+	var refreshPriority int
+	if err = pool.QueryRow(ctx, `SELECT priority FROM go_jobs WHERE id=$1`, stringValue(refreshed["task_id"])).Scan(&refreshPriority); err != nil || refreshPriority != 0 {
+		t.Fatalf("event conclusion refresh priority=%d err=%v, want interactive priority 0", refreshPriority, err)
+	}
 
 	oldCodeTask := "30000000-0000-0000-0000-000000000001"
 	snapshot, _ := json.Marshal(map[string]any{"queues": []any{map[string]any{
