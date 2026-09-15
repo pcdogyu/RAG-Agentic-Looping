@@ -144,6 +144,11 @@ func verifyEventDraft(draft *eventResearchDraft, event map[string]any, evidence 
 			allComplete = false
 			continue
 		}
+		if item.TargetType != "tradable_asset" && !observableTargetExplicitlyNamed(item.TargetName, event, evidence) {
+			verification.Missing = append(verification.Missing, "unknown observable target: "+item.TargetName)
+			allComplete = false
+			continue
+		}
 		key := item.TargetType + ":" + strings.ToLower(fallbackString(item.AssetID, normalizedText(item.TargetName)))
 		if seen[key] {
 			verification.Missing = append(verification.Missing, "duplicate_target:"+key)
@@ -609,11 +614,20 @@ func impactHasTargetSpecificEvidence(item eventImpactDraft, event map[string]any
 	if (relation.Kind != "direct" && relation.Kind != "indirect") || strings.TrimSpace(relation.Subject) == "" || len(relation.MissingInformation) > 0 {
 		return false
 	}
-	if relation.Kind == "indirect" && !containsString([]string{"supplier", "customer", "competitor", "holder", "business_exposure"}, relation.RelationshipType) {
-		return false
-	}
-	if relation.Kind == "direct" && !containsString([]string{"issuer", "security_identifier"}, relation.RelationshipType) {
-		return false
+	if item.TargetType == "tradable_asset" {
+		if relation.Kind == "indirect" && !containsString([]string{"supplier", "customer", "competitor", "holder", "business_exposure"}, relation.RelationshipType) {
+			return false
+		}
+		if relation.Kind == "direct" && !containsString([]string{"issuer", "security_identifier"}, relation.RelationshipType) {
+			return false
+		}
+	} else {
+		if relation.Kind == "direct" && !containsString([]string{"macro_indicator", "sector_exposure", "market_exposure"}, relation.RelationshipType) {
+			return false
+		}
+		if relation.Kind == "indirect" && !containsString([]string{"sector_exposure", "market_exposure"}, relation.RelationshipType) {
+			return false
+		}
 	}
 	evidenceIDs, actionIDs := relation.EvidenceIDs, relation.ActionIDs
 	if len(evidenceIDs)+len(actionIDs) == 0 {
@@ -665,6 +679,29 @@ func impactHasTargetSpecificEvidence(item eventImpactDraft, event map[string]any
 	for _, raw := range anySlice(event["actions"]) {
 		action := objectValue(raw)
 		if allowedActions[stringValue(action["id"])] && strings.Contains(normalizedText(stringValue(action["actor"])+" "+stringValue(action["object"])+" "+stringValue(action["scope"])), target) {
+			return true
+		}
+	}
+	return false
+}
+
+func observableTargetExplicitlyNamed(target string, event map[string]any, evidence []researchEvidence) bool {
+	target = normalizedText(target)
+	if target == "" {
+		return false
+	}
+	for _, current := range evidence {
+		if current.ContextRole == "historical_context" {
+			continue
+		}
+		if strings.Contains(normalizedText(current.Claim+" "+current.Excerpt), target) {
+			return true
+		}
+	}
+	for _, raw := range anySlice(event["actions"]) {
+		action := objectValue(raw)
+		text := stringValue(action["actor"]) + " " + stringValue(action["object"]) + " " + stringValue(action["scope"])
+		if strings.Contains(normalizedText(text), target) {
 			return true
 		}
 	}

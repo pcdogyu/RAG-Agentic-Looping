@@ -678,6 +678,42 @@ func TestEventDraftAllowsNoConfirmedTarget(t *testing.T) {
 	}
 }
 
+func TestEventDraftAllowsEvidenceNamedMacroObservation(t *testing.T) {
+	event, evidence, impact := researchQualityFixture()
+	impact.TargetType, impact.TargetName, impact.AssetID = "economy", "客户订单", ""
+	impact.TargetRelation = targetRelationDraft{
+		Kind: "direct", RelationshipType: "macro_indicator", Subject: "客户订单",
+		EvidenceIDs: []string{"ev-1"}, ActionIDs: []string{"action-1"}, MissingInformation: []string{},
+	}
+	draft := eventResearchDraft{Summary: "订单事件", Impacts: []eventImpactDraft{impact}}
+	verification := verifyEventDraft(&draft, event, evidence, time.Time{})
+	if len(draft.Impacts) != 1 || draft.Impacts[0].TargetType != "economy" || draft.Impacts[0].AssetID != "" {
+		t.Fatalf("evidence-named macro observation was not retained: %#v / %#v", draft, verification)
+	}
+	if !impactHasTargetSpecificEvidence(draft.Impacts[0], event, evidence) {
+		t.Fatalf("macro observation relation was not verified: %#v", draft.Impacts[0])
+	}
+	report := (&researchRuntime{}).finalizeEventReport(event, draft, evidence, verification)
+	public := objectValue(anySlice(report["impacts"])[0])
+	if public["asset"] != nil || boolValue(public["execution_supported"]) || stringValue(public["trade_status"]) != "untradeable" {
+		t.Fatalf("macro observation crossed the execution boundary: %#v", public)
+	}
+}
+
+func TestEventDraftRejectsUnmentionedMacroObservation(t *testing.T) {
+	event, evidence, impact := researchQualityFixture()
+	impact.TargetType, impact.TargetName, impact.AssetID = "economy", "消费者信心", ""
+	impact.TargetRelation = targetRelationDraft{
+		Kind: "direct", RelationshipType: "macro_indicator", Subject: "消费者信心",
+		EvidenceIDs: []string{"ev-1"}, ActionIDs: []string{"action-1"}, MissingInformation: []string{},
+	}
+	draft := eventResearchDraft{Summary: "订单事件", Impacts: []eventImpactDraft{impact}}
+	verification := verifyEventDraft(&draft, event, evidence, time.Time{})
+	if len(draft.Impacts) != 0 || !containsPrefix(verification.Missing, "unknown observable target:") {
+		t.Fatalf("unmentioned macro observation was accepted: %#v / %#v", draft, verification)
+	}
+}
+
 func TestEventDraftRejectsUnknownEvidenceID(t *testing.T) {
 	event, evidence, impact := researchQualityFixture()
 	impact.EvidenceIDs = []string{"ev-missing"}
