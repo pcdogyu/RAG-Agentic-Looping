@@ -733,6 +733,94 @@ func normalizeObservableTargetRelation(item *eventImpactDraft) bool {
 	return true
 }
 
+// addStructuredActionObservations keeps an explicitly named economic object
+// visible when the model cannot establish a directional impact. The generated
+// item is deliberately neutral, provisional and untradeable; the normal
+// verifier still decides whether the event-to-target relation is publishable.
+func addStructuredActionObservations(draft *eventResearchDraft, event map[string]any, evidence []researchEvidence) int {
+	if draft == nil || len(draft.Impacts) > 0 {
+		return 0
+	}
+	seen := map[string]bool{}
+	for _, raw := range anySlice(event["actions"]) {
+		action := objectValue(raw)
+		actionID := stringValue(action["id"])
+		targetName, targetType, impactChannel, relationship, ok := economicActionObservationTarget(action)
+		key := targetType + ":" + normalizedText(targetName)
+		if !ok || actionID == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		evidenceIDs := actionObservationEvidenceIDs(targetName, evidence)
+		references := evidenceAssessmentDraft{
+			Score: 0, Reason: "仅确认结构化事件动作，尚无方向性影响证据。",
+			EvidenceIDs: evidenceIDs, ActionIDs: []string{actionID}, MissingInformation: []string{"directional impact not established"},
+		}
+		source := fallbackString(stringValue(action["actor"]), "事件动作")
+		mechanism := fallbackString(stringValue(action["action"]), "直接影响")
+		claimText := strings.TrimSpace(strings.Join([]string{stringValue(action["actor"]), stringValue(action["action"]), stringValue(action["object"])}, " "))
+		claimText = fallbackString(claimText, targetName)
+		draft.Impacts = append(draft.Impacts, eventImpactDraft{
+			TargetType: targetType, TargetName: targetName, ActionID: actionID,
+			ConclusionStatus: "insufficient_evidence", ImpactChannel: impactChannel, DirectionScore: 0,
+			ReportConfidence:  modelConfidenceDraft{Score: 0, Reason: "方向证据不足，仅保留动作观察。", EvidenceIDs: evidenceIDs},
+			Claims:            []claimDraft{{ClaimType: "fact", Text: claimText, EvidenceIDs: evidenceIDs, ActionIDs: []string{actionID}, MissingInformation: []string{}}},
+			TransmissionSteps: []transmissionStepDraft{{SourceNode: source, Mechanism: mechanism, TargetNode: targetName, BasisType: "fact", EvidenceIDs: evidenceIDs, ActionIDs: []string{actionID}, MissingInformation: []string{"directional impact not established"}}},
+			TransmissionPath:  []string{source, targetName},
+			TargetRelation:    targetRelationDraft{Kind: "direct", RelationshipType: relationship, Subject: targetName, EvidenceIDs: evidenceIDs, ActionIDs: []string{actionID}, MissingInformation: []string{}},
+			TargetEvaluation:  targetEvaluationDraft{ObjectRelevance: references, EvidenceSufficiency: references, TransmissionCertainty: references, ImpactSupport: references, TimingPersistence: references},
+			Rationale:         "结构化事件动作直接点名该观察对象；方向证据不足，因此仅作为中性未评级观察。",
+			EvidenceIDs:       evidenceIDs, Missing: []string{"directional impact not established"}, ScoreSource: "structured_action_observation",
+		})
+		if len(draft.Impacts) == 3 {
+			break
+		}
+	}
+	return len(draft.Impacts)
+}
+
+func economicActionObservationTarget(action map[string]any) (name, targetType, channel, relationship string, ok bool) {
+	for _, candidate := range []string{stringValue(action["object"]), stringValue(action["scope"]), stringValue(action["actor"])} {
+		candidate = strings.TrimSpace(candidate)
+		text := strings.ToLower(candidate)
+		if candidate == "" || len(candidate) > 240 || containsAny(text, "unknown", "相关举措", "有关事项", "相关行动") {
+			continue
+		}
+		switch {
+		case containsAny(text, "利率", "收益率", "政策利率", "interest rate", "policy rate", "bond yield"):
+			return candidate, "interest_rate", "risk_premium", "macro_indicator", true
+		case containsAny(text, "汇率", "外汇", "美元指数", "exchange rate", "foreign exchange"):
+			return candidate, "fx_rate", "risk_premium", "macro_indicator", true
+		case containsAny(text, "出口", "进口", "产量", "供应", "供给", "库存", "储备", "export", "import", "production", "inventory"):
+			return candidate, "supply_volume", "supply", "macro_indicator", true
+		case containsAny(text, "航运", "运价", "港口", "航线", "shipping", "freight"):
+			return candidate, "shipping", "cost", "market_exposure", true
+		case containsAny(text, "通胀", "消费者价格", "生产者价格", "国内生产总值", "就业", "失业", "消费者信心", "采购经理指数", "cpi", "ppi", "gdp", "inflation", "employment", "unemployment", "pmi"):
+			return candidate, "economy", "demand", "macro_indicator", true
+		case containsAny(text, "股市", "债市", "风险资产", "股票市场", "bond market", "stock market", "risk asset"):
+			return candidate, "risk_asset", "risk_premium", "market_exposure", true
+		case containsAny(text, "能源", "石油", "原油", "天然气", "柴油", "芯片", "半导体", "金融", "银行", "保险", "地产", "房地产", "汽车", "航空", "钢铁", "煤炭", "电力", "科技", "消费", "energy", "oil", "gas", "semiconductor", "banking", "insurance", "real estate", "automotive", "aviation"):
+			return candidate, "sector", "supply", "sector_exposure", true
+		}
+	}
+	return "", "", "", "", false
+}
+
+func actionObservationEvidenceIDs(target string, evidence []researchEvidence) []string {
+	result := []string{}
+	needle := normalizedText(target)
+	for _, item := range evidence {
+		if item.ID == "" || item.ContextRole == "historical_context" || !strings.Contains(normalizedText(item.Claim+" "+item.Excerpt), needle) {
+			continue
+		}
+		result = append(result, item.ID)
+		if len(result) == 2 {
+			break
+		}
+	}
+	return result
+}
+
 func targetIdentityTerms(target string, asset map[string]any) []string {
 	values := []string{}
 	if meaningfulIssuerTerm(target) {

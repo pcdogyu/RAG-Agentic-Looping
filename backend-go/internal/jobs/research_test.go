@@ -717,6 +717,37 @@ func TestEventDraftRejectsUnmentionedMacroObservation(t *testing.T) {
 	}
 }
 
+func TestStructuredActionObservationFallbackKeepsNeutralEconomicTarget(t *testing.T) {
+	event := map[string]any{"event_type": "macro", "actions": []any{map[string]any{
+		"id": "action-diesel", "actor": "俄罗斯", "action": "实施禁令", "object": "柴油出口", "scope": "国内市场",
+	}}}
+	evidence := []researchEvidence{{ID: "ev-diesel", Claim: "俄罗斯实施柴油出口禁令", Excerpt: "柴油出口禁令将支撑国内市场", SourceQuality: "official", IndependentGroup: "official", ContextRole: "current_event"}}
+	draft := eventResearchDraft{Summary: "柴油出口受到政策限制", Impacts: []eventImpactDraft{}}
+	if added := addStructuredActionObservations(&draft, event, evidence); added != 1 {
+		t.Fatalf("structured action fallback added=%d, want 1: %#v", added, draft)
+	}
+	item := draft.Impacts[0]
+	if item.TargetName != "柴油出口" || item.TargetType != "supply_volume" || item.DirectionScore != 0 || item.ScoreSource != "structured_action_observation" {
+		t.Fatalf("unexpected structured action observation: %#v", item)
+	}
+	verification := verifyEventDraft(&draft, event, evidence, time.Now())
+	if len(draft.Impacts) != 1 || !impactHasTargetSpecificEvidence(draft.Impacts[0], event, evidence) {
+		t.Fatalf("structured action observation did not pass the relation gate: %#v / %#v", draft, verification)
+	}
+	public := objectValue(anySlice((&researchRuntime{}).finalizeEventReport(event, draft, evidence, verification)["impacts"])[0])
+	if stringValue(public["score_source"]) != "structured_action_observation" || boolValue(public["execution_supported"]) || stringValue(public["trade_status"]) != "untradeable" || int(numberValue(public["direction_score"])) != 0 {
+		t.Fatalf("structured action observation crossed the neutral execution boundary: %#v", public)
+	}
+}
+
+func TestStructuredActionObservationFallbackSkipsGenericPoliticalAction(t *testing.T) {
+	draft := eventResearchDraft{Summary: "外交表态"}
+	event := map[string]any{"actions": []any{map[string]any{"id": "action-talk", "actor": "某国总统", "action": "发言", "object": "另一国总统", "scope": "unknown"}}}
+	if added := addStructuredActionObservations(&draft, event, nil); added != 0 || len(draft.Impacts) != 0 {
+		t.Fatalf("generic political action became a macro target: %#v", draft)
+	}
+}
+
 func TestEventDraftRejectsUnknownEvidenceID(t *testing.T) {
 	event, evidence, impact := researchQualityFixture()
 	impact.EvidenceIDs = []string{"ev-missing"}

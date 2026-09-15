@@ -34,7 +34,7 @@ const (
 	researchEventTask = "market_loop.research_event"
 	researchAssetTask = "market_loop.research_asset"
 
-	eventResearchPromptVersion = "event-research-prompt-v6.2-action-observation"
+	eventResearchPromptVersion = "event-research-prompt-v6.3-structured-action-observation"
 	assetResearchPromptVersion = "asset-research-prompt-v6.0-three-day"
 	targetEvaluationVersion    = "target-evaluation-v1"
 	newsConfidenceVersion      = "news-confidence-v2"
@@ -243,6 +243,7 @@ type eventImpactDraft struct {
 	EvidenceIDs            []string                `json:"evidence_ids"`
 	Missing                []string                `json:"missing_information"`
 	Verification           impactVerification      `json:"-"`
+	ScoreSource            string                  `json:"-"`
 }
 
 type eventResearchDraft struct {
@@ -422,7 +423,11 @@ func (runtime *researchRuntime) researchEvent(ctx context.Context, job Job) (any
 	if err != nil {
 		return nil, runtime.failEventResearch(ctx, job, run, event, err)
 	}
+	actionObservations := addStructuredActionObservations(&draft, event, evidence)
 	appendAnalysisStep(run, analysisStep("event_report_drafting", "completed", "ollama", fmt.Sprintf("已生成逐目标事件研报草稿，包含 %d 个目标，引用 %d 条证据。", len(draft.Impacts), len(draft.EvidenceIDs)), map[string]any{"direction_scores": impactScores(draft.Impacts), "citation_count": len(draft.EvidenceIDs)}))
+	if actionObservations > 0 {
+		appendAnalysisStep(run, analysisStep("structured_action_observation", "completed", "go-evidence-gate", fmt.Sprintf("模型未返回目标；从结构化经济动作中保留 %d 个中性观察目标。", actionObservations), map[string]any{"target_count": actionObservations, "direction_score": 0, "trade_status": "untradeable"}))
+	}
 	counterReview := map[string]any{"version": counterResearchVersion, "status": "disabled", "enabled": false}
 	if runtime.cfg.CounterResearchEnabled {
 		started := time.Now().UTC()
@@ -1729,6 +1734,7 @@ func (runtime *researchRuntime) finalizeEventReport(event map[string]any, draft 
 			"execution_supported": boolValue(eligibility["execution_supported"]), "impact_verification": map[string]any{"relation": item.TargetRelation, "relation_verified": relationVerified, "transmission_continuous": transmissionPathContinuous(item), "economic_endpoint": impactHasEconomicEndpoint(item), "quality": publicImpactVerification(impactQuality)}, "eligibility": eligibility,
 			"technical_failure": false,
 		}
+		impact["score_source"] = fallbackString(item.ScoreSource, "llm")
 		impact["market_policy"] = marketPolicyMap(marketpolicy.Resolve(stringValue(asset["asset_class"]), stringValue(asset["market"])))
 		impact["event_signal"] = eventSignalContract(item.DirectionScore, ratingForScore(item.DirectionScore), item.ConclusionStatus, eventHorizonDays(stringValue(event["event_type"])), parseTime(event["as_of"]), signalAvailableAt(event, targetEvidence, generated))
 		impact["governed_signal"] = impact["event_signal"]

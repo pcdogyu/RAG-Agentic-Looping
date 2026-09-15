@@ -782,7 +782,7 @@ func (s *Server) eventTargetChanges(r *http.Request, targetTypes map[string]bool
 
 func publishableEventImpact(report, impact map[string]any) bool {
 	version := stringValue(report["prompt_version"])
-	if !strings.HasPrefix(version, "event-research-prompt-v6.1-") && !strings.HasPrefix(version, "event-research-prompt-v6.2-") {
+	if !strings.HasPrefix(version, "event-research-prompt-v6.1-") && !strings.HasPrefix(version, "event-research-prompt-v6.2-") && !strings.HasPrefix(version, "event-research-prompt-v6.3-") {
 		return true
 	}
 	verification := objectValue(impact["impact_verification"])

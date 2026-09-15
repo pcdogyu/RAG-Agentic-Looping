@@ -54,4 +54,7 @@ func TestPublishableEventImpactRequiresVerifiedRelationForNewMacroPrompts(t *tes
 	if !publishableEventImpact(map[string]any{"prompt_version": "event-research-prompt-v6.2-action-observation"}, verified) {
 		t.Fatal("verified v6.2 observation impact was hidden")
 	}
+	if publishableEventImpact(map[string]any{"prompt_version": "event-research-prompt-v6.3-structured-action-observation"}, unverified) {
+		t.Fatal("unverified v6.3 observation impact was published")
+	}
 }
