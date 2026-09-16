@@ -35,6 +35,7 @@ func sanitizePublishedImpacts(value any) []any {
 			continue
 		}
 		normalizeTargetImpact(impact)
+		normalizePublishedCommodityImpact(impact)
 		name := stringValue(impact["target_name"])
 		if publishedActivityTarget(name) {
 			continue
@@ -59,6 +60,26 @@ func sanitizePublishedImpacts(value any) []any {
 		result = append(result, impact)
 	}
 	return result
+}
+
+// normalizePublishedCommodityImpact repairs neutral structured-action
+// observations that describe an oil futures price as a sector. Keep this at
+// the public read boundary so existing audited reports are corrected without
+// rewriting their stored payloads.
+func normalizePublishedCommodityImpact(impact map[string]any) {
+	if impact == nil || securityAsset(objectValue(impact["asset"])) {
+		return
+	}
+	name := stringValue(impact["target_name"])
+	compact := normalizedTarget(name)
+	switch {
+	case (strings.Contains(compact, "布伦特") && strings.Contains(compact, "原油")) || strings.Contains(compact, "brentcrude"):
+		impact["target_type"] = "commodity_price"
+		impact["target_name"] = "布伦特原油价格"
+	case strings.Contains(compact, "轻质原油") || strings.Contains(compact, "wti原油") || strings.Contains(compact, "westtexasintermediate"):
+		impact["target_type"] = "commodity_price"
+		impact["target_name"] = "WTI 原油价格"
+	}
 }
 
 func publishedAssets(impacts []any) []publishedAssetTarget {

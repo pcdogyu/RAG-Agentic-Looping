@@ -86,6 +86,49 @@ func TestPublishedSecurityResolverCachesResolvedAndUnmatchedNames(t *testing.T) 
 	}
 }
 
+func TestPublishedSecurityResolverUsesQualifiedTickerWithoutGuessingProseTokens(t *testing.T) {
+	assets := []map[string]any{
+		{"asset_id": "equity:NYSE:BAC", "asset_class": "equity", "market": "US", "symbol": "BAC", "name": "Bank of America Corporation", "aliases": []any{"Bank of America Corporation"}, "association_tier": "standard", "instrument_type": "common_stock", "market_cap": float64(400_000_000_000), "active": true},
+		{"asset_id": "crypto:coingecko:jeff-ceo", "asset_class": "crypto", "market": "CRYPTO", "symbol": "CEO", "name": "EarnOrg", "association_tier": "standard", "active": true},
+		{"asset_id": "crypto:coingecko:-11", "asset_class": "crypto", "market": "CRYPTO", "symbol": "赵长娥", "name": "赵长娥", "aliases": []any{"11"}, "association_tier": "standard", "active": true},
+	}
+	impacts := []any{
+		map[string]any{"target_name": "美国银行(BAC.N)CEO 莫伊尼汉", "target_type": "sector", "direction_score": float64(0)},
+		map[string]any{"target_name": "11月交货的伦敦布伦特原油期货", "target_type": "sector", "direction_score": float64(0)},
+	}
+	got := resolvePublishedSecurityImpacts(sanitizePublishedImpacts(impacts), assets)
+	if len(got) != 2 {
+		t.Fatalf("got %d impacts, want BAC and Brent oil: %#v", len(got), got)
+	}
+	bank, oil := objectValue(got[0]), objectValue(got[1])
+	if stringValue(objectValue(bank["asset"])["asset_id"]) != "equity:NYSE:BAC" || stringValue(bank["target_type"]) != "tradable_asset" {
+		t.Fatalf("qualified BAC.N was not resolved to Bank of America: %#v", bank)
+	}
+	if stringValue(oil["target_type"]) != "commodity_price" || stringValue(oil["target_name"]) != "布伦特原油价格" || objectValue(oil["asset"]) != nil {
+		t.Fatalf("Brent delivery month was not kept as an oil price target: %#v", oil)
+	}
+	if stringValue(objectValue(oil["asset"])["asset_id"]) == "crypto:coingecko:-11" || stringValue(objectValue(bank["asset"])["asset_id"]) == "crypto:coingecko:jeff-ceo" {
+		t.Fatalf("ordinary month or CEO token was resolved as crypto: %#v", got)
+	}
+}
+
+func TestCommodityAndProseTokensDoNotResembleSecurities(t *testing.T) {
+	names := map[string]bool{"bankofamericacorporation": true}
+	symbols := map[string]bool{"11": true, "ceo": true, "bac": true, "wti": true}
+	for _, impact := range []map[string]any{
+		{"target_name": "11月交货的伦敦布伦特原油期货", "target_type": "sector"},
+		{"target_name": "WTI 原油价格", "target_type": "commodity_price"},
+		{"target_name": "CEO 表示融资需求强劲", "target_type": "sector"},
+	} {
+		if resemblesSecurity(impact, names, symbols) {
+			t.Fatalf("ordinary prose resembled a security: %#v", impact)
+		}
+	}
+	if !resemblesSecurity(map[string]any{"target_name": "美国银行(BAC.N)CEO 莫伊尼汉", "target_type": "sector"}, names, symbols) {
+		t.Fatal("qualified BAC.N was not recognized as a security identifier")
+	}
+}
+
 func TestRoundPlacesUsesTiesToEven(t *testing.T) {
 	if got, want := roundPlaces(0.44325, 4), 0.4432; got != want {
 		t.Fatalf("roundPlaces ties-to-even = %v, want %v", got, want)

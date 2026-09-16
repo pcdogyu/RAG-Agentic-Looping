@@ -293,6 +293,12 @@ func (s *Server) eventConclusionDetail(w http.ResponseWriter, r *http.Request) {
 	publicRun := deepCloneObject(run)
 	publicReport := objectValue(publicRun["report"])
 	impacts := sanitizePublishedImpacts(publicReport["impacts"])
+	masterAssets, err := s.activeSecurityAssets(r)
+	if err != nil {
+		writeError(w, 500, "event conclusion target resolution failed")
+		return
+	}
+	impacts = newPublishedSecurityResolver(masterAssets).resolve(impacts)
 	publicReport["impacts"] = impacts
 	directionScore, rating, signalAvailable := representativeImpact(impacts)
 	publicReport["direction_score"], publicReport["rating"], publicReport["signal_available"] = directionScore, rating, signalAvailable

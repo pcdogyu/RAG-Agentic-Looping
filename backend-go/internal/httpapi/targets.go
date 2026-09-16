@@ -333,8 +333,9 @@ type macroSnapshot struct {
 }
 
 var nonTargetCharacters = regexp.MustCompile(`[^a-z0-9\p{Han}]+`)
-var targetWords = regexp.MustCompile(`[A-Za-z0-9.\-]+`)
 var parentheticalTicker = regexp.MustCompile(`\([^)]*([A-Za-z]{1,8}|[0-9]{4,8})[^)]*\)`)
+var publishedQualifiedTicker = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])([a-z][a-z0-9]{0,7}|[0-9]{4,8})\.(ax|hk|l|n|o|oq|pk|us)(?:[^a-z0-9]|$)`)
+var publishedParentheticalTicker = regexp.MustCompile(`(?i)[\(\[]\s*([a-z][a-z0-9]{0,7}|[0-9]{4,8})\s*[\)\]]`)
 
 var macroTargetTypes = map[string]bool{
 	"economy": true, "supply_volume": true, "fx_rate": true,
@@ -646,7 +647,7 @@ func (s *Server) eventTargetChanges(r *http.Request, targetTypes map[string]bool
 			continue
 		}
 		normalizeEventReport(report)
-		report["impacts"] = securityResolver.resolve(report["impacts"])
+		report["impacts"] = securityResolver.resolve(sanitizePublishedImpacts(report["impacts"]))
 		runs = append(runs, run)
 		for _, raw := range anySlice(report["impacts"]) {
 			impact := objectValue(raw)
@@ -946,10 +947,19 @@ func (resolver *publishedSecurityResolver) match(name string) map[string]any {
 		resolver.matchedAsset[key] = resolver.byID[preferredID]
 		return resolver.matchedAsset[key]
 	}
+	// Whole-name matching keeps aliases such as "NVIDIA 股价" working. If the
+	// report embeds a ticker, only accept explicit parenthetical or
+	// exchange-qualified forms. Arbitrary words and numbers in prose (for
+	// example CEO or the delivery month 11) must never become security IDs.
 	terms := []string{base}
-	for _, token := range targetWords.FindAllString(name, -1) {
-		if term := compactTarget(token); term != "" && term != base {
-			terms = append(terms, term)
+	for _, expression := range []*regexp.Regexp{publishedQualifiedTicker, publishedParentheticalTicker} {
+		for _, match := range expression.FindAllStringSubmatch(name, -1) {
+			if len(match) < 2 {
+				continue
+			}
+			if term := compactTarget(match[1]); term != "" && term != base {
+				terms = append(terms, term)
+			}
 		}
 	}
 	for _, term := range terms {
@@ -1139,13 +1149,18 @@ func resemblesSecurity(impact map[string]any, names, symbols map[string]bool) bo
 	if stringValue(impact["target_type"]) == "tradable_asset" || securityAsset(objectValue(impact["asset"])) {
 		return true
 	}
+	if stringValue(impact["target_type"]) == "commodity_price" {
+		return false
+	}
 	name := stringValue(impact["target_name"])
 	if names[compactTarget(name)] {
 		return true
 	}
-	for _, token := range targetWords.FindAllString(name, -1) {
-		if len(token) >= 2 && symbols[strings.ToLower(token)] {
-			return true
+	for _, expression := range []*regexp.Regexp{publishedQualifiedTicker, publishedParentheticalTicker} {
+		for _, match := range expression.FindAllStringSubmatch(name, -1) {
+			if len(match) >= 2 && symbols[strings.ToLower(match[1])] {
+				return true
+			}
 		}
 	}
 	return false

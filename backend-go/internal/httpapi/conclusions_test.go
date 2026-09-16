@@ -118,6 +118,23 @@ func TestSanitizePublishedImpactsRemovesActivityAndRebindsStockPrice(t *testing.
 	}
 }
 
+func TestSanitizePublishedImpactsNormalizesOilFuturesTargets(t *testing.T) {
+	impacts := []any{
+		map[string]any{"target_name": "10月交货的轻质原油期货", "target_type": "sector", "direction_score": 0.0},
+		map[string]any{"target_name": "11月交货的伦敦布伦特原油期货", "target_type": "sector", "direction_score": 0.0},
+	}
+	got := sanitizePublishedImpacts(impacts)
+	if len(got) != 2 {
+		t.Fatalf("got %d impacts, want 2: %#v", len(got), got)
+	}
+	if first := objectValue(got[0]); stringValue(first["target_type"]) != "commodity_price" || stringValue(first["target_name"]) != "WTI 原油价格" {
+		t.Fatalf("light crude futures target was not normalized: %#v", first)
+	}
+	if second := objectValue(got[1]); stringValue(second["target_type"]) != "commodity_price" || stringValue(second["target_name"]) != "布伦特原油价格" {
+		t.Fatalf("Brent futures target was not normalized: %#v", second)
+	}
+}
+
 func TestConclusionItemPublishesV41ConfidenceFieldsAndTargetEvaluation(t *testing.T) {
 	impact := map[string]any{
 		"target_type": "tradable_asset", "target_name": "Acme", "direction_score": 45, "rating": "bullish",
