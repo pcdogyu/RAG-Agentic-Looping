@@ -367,7 +367,7 @@ describe("analysis mapping states", () => {
     const markup = renderToStaticMarkup(createElement(AnalysisTraceList, { logs: [log] }));
 
     expect(markup).toContain("影响分");
-    expect(markup).toContain("中性");
+    expect(markup).toContain("观望");
     expect(markup).toContain("新闻事实置信度");
     expect(markup).toContain("92%");
     expect(markup).toContain("评级置信度");
@@ -1031,7 +1031,7 @@ describe("changed targets page", () => {
     expect(markup).not.toContain("方向证据不足");
     expect(markup).not.toContain("方向信号");
     expect(markup).not.toContain("未变");
-    expect(markup).toContain("中性");
+    expect(markup).toContain("观望");
     expect(markup).toContain("看空");
     expect(markup).toContain("看多");
     expect(markup).toContain("强烈看多");

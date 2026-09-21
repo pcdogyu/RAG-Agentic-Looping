@@ -252,8 +252,9 @@ func recommendationRatingSignals(values []recommendationSnapshot) []targetRating
 		provisional := !boolValue(value.Payload["evidence_complete"]) || boolValue(value.Payload["provisional"]) || boolValue(impact["provisional"]) ||
 			status == "insufficient_evidence" || status == "technical_failure" || boolValue(impact["technical_failure"])
 		observation := canonicalObservation([]map[string]any{impact}, value.OccurredAt, newsConfidence, provisional)
+		rating, directionScore := modelResearchRatingSignal(value.Payload)
 		result = append(result, targetRatingSignal{
-			EventID: value.EventID, Rating: stringValue(value.Payload["rating"]), DirectionScore: numberValue(value.Payload["direction_score"]),
+			EventID: value.EventID, Rating: rating, DirectionScore: directionScore,
 			RatingConfidence: confidence, NewsConfidence: newsConfidence, OccurredAt: value.OccurredAt, EvaluatedAt: value.UpdatedAt,
 			DetailKind: "asset", DetailID: value.ID, Eligible: value.EventID != "" && !observation.Insufficient && !observation.Provisional && confidence >= .45,
 			SourcePriority: 2, Observation: observation,
@@ -788,7 +789,7 @@ func (s *Server) eventTargetChanges(r *http.Request, targetTypes map[string]bool
 
 func publishableEventImpact(report, impact map[string]any) bool {
 	version := stringValue(report["prompt_version"])
-	if !strings.HasPrefix(version, "event-research-prompt-v6.1-") && !strings.HasPrefix(version, "event-research-prompt-v6.2-") && !strings.HasPrefix(version, "event-research-prompt-v6.3-") {
+	if !strings.HasPrefix(version, "event-research-prompt-v6.1-") && !strings.HasPrefix(version, "event-research-prompt-v6.2-") && !strings.HasPrefix(version, "event-research-prompt-v6.3-") && !strings.HasPrefix(version, "event-research-prompt-v6.4-") {
 		return true
 	}
 	verification := objectValue(impact["impact_verification"])
@@ -1325,8 +1326,9 @@ func macroRatingSignals(values []macroSnapshot) []targetRatingSignal {
 	for _, value := range values {
 		confidence := numberValue(value.Impact["rating_confidence"])
 		newsConfidence := value.Observation.NewsConfidence
+		rating, directionScore := modelResearchRatingSignal(value.Impact)
 		result = append(result, targetRatingSignal{
-			EventID: value.EventID, Rating: stringValue(value.Impact["rating"]), DirectionScore: numberValue(value.Impact["direction_score"]),
+			EventID: value.EventID, Rating: rating, DirectionScore: directionScore,
 			RatingConfidence: confidence, NewsConfidence: newsConfidence, OccurredAt: value.Observation.OccurredAt, EvaluatedAt: value.ChangedAt,
 			DetailKind: "event", DetailID: value.RunID, Eligible: value.EventID != "" && !value.Observation.Insufficient && !value.Observation.Provisional && confidence >= .45,
 			SourcePriority: 1, Observation: value.Observation,
@@ -1375,6 +1377,16 @@ func normalizedSignalRating(value string, score float64) string {
 		}
 	}
 	return ratingForScore(score)
+}
+
+func modelResearchRatingSignal(value map[string]any) (string, float64) {
+	rating := stringValue(value["rating"])
+	score := numberValue(value["direction_score"])
+	if signal := objectValue(value["research_signal"]); signal != nil && boolValue(signal["available"]) && signal["direction_score"] != nil {
+		rating = stringValue(signal["rating"])
+		score = numberValue(signal["direction_score"])
+	}
+	return normalizedSignalRating(rating, score), score
 }
 
 func deduplicateRatingSignals(values []targetRatingSignal) []targetRatingSignal {

@@ -86,7 +86,7 @@ export type AnalysisLog = {
 const labels: Record<string, string> = {
   strongly_bullish: "强烈看多",
   bullish: "看多",
-  watch: "中性",
+  watch: "观望",
   bearish: "看空",
   strongly_bearish: "强烈看空",
   insufficient_evidence: "证据不足",

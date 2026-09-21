@@ -102,7 +102,7 @@ describe("open source and search settings", () => {
     }));
 
     expect(markup).toContain("发布分：0");
-    expect(markup).toContain("本次事件信号：中性");
+    expect(markup).toContain("本次事件信号：观望");
     expect(markup).toContain("发布置信度 95% · 资料覆盖完整");
   });
 
@@ -225,7 +225,7 @@ describe("open source and search settings", () => {
     }));
 
     expect(markup).toContain("暂不评分");
-    expect(markup).toContain("方向证据不足 · 本次事件信号：中性");
+    expect(markup).toContain("方向证据不足 · 本次事件信号：观望");
     expect(markup).toContain("门禁后参考置信度 0%");
     expect(markup).not.toContain("发布分：0");
   });
@@ -263,14 +263,14 @@ describe("open source and search settings", () => {
     expect(markup).toContain("缺少美元和美债收益率同步确认");
   });
 
-  it("normalizes the model typo 官网 to 中性", () => {
+  it("normalizes the model typo 官网 to 观望", () => {
     const markup = renderToStaticMarkup(createElement(ModelOpinion, {
       direction: "neutral",
       rating: "官网",
       confidence: 0.6,
     }));
 
-    expect(markup).toContain("中性 / Neutral");
+    expect(markup).toContain("观望 / Watch");
     expect(markup).not.toContain("<strong>官网</strong>");
   });
 
@@ -404,7 +404,7 @@ describe("open source and search settings", () => {
     }));
 
     expect(markup).toContain("暂不评分");
-    expect(markup).toContain("本次事件信号：中性");
+    expect(markup).toContain("本次事件信号：观望");
     expect(markup).toContain("参考置信度 0%");
     expect(markup).not.toContain("方向证据不足");
     expect(markup).not.toContain("资料覆盖不足");

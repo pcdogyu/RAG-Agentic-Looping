@@ -524,7 +524,7 @@ func verifyAssetDraft(draft *assetResearchDraft, asset, event map[string]any, ev
 	verification := verifyEventDraft(&eventDraft, eventCopy, evidence, asOf)
 	if len(eventDraft.Impacts) == 1 {
 		impact := eventDraft.Impacts[0]
-		draft.DirectionScore, draft.ResearchDirectionScore, draft.ConclusionStatus, draft.ImpactChannel = impact.DirectionScore, impact.ResearchDirectionScore, impact.ConclusionStatus, impact.ImpactChannel
+		draft.DirectionScore, draft.ResearchDirectionScore, draft.Rating, draft.ConclusionStatus, draft.ImpactChannel = impact.DirectionScore, impact.ResearchDirectionScore, impact.Rating, impact.ConclusionStatus, impact.ImpactChannel
 		draft.Claims, draft.TransmissionSteps, draft.TransmissionPath, draft.TargetRelation = impact.Claims, impact.TransmissionSteps, impact.TransmissionPath, impact.TargetRelation
 		draft.EvidenceIDs, draft.MissingInformation = impact.EvidenceIDs, impact.Missing
 		draft.Verification = impact.Verification
@@ -537,7 +537,7 @@ func verifyAssetDraft(draft *assetResearchDraft, asset, event map[string]any, ev
 func eventImpactFromAssetDraft(draft assetResearchDraft, asset map[string]any) eventImpactDraft {
 	return eventImpactDraft{
 		TargetType: "tradable_asset", TargetName: stringValue(asset["name"]), AssetID: stringValue(asset["asset_id"]),
-		ConclusionStatus: draft.ConclusionStatus, ImpactChannel: draft.ImpactChannel, DirectionScore: draft.DirectionScore,
+		ConclusionStatus: draft.ConclusionStatus, ImpactChannel: draft.ImpactChannel, DirectionScore: draft.DirectionScore, Rating: draft.Rating,
 		ResearchDirectionScore: draft.ResearchDirectionScore, ReportConfidence: draft.ReportConfidence,
 		Claims: draft.Claims, TransmissionSteps: draft.TransmissionSteps, TransmissionPath: draft.TransmissionPath, TargetRelation: draft.TargetRelation,
 		TargetEvaluation: draft.TargetEvaluation, Rationale: draft.Summary, EvidenceIDs: draft.EvidenceIDs, Missing: draft.MissingInformation,

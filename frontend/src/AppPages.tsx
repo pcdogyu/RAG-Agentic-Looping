@@ -1904,7 +1904,7 @@ export function conclusionReferences(
 }
 
 const ratingLabels: Record<string, string> = {
-  strongly_bullish: "强烈看多", bullish: "看多", watch: "中性", bearish: "看空", strongly_bearish: "强烈看空",
+  strongly_bullish: "强烈看多", bullish: "看多", watch: "观望", bearish: "看空", strongly_bearish: "强烈看空",
 };
 
 export function recommendationRatingLabel(value: string) {
@@ -1928,7 +1928,7 @@ const modelDirectionLabels: Record<string, string> = {
 const modelRatingLabels: Record<string, string> = {
   strongly_bullish: "强烈看多 / Strongly bullish",
   bullish: "看多 / Bullish",
-  watch: "中性 / Neutral",
+  watch: "观望 / Watch",
   bearish: "看空 / Bearish",
   strongly_bearish: "强烈看空 / Strongly bearish",
 };
@@ -2574,8 +2574,8 @@ export function ConclusionDetailModal({ detail, onClose }: { detail: ConclusionD
       <ConfidenceAssessmentDetails title="研报置信度判断" value={detail.recommendation.report_confidence_assessment} />
       <p className="score-explanation">{isV3
 		? (detail.recommendation.target_evaluation
-		  ? "方向分由模型判断；五级评级、五项评价封顶、新闻可信度和研报置信度均由系统确定性计算。"
-		  : "方向分是模型唯一数值判断；五级评级、新闻可信度和评级置信度均由系统独立计算，缺失信息只降低对应置信因子。")
+		  ? "方向分和五档评级均由研究模型给出；系统校验两者一致，并独立执行五项评价封顶、可信度计算与证据门禁。"
+		  : "方向分和五档评级均由研究模型给出；新闻可信度、研报置信度和证据门禁由系统独立计算。")
         : isShortTerm
         ? "影响分按 D × (45M + 25T + 15I + 15C) 计算；证据质量核验只降低置信度，不改变方向或隐藏评分。"
         : "该历史结论沿用原评分与证据门禁规则；证据不足记录继续暂不评分，供追溯和重新调研。"}</p>

@@ -214,6 +214,20 @@ func TestPublicRatingBoundariesMatchResearchContract(t *testing.T) {
 	}
 }
 
+func TestModelResearchRatingSignalPrefersDirectModelRating(t *testing.T) {
+	rating, score := modelResearchRatingSignal(map[string]any{
+		"rating": "watch", "direction_score": 0,
+		"research_signal": map[string]any{"available": true, "rating": "bearish", "direction_score": -44},
+	})
+	if rating != "bearish" || score != -44 {
+		t.Fatalf("direct research rating was not used: %s / %v", rating, score)
+	}
+	rating, score = modelResearchRatingSignal(map[string]any{"rating": "bullish", "direction_score": 40})
+	if rating != "bullish" || score != 40 {
+		t.Fatalf("legacy signal fallback changed: %s / %v", rating, score)
+	}
+}
+
 func TestStepLimitedRatingReplayIgnoresIneligibleManualAndDuplicateEvents(t *testing.T) {
 	base := time.Date(2026, 9, 5, 3, 0, 0, 0, time.UTC)
 	values := []targetRatingSignal{

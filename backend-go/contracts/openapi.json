@@ -2954,6 +2954,10 @@
               }
             ]
           },
+          "model_rating_source": {
+            "type": "string",
+            "enum": ["llm", "system_fallback"]
+          },
           "model_score": {
             "anyOf": [
               {
@@ -3967,6 +3971,7 @@
           "provisional": { "type": "boolean" },
           "direction_score": { "anyOf": [{ "type": "integer", "minimum": -100, "maximum": 100 }, { "type": "null" }] },
           "rating": { "anyOf": [{ "$ref": "#/components/schemas/Rating" }, { "type": "null" }] },
+          "rating_source": { "type": "string", "enum": ["llm", "system_fallback"] },
           "asset_id": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
           "trade_eligible": { "type": "boolean", "const": false },
           "reasons": { "type": "array", "items": { "type": "string" } },
@@ -4138,6 +4143,13 @@
           },
           "model_target_evaluation": {
             "$ref": "#/components/schemas/TargetEvaluation"
+          },
+          "model_rating": {
+            "$ref": "#/components/schemas/Rating"
+          },
+          "model_rating_source": {
+            "type": "string",
+            "enum": ["llm", "system_fallback"]
           },
           "rating": {
             "$ref": "#/components/schemas/Rating",
