@@ -53,6 +53,8 @@ func (s *Server) failedResearchRuns(w http.ResponseWriter, r *http.Request) {
 				LIMIT 1
 			) model_failure ON true
 			WHERE rr.retry_of_run_id IS NULL
+			  AND (rr.event_id IS NULL OR e.published_at>=now()-interval '48 hours')
+			  AND coalesce(rr.payload->>'retryable_reason','')<>'news_age_filtered'
 			  AND coalesce(rr.payload->>'failure_dismissed_at','')=''
 			  AND (rr.status='failed' OR rr.retryable_reason IS NOT NULL)
 			  AND NOT (rr.retryable_reason IS NULL AND own_rec.run_id IS NOT NULL)
@@ -72,6 +74,8 @@ func (s *Server) failedResearchRuns(w http.ResponseWriter, r *http.Request) {
 				LIMIT 1
 			) model_failure ON true
 			WHERE er.status IN ('failed','insufficient_evidence','filtered')
+			  AND e.published_at>=now()-interval '48 hours'
+			  AND coalesce(er.payload->>'retryable_reason','')<>'news_age_filtered'
 			  AND coalesce(er.payload->>'failure_dismissed_at','')=''
 			  AND (er.status='failed' OR er.payload->>'retryable_reason' IS NOT NULL)
 			  AND NOT EXISTS (

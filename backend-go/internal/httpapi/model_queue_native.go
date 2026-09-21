@@ -137,7 +137,7 @@ func (s *Server) loadRecentModelExecutionSamples(ctx context.Context, queue stri
 func (s *Server) loadNativeModelJobs(ctx context.Context, queue string, cutoff time.Time) ([]nativeModelJob, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT j.id::text,j.task_type,
-		       CASE WHEN j.status='cancelled' AND coalesce(er.payload->>'status',rr.payload->>'status')='filtered' THEN 'filtered' ELSE j.status END,
+		       CASE WHEN j.status='cancelled' AND (j.result->>'status'='filtered' OR coalesce(er.payload->>'status',rr.payload->>'status')='filtered') THEN 'filtered' ELSE j.status END,
 		       j.attempt,
 		       coalesce(nullif(j.error,''),nullif(er.payload->>'error',''),nullif(rr.payload->>'error',''),''),j.created_at,j.available_at,j.updated_at,j.started_at,j.attempt_started_at,
 		       j.completed_at,j.execution_duration_ms,
@@ -196,7 +196,7 @@ func (s *Server) loadNativeModelJobs(ctx context.Context, queue string, cutoff t
 		LEFT JOIN research_runs rr
 		  ON j.task_type='market_loop.research_asset' AND rr.id=j.payload->'args'->>2
 		LEFT JOIN news_items ni
-		  ON j.queue='extract' AND ni.id=j.payload->'args'->>0
+		  ON j.queue='extract' AND ni.id=CASE WHEN j.task_type='market_loop.extract_news_item' THEN j.payload->'args'->>1 ELSE j.payload->'args'->>0 END
 		LEFT JOIN news_events mapping_event
 		  ON j.queue='assist' AND mapping_event.id=j.payload->'args'->>0
 		LEFT JOIN evolution_candidates ec
@@ -391,7 +391,7 @@ func nativeVisibleTasks(queue string, jobs []nativeModelJob, now time.Time) []na
 	for _, job := range jobs {
 		// A news-age-filtered research job remains counted for audit and queue
 		// metrics, but it is terminal work rather than an actionable task card.
-		if queue == "research" && job.Status == "filtered" {
+		if job.Status == "filtered" {
 			continue
 		}
 		if nativeActiveStatus(job.Status) || nativeFailedStatus(job.Status) {
@@ -583,7 +583,7 @@ func nativeActiveStatus(status string) bool {
 }
 
 func nativeFailedStatus(status string) bool {
-	return status == "failed" || status == "rejected" || status == "rolled_back" || status == "filtered"
+	return status == "failed" || status == "rejected" || status == "rolled_back"
 }
 
 func nativeStatusRank(status string) int {

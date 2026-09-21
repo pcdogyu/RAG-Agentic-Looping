@@ -926,6 +926,14 @@ func (runtime *discoveryRuntime) filterNews(ctx context.Context, items []discove
 	accepted := make([]discoveredNews, 0, len(items))
 	filtered := 0
 	for _, item := range items {
+		if ResearchNewsExpired(DefaultResearchNewsAgeFilter(), item.PublishedAt, time.Now().UTC()) {
+			filtered++
+			_, err = runtime.db.Exec(ctx, `INSERT INTO news_filter_logs(id,content_hash,source,title,url,matched_keyword,published_at,first_filtered_at,last_filtered_at,hit_count) VALUES($1,$2,$3,$4,$5,'news_age_filtered', $6,now(),now(),1) ON CONFLICT(content_hash) DO UPDATE SET last_filtered_at=now(),hit_count=news_filter_logs.hit_count+1,matched_keyword='news_age_filtered'`, uuid.New(), item.ContentHash, item.Source, item.Title, item.URL, item.PublishedAt)
+			if err != nil {
+				return nil, filtered, err
+			}
+			continue
+		}
 		decision := sourcefilter.Evaluate(item.Title, configValue)
 		if decision.Blocked {
 			filtered++
@@ -1067,13 +1075,13 @@ func (runtime *discoveryRuntime) dispatchOutboxLimit(ctx context.Context, limit 
 		return nil, err
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
-	query := `SELECT id,news_id,force_asset_mapping,dispatch_attempts+1 FROM news_processing_outbox WHERE status IN ('pending','failed') AND available_at<=now()`
+	query := `SELECT o.id,o.news_id,o.force_asset_mapping,o.dispatch_attempts+1 FROM news_processing_outbox o JOIN news_items n ON n.id=o.news_id WHERE o.status IN ('pending','failed') AND o.available_at<=now() AND n.published_at>=now()-interval '48 hours'`
 	args := []any{}
 	if len(only) > 0 {
-		query += ` AND news_id=ANY($1)`
+		query += ` AND o.news_id=ANY($1)`
 		args = append(args, only)
 	}
-	query += fmt.Sprintf(` ORDER BY available_at,created_at FOR UPDATE SKIP LOCKED LIMIT %d`, limit)
+	query += fmt.Sprintf(` ORDER BY o.available_at,o.created_at FOR UPDATE OF o SKIP LOCKED LIMIT %d`, limit)
 	rows, err := tx.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err

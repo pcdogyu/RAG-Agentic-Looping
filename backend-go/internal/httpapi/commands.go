@@ -293,6 +293,9 @@ func (s *Server) enqueueAssetResearch(ctx context.Context, assetID, eventID stri
 		}
 		if eventID != "" {
 			event, _ = decodeDefault(body, map[string]any{}).(map[string]any)
+			if publishedAt := parseAnyTime(stringValue(event["published_at"])); publishedAt != nil && jobs.ResearchNewsExpired(jobs.DefaultResearchNewsAgeFilter(), *publishedAt, time.Now().UTC()) {
+				return queuedResearch{}, fail(http.StatusConflict, "新闻发布时间超过 48 小时，无法研究")
+			}
 		}
 	}
 	var activeID string
@@ -448,6 +451,13 @@ func (s *Server) retryEventResearch(ctx context.Context, runID, preferred string
 	if !eventExists {
 		return nil, fail(http.StatusConflict, "source event no longer exists")
 	}
+	var publishedAt time.Time
+	if err := s.db.QueryRow(ctx, `SELECT published_at FROM news_events WHERE id=$1`, eventID).Scan(&publishedAt); err != nil {
+		return nil, err
+	}
+	if jobs.ResearchNewsExpired(jobs.DefaultResearchNewsAgeFilter(), publishedAt, time.Now().UTC()) {
+		return nil, fail(http.StatusConflict, "新闻发布时间超过 48 小时，无法重试")
+	}
 	instanceID, err := s.selectModelInstance(ctx, "research", preferred)
 	if err != nil {
 		status := http.StatusConflict
@@ -477,7 +487,7 @@ func (s *Server) retryEventResearch(ctx context.Context, runID, preferred string
 }
 
 func (s *Server) retryFailedResearchRuns(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.db.Query(r.Context(), `SELECT 'asset',id FROM research_runs WHERE (status='failed' OR payload->>'retryable_reason' IS NOT NULL) AND payload->>'retry_of_run_id' IS NULL AND coalesce(payload->>'failure_dismissed_at','')='' UNION ALL SELECT 'event',id FROM event_research_runs WHERE (status='failed' OR payload->>'retryable_reason' IS NOT NULL) AND coalesce(payload->>'failure_dismissed_at','')=''`)
+	rows, err := s.db.Query(r.Context(), `SELECT 'asset',r.id FROM research_runs r LEFT JOIN news_events e ON e.id=r.event_id WHERE (r.status='failed' OR r.payload->>'retryable_reason' IS NOT NULL) AND r.payload->>'retry_of_run_id' IS NULL AND coalesce(r.payload->>'failure_dismissed_at','')='' AND (r.event_id IS NULL OR e.published_at>=now()-interval '48 hours') AND coalesce(r.payload->>'retryable_reason','')<>'news_age_filtered' UNION ALL SELECT 'event',r.id FROM event_research_runs r JOIN news_events e ON e.id=r.event_id WHERE (r.status='failed' OR r.payload->>'retryable_reason' IS NOT NULL) AND coalesce(r.payload->>'failure_dismissed_at','')='' AND e.published_at>=now()-interval '48 hours' AND coalesce(r.payload->>'retryable_reason','')<>'news_age_filtered'`)
 	if err != nil {
 		writeError(w, 500, "failed research query failed")
 		return
@@ -569,6 +579,15 @@ func (s *Server) researchEventConclusionAgain(w http.ResponseWriter, r *http.Req
 		return
 	}
 	eventID := stringValue(run["event_id"])
+	var publishedAt time.Time
+	if err := s.db.QueryRow(r.Context(), `SELECT published_at FROM news_events WHERE id=$1`, eventID).Scan(&publishedAt); err != nil {
+		writeError(w, http.StatusConflict, "source event no longer exists")
+		return
+	}
+	if jobs.ResearchNewsExpired(jobs.DefaultResearchNewsAgeFilter(), publishedAt, time.Now().UTC()) {
+		writeError(w, http.StatusConflict, "新闻发布时间超过 48 小时，无法重新调研")
+		return
+	}
 	var newsCount int
 	if err := s.db.QueryRow(r.Context(), `SELECT count(*)::int FROM news_items WHERE id::text IN (SELECT jsonb_array_elements_text(payload::jsonb->'news_item_ids') FROM news_events WHERE id=$1)`, eventID).Scan(&newsCount); err != nil || newsCount == 0 {
 		writeError(w, http.StatusConflict, "该事件没有可用的关联原始新闻，无法执行完整重新研究。")

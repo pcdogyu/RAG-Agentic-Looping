@@ -102,6 +102,8 @@ jobs:
         run: go test -race ./internal/jobs -run '^(TestPersistMarketRecordsIncludedExcludedAndDelistedMembershipsAgainstIsolatedPostgres|TestPredictionOutcomesMatureFiveSessionsWithoutAdvancingTwentyAgainstIsolatedPostgres)$' -count=1 -v
       - name: Verify factual bootstrap, consensus capture and forward rule collection against PostgreSQL
         run: go test -race ./internal/jobs -run '^(TestFundamentalRefreshCandidatesBootstrapOnlyRecentCurrentContractResearch|TestConsensusSyncCapturesOnlyFirstObservedFMPHistoryAgainstIsolatedPostgres|TestManualMarketPriceSyncPersistsOnlyProviderObservationsAgainstIsolatedPostgres|TestRuleBaselineCollectionIsForwardOnlyIdempotentAndNotPromotableAgainstPostgres|TestClaimResearchUsesFastAndDeepPreferredLanesAgainstPostgres|TestStoreClaimPrioritizesFreshAutomaticExtractionAgainstPostgres|TestClaimResearchPrioritizesFreshEventOverReplayAgainstPostgres)$' -count=1 -v
+      - name: Verify 48-hour expiry across news queues against PostgreSQL
+        run: go test -race ./internal/jobs -run '^TestDiscardExpiredNewsAcrossQueuesAgainstPostgres$' -count=1 -v
       - name: Verify rolling manifests, sealed holdout, baselines, calibration and layered reports against PostgreSQL
         run: go test -race ./internal/evaluation -run '^TestDatasetStorePersistsReproducibleWalkForwardAndSealedHoldoutAgainstIsolatedPostgres$' -count=1 -v
       - name: Verify recent research filtering against PostgreSQL

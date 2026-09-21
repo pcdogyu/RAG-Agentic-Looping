@@ -306,8 +306,12 @@ func (s *Server) retryModelTask(ctx context.Context, queueID string, task map[st
 			return "", fail(http.StatusUnprocessableEntity, "only asset mapping tasks can be retried")
 		}
 		var headline string
-		if err := s.db.QueryRow(ctx, `SELECT headline FROM news_events WHERE id=$1`, entityID).Scan(&headline); err != nil {
+		var publishedAt time.Time
+		if err := s.db.QueryRow(ctx, `SELECT headline,published_at FROM news_events WHERE id=$1`, entityID).Scan(&headline, &publishedAt); err != nil {
 			return "", fail(http.StatusConflict, "source event no longer exists")
+		}
+		if jobs.ResearchNewsExpired(jobs.DefaultResearchNewsAgeFilter(), publishedAt, time.Now().UTC()) {
+			return "", fail(http.StatusConflict, "新闻发布时间超过 48 小时，无法重试")
 		}
 		instanceID, err := s.selectModelInstance(ctx, "assist", preferred)
 		if err != nil {
@@ -372,6 +376,13 @@ func (s *Server) retryModelTask(ctx context.Context, queueID string, task map[st
 }
 
 func (s *Server) queueNewsRetryWithOptions(ctx context.Context, newsID, title, source, preferred string, priority int) (string, error) {
+	var publishedAt time.Time
+	if err := s.db.QueryRow(ctx, `SELECT published_at FROM news_items WHERE id=$1`, newsID).Scan(&publishedAt); err != nil {
+		return "", fail(http.StatusConflict, "source news no longer exists")
+	}
+	if jobs.ResearchNewsExpired(jobs.DefaultResearchNewsAgeFilter(), publishedAt, time.Now().UTC()) {
+		return "", fail(http.StatusConflict, "新闻发布时间超过 48 小时，无法重试")
+	}
 	outboxID := uuid.NewString()
 	if _, err := s.db.Exec(ctx, `INSERT INTO news_processing(
 		news_id,status,celery_task_id,attempt_count,last_error,queued_at,started_at,completed_at,heartbeat_at,created_at,updated_at

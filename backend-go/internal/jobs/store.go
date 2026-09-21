@@ -132,13 +132,12 @@ func (s *Store) Claim(ctx context.Context, workerID string, queues []string, lea
 				JOIN go_jobs parent ON parent.id=d.depends_on_job_id
 				WHERE d.job_id=j.id AND parent.status <> 'completed'
 			  )
-			-- Automatic extraction that has already missed the research freshness
-			-- window must not keep newly discovered news behind a historical
-			-- backlog. Explicit retries retain their normal priority.
+			-- The scheduler discards expired news; prioritize fresh extraction
+			-- before a sweep catches tasks crossing the 48-hour boundary.
 			ORDER BY CASE
 				WHEN j.task_type='market_loop.retry_news_item'
 				 AND coalesce((j.payload->'kwargs'->>'force_asset_mapping')::boolean,false)=false
-				 AND (news.published_at IS NULL OR news.published_at<=now()-interval '24 hours') THEN 1
+				 AND (news.published_at IS NULL OR news.published_at<now()-interval '48 hours') THEN 1
 				ELSE 0
 			END,
 			j.priority ASC, j.available_at, j.created_at
@@ -196,7 +195,7 @@ func (s *Store) ClaimResearch(ctx context.Context, workerID string, queues []str
 			ORDER BY
 				CASE
 					WHEN lower(coalesce(j.payload->'kwargs'->>'source',''))='manual' THEN 0
-					WHEN event.published_at>now()-interval '24 hours' THEN 1
+					WHEN event.published_at>=now()-interval '48 hours' THEN 1
 					WHEN coalesce((j.payload->'kwargs'->>'news_age_filter_bypass')::boolean,false) THEN 3
 					ELSE 2
 				END,

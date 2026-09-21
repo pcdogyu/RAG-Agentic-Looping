@@ -33,6 +33,24 @@ func main() {
 		os.Exit(1)
 	}
 	store := jobs.NewStore(dependencies.DB)
+	// Sweep the pre-existing backlog immediately; later ticks catch news that
+	// ages out while waiting and source outbox rows not yet dispatched.
+	cleanExpiredNews := func() {
+		if _, err := jobs.DiscardExpiredNewsOutbox(ctx, dependencies.DB); err != nil {
+			slog.Error("discard expired news outbox", "error", err)
+		}
+		for {
+			count, err := jobs.DiscardExpiredNewsJobs(ctx, dependencies.DB, 500)
+			if err != nil {
+				slog.Error("discard expired news jobs", "error", err)
+				return
+			}
+			if count < 500 || ctx.Err() != nil {
+				return
+			}
+		}
+	}
+	cleanExpiredNews()
 	reconcileTicker := time.NewTicker(time.Minute)
 	discoveryTicker := time.NewTicker(5 * time.Second)
 	defer reconcileTicker.Stop()
@@ -79,6 +97,7 @@ func main() {
 				}
 			}
 		case <-reconcileTicker.C:
+			cleanExpiredNews()
 			count, err := store.ReconcileExpired(ctx)
 			if err != nil {
 				slog.Error("reconcile expired leases", "error", err)

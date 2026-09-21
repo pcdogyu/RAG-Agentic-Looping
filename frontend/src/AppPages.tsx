@@ -556,7 +556,6 @@ export function UnifiedModelQueuePanel({
   instance,
   filterRecentResearch = false,
   onFilterRecentResearchChange,
-  onResearchNewsAgeFilterChange,
   onCancelTask,
   onRetryTask,
   onRetryAll,
@@ -570,7 +569,6 @@ export function UnifiedModelQueuePanel({
   instance?: ModelQueueInstanceItem;
   filterRecentResearch?: boolean;
   onFilterRecentResearchChange?: (value: boolean) => void;
-  onResearchNewsAgeFilterChange?: (value: boolean) => void;
   onCancelTask?: (task: ModelQueueTask) => void;
   onRetryTask?: (task: ModelQueueTask) => void;
   onRetryAll?: () => void;
@@ -609,14 +607,7 @@ export function UnifiedModelQueuePanel({
           />
           <span>过滤 48h 已研究</span>
         </label>}
-        {queue.id === "research" && <label className="model-queue-filter-toggle" title="开启后自动研究会过滤新闻发布时间超过 24 小时的任务；手动重试不受影响">
-          <input
-            type="checkbox"
-            checked={queue.news_age_filter?.enabled ?? true}
-            onChange={(event) => onResearchNewsAgeFilterChange?.(event.target.checked)}
-          />
-          <span>过滤 24h 新闻</span>
-        </label>}
+        {queue.id !== "code" && <span className="model-queue-filter-toggle" title="所有新闻任务（包括手动重试）以原始发布时间为准；超过 48 小时自动过滤，历史新闻记录保留">过滤 48h 新闻</span>}
         <button
           type="button"
           className="model-queue-retry"
@@ -638,7 +629,7 @@ export function UnifiedModelQueuePanel({
       <span>运行<strong>{activeInstance.counts.running}</strong></span>
       <span>重试/验证<strong>{secondary}</strong></span>
       <span>{queue.id === "research" ? "近24h完成/失败" : "完成/失败"}<strong>{activeInstance.counts.completed}/{activeInstance.counts.failed}</strong></span>
-      {queue.id === "research" && <span>已过滤<strong>{activeInstance.counts.filtered ?? 0}</strong></span>}
+      {queue.id !== "code" && <span>已过滤<strong>{activeInstance.counts.filtered ?? 0}</strong></span>}
       <span title={`样本 ${activeInstance.metrics.queue_duration_sample_count}`}>平均排队<strong>{formatQueueDuration(activeInstance.metrics.average_queue_duration_ms)}</strong></span>
       {queue.id === "assist"
         ? <span title="过去 4 小时完成任务的实际吞吐">近4h吞吐<strong>{activeInstance.metrics.throughput_per_hour === null ? "—" : `${activeInstance.metrics.throughput_per_hour.toFixed(1)}/时`}</strong></span>
@@ -975,24 +966,6 @@ export function QueuePage({ apiBase }: { apiBase: string }) {
     }
   }, [apiBase, filterRecentResearch, loadQueues]);
 
-  const updateResearchNewsAgeFilter = useCallback(async (enabled: boolean) => {
-    setActionMessage("");
-    setError("");
-    try {
-      const response = await fetch(`${apiBase}/api/v1/model-queues/research/news-age-filter`, {
-        method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled }),
-      });
-      if (!response.ok) throw new Error(`更新新闻过滤失败（HTTP ${response.status}）`);
-      const result = await response.json() as { discarded: number };
-      setActionMessage(enabled
-        ? `已开启过滤 24h 新闻，已过滤 ${result.discarded} 个未开始自动研究任务。`
-        : "已关闭过滤 24h 新闻；后续自动研究不再按新闻发布时间过滤。");
-      await loadQueues();
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "更新新闻过滤失败");
-    }
-  }, [apiBase, loadQueues]);
-
   useEffect(() => {
     const controller = new AbortController();
     void loadQueues(controller.signal, true);
@@ -1035,7 +1008,6 @@ export function QueuePage({ apiBase }: { apiBase: string }) {
               instance={instance}
               filterRecentResearch={filterRecentResearch}
               onFilterRecentResearchChange={setFilterRecentResearch}
-              onResearchNewsAgeFilterChange={(enabled) => void updateResearchNewsAgeFilter(enabled)}
               key={actionId}
               onCancelTask={(task) => void cancelModelTask(queue, task)}
               onRetryTask={(task) => void retryModelTask(queue, task)}

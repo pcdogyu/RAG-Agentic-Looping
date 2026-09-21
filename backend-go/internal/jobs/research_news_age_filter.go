@@ -7,10 +7,9 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/redis/go-redis/v9"
 )
 
-const researchNewsAgeFilterSetting = "research-news-age-filter"
+const newsMaxAge = 48 * time.Hour
 
 type ResearchNewsAgeFilter struct {
 	Enabled     bool `json:"enabled"`
@@ -18,106 +17,172 @@ type ResearchNewsAgeFilter struct {
 }
 
 func DefaultResearchNewsAgeFilter() ResearchNewsAgeFilter {
-	return ResearchNewsAgeFilter{Enabled: true, MaxAgeHours: 24}
+	return ResearchNewsAgeFilter{Enabled: true, MaxAgeHours: 48}
 }
 
 func LoadResearchNewsAgeFilter(ctx context.Context, db *pgxpool.Pool) (ResearchNewsAgeFilter, error) {
-	filter := DefaultResearchNewsAgeFilter()
-	var body []byte
-	err := db.QueryRow(ctx, `SELECT payload::jsonb FROM integration_settings WHERE key=$1`, researchNewsAgeFilterSetting).Scan(&body)
-	if err != nil {
-		return filter, nil
-	}
-	var stored ResearchNewsAgeFilter
-	if json.Unmarshal(body, &stored) == nil {
-		filter.Enabled = stored.Enabled
-	}
-	return filter, nil
-}
-
-func SaveResearchNewsAgeFilter(ctx context.Context, db *pgxpool.Pool, enabled bool) (ResearchNewsAgeFilter, error) {
-	filter := DefaultResearchNewsAgeFilter()
-	filter.Enabled = enabled
-	body, _ := json.Marshal(filter)
-	_, err := db.Exec(ctx, `INSERT INTO integration_settings(key,payload,updated_at) VALUES($1,$2,now()) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload,updated_at=now()`, researchNewsAgeFilterSetting, body)
-	return filter, err
+	return DefaultResearchNewsAgeFilter(), nil
 }
 
 func ResearchNewsExpired(filter ResearchNewsAgeFilter, publishedAt, now time.Time) bool {
-	return filter.Enabled && !publishedAt.IsZero() && !publishedAt.After(now.Add(-time.Duration(filter.MaxAgeHours)*time.Hour))
+	return !publishedAt.IsZero() && publishedAt.Before(now.Add(-newsMaxAge))
 }
 
-func researchNewsAgeFilterBypass(run map[string]any) bool {
-	return boolValue(run["news_age_filter_bypass"])
-}
+// newsPublicationSQL resolves the original publication time, never queue time.
+// Jobs without a source news/event (for example code evolution or standalone
+// fundamental research) are deliberately outside this news-age policy.
+const newsPublicationSQL = `CASE j.task_type
+    WHEN 'market_loop.extract_news_item' THEN (SELECT published_at FROM news_items WHERE id::text=j.payload->'args'->>1)
+    WHEN 'market_loop.retry_news_item' THEN (SELECT published_at FROM news_items WHERE id::text=j.payload->'args'->>0)
+    WHEN 'market_loop.reextract_event' THEN (SELECT published_at FROM news_events WHERE id::text=j.payload->'args'->>0)
+    WHEN 'market_loop.resolve_event_assets' THEN (SELECT published_at FROM news_events WHERE id::text=j.payload->'args'->>0)
+    WHEN 'market_loop.research_event' THEN (SELECT published_at FROM news_events WHERE id::text=j.payload->'args'->>0)
+    WHEN 'market_loop.research_asset' THEN (SELECT published_at FROM news_events WHERE id::text=j.payload->'args'->>1)
+END`
 
-// FilterExpiredAutomaticResearch cancels only unclaimed automatic research jobs.
-// Running jobs are deliberately left for the worker's pre-inference guard.
-func FilterExpiredAutomaticResearch(ctx context.Context, db *pgxpool.Pool, redisClient *redis.Client) (int, error) {
-	filter, err := LoadResearchNewsAgeFilter(ctx, db)
-	if err != nil || !filter.Enabled {
-		return 0, err
+const newsAgeFilteredMessage = "新闻发布时间超过 48 小时，任务已过滤。"
+
+// DiscardExpiredNewsJobs closes queued/retrying news tasks in bounded batches.
+// Terminal rows and unrelated work are retained; the scheduler repeats this
+// so an item that ages out while waiting is removed before inference.
+func DiscardExpiredNewsJobs(ctx context.Context, db *pgxpool.Pool, limit int) (int64, error) {
+	if limit < 1 || limit > 1000 {
+		limit = 500
 	}
-	rows, err := db.Query(ctx, `
-		SELECT j.id::text,j.task_type,coalesce(asset_run.id::text,event_run.id::text),
-		       coalesce(asset_run.payload,event_run.payload)::jsonb,events.published_at
-		FROM go_jobs j
-		LEFT JOIN research_runs asset_run ON j.task_type='market_loop.research_asset' AND asset_run.payload->>'celery_task_id'=j.id::text
-		LEFT JOIN event_research_runs event_run ON j.task_type='market_loop.research_event' AND event_run.payload->>'celery_task_id'=j.id::text
-		JOIN news_events events ON events.id=coalesce(asset_run.event_id,event_run.event_id)
-		WHERE j.queue='research' AND j.status IN ('queued','retrying')`)
+	tx, err := db.Begin(ctx)
 	if err != nil {
 		return 0, err
 	}
-	defer rows.Close()
-	filtered := 0
-	for rows.Next() {
-		var taskID, taskType, runID string
-		var body []byte
-		var publishedAt time.Time
-		if rows.Scan(&taskID, &taskType, &runID, &body, &publishedAt) != nil {
-			continue
-		}
-		var run map[string]any
-		if json.Unmarshal(body, &run) != nil || researchNewsAgeFilterBypass(run) || !ResearchNewsExpired(filter, publishedAt, time.Now().UTC()) {
-			continue
-		}
-		result, updateErr := db.Exec(ctx, `UPDATE go_jobs SET cancel_requested_at=now(),status='cancelled',completed_at=now(),updated_at=now() WHERE id=$1 AND status IN ('queued','retrying')`, taskID)
-		if updateErr != nil || result.RowsAffected() != 1 {
-			continue
-		}
-		markResearchNewsAgeFiltered(run, publishedAt)
-		updated, _ := json.Marshal(run)
-		table := "research_runs"
-		if taskType == researchEventTask {
-			table = "event_research_runs"
-		}
-		if _, err = db.Exec(ctx, fmt.Sprintf(`UPDATE %s SET status='filtered',payload=$2,updated_at=now() WHERE id=$1`, table), runID, updated); err != nil {
-			return filtered, err
-		}
-		updateResearchAgeFilterTracking(ctx, redisClient, taskID)
-		filtered++
+	defer tx.Rollback(ctx) //nolint:errcheck
+	var count int64
+	err = tx.QueryRow(ctx, fmt.Sprintf(`WITH expired AS (
+        SELECT j.id FROM go_jobs j
+        WHERE j.queue IN ('extract','assist','research')
+          AND j.status IN ('queued','retrying')
+          AND %s < now()-interval '48 hours'
+        ORDER BY j.created_at,j.id FOR UPDATE OF j SKIP LOCKED LIMIT $1
+    ), cancelled AS (
+        UPDATE go_jobs j SET status='cancelled',cancel_requested_at=now(),completed_at=now(),updated_at=now(),
+            error=$2,result=jsonb_build_object('status','filtered','reason','news_age_filtered')
+        FROM expired WHERE j.id=expired.id
+        RETURNING j.id,j.task_type,j.payload
+    ), event_runs AS (
+        UPDATE event_research_runs r SET status='filtered',updated_at=now(),
+            payload=(r.payload::jsonb || jsonb_build_object('status','filtered','retryable_reason','news_age_filtered','error',$2,'completed_at',now(),'updated_at',now()))::json
+        FROM cancelled c WHERE c.task_type='market_loop.research_event' AND r.id::text=c.payload->'args'->>1
+        RETURNING r.id
+    ), asset_runs AS (
+        UPDATE research_runs r SET status='filtered',updated_at=now(),
+            payload=(r.payload::jsonb || jsonb_build_object('status','filtered','retryable_reason','news_age_filtered','error',$2,'completed_at',now(),'updated_at',now()))::json
+        FROM cancelled c WHERE c.task_type='market_loop.research_asset' AND r.id::text=c.payload->'args'->>2
+        RETURNING r.id
+    ), news_state AS (
+        UPDATE news_processing p SET status='cancelled',last_error=$2,completed_at=now(),updated_at=now()
+        FROM cancelled c WHERE c.task_type IN ('market_loop.extract_news_item','market_loop.retry_news_item')
+          AND p.news_id::text=CASE WHEN c.task_type='market_loop.extract_news_item' THEN c.payload->'args'->>1 ELSE c.payload->'args'->>0 END
+        RETURNING p.news_id
+    ) SELECT count(*) FROM cancelled`, newsPublicationSQL), limit, newsAgeFilteredMessage).Scan(&count)
+	if err != nil {
+		return 0, err
 	}
-	return filtered, rows.Err()
+	return count, tx.Commit(ctx)
+}
+
+// DiscardExpiredNewsOutbox prevents old news from being re-enqueued by the
+// durable discovery dispatcher, including after a scheduler restart.
+func DiscardExpiredNewsOutbox(ctx context.Context, db *pgxpool.Pool) (int64, error) {
+	var count int64
+	err := db.QueryRow(ctx, `WITH expired AS (
+        UPDATE news_processing_outbox o SET status='cancelled',last_error=$1,updated_at=now()
+        FROM news_items n WHERE o.news_id=n.id AND o.status IN ('pending','failed','dispatching')
+          AND n.published_at<now()-interval '48 hours' RETURNING o.news_id
+    ), state AS (
+        UPDATE news_processing p SET status='cancelled',last_error=$1,completed_at=now(),updated_at=now()
+        FROM expired e WHERE p.news_id=e.news_id AND p.status NOT IN ('completed','cancelled') RETURNING p.news_id
+    ) SELECT count(*) FROM expired`, newsAgeFilteredMessage).Scan(&count)
+	if err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+// DiscardExpiredClaimedNews catches the race where a job ages out between
+// scheduler sweeps and also covers manual retries and already claimed work.
+func DiscardExpiredClaimedNews(ctx context.Context, db *pgxpool.Pool, job Job) (bool, error) {
+	if job.Queue != "extract" && job.Queue != "assist" && job.Queue != "research" {
+		return false, nil
+	}
+	var publishedAt *time.Time
+	err := db.QueryRow(ctx, fmt.Sprintf(`SELECT %s FROM go_jobs j WHERE j.id=$1`, newsPublicationSQL), job.ID).Scan(&publishedAt)
+	if err != nil {
+		return false, err
+	}
+	if publishedAt == nil || !ResearchNewsExpired(DefaultResearchNewsAgeFilter(), *publishedAt, time.Now().UTC()) {
+		return false, nil
+	}
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	_, err = tx.Exec(ctx, `UPDATE go_jobs SET cancel_requested_at=now(),error=$2,
+        result=jsonb_build_object('status','filtered','reason','news_age_filtered') WHERE id=$1 AND status='running'`, job.ID, newsAgeFilteredMessage)
+	if err != nil {
+		return false, err
+	}
+	switch job.TaskType {
+	case researchEventTask, researchAssetTask:
+		var runID string
+		var run map[string]any
+		var args taskEnvelope
+		if err = json.Unmarshal(job.Payload, &args); err != nil {
+			return false, err
+		}
+		index, table := 2, "research_runs"
+		if job.TaskType == researchEventTask {
+			index, table = 1, "event_research_runs"
+		}
+		if len(args.Args) <= index {
+			return false, fmt.Errorf("missing research run id")
+		}
+		runID = fmt.Sprint(args.Args[index])
+		var body []byte
+		if err = tx.QueryRow(ctx, `SELECT payload::jsonb FROM `+table+` WHERE id::text=$1`, runID).Scan(&body); err != nil {
+			return false, err
+		}
+		if err = json.Unmarshal(body, &run); err != nil {
+			return false, err
+		}
+		markResearchNewsAgeFiltered(run, *publishedAt)
+		body, _ = json.Marshal(run)
+		if _, err = tx.Exec(ctx, `UPDATE `+table+` SET status='filtered',payload=$2,updated_at=now() WHERE id::text=$1`, runID, body); err != nil {
+			return false, err
+		}
+	case extractTask, retryNewsTask:
+		var args taskEnvelope
+		if err = json.Unmarshal(job.Payload, &args); err != nil {
+			return false, err
+		}
+		index := 0
+		if job.TaskType == extractTask {
+			index = 1
+		}
+		if len(args.Args) > index {
+			_, err = tx.Exec(ctx, `UPDATE news_processing SET status='cancelled',last_error=$2,completed_at=now(),updated_at=now() WHERE news_id::text=$1`, fmt.Sprint(args.Args[index]), newsAgeFilteredMessage)
+			if err != nil {
+				return false, err
+			}
+		}
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func markResearchNewsAgeFiltered(run map[string]any, publishedAt time.Time) {
 	now := iso(time.Now())
-	run["status"], run["retryable_reason"], run["error"] = "filtered", "news_age_filtered", "新闻发布时间超过 24 小时，自动研究已过滤；可手动重试。"
+	run["status"], run["retryable_reason"], run["error"] = "filtered", "news_age_filtered", newsAgeFilteredMessage
 	run["completed_at"], run["updated_at"] = now, now
-	appendAnalysisStep(run, analysisStep("research_news_age_filter", "filtered", "go-worker", "新闻发布时间超过 24 小时，自动研究已过滤；可手动重试。", map[string]any{"published_at": iso(publishedAt), "max_age_hours": 24}))
-}
-
-func updateResearchAgeFilterTracking(ctx context.Context, redisClient *redis.Client, taskID string) {
-	if redisClient == nil {
-		return
-	}
-	key := "market-loop:model-queue:research:tasks"
-	raw, _ := redisClient.HGet(ctx, key, taskID).Bytes()
-	payload := map[string]any{}
-	_ = json.Unmarshal(raw, &payload)
-	payload["status"], payload["error"], payload["updated_at"], payload["completed_at"] = "filtered", "新闻发布时间超过 24 小时，自动研究已过滤；可手动重试。", iso(time.Now()), iso(time.Now())
-	body, _ := json.Marshal(payload)
-	_ = redisClient.HSet(ctx, key, taskID, body).Err()
-	_ = redisClient.Expire(ctx, key, modelTaskTTL).Err()
+	appendAnalysisStep(run, analysisStep("research_news_age_filter", "filtered", "go-worker", newsAgeFilteredMessage, map[string]any{"published_at": iso(publishedAt), "max_age_hours": 48}))
 }

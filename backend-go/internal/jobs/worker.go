@@ -135,6 +135,15 @@ func (w *Worker) claimLoop(claimCtx, drainCtx context.Context, researchMode stri
 }
 
 func (w *Worker) execute(parent context.Context, job Job) {
+	filtered, filterErr := DiscardExpiredClaimedNews(parent, w.Store.pool, job)
+	if filterErr != nil {
+		_ = w.Store.Fail(parent, job, w.ID, filterErr)
+		return
+	}
+	if filtered {
+		_ = w.Store.CompleteCancellation(parent, job.ID, w.ID)
+		return
+	}
 	handler := w.Handlers[job.TaskType]
 	if handler == nil {
 		cause := permanentJobError{errors.New("unregistered Go task type: " + job.TaskType)}

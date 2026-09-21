@@ -2230,7 +2230,7 @@ func (runtime *researchRuntime) enqueueAssetResearch(ctx context.Context, event,
 }
 
 func (runtime *researchRuntime) filterExpiredAutomaticResearch(ctx context.Context, job Job, run, event map[string]any, eventRun bool) (bool, error) {
-	if event == nil || researchNewsAgeFilterBypass(run) {
+	if event == nil {
 		return false, nil
 	}
 	filter, err := LoadResearchNewsAgeFilter(ctx, runtime.db)
@@ -2247,7 +2247,6 @@ func (runtime *researchRuntime) filterExpiredAutomaticResearch(ctx context.Conte
 		return false, err
 	}
 	_ = NewStore(runtime.db).Cancel(ctx, job.ID)
-	updateResearchAgeFilterTracking(ctx, runtime.redis, job.ID.String())
 	return true, nil
 }
 

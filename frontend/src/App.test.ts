@@ -1788,7 +1788,7 @@ describe("research queue page", () => {
     expect(disabledMarkup).toContain('type="checkbox"');
     expect(disabledMarkup).not.toContain('checked=""');
     expect(researchMarkup).not.toContain("过滤 48h 已研究");
-    expect(researchMarkup).toContain("过滤 24h 新闻");
+    expect(researchMarkup).toContain("过滤 48h 新闻");
 
     const task = {
       task_id: "mapping-1", kind: "asset_mapping", entity_id: "event-1", instance_id: "assist-0",

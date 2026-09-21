@@ -24,22 +24,26 @@ func (s *Server) updateResearchNewsAgeFilter(w http.ResponseWriter, r *http.Requ
 	if !decodeJSONBody(w, r, &input) {
 		return
 	}
-	enabled := true
-	if input.Enabled != nil {
-		enabled = *input.Enabled
-	}
-	filter, err := jobs.SaveResearchNewsAgeFilter(r.Context(), s.db, enabled)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "research news age filter update failed")
+	if input.Enabled != nil && !*input.Enabled {
+		writeError(w, http.StatusConflict, "48-hour news expiry is mandatory for all news queues")
 		return
 	}
-	discarded := 0
-	if enabled {
-		discarded, err = jobs.FilterExpiredAutomaticResearch(r.Context(), s.db, s.redis)
+	filter := jobs.DefaultResearchNewsAgeFilter()
+	var discarded int64
+	for {
+		count, err := jobs.DiscardExpiredNewsJobs(r.Context(), s.db, 500)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "expired research cleanup failed")
+			writeError(w, http.StatusInternalServerError, "expired news cleanup failed")
 			return
 		}
+		discarded += count
+		if count < 500 {
+			break
+		}
+	}
+	if _, err := jobs.DiscardExpiredNewsOutbox(r.Context(), s.db); err != nil {
+		writeError(w, http.StatusInternalServerError, "expired news outbox cleanup failed")
+		return
 	}
 	_ = s.redis.Del(r.Context(), modelQueueOverviewCacheKey).Err()
 	writeJSON(w, http.StatusOK, map[string]any{"enabled": filter.Enabled, "max_age_hours": filter.MaxAgeHours, "discarded": discarded})
