@@ -29,6 +29,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
+    restart: unless-stopped
 
   redis:
     image: redis:7-alpine
@@ -42,6 +43,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
+    restart: unless-stopped
 
   searxng:
     image: ghcr.io/searxng/searxng:2026.8.21-bbb3c7d82@sha256:4e211fc2669b3e2ddfe571ec23fae6648e748353b31137eb8ef4972744969cda
@@ -495,6 +497,7 @@ services:
       ADMIN_API_TOKEN: ${ADMIN_API_TOKEN:-}
     depends_on:
       - go-api
+    restart: unless-stopped
 
 volumes:
   postgres-data:
