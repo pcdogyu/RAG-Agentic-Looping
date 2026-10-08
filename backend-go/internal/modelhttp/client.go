@@ -38,6 +38,13 @@ func Do(client *http.Client, request *http.Request) (*http.Response, error) {
 		}
 		think, _ := input["think"].(bool)
 		output["chat_template_kwargs"] = map[string]any{"enable_thinking": think}
+		if options, ok := input["options"].(map[string]any); ok {
+			if contextLength, ok := options["num_ctx"].(float64); ok && contextLength > 0 {
+				if err := applyContextBudget(client, request, output, int(contextLength)); err != nil {
+					return nil, err
+				}
+			}
+		}
 		body, err := json.Marshal(output)
 		if err != nil {
 			return nil, err
@@ -98,4 +105,49 @@ func Do(client *http.Client, request *http.Request) (*http.Response, error) {
 	response.ContentLength = int64(len(body))
 	response.Header.Del("Content-Length")
 	return response, nil
+}
+
+// applyContextBudget counts the rendered chat template at the serving tokenizer.
+// Oversized input is rejected rather than silently dropping evidence; generation
+// (including thinking tokens) is limited to the remaining total context budget.
+func applyContextBudget(client *http.Client, original *http.Request, output map[string]any, limit int) error {
+	input := map[string]any{"model": output["model"], "messages": output["messages"], "add_generation_prompt": true, "chat_template_kwargs": output["chat_template_kwargs"]}
+	body, err := json.Marshal(input)
+	if err != nil {
+		return err
+	}
+	request := original.Clone(original.Context())
+	request.URL.Path = strings.TrimSuffix(original.URL.Path, "/v1/api/chat") + "/tokenize"
+	request.Body = io.NopCloser(bytes.NewReader(body))
+	request.ContentLength = int64(len(body))
+	request.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(body)), nil }
+	response, err := client.Do(request)
+	if err != nil {
+		return fmt.Errorf("count model context: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("model tokenizer returned %s", response.Status)
+	}
+	var tokens struct {
+		Count          *int `json:"count"`
+		MaxModelLength int  `json:"max_model_len"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 16<<20)).Decode(&tokens); err != nil {
+		return fmt.Errorf("decode token count: %w", err)
+	}
+	if tokens.Count == nil || *tokens.Count < 0 {
+		return fmt.Errorf("model tokenizer returned invalid count")
+	}
+	if tokens.MaxModelLength > 0 && tokens.MaxModelLength < limit {
+		limit = tokens.MaxModelLength
+	}
+	remaining := limit - *tokens.Count
+	if remaining <= 0 {
+		return fmt.Errorf("model input exceeds context budget: input=%d limit=%d", *tokens.Count, limit)
+	}
+	if maxOutput, ok := output["max_tokens"].(float64); !ok || maxOutput <= 0 || maxOutput > float64(remaining) {
+		output["max_tokens"] = remaining
+	}
+	return nil
 }

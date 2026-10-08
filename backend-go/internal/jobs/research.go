@@ -1305,16 +1305,16 @@ func (runtime *researchRuntime) callResearchModel(ctx context.Context, entityID 
 	attempts := make([]researchModelAttempt, 0, 3)
 	if profile == researchProfileFast {
 		attempts = append(attempts,
-			researchModelAttempt{Think: false, MaxOutput: fastMaxOutput, ContextLength: fastContext, Profile: researchProfileFast, RouteReason: routeReason},
+			researchModelAttempt{Think: runtime.cfg.ResearchThink, MaxOutput: fastMaxOutput, ContextLength: fastContext, Profile: researchProfileFast, RouteReason: routeReason},
 			researchModelAttempt{Think: runtime.cfg.ResearchThink, MaxOutput: primaryMaxOutput, ContextLength: deepContext, Profile: researchProfileDeep, RouteReason: "fast_output_invalid", Escalated: true},
 		)
 		if runtime.cfg.ResearchThink {
-			attempts = append(attempts, researchModelAttempt{Think: false, MaxOutput: fallbackMaxOutput, ContextLength: deepContext, Profile: researchProfileDeep, RouteReason: "fast_output_invalid", Escalated: true})
+			attempts = append(attempts, researchModelAttempt{Think: runtime.cfg.ResearchThink, MaxOutput: fallbackMaxOutput, ContextLength: deepContext, Profile: researchProfileDeep, RouteReason: "fast_output_invalid", Escalated: true})
 		}
 	} else {
 		attempts = append(attempts, researchModelAttempt{Think: runtime.cfg.ResearchThink, MaxOutput: primaryMaxOutput, ContextLength: deepContext, Profile: researchProfileDeep, RouteReason: routeReason})
 		if runtime.cfg.ResearchThink {
-			attempts = append(attempts, researchModelAttempt{Think: false, MaxOutput: fallbackMaxOutput, ContextLength: deepContext, Profile: researchProfileDeep, RouteReason: routeReason})
+			attempts = append(attempts, researchModelAttempt{Think: runtime.cfg.ResearchThink, MaxOutput: fallbackMaxOutput, ContextLength: deepContext, Profile: researchProfileDeep, RouteReason: routeReason})
 		}
 	}
 	for index := range attempts {

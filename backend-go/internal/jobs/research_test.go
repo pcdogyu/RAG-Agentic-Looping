@@ -356,7 +356,7 @@ func TestResearchModelRequestDisablesThinkingByDefault(t *testing.T) {
 	}
 }
 
-func TestResearchModelFallsBackWithoutThinkingAfterOutputLimit(t *testing.T) {
+func TestResearchModelPreservesThinkingAfterOutputLimit(t *testing.T) {
 	requests := make([]map[string]any, 0, 2)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request map[string]any
@@ -386,7 +386,7 @@ func TestResearchModelFallsBackWithoutThinkingAfterOutputLimit(t *testing.T) {
 	if err := runtime.callResearchModel(context.Background(), uuid.New(), "research_run", "report_drafting", "system", "prompt", map[string]any{"type": "object"}, "research-0", "deep", "test", &result); err != nil {
 		t.Fatalf("fallback research call failed: %v", err)
 	}
-	if len(requests) != 2 || requests[0]["think"] != true || requests[1]["think"] != false {
+	if len(requests) != 2 || requests[0]["think"] != true || requests[1]["think"] != true {
 		t.Fatalf("unexpected thinking fallback sequence: %#v", requests)
 	}
 	firstOptions, secondOptions := objectValue(requests[0]["options"]), objectValue(requests[1]["options"])
@@ -398,7 +398,7 @@ func TestResearchModelFallsBackWithoutThinkingAfterOutputLimit(t *testing.T) {
 	}
 }
 
-func TestFastResearchEscalatesToThinkingAfterInvalidOutput(t *testing.T) {
+func TestFastResearchPreservesThinkingDuringEscalation(t *testing.T) {
 	requests := make([]map[string]any, 0, 2)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request map[string]any
@@ -414,19 +414,19 @@ func TestFastResearchEscalatesToThinkingAfterInvalidOutput(t *testing.T) {
 	}))
 	defer server.Close()
 	runtime := newResearchRuntime(config.Config{
-		ResearchModel: "qwen3:4b-thinking", ResearchURLs: []string{server.URL}, ResearchThink: true,
-		ResearchFastContext: 16384, ResearchFastMaxOutput: 4096, ResearchContextLength: 32768, ResearchMaxOutput: 16384,
+		ResearchModel: "qwen3.8-flash-next", ResearchURLs: []string{server.URL}, ResearchThink: true,
+		ResearchFastContext: 262144, ResearchFastMaxOutput: 4096, ResearchContextLength: 262144, ResearchMaxOutput: 16384,
 	}, nil, nil)
 	runtime.client = server.Client()
 	var result map[string]any
 	if err := runtime.callResearchModel(context.Background(), uuid.New(), "research_run", "report_drafting", "system", "prompt", map[string]any{"type": "object"}, "research-0", "fast", "default_fast", &result); err != nil {
 		t.Fatal(err)
 	}
-	if len(requests) != 2 || requests[0]["think"] != false || requests[1]["think"] != true {
+	if len(requests) != 2 || requests[0]["think"] != true || requests[1]["think"] != true {
 		t.Fatalf("unexpected fast/deep sequence: %#v", requests)
 	}
 	first, second := objectValue(requests[0]["options"]), objectValue(requests[1]["options"])
-	if numberValue(first["num_ctx"]) != 16384 || numberValue(first["num_predict"]) != 4096 || numberValue(second["num_ctx"]) != 32768 {
+	if numberValue(first["num_ctx"]) != 262144 || numberValue(first["num_predict"]) != 4096 || numberValue(second["num_ctx"]) != 262144 {
 		t.Fatalf("unexpected profiles: first=%#v second=%#v", first, second)
 	}
 }
