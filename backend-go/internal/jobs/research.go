@@ -25,6 +25,7 @@ import (
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/counterresearch"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/fundamentals"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/marketpolicy"
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/modelhttp"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/prediction"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/rating"
 	"github.com/redis/go-redis/v9"
@@ -1344,7 +1345,7 @@ func (runtime *researchRuntime) callResearchModel(ctx context.Context, entityID 
 				continue
 			}
 			httpRequest.Header.Set("Content-Type", "application/json")
-			response, err := runtime.client.Do(httpRequest)
+			response, err := modelhttp.Do(runtime.client, httpRequest)
 			if err != nil {
 				lastErr = err
 				runtime.persistResearchAudit(context.WithoutCancel(ctx), logicalID, entityID, entityType, operation, attemptIndex+1, "failed", started, messages, schema, "", nil, err.Error(), 0, 0, endpoint, researchAttemptMetrics(*attempt, ollamaResponse{}, false, deepWait))

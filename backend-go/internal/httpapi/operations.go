@@ -15,6 +15,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/modelhttp"
 )
 
 const (
@@ -157,7 +158,7 @@ func fetchOllamaModelNames(ctx context.Context, client *http.Client, endpoint st
 	if err != nil {
 		return nil
 	}
-	response, err := client.Do(req)
+	response, err := modelhttp.Do(client, req)
 	if err != nil {
 		return nil
 	}

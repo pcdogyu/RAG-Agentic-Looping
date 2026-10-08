@@ -20,6 +20,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/config"
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/modelhttp"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -230,7 +231,7 @@ func (runtime *evolutionRuntime) callCodeModel(ctx context.Context, prompt strin
 				continue
 			}
 			req.Header.Set("Content-Type", "application/json")
-			response, err := runtime.client.Do(req)
+			response, err := modelhttp.Do(runtime.client, req)
 			if err != nil {
 				lastErr = err
 				runtime.persistCodeAudit(context.WithoutCancel(ctx), logicalID, attempt, "failed", started, messages, schema, "", nil, err.Error(), 0, 0, index)

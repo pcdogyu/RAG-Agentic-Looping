@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/config"
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/modelhttp"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/prediction"
 	"github.com/redis/go-redis/v9"
 )
@@ -89,7 +90,7 @@ func (runtime *operationsRuntime) selectCodeInstance(ctx context.Context) string
 		if err != nil {
 			continue
 		}
-		response, err := runtime.client.Do(request)
+		response, err := modelhttp.Do(runtime.client, request)
 		if err != nil {
 			continue
 		}

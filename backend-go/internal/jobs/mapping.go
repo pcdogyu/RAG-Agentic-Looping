@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/config"
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/modelhttp"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -339,7 +340,7 @@ func (runtime *ExtractRuntime) generateMapping(ctx context.Context, event map[st
 				continue
 			}
 			req.Header.Set("Content-Type", "application/json")
-			response, err := runtime.client.Do(req)
+			response, err := modelhttp.Do(runtime.client, req)
 			if err != nil {
 				lastErr = err
 				runtime.persistMappingAudit(ctx, logicalID, stringValue(event["id"]), attempt, "failed", started, messages, schema, "", nil, err.Error(), 0, 0, index)
