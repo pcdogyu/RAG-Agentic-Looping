@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -421,7 +422,7 @@ func (runtime *discoveryRuntime) discover(ctx context.Context, since time.Time, 
 		batch discoveryBatch
 	}
 	providers := []func(context.Context, time.Time, int) discoveryBatch{
-		runtime.discoverFMP, runtime.discoverRSS, runtime.discoverMarketAdapter, runtime.discoverMCPFeeds,
+		runtime.discoverFMP, runtime.discoverRSS, runtime.discoverMarketAdapter, runtime.discoverMCPFeeds, runtime.discoverNewsLiquid,
 	}
 	results := make(chan outcome, len(providers))
 	for _, provider := range providers {
@@ -574,6 +575,212 @@ func (runtime *discoveryRuntime) discoverMarketAdapter(ctx context.Context, sinc
 		batch.Reports = append(batch.Reports, healthySourceReport(source, "market-adapter", attempted, items))
 	}
 	return batch
+}
+
+// discoverNewsLiquid pulls the NewsLiquid/OpenNews (6551.io) flash feed
+// directly through its REST API. The upstream is queried newest-first with
+// plain JSON paging, so no MCP handshake or tool mapping is required.
+func (runtime *discoveryRuntime) discoverNewsLiquid(ctx context.Context, since time.Time, limit int) discoveryBatch {
+	attempted := time.Now().UTC()
+	batch := discoveryBatch{}
+	const source, provider = "newsliquid", "opennews-rest"
+	token, enabled := runtime.newsLiquidSettings(ctx)
+	if !enabled || token == "" {
+		return batch
+	}
+	base := strings.TrimRight(strings.TrimSpace(runtime.cfg.OpenNewsBaseURL), "/")
+	if base == "" {
+		base = "https://ai.6551.io"
+	}
+	size := min(max(limit, 1), 100)
+	result := make([]discoveredNews, 0)
+	seen := map[string]bool{}
+	for page := 1; page <= 3; page++ {
+		items, err := runtime.fetchNewsLiquidPage(ctx, base, token, page, size)
+		if err != nil {
+			batch.addSourceError(source, provider, attempted, err)
+			return batch
+		}
+		if len(items) == 0 {
+			break
+		}
+		reached := false
+		for _, raw := range items {
+			published := newsLiquidTime(firstDiscoveryValue(raw, "ts", "time", "published_at"))
+			if published.IsZero() || published.Before(since) {
+				reached = true
+				continue
+			}
+			content := discoveryContentText(firstDiscoveryString(raw, "text", "description", "content"))
+			urlValue := strings.TrimSpace(fallbackString(stringValue(raw["link"]), stringValue(raw["url"])))
+			if content == "" || !validDiscoveryURL(urlValue) {
+				continue
+			}
+			item := newDiscoveredNews(source, provider, "aggregator", discoveryHeadline(content, 120), content, canonicalDiscoveryURL(urlValue), newsLiquidLanguage(content), published, newsLiquidSymbols(raw), newsLiquidMetadata(raw))
+			fingerprint := sha256.Sum256([]byte(strings.ToLower(strings.Join(strings.Fields(content), " "))))
+			item.ContentHash = hex.EncodeToString(fingerprint[:])
+			if seen[item.ContentHash] {
+				continue
+			}
+			seen[item.ContentHash] = true
+			result = append(result, item)
+		}
+		if reached || len(items) < size || len(result) >= limit {
+			break
+		}
+	}
+	if len(result) > limit {
+		result = result[:limit]
+	}
+	batch.Items = append(batch.Items, result...)
+	batch.Reports = append(batch.Reports, healthySourceReport(source, provider, attempted, result))
+	return batch
+}
+
+// newsLiquidSettings resolves the upstream token: the encrypted per-source
+// secret configured on the data-source page wins over the OPENNEWS_TOKEN
+// environment fallback, and a disabled registry row switches the source off.
+func (runtime *discoveryRuntime) newsLiquidSettings(ctx context.Context) (string, bool) {
+	token := strings.TrimSpace(runtime.cfg.OpenNewsToken)
+	if runtime.db == nil {
+		return token, token != ""
+	}
+	var enabled bool
+	var encrypted *string
+	err := runtime.db.QueryRow(ctx, `SELECT enabled,encrypted_secret FROM mcp_sources WHERE name='newsliquid' ORDER BY created_at LIMIT 1`).Scan(&enabled, &encrypted)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return token, token != ""
+	}
+	if err != nil || !enabled {
+		return "", false
+	}
+	if encrypted != nil && strings.TrimSpace(*encrypted) != "" {
+		if value, decryptErr := decryptDiscoverySecret(*encrypted, runtime.cfg.MCPSecretKey); decryptErr == nil && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value), true
+		}
+	}
+	return token, token != ""
+}
+
+func (runtime *discoveryRuntime) fetchNewsLiquidPage(ctx context.Context, base, token string, page, limit int) ([]map[string]any, error) {
+	body, _ := json.Marshal(map[string]any{"limit": limit, "page": page})
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/open/news_search", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("Authorization", "Bearer "+token)
+	response, err := runtime.client.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	payload, err := io.ReadAll(io.LimitReader(response.Body, 8<<20))
+	if err != nil {
+		return nil, err
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		detail := strings.TrimSpace(string(payload))
+		if runes := []rune(detail); len(runes) > 200 {
+			detail = string(runes[:200])
+		}
+		if detail == "" {
+			return nil, fmt.Errorf("NewsLiquid HTTP %d", response.StatusCode)
+		}
+		return nil, fmt.Errorf("NewsLiquid HTTP %d: %s", response.StatusCode, detail)
+	}
+	var decoded any
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		return nil, fmt.Errorf("NewsLiquid returned invalid JSON: %w", err)
+	}
+	return discoveryObjectItems(decoded), nil
+}
+
+// newsLiquidTime accepts both the ISO timestamps documented by the upstream
+// and the numeric epoch seconds or milliseconds that older payloads carry.
+func newsLiquidTime(value any) time.Time {
+	if parsed := discoveryTime(value); !parsed.IsZero() {
+		return parsed
+	}
+	var seconds float64
+	switch typed := value.(type) {
+	case float64:
+		seconds = typed
+	case int:
+		seconds = float64(typed)
+	case int64:
+		seconds = float64(typed)
+	case json.Number:
+		parsed, parseErr := typed.Float64()
+		if parseErr != nil {
+			return time.Time{}
+		}
+		seconds = parsed
+	case string:
+		parsed, parseErr := strconv.ParseFloat(strings.TrimSpace(typed), 64)
+		if parseErr != nil {
+			return time.Time{}
+		}
+		seconds = parsed
+	default:
+		return time.Time{}
+	}
+	if seconds <= 0 {
+		return time.Time{}
+	}
+	if seconds >= 1e12 {
+		return time.UnixMilli(int64(seconds)).UTC()
+	}
+	return time.Unix(int64(seconds), 0).UTC()
+}
+
+func newsLiquidLanguage(content string) string {
+	for _, symbol := range content {
+		if unicode.Is(unicode.Han, symbol) {
+			return "zh"
+		}
+	}
+	return "en"
+}
+
+func newsLiquidSymbols(raw map[string]any) []string {
+	symbols := make([]string, 0)
+	for _, value := range anySlice(raw["coins"]) {
+		text := strings.TrimSpace(stringValue(objectValue(value)["symbol"]))
+		if text == "" {
+			text = strings.TrimSpace(stringValue(value))
+		}
+		if text != "" {
+			symbols = appendUnique(symbols, text)
+		}
+	}
+	return symbols
+}
+
+func newsLiquidMetadata(raw map[string]any) map[string]any {
+	metadata := map[string]any{"rest_api": "news_search_v1"}
+	if raw["id"] != nil {
+		metadata["upstream_id"] = raw["id"]
+	}
+	if value := strings.TrimSpace(stringValue(raw["newsType"])); value != "" {
+		metadata["news_type"] = value
+	}
+	if value := strings.TrimSpace(stringValue(raw["engineType"])); value != "" {
+		metadata["engine_type"] = value
+	}
+	if rating := objectValue(raw["aiRating"]); rating != nil {
+		trimmed := map[string]any{}
+		for _, key := range []string{"score", "grade", "signal", "status", "summary", "enSummary"} {
+			if rating[key] != nil {
+				trimmed[key] = rating[key]
+			}
+		}
+		if len(trimmed) > 0 {
+			metadata["ai_rating"] = trimmed
+		}
+	}
+	return metadata
 }
 
 type rssDocument struct {

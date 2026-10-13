@@ -89,6 +89,8 @@ evals/                  冻结评估数据和基线
 
 内置 `search-mcp` 通过 `http://search-mcp:8080/mcp` 提供 `web_search` 工具，并转发到 SearXNG。内置 `news-mcp` 通过 `http://news-mcp:8080/mcp` 提供 `get_latest_news` 与 `search_news` 工具，并转发到 NewsLiquid/OpenNews（6551.io）的 `/open/news_search` API；上游 Bearer Token 在“数据源”页面按来源配置（也可用 `OPENNEWS_TOKEN` 环境变量兜底）。Go API 也支持在“数据源”页面添加其他 Streamable HTTP MCP 来源。
 
+新闻采集（`#/news` 新闻板）包含内置的 `newsliquid` 来源：Go 发现 Worker 直接通过 REST 调用 NewsLiquid/OpenNews 的 `POST /open/news_search`（不经过 MCP），按时间倒序抓取快讯并入库；上游 Token 优先取“数据源”页面 `newsliquid` 来源的加密密钥，否则回落到 `OPENNEWS_TOKEN`。上游配额耗尽（HTTP 402）时该来源面板会显示错误详情，充值或更换有额度的 Token 后自动恢复。
+
 FMP MCP 是可选服务：
 
 ```powershell

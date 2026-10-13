@@ -96,6 +96,8 @@ type Config struct {
 	CoinGeckoURL            string
 	DefiLlamaURL            string
 	WebSearchTimeout        time.Duration
+	OpenNewsBaseURL         string
+	OpenNewsToken           string
 }
 
 func Load() (Config, error) {
@@ -187,6 +189,8 @@ func Load() (Config, error) {
 		CoinGeckoURL:            strings.TrimRight(env("COINGECKO_BASE_URL", "https://api.coingecko.com/api/v3"), "/"),
 		DefiLlamaURL:            strings.TrimRight(env("DEFILLAMA_BASE_URL", "https://api.llama.fi"), "/"),
 		WebSearchTimeout:        time.Duration(envInt("WEB_SEARCH_TIMEOUT_SECONDS", 20)) * time.Second,
+		OpenNewsBaseURL:         strings.TrimRight(env("NEWS_SEARCH_API_BASE", "https://ai.6551.io"), "/"),
+		OpenNewsToken:           env("OPENNEWS_TOKEN", ""),
 	}
 	if cfg.WorkerConcurrency < 1 {
 		return Config{}, fmt.Errorf("GO_WORKER_CONCURRENCY must be at least 1")

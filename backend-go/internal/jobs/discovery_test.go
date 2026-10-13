@@ -1,8 +1,12 @@
 package jobs
 
 import (
+	"context"
+	"encoding/json"
 	"encoding/xml"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -159,5 +163,89 @@ func TestRestoreTruncatedMCPHeadlineCapsReconstructedContent(t *testing.T) {
 func TestDiscoverySchedulerIsEnabledForGoRuntime(t *testing.T) {
 	if !NewDiscoveryScheduler(config.Config{}, nil, nil).Enabled() {
 		t.Fatal("discovery scheduler must be enabled for the Go runtime")
+	}
+}
+
+func TestDiscoverNewsLiquidParsesRestFeed(t *testing.T) {
+	var gotPath, gotAuth string
+	var gotBody map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotAuth = r.URL.Path, r.Header.Get("Authorization")
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "total": 4, "data": []map[string]any{
+			{"id": 1, "text": "Bitcoin ETF inflows accelerate.", "link": "https://example.com/a?utm_source=x", "ts": "2026-10-13T08:00:00Z", "newsType": "Bloomberg", "engineType": "news", "coins": []map[string]any{{"symbol": "BTC"}}, "aiRating": map[string]any{"score": 88, "signal": "long", "status": "done"}},
+			{"id": 2, "text": "黄金储备增持。", "link": "https://example.com/b", "ts": float64(1791878400000)},
+			{"id": 3, "text": "旧消息。", "link": "https://example.com/old", "ts": "2026-10-12T01:00:00Z"},
+			{"id": 4, "text": "缺少链接。", "link": "", "ts": "2026-10-13T08:30:00Z"},
+		}})
+	}))
+	defer upstream.Close()
+	runtime := &discoveryRuntime{cfg: config.Config{OpenNewsBaseURL: upstream.URL, OpenNewsToken: "token"}, client: upstream.Client()}
+	batch := runtime.discoverNewsLiquid(context.Background(), time.Date(2026, 10, 13, 0, 0, 0, 0, time.UTC), 40)
+	if gotPath != "/open/news_search" || gotAuth != "Bearer token" {
+		t.Fatalf("unexpected request path=%q auth=%q", gotPath, gotAuth)
+	}
+	if gotBody["limit"] != float64(40) || gotBody["page"] != float64(1) {
+		t.Fatalf("unexpected upstream body: %v", gotBody)
+	}
+	if len(batch.Items) != 2 {
+		t.Fatalf("expected stale and link-less items filtered, got %d items: %#v", len(batch.Items), batch.Items)
+	}
+	first := batch.Items[0]
+	if first.Source != "newsliquid" || first.Provider != "opennews-rest" || first.Language != "en" || first.URL != "https://example.com/a" {
+		t.Fatalf("unexpected first item: %#v", first)
+	}
+	if len(first.Symbols) != 1 || first.Symbols[0] != "BTC" {
+		t.Fatalf("coin symbols were not extracted: %#v", first.Symbols)
+	}
+	if rating := objectValue(first.Metadata["ai_rating"]); rating == nil || rating["score"] != float64(88) {
+		t.Fatalf("AI rating was not preserved: %#v", first.Metadata)
+	}
+	if first.ContentHash == "" || first.ContentHash == newDiscoveredNews(first.Source, first.Provider, first.SourceQuality, first.Title, first.Summary, first.URL, first.Language, first.PublishedAt, nil, nil).ContentHash {
+		t.Fatalf("content fingerprint was not applied: %#v", first)
+	}
+	second := batch.Items[1]
+	if second.Language != "zh" || !second.PublishedAt.Equal(time.Date(2026, 10, 13, 8, 0, 0, 0, time.UTC)) {
+		t.Fatalf("epoch-millisecond timestamp was not parsed: %#v", second)
+	}
+	if len(batch.Reports) != 1 || batch.Reports[0].Status != "healthy" || batch.Reports[0].Source != "newsliquid" || batch.Reports[0].DiscoveredCount != 2 {
+		t.Fatalf("unexpected reports: %#v", batch.Reports)
+	}
+	if len(batch.Errors) != 0 {
+		t.Fatalf("unexpected errors: %v", batch.Errors)
+	}
+}
+
+func TestDiscoverNewsLiquidDisabledWithoutToken(t *testing.T) {
+	runtime := &discoveryRuntime{cfg: config.Config{}, client: http.DefaultClient}
+	batch := runtime.discoverNewsLiquid(context.Background(), time.Now().UTC().Add(-time.Hour), 40)
+	if len(batch.Items) != 0 || len(batch.Reports) != 0 || len(batch.Errors) != 0 {
+		t.Fatalf("source must stay silent without a token: %#v", batch)
+	}
+}
+
+func TestDiscoverNewsLiquidReportsQuotaErrorDetail(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusPaymentRequired)
+		_, _ = w.Write([]byte(`{"error":"insufficient quota","success":false}`))
+	}))
+	defer upstream.Close()
+	runtime := &discoveryRuntime{cfg: config.Config{OpenNewsBaseURL: upstream.URL, OpenNewsToken: "token"}, client: upstream.Client()}
+	batch := runtime.discoverNewsLiquid(context.Background(), time.Now().UTC().Add(-time.Hour), 40)
+	if len(batch.Reports) != 1 || batch.Reports[0].Status != "error" {
+		t.Fatalf("expected one error report: %#v", batch.Reports)
+	}
+	if !strings.Contains(batch.Reports[0].Error, "HTTP 402") || !strings.Contains(batch.Reports[0].Error, "insufficient quota") {
+		t.Fatalf("quota detail was not surfaced: %q", batch.Reports[0].Error)
+	}
+}
+
+func TestNewsLiquidTimeParsesEpochSeconds(t *testing.T) {
+	if actual := newsLiquidTime(float64(1791878400)); !actual.Equal(time.Date(2026, 10, 13, 8, 0, 0, 0, time.UTC)) {
+		t.Fatalf("epoch seconds were not parsed: %v", actual)
+	}
+	if actual := newsLiquidTime("not-a-time"); !actual.IsZero() {
+		t.Fatalf("invalid timestamp must stay zero: %v", actual)
 	}
 }
