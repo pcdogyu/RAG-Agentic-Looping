@@ -50,7 +50,10 @@ func main() {
 		slog.Error("maintenance lane", "error", err)
 		os.Exit(1)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	// Migrations run on every maintenance invocation, and a data repair such as the
+	// dotted-symbol headline restore scans the news tables, so give startup a budget
+	// that production can actually finish inside.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 	dependencies, err := platform.Open(ctx, cfg)
 	if err != nil {
