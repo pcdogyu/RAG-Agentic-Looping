@@ -86,6 +86,7 @@ services:
     environment:
       NEWS_MCP_ADDRESS: 0.0.0.0:8080
       NEWS_SEARCH_API_BASE: ${NEWS_SEARCH_API_BASE:-https://ai.6551.io}
+      OPENNEWS_TOKEN: ${OPENNEWS_TOKEN:-}
     healthcheck:
       test: ["CMD", "/usr/local/bin/news-mcp", "-healthcheck"]
       interval: 10s
