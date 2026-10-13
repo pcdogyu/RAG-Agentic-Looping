@@ -161,6 +161,12 @@ func segmentKinds(compact string) ([]string, bool) {
 		words = append([]string{word}, words...)
 		at = parentAt[at]
 	}
+	// A country directly in front of a company-forming industry word names an
+	// institution rather than a sector: "美国银行" is Bank of America, "印度航空" is
+	// Air India. The sector reading of those words carries a longer suffix ("银行业").
+	if namesCompany(words) {
+		return nil, false
+	}
 	kinds := make([]string, 0, len(words))
 	concrete := false
 	for _, word := range words {
@@ -221,12 +227,10 @@ func highestPriorityKind(kinds []string) string {
 	return best
 }
 
-// qualifierWords name a scope, a region or a measure of an object. They never make a
-// label publishable on their own, and an unknown region ("马来亚", "粤芯") is not part
-// of this list, which is what rejects institution names that end in a real industry
-// word such as "马来亚银行" or "粤芯半导体".
-var qualifierWords = []string{
-	// Countries, regions and waters that scope an object.
+// regionWords scope an object by geography or economic area. They are qualifiers, so
+// they can never make a label publishable, and a name that is not in this list
+// ("马来亚", "粤芯", "平安") leaves a residue that rejects the label.
+var regionWords = []string{
 	"美国", "中国", "日本", "欧洲", "欧元区", "欧盟", "英国", "法国", "德国", "意大利",
 	"加拿大", "澳大利亚", "新西兰", "俄罗斯", "乌克兰", "中东", "沙特", "伊朗", "伊拉克",
 	"以色列", "印度", "印度尼西亚", "印尼", "巴西", "墨西哥", "阿根廷", "智利", "秘鲁",
@@ -238,13 +242,15 @@ var qualifierWords = []string{
 	"红海", "黑海", "地中海", "波罗的海", "北海", "阿拉伯海", "亚丁湾", "几内亚湾",
 	"好望角", "马六甲海峡", "霍尔木兹海峡", "苏伊士运河", "巴拿马运河", "台湾海峡",
 	"南海", "东海", "黄海", "日本海",
-	// Scope and attribute words.
+}
+
+// measureWords name a scope, a measure or an industry component of an object.
+var measureWords = []string{
 	"战略", "商业", "国家", "政府", "官方", "民间", "国有", "私营", "大型", "主要", "重点",
 	"核心", "关键", "高端", "先进", "上游", "下游", "中游", "传统", "新兴", "现代", "绿色",
 	"清洁", "可再生", "联邦基金", "公开市场", "固定", "浮息", "挂钩",
-	// Measure, market and industry component words.
 	"市场", "水平", "数据", "指标", "指数", "目标", "区间", "上限", "下限", "中枢", "板块",
-	"行业", "领域", "环节", "体系", "规模", "总量", "增速", "增幅", "增长率", "波动",
+	"行业", "业", "领域", "环节", "体系", "规模", "总量", "增速", "增幅", "增长率", "波动",
 	"波动率", "期限", "就业", "增长", "情况", "端", "面", "兑", "封装", "零部件", "器件",
 	"设备", "代工", "晶圆", "操作", "进出口", "量",
 	// English qualifiers and product names, so "Gold Price" or "Copper Inventories"
@@ -254,4 +260,40 @@ var qualifierWords = []string{
 	"stockpiles", "market", "markets", "sector", "sectors", "data", "level", "levels",
 	"growth", "output", "capacity", "diesel", "gasoline", "fuel oil", "heating oil",
 	"jet fuel", "naphtha", "natural gas", "lpg", "ethane", "propane", "bitumen",
+}
+
+var qualifierWords = append(append([]string{}, regionWords...), measureWords...)
+
+var regionQualifierSet = wordSet(regionWords)
+
+// openScopeWords are the regional words that describe a market breadth rather than a
+// country, so they never form a company name: "全球航空" is global aviation, while
+// "印度航空" is Air India.
+var openScopeWords = wordSet([]string{
+	"全球", "世界", "国际", "国内", "海外", "境外", "境内", "亚太", "亚洲", "北美",
+	"拉美", "拉丁美洲", "非洲", "新兴市场", "发达经济体", "发展中经济体", "海湾",
+})
+
+// corporateFormTerms are industry words that name a listed company rather than a
+// sector once a country sits directly in front of them: "美国银行" is Bank of America
+// and "印度航空" is Air India. Sector words that regions legitimately scope
+// (石油, 港口, 航运) are deliberately absent, and "美国银行业" stays a sector because
+// it resolves to the longer vocabulary word 银行业.
+var corporateFormTerms = wordSet([]string{
+	"银行", "航空", "保险", "证券", "电信", "电讯", "铁路", "邮政",
+})
+
+// namesCompany reports whether a segmentation reads as a country plus a bare
+// corporate industry word.
+func namesCompany(words []string) bool {
+	return len(words) == 2 && regionQualifierSet[words[0]] && !openScopeWords[words[0]] &&
+		corporateFormTerms[words[1]]
+}
+
+func wordSet(words []string) map[string]bool {
+	set := make(map[string]bool, len(words))
+	for _, word := range words {
+		set[Normalized(word)] = true
+	}
+	return set
 }

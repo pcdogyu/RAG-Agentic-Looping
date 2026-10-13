@@ -200,6 +200,9 @@ var institutionMarkers = []string{
 	"公司", "集团", "股份", "银行间", "研究院", "研究所", "研究中心", "协会", "学会",
 	"联盟", "基金会", "大学", "学院", "学校", "会议", "座谈会", "论坛", "峰会", "航班",
 	"航班号", "机队", "工厂", "车间", "门店", "分公司", "事业部",
+	// Named central, development and multilateral banks. Their names contain flow and
+	// industry words ("储备", "开发", "银行"), so coverage alone would publish them.
+	"储备银行", "人民银行", "开发银行", "世界银行", "英格兰银行", "国际清算银行", "货币基金组织",
 }
 
 // institutionASCII uses the same bounded rule as the instrument codes.
