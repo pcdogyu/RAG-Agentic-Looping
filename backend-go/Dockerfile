@@ -11,7 +11,8 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /out/scheduler ./cmd/scheduler && \
     CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /out/maintenance ./cmd/maintenance && \
     CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /out/market-adapter ./cmd/market-adapter && \
-    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /out/search-mcp ./cmd/search-mcp
+    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /out/search-mcp ./cmd/search-mcp && \
+    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /out/news-mcp ./cmd/news-mcp
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/api /usr/local/bin/api
@@ -20,4 +21,5 @@ COPY --from=build /out/scheduler /usr/local/bin/scheduler
 COPY --from=build /out/maintenance /usr/local/bin/maintenance
 COPY --from=build /out/market-adapter /usr/local/bin/market-adapter
 COPY --from=build /out/search-mcp /usr/local/bin/search-mcp
+COPY --from=build /out/news-mcp /usr/local/bin/news-mcp
 ENTRYPOINT ["/usr/local/bin/api"]

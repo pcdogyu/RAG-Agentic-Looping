@@ -13,6 +13,7 @@
 | `go-*-worker` | Go | 抽取、映射、研究、发现、恢复、结果、主数据、演进等队列 |
 | `market-adapter` | Go | A/H 股行情、资产主数据和新闻适配 |
 | `search-mcp` | Go | 将 SearXNG 暴露为 Streamable HTTP MCP 工具 |
+| `news-mcp` | Go | 将 NewsLiquid/OpenNews（6551.io）新闻 API 暴露为 Streamable HTTP MCP 工具 |
 | `web` | React + Nginx | 管理和研究界面 |
 | `postgres` | PostgreSQL/pgvector | 业务数据和持久任务状态 |
 | `redis` | Redis | 调度锁、缓存和实时协调 |
@@ -86,7 +87,7 @@ evals/                  冻结评估数据和基线
 
 ## 搜索与 MCP
 
-内置 `search-mcp` 通过 `http://search-mcp:8080/mcp` 提供 `web_search` 工具，并转发到 SearXNG。Go API 也支持在“数据源”页面添加其他 Streamable HTTP MCP 来源。
+内置 `search-mcp` 通过 `http://search-mcp:8080/mcp` 提供 `web_search` 工具，并转发到 SearXNG。内置 `news-mcp` 通过 `http://news-mcp:8080/mcp` 提供 `get_latest_news` 与 `search_news` 工具，并转发到 NewsLiquid/OpenNews（6551.io）的 `/open/news_search` API；上游 Bearer Token 在“数据源”页面按来源配置（也可用 `OPENNEWS_TOKEN` 环境变量兜底）。Go API 也支持在“数据源”页面添加其他 Streamable HTTP MCP 来源。
 
 FMP MCP 是可选服务：
 

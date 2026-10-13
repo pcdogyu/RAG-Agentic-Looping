@@ -12,6 +12,7 @@
 | `cmd/maintenance` | 维护工具 |
 | `cmd/market-adapter` | A/H 股市场适配器 |
 | `cmd/search-mcp` | SearXNG Streamable HTTP MCP 网关 |
+| `cmd/news-mcp` | NewsLiquid/OpenNews（6551.io）Streamable HTTP MCP 网关 |
 | `cmd/evaluation` | 网络隔离的冻结评估门禁 |
 | `cmd/freeze-contract` | API 契约冻结工具 |
 
