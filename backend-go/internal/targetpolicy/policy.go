@@ -149,6 +149,14 @@ var clauseMarkers = []string{
 	"said", "says", "calls", "callsfor", "urges", "warns", "predicts", "reported", "sources",
 	// Vague placeholders the extractor uses when it cannot name the object.
 	"相关举措", "有关事项", "相关行动", "有关措施", "unknown", "n/a",
+	// Connectives and action verbs. A target names an object, so a label that
+	// contains a particle or a verb is a headline fragment. None of these runes
+	// appear inside a vocabulary term.
+	"的", "了", "将", "已", "被", "让", "使", "从", "给", "或", "以及", "及其",
+	"是否", "必要", "旨在", "彼此", "全部", "包括", "通过", "利用", "进行",
+	"加强", "推动", "推进", "促进", "加快", "支持", "出台", "实施", "落实",
+	"开展", "印发", "征集", "运出", "运抵", "飞往", "招聘", "回升", "有关", "相关",
+	"一位", "多位", "数名", "若干",
 }
 
 // personMarkers catch named individuals. An individual is never a macro or
@@ -158,6 +166,11 @@ var personMarkers = []string{
 	"特朗普", "鲍威尔", "耶伦", "拜登", "马斯克", "贝森特", "沃勒", "沃什", "拉加德",
 	"植田", "黑田", "奥尔斯", "埃尔多安", "普京", "泽连斯基", "习主席", "国务院总理",
 	"特朗普政府", "财政部长", "美联储主席", "央行行长", "白宫国家经济委员会主任",
+	// Roles and job titles. News output names the speaker or the affected person,
+	// never the indicator, so any label carrying a role is dropped.
+	"工程师", "学者", "律师", "分析师", "交易员", "负责人", "总裁", "董事长", "总经理",
+	"经理", "发言人", "特使", "参议员", "部长", "首相", "总理", "总统", "国王", "女王",
+	"副驾驶", "机长", "飞行员", "船员", "驾驶员",
 }
 
 // personASCII are the romanized surnames that appear in English research output;
@@ -181,6 +194,12 @@ var institutionMarkers = []string{
 	"联合国", "世贸组织", "贸发会议", "纳斯达克", "纽交所", "纽约证券交易所", "伦交所", "港交所",
 	"上交所", "深交所", "英伟达", "台积电", "海力士", "三星电子", "博通", "超威", "阿斯麦",
 	"沙特阿美", "中石油", "中石化", "壳牌", "道达尔", "埃克森", "雪佛龙", "洛克希德", "波音", "空客",
+	// Corporate and institutional suffixes. A label that carries one of these names a
+	// legal entity ("广汽本田汽车有限公司", "拉丁美洲和加勒比开发银行"), not a macro
+	// or industry object, even when its tail is a real industry word.
+	"公司", "集团", "股份", "银行间", "研究院", "研究所", "研究中心", "协会", "学会",
+	"联盟", "基金会", "大学", "学院", "学校", "会议", "座谈会", "论坛", "峰会", "航班",
+	"航班号", "机队", "工厂", "车间", "门店", "分公司", "事业部",
 }
 
 // institutionASCII uses the same bounded rule as the instrument codes.
@@ -206,31 +225,24 @@ var instrumentPhrases = []string{
 	"stockprice", "shareprice", "stocks", "shares", "stockfuture",
 }
 
-// MacroKind classifies a plausible label into one macro target type. Industry
-// names resolved through master data win in the caller; the Sector token list
-// only covers industry vocabulary that master data does not carry yet.
+// MacroKind classifies a plausible label into one macro target type by segmenting the
+// whole label into vocabulary words. Industry names resolved through master data are
+// part of the same lexicon; the coverage rule is what stops a news clause or an
+// institution that merely contains a keyword from becoming a target.
 func MacroKind(name string) (string, bool) {
 	compact := Normalized(name)
 	if compact == "" {
 		return "", false
 	}
-	for _, check := range macroKindChecks {
-		for _, token := range check.tokens {
-			if check.boundedASCII {
-				if containsBoundedASCII(compact, token) {
-					return check.kind, true
-				}
-				continue
-			}
-			if strings.Contains(compact, token) {
-				return check.kind, true
-			}
-		}
+	kinds, covered := coveredKinds(compact)
+	if !covered {
+		return "", false
 	}
-	if _, found := IndustryName(name); found {
-		return Sector, true
+	kind := highestPriorityKind(kinds)
+	if kind == "" {
+		return "", false
 	}
-	return "", false
+	return kind, true
 }
 
 type kindCheck struct {

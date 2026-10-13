@@ -60,7 +60,7 @@ func TestPruneInvalidMacroTargetsAgainstPostgres(t *testing.T) {
 	if int(numberValue(objectValue(preview)["impacts_removed"])) < 3 {
 		t.Fatalf("preview reported no junk targets: %#v", preview)
 	}
-	if labels := anySlice(objectValue(preview)["removed_labels"]); len(labels) == 0 {
+	if labels := stringSlice(objectValue(preview)["removed_labels"]); len(labels) == 0 {
 		t.Fatalf("preview listed no removed labels: %#v", preview)
 	}
 	if len(anySlice(objectValue(objectValue(mustStoredRun(t, ctx, pool, macroRunID))["report"])["impacts"])) != 3 {
