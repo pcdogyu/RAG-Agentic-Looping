@@ -62,6 +62,7 @@ var workerLaneDefinitions = []MigrationLane{
 	}},
 	{ID: "maintenance", Order: 11, GoQueue: "maintenance", TaskTypes: []string{
 		"market_loop.compact_research_backlog", "market_loop.reprocess_target_impacts_v2", "market_loop.replay_recent_event_research_v6", "market_loop.seed_assets",
+		"market_loop.prune_invalid_macro_targets_v1",
 	}},
 }
 

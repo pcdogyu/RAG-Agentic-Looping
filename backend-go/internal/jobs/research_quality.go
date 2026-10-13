@@ -780,30 +780,11 @@ func addStructuredActionObservations(draft *eventResearchDraft, event map[string
 }
 
 func economicActionObservationTarget(action map[string]any) (name, targetType, channel, relationship string, ok bool) {
-	for _, candidate := range []string{stringValue(action["object"]), stringValue(action["scope"]), stringValue(action["actor"])} {
-		candidate = strings.TrimSpace(candidate)
-		text := strings.ToLower(candidate)
-		if candidate == "" || len(candidate) > 240 || containsAny(text, "unknown", "相关举措", "有关事项", "相关行动") {
-			continue
-		}
-		switch {
-		case containsAny(text, "利率", "收益率", "政策利率", "interest rate", "policy rate", "bond yield"):
-			return candidate, "interest_rate", "risk_premium", "macro_indicator", true
-		case containsAny(text, "汇率", "外汇", "美元指数", "exchange rate", "foreign exchange"):
-			return candidate, "fx_rate", "risk_premium", "macro_indicator", true
-		case containsAny(text, "出口", "进口", "产量", "供应", "供给", "库存", "储备", "export", "import", "production", "inventory"):
-			return candidate, "supply_volume", "supply", "macro_indicator", true
-		case containsAny(text, "航运", "运价", "港口", "航线", "shipping", "freight"):
-			return candidate, "shipping", "cost", "market_exposure", true
-		case containsAny(text, "通胀", "消费者价格", "生产者价格", "国内生产总值", "就业", "失业", "消费者信心", "采购经理指数", "cpi", "ppi", "gdp", "inflation", "employment", "unemployment", "pmi"):
-			return candidate, "economy", "demand", "macro_indicator", true
-		case containsAny(text, "股市", "债市", "风险资产", "股票市场", "bond market", "stock market", "risk asset"):
-			return candidate, "risk_asset", "risk_premium", "market_exposure", true
-		case containsAny(text, "能源", "石油", "原油", "天然气", "柴油", "芯片", "半导体", "金融", "银行", "保险", "地产", "房地产", "汽车", "航空", "钢铁", "煤炭", "电力", "科技", "消费", "energy", "oil", "gas", "semiconductor", "banking", "insurance", "real estate", "automotive", "aviation"):
-			return candidate, "sector", "supply", "sector_exposure", true
-		}
+	target, ok := economicPolicyActionTarget(action)
+	if !ok {
+		return "", "", "", "", false
 	}
-	return "", "", "", "", false
+	return target.Name, target.TargetType, target.ImpactChannel, target.Relationship, true
 }
 
 func actionObservationEvidenceIDs(target string, evidence []researchEvidence) []string {

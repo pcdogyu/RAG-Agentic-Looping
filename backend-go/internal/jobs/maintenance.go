@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -17,6 +18,7 @@ import (
 
 const (
 	CompactResearchBacklogTask    = "market_loop.compact_research_backlog"
+	PruneInvalidMacroTargetsTask  = "market_loop.prune_invalid_macro_targets_v1"
 	ReprocessTargetImpactsTask    = "market_loop.reprocess_target_impacts_v2"
 	ReplayRecentEventResearchTask = "market_loop.replay_recent_event_research_v6"
 	SeedAssetsTask                = "market_loop.seed_assets"
@@ -50,6 +52,7 @@ func NewMaintenanceHandlers(cfg config.Config, db *pgxpool.Pool, redisClient *re
 	runtime := &maintenanceRuntime{cfg: cfg, db: db, redis: redisClient}
 	return map[string]Handler{
 		CompactResearchBacklogTask:    runtime.compactResearchBacklog,
+		PruneInvalidMacroTargetsTask:  runtime.pruneInvalidMacroTargets,
 		ReprocessTargetImpactsTask:    runtime.reprocessTargetImpacts,
 		ReplayRecentEventResearchTask: runtime.replayRecentEventResearch,
 		SeedAssetsTask:                runtime.seedAssets,
@@ -376,6 +379,108 @@ func (runtime *maintenanceRuntime) compactResearchBacklog(ctx context.Context, j
 		}
 	}
 	return map[string]any{"scanned": scanned, "canonical": canonicalCount, "coalesced": coalescedCount}, nil
+}
+
+// pruneInvalidMacroTargets re-applies the shared target policy to the impacts
+// already stored in event research runs. Bare labels that name an institution, a
+// person, an instrument or a news clause are hidden from the public 宏观/行业
+// target list by the read gate; this task removes them from storage as well so
+// stored research and the public list agree. It previews by default, never touches
+// asset-backed or tradable targets, and walks the table by id, continuing itself
+// until the sweep is complete.
+func (runtime *maintenanceRuntime) pruneInvalidMacroTargets(ctx context.Context, job Job) (any, error) {
+	envelope, err := decodeTaskEnvelope(job.Payload)
+	if err != nil {
+		return nil, permanentJobError{err}
+	}
+	dryRun := true
+	if _, exists := envelope.Kwargs["dry_run"]; exists {
+		dryRun = boolValue(envelope.Kwargs["dry_run"])
+	}
+	batchSize := int(numberValue(envelope.Kwargs["batch_size"]))
+	if batchSize < 1 {
+		batchSize = 500
+	}
+	afterID := strings.TrimSpace(stringValue(envelope.Kwargs["after_id"]))
+	rows, err := runtime.db.Query(ctx, `SELECT id,payload::jsonb
+		FROM event_research_runs
+		WHERE jsonb_typeof(payload::jsonb->'report'->'impacts')='array' AND id>$1
+		ORDER BY id LIMIT $2`, afterID, batchSize)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	type storedRun struct {
+		id      string
+		payload map[string]any
+	}
+	runs := make([]storedRun, 0)
+	for rows.Next() {
+		var run storedRun
+		var body []byte
+		if err := rows.Scan(&run.id, &body); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(body, &run.payload); err != nil {
+			return nil, err
+		}
+		runs = append(runs, run)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	scanned, changed, removed, updateFailures := 0, 0, 0, 0
+	seen := map[string]bool{}
+	samples := make([]string, 0, 25)
+	for _, run := range runs {
+		scanned++
+		report := objectValue(run.payload["report"])
+		if report == nil {
+			continue
+		}
+		kept, dropped := pruneMacroObservationImpacts(anySlice(report["impacts"]))
+		if len(dropped) == 0 {
+			continue
+		}
+		changed++
+		removed += len(dropped)
+		for _, label := range dropped {
+			if label == "" || seen[label] || len(samples) == 25 {
+				continue
+			}
+			seen[label] = true
+			samples = append(samples, label)
+		}
+		if dryRun {
+			continue
+		}
+		report["impacts"] = kept
+		encoded, marshalErr := json.Marshal(run.payload)
+		if marshalErr != nil {
+			return nil, marshalErr
+		}
+		if _, execErr := runtime.db.Exec(ctx, `UPDATE event_research_runs SET payload=$2::json WHERE id=$1`, run.id, encoded); execErr != nil {
+			updateFailures++
+			continue
+		}
+	}
+	lastID := afterID
+	if len(runs) > 0 {
+		lastID = runs[len(runs)-1].id
+	}
+	complete := len(runs) < batchSize
+	summary := map[string]any{
+		"dry_run": dryRun, "batch_size": batchSize, "scanned": scanned,
+		"runs_changed": changed, "impacts_removed": removed,
+		"update_failures": updateFailures, "removed_labels": samples,
+		"after_id": lastID, "complete": complete,
+	}
+	if !complete {
+		return nil, &continuationError{Payload: taskEnvelope{Args: []any{}, Kwargs: map[string]any{
+			"dry_run": dryRun, "batch_size": batchSize, "after_id": lastID,
+		}}, Progress: summary, Delay: 30 * time.Second}
+	}
+	return summary, nil
 }
 
 func (runtime *maintenanceRuntime) coalesceResearchRun(ctx context.Context, canonical, duplicate *queuedResearchRun) (bool, error) {

@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/pcdogyu/RAG-Agentic-Looping/backend-go/internal/targetpolicy"
 )
 
 type recommendationSnapshot struct {
@@ -319,6 +321,10 @@ type ratingStateReplay struct {
 
 type canonicalTarget struct {
 	Key, Label, TargetType string
+	// Verified marks a target whose identity comes from master data — an
+	// asset-backed object, the economy override or the industry taxonomy — rather
+	// than from a model-written label alone.
+	Verified bool
 }
 
 type macroSnapshot struct {
@@ -701,6 +707,9 @@ func (s *Server) eventTargetChanges(r *http.Request, targetTypes map[string]bool
 				asset = aliases[targetType+"|"+macroTargetBase(stringValue(impact["target_name"]))]
 			}
 			canonical := canonicalizeGoTarget(stringValue(impact["target_name"]), targetType, asset, taxonomy)
+			if kind == "macro" && !macroTargetPublishable(targetType, stringValue(impact["target_name"]), canonical) {
+				continue
+			}
 			group := groups[canonical.Key]
 			if group == nil {
 				group = &impactGroup{canonical: canonical, asset: asset}
@@ -1207,21 +1216,35 @@ func stripTargetWrappers(value string) string {
 	return value
 }
 
+// macroTargetPublishable decides whether a non-tradable observation may appear in
+// the public 宏观/行业 target list. Master-data identity is authoritative: an
+// asset-backed object or a taxonomy hit is always published. A bare model-written
+// label additionally has to pass the shared target vocabulary, so a person, an
+// institution, an instrument or a news clause left in old data cannot become a
+// published target.
+func macroTargetPublishable(targetType, name string, canonical canonicalTarget) bool {
+	if canonical.Verified {
+		return true
+	}
+	_, ok := targetpolicy.Classify(name)
+	return ok
+}
+
 func canonicalizeGoTarget(name, targetType string, asset map[string]any, taxonomy map[string]canonicalTarget) canonicalTarget {
 	if asset != nil && stringValue(asset["asset_id"]) != "" {
 		if securityAsset(asset) {
 			return canonicalTarget{
-				Key: stringValue(asset["asset_id"]), Label: fallbackString(stringValue(asset["name"]), strings.TrimSpace(name)), TargetType: "tradable_asset",
+				Key: stringValue(asset["asset_id"]), Label: fallbackString(stringValue(asset["name"]), strings.TrimSpace(name)), TargetType: "tradable_asset", Verified: true,
 			}
 		}
-		return canonicalTarget{Key: stringValue(asset["asset_id"]), Label: fallbackString(strings.TrimSpace(name), stringValue(asset["asset_id"])), TargetType: targetType}
+		return canonicalTarget{Key: stringValue(asset["asset_id"]), Label: fallbackString(strings.TrimSpace(name), stringValue(asset["asset_id"])), TargetType: targetType, Verified: true}
 	}
 	normalized := compactTarget(name)
 	if normalized == "" {
 		normalized = "unknown"
 	}
 	if targetType == "economy" && unitedStatesEconomyAlias(name) {
-		return canonicalTarget{Key: "economy:us", Label: "美国经济", TargetType: "economy"}
+		return canonicalTarget{Key: "economy:us", Label: "美国经济", TargetType: "economy", Verified: true}
 	}
 	if targetType != "sector" && targetType != "economy" && targetType != "risk_asset" && targetType != "other" {
 		return canonicalTarget{Key: targetType + ":" + normalized, Label: fallbackString(strings.TrimSpace(name), normalized), TargetType: targetType}
@@ -1229,10 +1252,11 @@ func canonicalizeGoTarget(name, targetType string, asset map[string]any, taxonom
 	unwrapped := compactTarget(stripTargetWrappers(name))
 	for _, alias := range []string{"Digital Assets", "Cryptocurrency", "数字资产", "加密货币", "Cryptocurrency Market", "Digital Assets Cryptocurrency", "数字资产 加密货币", "加密货币市场"} {
 		if unwrapped == compactTarget(alias) {
-			return canonicalTarget{Key: "sector:digital_assets", Label: "数字资产", TargetType: "sector"}
+			return canonicalTarget{Key: "sector:digital_assets", Label: "数字资产", TargetType: "sector", Verified: true}
 		}
 	}
 	if matched, found := taxonomy[unwrapped]; found {
+		matched.Verified = true
 		return matched
 	}
 	return canonicalTarget{Key: targetType + ":" + normalized, Label: fallbackString(strings.TrimSpace(name), normalized), TargetType: targetType}
