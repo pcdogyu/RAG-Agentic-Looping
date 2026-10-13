@@ -231,6 +231,12 @@ func adapterItems(payload any, adapter string) []map[string]any {
 			raw = data["items"]
 		} else {
 			raw = firstAny(object, "results", "items", "data")
+			// MCP servers may wrap pages as {data:{items:[...]}}; unwrap one level.
+			if nested, ok := raw.(map[string]any); ok {
+				if inner := firstAny(nested, "items", "results"); inner != nil {
+					raw = inner
+				}
+			}
 		}
 	}
 	if object, ok := raw.(map[string]any); ok {
