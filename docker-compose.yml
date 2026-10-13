@@ -288,6 +288,8 @@ services:
       NEWS_WATERMARK_OVERLAP_MINUTES: ${NEWS_WATERMARK_OVERLAP_MINUTES:-10}
       MCP_SECRET_KEY: ${MCP_SECRET_KEY:-}
       WEB_SEARCH_TIMEOUT_SECONDS: ${WEB_SEARCH_TIMEOUT_SECONDS:-20}
+      NEWS_SEARCH_API_BASE: ${NEWS_SEARCH_API_BASE:-https://ai.6551.io}
+      OPENNEWS_TOKEN: ${OPENNEWS_TOKEN:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
