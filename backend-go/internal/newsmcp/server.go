@@ -309,6 +309,9 @@ func respondToolError(w http.ResponseWriter, id json.RawMessage, err error) {
 	} else if status > 0 {
 		message = fmt.Sprintf("upstream request failed - HTTP %d", status)
 	}
+	if detail := statusDetail(err); detail != "" && !strings.Contains(message, detail) {
+		message += ": " + detail
+	}
 	writeResult(w, id, map[string]any{"content": []map[string]string{{"type": "text", "text": message}}, "isError": true})
 }
 
@@ -328,9 +331,15 @@ type upstreamResponse struct {
 
 type statusError struct {
 	status int
+	body   string
 }
 
-func (e *statusError) Error() string { return fmt.Sprintf("upstream returned HTTP %d", e.status) }
+func (e *statusError) Error() string {
+	if e.body != "" {
+		return fmt.Sprintf("upstream returned HTTP %d: %s", e.status, e.body)
+	}
+	return fmt.Sprintf("upstream returned HTTP %d", e.status)
+}
 
 func statusCode(err error) int {
 	for current := err; current != nil; {
@@ -344,6 +353,20 @@ func statusCode(err error) int {
 		current = unwrapped.Unwrap()
 	}
 	return 0
+}
+
+func statusDetail(err error) string {
+	for current := err; current != nil; {
+		if typed, ok := current.(*statusError); ok {
+			return typed.body
+		}
+		unwrapped, ok := current.(interface{ Unwrap() error })
+		if !ok {
+			return ""
+		}
+		current = unwrapped.Unwrap()
+	}
+	return ""
 }
 
 func (s *Server) search(ctx context.Context, authorization string, payload map[string]any) (upstreamResponse, error) {
@@ -370,7 +393,12 @@ func (s *Server) search(ctx context.Context, authorization string, payload map[s
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return upstreamResponse{}, &statusError{status: response.StatusCode}
+		snippet, _ := io.ReadAll(io.LimitReader(response.Body, 300))
+		detail := strings.TrimSpace(string(snippet))
+		if runes := []rune(detail); len(runes) > 200 {
+			detail = string(runes[:200])
+		}
+		return upstreamResponse{}, &statusError{status: response.StatusCode, body: detail}
 	}
 	var result upstreamResponse
 	if err := json.NewDecoder(io.LimitReader(response.Body, maxUpstreamBody)).Decode(&result); err != nil {

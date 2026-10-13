@@ -182,3 +182,25 @@ func TestUnknownMethodAndNonPost(t *testing.T) {
 		t.Fatalf("expected 405 for GET, got %d", recorder.Code)
 	}
 }
+
+func TestUpstreamQuotaErrorIncludesDetail(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusPaymentRequired)
+		_, _ = w.Write([]byte(`{"error":"insufficient quota","success":false}`))
+	}))
+	defer upstream.Close()
+	server := NewServer(Config{BaseURL: upstream.URL, DefaultToken: "env-token"})
+	initialize(t, server)
+	response := rpcCall(t, server, `{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"get_latest_news","arguments":{}}}`)
+	result, _ := response["result"].(map[string]any)
+	if result["isError"] != true {
+		t.Fatalf("expected isError for upstream 402: %v", result)
+	}
+	content, _ := result["content"].([]any)
+	text, _ := content[0].(map[string]any)
+	message := stringValue(text["text"])
+	if !strings.Contains(message, "HTTP 402") || !strings.Contains(message, "insufficient quota") {
+		t.Fatalf("expected quota detail in message, got %q", message)
+	}
+}
