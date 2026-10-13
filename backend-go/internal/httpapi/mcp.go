@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -360,7 +361,12 @@ func (s *Server) probeMCPSource(ctx context.Context, id string, discover bool) m
 		}
 	}
 	body, _ := json.Marshal(tools)
-	_, _ = s.db.Exec(ctx, `UPDATE mcp_sources SET discovered_tools=CASE WHEN $2 OR $4 IS NOT NULL THEN $3 ELSE discovered_tools END,last_status=$5,last_error=$4,last_checked_at=now(),updated_at=now() WHERE id=$1`, id, discover, body, lastError, status)
+	// The discovered_tools column is json (not jsonb); the CASE branch must cast
+	// the marshalled parameter to json or PostgreSQL rejects the whole UPDATE.
+	if _, execErr := s.db.Exec(ctx, `UPDATE mcp_sources SET discovered_tools=CASE WHEN $2 OR $4 IS NOT NULL THEN CAST($3 AS json) ELSE discovered_tools END,last_status=$5,last_error=$4,last_checked_at=now(),updated_at=now() WHERE id=$1`, id, discover, body, lastError, status); execErr != nil {
+		slog.Warn("persist MCP probe result", "source_id", id, "error", execErr)
+	}
+
 	updated, err := s.getMCPSource(ctx, id)
 	if err != nil {
 		return nil
