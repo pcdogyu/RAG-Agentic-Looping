@@ -3390,7 +3390,7 @@ export function SourceFilterPage({ apiBase }: { apiBase: string }) {
     setMessage(`规则已保存，未领取研究任务已重新分类。${cleaned ? ` 已自动清理 ${cleaned} 个重复项。` : ""}`);
   }
   async function reset() {
-    if (!window.confirm("恢复默认规则？白名单将清空，所有非黑名单新闻使用快速研究；黑名单恢复为“天气”。")) return;
+    if (!window.confirm("恢复默认规则？白名单将清空，启用过滤时所有新新闻都会被挡在队列外；黑名单恢复为“天气”。")) return;
     const response = await fetch(`${apiBase}/api/v1/source-filter`, { method: "DELETE" });
     if (!response.ok) { setMessage("恢复默认失败。"); return; }
     applyConfig(await response.json() as SourceFilterConfig);
@@ -3426,10 +3426,10 @@ export function SourceFilterPage({ apiBase }: { apiBase: string }) {
   const duplicateCount = validation.whitelistDuplicates + validation.blacklistDuplicates;
   const hasErrors = validation.issues.length > 0;
   return <section className="app-page source-filter-page">
-    <PageHeading eyebrow="NEWS ADMISSION & RESEARCH ROUTING" title="新闻准入与研究分流" copy="黑名单控制新闻准入；白名单只决定是否进入 Qwen2.5 7B 深度研究。" />
+    <PageHeading eyebrow="NEWS ADMISSION & RESEARCH ROUTING" title="新闻准入与研究分流" copy="启用过滤后，只有白名单命中的新闻才能进入事件提取与 Qwen2.5 7B 深度研究队列；黑名单命中直接拦截；白名单为空时所有新新闻都不会入队（可在过滤记录里重新扫描放行）。" />
     <div className="filter-metrics">
       <div><span>过滤状态</span><strong className={enabled ? "enabled" : "disabled"}>{enabled ? "已启用" : "已关闭"}</strong></div>
-      <div><span>快速研究 / 24h</span><strong>{config.routing_stats?.fast_24h || 0}</strong><small>未命中白名单</small></div>
+      <div><span>快速研究 / 24h</span><strong>{config.routing_stats?.fast_24h || 0}</strong><small>过滤关闭时</small></div>
       <div><span>深度研究 / 24h</span><strong>{config.routing_stats?.deep_24h || 0}</strong><small>命中白名单</small></div>
       <div><span>黑名单拦截 / 24h</span><strong>{config.routing_stats?.blocked_24h || 0}</strong><small>黑名单优先</small></div>
     </div>
@@ -3440,7 +3440,7 @@ export function SourceFilterPage({ apiBase }: { apiBase: string }) {
         <label className={validation.issues.some((item) => item.field === "blacklist_keywords") ? "invalid" : ""}><span><strong>黑名单关键字</strong><small>{blacklistCount} / 200 · 重复 {validation.blacklistDuplicates} · 冲突 {validation.conflicts.length}</small></span><textarea aria-label="黑名单关键字" aria-invalid={validation.issues.some((item) => item.field === "blacklist_keywords")} value={blacklist} placeholder="例如：天气" onChange={(e) => setBlacklist(e.target.value)} /></label>
       </div>
       <p className="filter-note">支持英文逗号、中文逗号和换行分隔；保存后统一显示为英文逗号加空格。短英文、数字和证券代码按完整边界匹配；同时命中时黑名单优先。</p>
-      {!loading && enabled && whitelistCount === 0 && <div className="page-message">白名单为空：所有非黑名单新闻使用快速研究。</div>}
+      {!loading && enabled && whitelistCount === 0 && <div className="page-message">白名单为空：启用过滤时所有新新闻都会被挡在队列外，请添加关键字或关闭过滤。</div>}
       {duplicateCount > 0 && <div className="page-message">检测到 {duplicateCount} 个重复项，保存时会自动去重。</div>}
       {hasErrors && <div className="page-error">{validation.issues.map((item) => item.message).join("；")}</div>}
       <div className="card-actions"><button type="submit" disabled={hasErrors}>保存规则</button><button type="button" onClick={load}>刷新</button><button type="button" className="danger" onClick={reset}>恢复默认</button></div>

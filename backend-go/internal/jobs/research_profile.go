@@ -117,8 +117,14 @@ func ReclassifyQueuedResearchProfiles(ctx context.Context, db *pgxpool.Pool) (in
 			}
 		}
 		blocked := len(matchedBlacklist) > 0
+		// While the gate is enabled, queued work whose titles no longer match
+		// the whitelist is cancelled like a blacklist hit: only whitelist
+		// matches may occupy the research queue.
+		gateMiss := cfg.Enabled && !blocked && eventProfile != researchProfileDeep && len(item.titles) > 0
 		if blocked {
 			eventProfile, eventReason = "blocked", "blacklist_match"
+		} else if gateMiss {
+			eventProfile, eventReason = "blocked", "whitelist_miss"
 		}
 		profile, reason := eventProfile, eventReason
 		if manual {
@@ -136,7 +142,7 @@ func ReclassifyQueuedResearchProfiles(ctx context.Context, db *pgxpool.Pool) (in
 			batch.Queue(`UPDATE news_events SET payload=$2 WHERE id=$1`, item.eventID, eventBody)
 		}
 		jobBody, _ := json.Marshal(item.job)
-		if blocked && !manual {
+		if (blocked || gateMiss) && !manual {
 			item.run["status"], item.run["completed_at"], item.run["updated_at"] = "filtered", iso(time.Now()), iso(time.Now())
 			batch.Queue(`UPDATE go_jobs SET payload=$2,status='cancelled',error=NULL,completed_at=now(),updated_at=now() WHERE id=$1 AND status IN ('queued','retrying')`, item.jobID, jobBody)
 		} else {
@@ -148,7 +154,7 @@ func ReclassifyQueuedResearchProfiles(ctx context.Context, db *pgxpool.Pool) (in
 			if item.taskType == researchEventTask {
 				table = "event_research_runs"
 			}
-			if blocked && !manual {
+			if (blocked || gateMiss) && !manual {
 				batch.Queue(`UPDATE `+table+` SET status='filtered',payload=$2,updated_at=now() WHERE id=$1 AND status IN ('queued','retrying')`, item.runID, runBody)
 			} else {
 				batch.Queue(`UPDATE `+table+` SET payload=$2,updated_at=now() WHERE id=$1 AND status IN ('queued','retrying')`, item.runID, runBody)

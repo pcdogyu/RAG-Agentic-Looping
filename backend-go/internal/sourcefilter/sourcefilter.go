@@ -8,7 +8,7 @@ import (
 	"golang.org/x/text/unicode/norm"
 )
 
-const RuleVersion = "research-routing-v1"
+const RuleVersion = "research-routing-v2-whitelist-gate"
 
 type Config struct {
 	Enabled   bool
@@ -19,6 +19,7 @@ type Config struct {
 type Decision struct {
 	Profile          string
 	Blocked          bool
+	GateBlocked      bool
 	MatchedWhitelist []string
 	MatchedBlacklist []string
 }
@@ -111,7 +112,10 @@ func Evaluate(title string, cfg Config) Decision {
 	if len(white) > 0 {
 		return Decision{Profile: "deep", MatchedWhitelist: white}
 	}
-	return Decision{Profile: "fast"}
+	// The whitelist is an admission gate: while filtering is enabled a title
+	// that names no whitelist keyword never enters the extraction/research
+	// queue. An empty whitelist therefore blocks every new title.
+	return Decision{Profile: "whitelist_miss", GateBlocked: true}
 }
 
 func matchedKeywords(title string, keywords []string) []string {

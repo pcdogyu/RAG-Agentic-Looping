@@ -2,10 +2,10 @@ package sourcefilter
 
 import "testing"
 
-func TestEvaluateRoutesAllNonBlockedNews(t *testing.T) {
+func TestEvaluateGatesWhitelistMisses(t *testing.T) {
 	cfg := Config{Enabled: true, Whitelist: []string{"NVDA", "美联储"}, Blacklist: []string{"天气"}}
-	if decision := Evaluate("普通公司发布新品", cfg); decision.Profile != "fast" || decision.Blocked {
-		t.Fatalf("ordinary title = %#v", decision)
+	if decision := Evaluate("普通公司发布新品", cfg); decision.Blocked || !decision.GateBlocked || decision.Profile != "whitelist_miss" {
+		t.Fatalf("whitelist miss must be gated out of the queue: %#v", decision)
 	}
 	if decision := Evaluate("NVDA launches a new chip", cfg); decision.Profile != "deep" {
 		t.Fatalf("whitelist title = %#v", decision)
@@ -13,11 +13,17 @@ func TestEvaluateRoutesAllNonBlockedNews(t *testing.T) {
 	if decision := Evaluate("美联储讨论利率与天气", cfg); !decision.Blocked || decision.Profile != "blocked" {
 		t.Fatalf("blacklist must win = %#v", decision)
 	}
+	if decision := Evaluate("任何标题", Config{Enabled: true}); decision.Profile != "whitelist_miss" || !decision.GateBlocked {
+		t.Fatalf("an empty whitelist must block every title while enabled: %#v", decision)
+	}
+	if decision := Evaluate("任何标题", Config{Enabled: false, Whitelist: []string{"不相关"}}); decision.Profile != "fast" || decision.GateBlocked {
+		t.Fatalf("disabled filtering must admit everything as fast: %#v", decision)
+	}
 }
 
 func TestShortTickerRequiresASCIIBoundary(t *testing.T) {
 	for _, title := range []string{"Alibaba reports earnings", "Basic materials rally", "Closing bell"} {
-		if decision := Evaluate(title, Config{Enabled: true, Whitelist: []string{"B", "LI", "C"}}); decision.Profile != "fast" {
+		if decision := Evaluate(title, Config{Enabled: true, Whitelist: []string{"B", "LI", "C"}}); decision.Profile != "whitelist_miss" || !decision.GateBlocked {
 			t.Fatalf("%q unexpectedly matched: %#v", title, decision)
 		}
 	}

@@ -58,8 +58,8 @@ func TestDiscoveryTitleFilterSemantics(t *testing.T) {
 	if decision := sourcefilter.Evaluate("英伟达天气影响", cfg); !decision.Blocked || decision.Profile != "blocked" {
 		t.Fatalf("blacklist must override whitelist: %#v", decision)
 	}
-	if decision := sourcefilter.Evaluate("其他公司新闻", cfg); decision.Blocked || decision.Profile != "fast" {
-		t.Fatalf("whitelist miss must remain admitted as fast research: %#v", decision)
+	if decision := sourcefilter.Evaluate("其他公司新闻", cfg); decision.Blocked || !decision.GateBlocked || decision.Profile != "whitelist_miss" {
+		t.Fatalf("whitelist miss must be gated out of the queue: %#v", decision)
 	}
 	if decision := sourcefilter.Evaluate("ＮＶＩＤＩＡ", sourcefilter.Config{Enabled: true, Whitelist: []string{"nvidia"}}); decision.Profile != "deep" {
 		t.Fatal("NFKC and case-fold matching must be preserved")

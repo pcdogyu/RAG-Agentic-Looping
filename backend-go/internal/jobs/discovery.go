@@ -1163,9 +1163,12 @@ func (runtime *discoveryRuntime) filterNews(ctx context.Context, items []discove
 			continue
 		}
 		decision := sourcefilter.Evaluate(item.Title, configValue)
-		if decision.Blocked {
+		if decision.Blocked || decision.GateBlocked {
 			filtered++
 			keyword := strings.Join(decision.MatchedBlacklist, ", ")
+			if keyword == "" {
+				keyword = "未命中白名单"
+			}
 			_, err = runtime.db.Exec(ctx, `INSERT INTO news_filter_logs(id,content_hash,source,title,url,matched_keyword,published_at,first_filtered_at,last_filtered_at,hit_count) VALUES($1,$2,$3,$4,$5,$6,$7,now(),now(),1) ON CONFLICT(content_hash) DO UPDATE SET last_filtered_at=now(),hit_count=news_filter_logs.hit_count+1,matched_keyword=excluded.matched_keyword`, uuid.New(), item.ContentHash, item.Source, item.Title, item.URL, keyword, item.PublishedAt)
 			if err != nil {
 				return nil, filtered, err

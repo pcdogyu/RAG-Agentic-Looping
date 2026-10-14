@@ -50,7 +50,7 @@ func (s *Server) writeSourceFilter(w http.ResponseWriter, r *http.Request, warni
 		return
 	}
 	payload["retained_log_count"], payload["last_filtered_at"], payload["updated_at"] = count, timeOrNil(last), timeOrNil(updated)
-	payload["mode"], payload["default_research_profile"], payload["rule_version"] = "research_routing", "fast", sourcefilter.RuleVersion
+	payload["mode"], payload["default_research_profile"], payload["rule_version"] = "whitelist_gate", "deep", sourcefilter.RuleVersion
 	payload["normalization_warnings"] = warnings
 	var fast, deep, blocked int
 	_ = s.db.QueryRow(r.Context(), `SELECT
