@@ -685,16 +685,37 @@ func (runtime *discoveryRuntime) fetchNewsLiquidPage(ctx context.Context, base, 
 		if runes := []rune(detail); len(runes) > 200 {
 			detail = string(runes[:200])
 		}
-		if detail == "" {
+		hint := newsLiquidErrorHint(response.StatusCode)
+		switch {
+		case detail == "" && hint == "":
 			return nil, fmt.Errorf("NewsLiquid HTTP %d", response.StatusCode)
+		case detail == "":
+			return nil, fmt.Errorf("NewsLiquid HTTP %d: %s", response.StatusCode, hint)
+		case hint == "":
+			return nil, fmt.Errorf("NewsLiquid HTTP %d: %s", response.StatusCode, detail)
+		default:
+			return nil, fmt.Errorf("NewsLiquid HTTP %d: %s（%s）", response.StatusCode, detail, hint)
 		}
-		return nil, fmt.Errorf("NewsLiquid HTTP %d: %s", response.StatusCode, detail)
 	}
 	var decoded any
 	if err := json.Unmarshal(payload, &decoded); err != nil {
 		return nil, fmt.Errorf("NewsLiquid returned invalid JSON: %w", err)
 	}
 	return discoveryObjectItems(decoded), nil
+}
+
+// newsLiquidErrorHint turns the upstream authentication and billing status
+// codes into the short Chinese guidance the news board renders, because the
+// bare JSON body ("insufficient quota") reads as a generic data-source fault
+// even though the fix is always on the upstream account side.
+func newsLiquidErrorHint(status int) string {
+	switch status {
+	case http.StatusPaymentRequired:
+		return "上游账号额度已用尽，套餐页的 3,000 msgs/mo 是每月上限而非剩余额度，请以 QUOTA OVERVIEW 的 Available Messages 为准；充值或改用有额度的 Token 后会自动恢复"
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return "上游拒绝了该 Token（无效、已重置或不属于该账号）；请更新 OPENNEWS_TOKEN 或“数据源”页 newsliquid 的密钥"
+	}
+	return ""
 }
 
 // newsLiquidTime accepts both the ISO timestamps documented by the upstream

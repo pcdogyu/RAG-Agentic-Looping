@@ -239,6 +239,35 @@ func TestDiscoverNewsLiquidReportsQuotaErrorDetail(t *testing.T) {
 	if !strings.Contains(batch.Reports[0].Error, "HTTP 402") || !strings.Contains(batch.Reports[0].Error, "insufficient quota") {
 		t.Fatalf("quota detail was not surfaced: %q", batch.Reports[0].Error)
 	}
+	if !strings.Contains(batch.Reports[0].Error, "Available Messages") {
+		t.Fatalf("quota guidance was not surfaced: %q", batch.Reports[0].Error)
+	}
+}
+
+func TestDiscoverNewsLiquidReportsRejectedTokenHint(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"invalid token","success":false}`))
+	}))
+	defer upstream.Close()
+	runtime := &discoveryRuntime{cfg: config.Config{OpenNewsBaseURL: upstream.URL, OpenNewsToken: "token"}, client: upstream.Client()}
+	batch := runtime.discoverNewsLiquid(context.Background(), time.Now().UTC().Add(-time.Hour), 40)
+	if len(batch.Reports) != 1 || batch.Reports[0].Status != "error" {
+		t.Fatalf("expected one error report: %#v", batch.Reports)
+	}
+	if !strings.Contains(batch.Reports[0].Error, "HTTP 401") || !strings.Contains(batch.Reports[0].Error, "OPENNEWS_TOKEN") {
+		t.Fatalf("token guidance was not surfaced: %q", batch.Reports[0].Error)
+	}
+}
+
+func TestNewsLiquidErrorHintOnlyCoversBillingAndAuth(t *testing.T) {
+	if newsLiquidErrorHint(http.StatusInternalServerError) != "" {
+		t.Fatalf("unexpected hint for a server-side failure")
+	}
+	if newsLiquidErrorHint(http.StatusPaymentRequired) == "" || newsLiquidErrorHint(http.StatusForbidden) == "" {
+		t.Fatalf("billing and auth statuses must carry guidance")
+	}
 }
 
 func TestNewsLiquidTimeParsesEpochSeconds(t *testing.T) {
