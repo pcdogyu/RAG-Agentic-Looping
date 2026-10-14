@@ -737,6 +737,17 @@ func TestEventDraftAllowsEvidenceNamedMacroObservation(t *testing.T) {
 	if public["asset"] != nil || boolValue(public["execution_supported"]) || stringValue(public["trade_status"]) != "untradeable" {
 		t.Fatalf("macro observation crossed the execution boundary: %#v", public)
 	}
+	signal := objectValue(public["research_signal"])
+	if !boolValue(signal["available"]) || boolValue(signal["trade_eligible"]) || signal["direction_score"] == nil {
+		t.Fatalf("verified macro observation lacked a published research signal: %#v", signal)
+	}
+	if boolValue(public["execution_supported"]) || boolValue(signal["trade_eligible"]) {
+		t.Fatalf("verified macro observation crossed the execution boundary: %#v", signal)
+	}
+	eventSignal := objectValue(report["research_signal"])
+	if !boolValue(eventSignal["available"]) || containsString(stringSlice(eventSignal["reasons"]), "no_verified_target") {
+		t.Fatalf("event-level signal still reported no_verified_target while an observation was published: %#v", eventSignal)
+	}
 }
 
 func TestEventDraftRejectsUnmentionedMacroObservation(t *testing.T) {

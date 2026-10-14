@@ -1758,7 +1758,11 @@ func (runtime *researchRuntime) finalizeEventReport(event map[string]any, draft 
 		eligibility := impactEligibility(asset, item, impactQuality.EvidenceComplete && len(missing) == 0)
 		tradeable := boolValue(eligibility["long_eligible"])
 		relationVerified := impactHasTargetSpecificEvidence(item, event, evidence)
-		researchAvailable := asset != nil && relationVerified
+		// Non-tradable macro/industry observations never carry an asset. Once their
+		// relation is verified they must publish a provisional direction, otherwise
+		// the event-level signal falls back to no_verified_target even though the
+		// observation impact (e.g. 印度卢比 fx_rate) is published and tradeable=false.
+		researchAvailable := relationVerified && (item.TargetType != "tradable_asset" || asset != nil)
 		modelRating, modelRatingSource := directResearchRating(item.Rating, item.ResearchDirectionScore)
 		researchSignal := researchSignalContract(item.ResearchDirectionScore, modelRating, modelRatingSource, item.AssetID, researchAvailable, boolValue(eligibility["signal_valid"]), missing)
 		reportConfidenceAssessment := modelConfidenceAssessment(item.ReportConfidence, evidence, parseTime(event["as_of"]), true, append(append([]string{}, impactQuality.Missing...), impactQuality.Contradictions...))
