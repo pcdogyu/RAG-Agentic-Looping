@@ -58,6 +58,17 @@ func (s *Server) assetUniverse(w http.ResponseWriter, r *http.Request) {
 		}
 		add(`association_tier=$%d`, value)
 	}
+	if value := strings.TrimSpace(query.Get("latest_rating")); value != "" {
+		switch value {
+		case "strongly_bullish", "bullish", "watch", "bearish", "strongly_bearish":
+			add(`(SELECT rec.rating FROM recommendations rec WHERE rec.asset_id=assets.id ORDER BY rec.as_of DESC,rec.id DESC LIMIT 1)=$%d`, value)
+		case "unrated":
+			where = append(where, `NOT EXISTS (SELECT 1 FROM recommendations rec WHERE rec.asset_id=assets.id)`)
+		default:
+			validationError(w, "latest_rating", "Input should be 'strongly_bullish', 'bullish', 'watch', 'bearish', 'strongly_bearish' or 'unrated'")
+			return
+		}
+	}
 	active := query.Get("active")
 	if active == "" {
 		active = "true"

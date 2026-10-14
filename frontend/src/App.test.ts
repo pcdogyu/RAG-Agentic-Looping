@@ -940,6 +940,7 @@ describe("asset universe page", () => {
     expect(markup).toContain("统一行业用于跨市场比较");
     expect(markup).toContain("统一行业 / 原始行业");
     expect(markup).toContain("评级");
+    expect(markup).toContain("全部评级");
     expect(markup).toContain("行业 0 / 0 · 0%");
   });
 });

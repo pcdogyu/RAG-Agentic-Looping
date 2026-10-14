@@ -3888,6 +3888,7 @@ export function AssetUniversePage({ apiBase }: { apiBase: string }) {
   const [market, setMarket] = useState("");
   const [industryId, setIndustryId] = useState("");
   const [associationTier, setAssociationTier] = useState("");
+  const [latestRating, setLatestRating] = useState("");
   const [offset, setOffset] = useState(0);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -3909,6 +3910,7 @@ export function AssetUniversePage({ apiBase }: { apiBase: string }) {
     if (market) params.set("market", market);
     if (industryId) params.set("industry_id", industryId);
     if (associationTier) params.set("association_tier", associationTier);
+    if (latestRating) params.set("latest_rating", latestRating);
     try {
       const [assetResponse, industryResponse, statusResponse] = await Promise.all([
         fetch(`${apiBase}/api/v1/asset-universe?${params}`),
@@ -3933,7 +3935,7 @@ export function AssetUniversePage({ apiBase }: { apiBase: string }) {
     } finally {
       setLoading(false);
     }
-  }, [apiBase, associationTier, industryId, market, offset, query]);
+  }, [apiBase, associationTier, industryId, latestRating, market, offset, query]);
 
   useEffect(() => { void load(); }, [load]);
 
@@ -4049,6 +4051,7 @@ export function AssetUniversePage({ apiBase }: { apiBase: string }) {
           {levelTwoIndustries.map((item) => <option key={item.industry_id} value={item.industry_id}>{item.name_zh}（{item.asset_count}）</option>)}
         </select>
         <select aria-label="关联层级" value={associationTier} onChange={(event) => { setAssociationTier(event.target.value); setOffset(0); }}><option value="">全部关联层级</option><option value="standard">标准自动关联</option><option value="exact_only">仅精确命中</option><option value="manual_only">仅手动研究</option></select>
+        <select aria-label="评级筛选" value={latestRating} onChange={(event) => { setLatestRating(event.target.value); setOffset(0); }}><option value="">全部评级</option>{Object.entries(ratingLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}<option value="unrated">未评级</option></select>
         <button type="submit">查询</button>
         <button type="button" onClick={() => void load()}>刷新状态</button>
       </form>
