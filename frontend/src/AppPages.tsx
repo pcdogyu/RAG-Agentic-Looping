@@ -16,7 +16,7 @@ import {
 import ModelLogsPage from "./ModelLogs";
 import ModelPromptsPage from "./ModelPrompts";
 import PhaseTwoReadinessPage from "./PhaseTwoReadiness";
-import { TargetTrendSummary, type TargetTrend } from "./TargetTrendSummary";
+import type { TargetTrend } from "./TargetTrendSummary";
 
 export type AppRoute = "home" | "source-filter" | "sources" | "asset-universe" | "news" | "queue" | "analysis" | "conclusions" | "targets" | "fundamental" | "readiness" | "model-prompts" | "model-logs" | "policy" | "search" | "weknora";
 
@@ -2734,9 +2734,6 @@ export function TargetChangeGrid({
       const score = eventSignal?.direction_score ?? item.latest.direction_score;
       const newsConfidence = eventSignal?.news_confidence ?? item.latest.news_confidence;
       const confidence = eventSignal?.rating_confidence ?? item.latest.rating_confidence;
-      const previousRating = item.event_signal_state?.previous || item.rating_state?.previous || item.previous?.rating || item.current.rating;
-      const currentRating = item.event_signal_state?.current || item.rating_state?.current || item.current.rating;
-      const overallRatingChanged = item.overall_rating_changed ?? previousRating !== currentRating;
       const changedAt = item.rating_state?.changed_at || item.observed_at || item.changed_at;
       return <article className={`target-change-card ${item.kind}`} key={item.key}>
         <header>
@@ -2756,9 +2753,7 @@ export function TargetChangeGrid({
             </button>
           </div>
         </header>
-        <div className={`target-change-field ${overallRatingChanged ? "changed" : "unchanged"}`}><span>{overallRatingChanged ? "事件信号状态变化" : "总体评级（未变）"}</span><div className="target-change-rating-row"><strong>{overallRatingChanged ? `${recommendationRatingLabel(previousRating)} → ${recommendationRatingLabel(currentRating)}` : recommendationRatingLabel(currentRating)}</strong>{overallRatingChanged ? ((item.event_signal_state || item.rating_state)?.transition_limited && <em className="target-change-limited">单步限制</em>) : <em className="target-change-limited">未触发变更</em>}</div></div>
         <div className="target-change-field"><span>最新新闻信号</span><div className="target-change-rating-row"><strong>{recommendationRatingLabel(eventSignal?.rating || item.latest.rating)}</strong><b className={score === null ? "neutral" : score < 0 ? "negative" : score > 0 ? "positive" : "neutral"} title="本次事件原始方向分">{score === null ? "—" : `${score > 0 ? "+" : ""}${score}`}</b></div></div>
-        {item.trend && <TargetTrendSummary trend={item.trend} />}
         <div className={`target-change-latest${onResearch ? " with-research" : ""}`}>
           <span>新闻可信度<strong>{newsConfidence === null ? "—" : `${Math.round(newsConfidence * 100)}%`}</strong></span>
           <span>评级置信度<strong>{confidence === null ? "—" : `${Math.round(confidence * 100)}%`}</strong></span>

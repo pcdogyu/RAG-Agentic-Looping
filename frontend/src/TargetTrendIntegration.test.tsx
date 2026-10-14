@@ -56,16 +56,18 @@ describe("target trend integration", () => {
 
     expect(markup.match(/target-change-card macro/g)?.length).toBe(1);
     expect(markup).toContain("数字资产");
-    expect(markup).toContain("事件信号状态变化");
-    expect(markup).toContain("看多 → 观望");
+    expect(markup).not.toContain("事件信号状态变化");
+    expect(markup).not.toContain("总体评级");
+    expect(markup).not.toContain("看多 → 观望");
     expect(markup).toContain("最新新闻信号");
     expect(markup).toContain("强烈看空");
     expect(markup).toContain("-90");
-    expect(markup).toContain("单步限制");
-    expect(markup).toContain("长期证据趋势");
-    expect(markup).toContain("短期证据趋势");
-    expect(markup).toContain("综合证据参考");
-    expect(markup).toContain("低置信事件未纳入证据趋势");
+    expect(markup).not.toContain("单步限制");
+    expect(markup).not.toContain("长期证据趋势");
+    expect(markup).not.toContain("短期证据趋势");
+    expect(markup).not.toContain("综合证据参考");
+    expect(markup).not.toContain("低置信事件未纳入证据趋势");
+    expect(markup).not.toContain("目标趋势摘要");
   });
 
   it("keeps rendering legacy target payloads without trend data", () => {
