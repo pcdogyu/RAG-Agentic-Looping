@@ -190,6 +190,9 @@ func TestMappingPromptTreatsNewsAsUntrustedAndClosesSchema(t *testing.T) {
 	if !strings.Contains(user, "不得输出同行") || !strings.Contains(user, "product_owner") || !strings.Contains(user, "asset_id 必须逐字来自候选证券主数据") {
 		t.Fatalf("mapping prompt does not enforce direct identity-only candidates: %s", user)
 	}
+	if !strings.Contains(user, "必须从允许行业") || !strings.Contains(user, "电池级碳酸锂") || !strings.Contains(user, "下游使用行业") {
+		t.Fatalf("mapping prompt does not require commodity news to backfill downstream industry ids: %s", user)
+	}
 	schema := objectValue(request["format"])
 	items := objectValue(objectValue(objectValue(schema["properties"])["candidates"])["items"])
 	if schema["additionalProperties"] != false || items["additionalProperties"] != false {

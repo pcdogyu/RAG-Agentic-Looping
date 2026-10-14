@@ -59,6 +59,8 @@ var industryEntries = []industryEntry{
 	{label: "必选消费零售", aliases: []string{"消费者主要零售商", "商贸零售", "consumer staples retail"}},
 	{label: "食品饮料", aliases: []string{"酿酒行业", "食品加工", "饮料乳品", "白酒", "啤酒", "食品", "饮料", "beverages", "packaged foods"}},
 	{label: "新能源", aliases: []string{"光伏设备", "光伏", "风电设备", "风电", "储能", "氢能", "renewable energy", "solar", "clean energy"}},
+	{label: "电池", aliases: []string{"锂电池", "动力电池", "锂电", "电池制造", "battery", "batteries"}},
+	{label: "能源金属", aliases: []string{"锂矿", "锂盐"}},
 	{label: "煤炭", aliases: []string{"焦煤", "焦炭", "coal"}},
 	{label: "石油与天然气", aliases: []string{"石油及天然气", "油气", "石油", "原油", "天然气", "成品油", "柴油", "汽油", "oil gas", "crude", "brent", "wti"}},
 	{label: "保险", aliases: []string{"再保险", "insurance"}},

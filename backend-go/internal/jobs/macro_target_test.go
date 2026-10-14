@@ -61,6 +61,17 @@ func TestEconomicActionObservationTargetUsesSharedVocabulary(t *testing.T) {
 	if _, _, _, _, ok := economicActionObservationTarget(map[string]any{"actor": "白宫", "object": "相关举措"}); ok {
 		t.Error("economicActionObservationTarget accepted a vague placeholder")
 	}
+	// A raw-material price action must resolve to the graded commodity object so
+	// battery-grade lithium carbonate news keeps an observable transmission target.
+	name, targetType, channel, relationship, ok = economicActionObservationTarget(map[string]any{
+		"actor": "Mysteel", "action_type": "price_change", "object": "电池级碳酸锂价格",
+	})
+	if !ok || name != "电池级碳酸锂价格" || targetType != "commodity_price" || channel != "risk_premium" || relationship != "macro_indicator" {
+		t.Errorf("economicActionObservationTarget battery-grade commodity = %q/%q/%q/%q/%v, want 电池级碳酸锂价格/commodity_price/risk_premium/macro_indicator/true", name, targetType, channel, relationship, ok)
+	}
+	if name, targetType, _, _, ok := economicActionObservationTarget(map[string]any{"actor": "行业协会", "object": "锂电池"}); !ok || name != "锂电池" || targetType != "sector" {
+		t.Errorf("economicActionObservationTarget battery industry = %q/%q/%v, want 锂电池/sector/true", name, targetType, ok)
+	}
 }
 
 func TestSanitizeEventImpactsDropsNonMacroTargets(t *testing.T) {

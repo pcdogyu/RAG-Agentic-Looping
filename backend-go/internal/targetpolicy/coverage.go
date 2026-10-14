@@ -253,6 +253,9 @@ var measureWords = []string{
 	"行业", "业", "领域", "环节", "体系", "规模", "总量", "增速", "增幅", "增长率", "波动",
 	"波动率", "期限", "就业", "增长", "情况", "端", "面", "兑", "封装", "零部件", "器件",
 	"设备", "代工", "晶圆", "操作", "进出口", "量",
+	// Commodity grade and quotation qualifiers, so "电池级碳酸锂价格" reads as a
+	// concrete commodity object qualified by grade and session instead of residue.
+	"电池级", "工业级", "早盘", "午盘", "中间价", "均价",
 	// English qualifiers and product names, so "Gold Price" or "Copper Inventories"
 	// stay vocabulary words instead of an unknown residue.
 	"price", "prices", "rate", "rates", "yield", "yields", "export", "exports",

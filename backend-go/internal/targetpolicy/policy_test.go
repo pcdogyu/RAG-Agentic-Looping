@@ -31,6 +31,15 @@ func TestClassifyAcceptsMacroAndIndustryObjects(t *testing.T) {
 		"银行":             Sector,
 		"黄金价格":           CommodityPrice,
 		"原油":             Sector,
+		"碳酸锂价格":          CommodityPrice,
+		"电池级碳酸锂价格":       CommodityPrice,
+		"工业级碳酸锂":         CommodityPrice,
+		"电池":             Sector,
+		"电池行业":           Sector,
+		"锂电池":            Sector,
+		"动力电池":           Sector,
+		"能源金属":           Sector,
+		"锂矿":             Sector,
 		"美国股市":           RiskAsset,
 		"加密货币":           RiskAsset,
 		"美国经济":           Economy,
@@ -98,6 +107,10 @@ func TestIndustryNameFoldsSuffixVariants(t *testing.T) {
 		"零售板块":           "零售",
 		"白酒":             "食品饮料",
 		"新能源汽车":          "汽车",
+		"锂电池":            "电池",
+		"动力电池":           "电池",
+		"电池行业":           "电池",
+		"锂矿":             "能源金属",
 	}
 	for name, expected := range cases {
 		label, ok := IndustryName(name)
