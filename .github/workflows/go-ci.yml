@@ -128,4 +128,4 @@ jobs:
           RESEARCH_HISTORY_TEST_ISOLATED: "1"
         run: |
           go test -race ./internal/jobs -run '^(TestExtractRetryGoldenStateAgainstIsolatedServices|TestMappingGoldenStateAgainstIsolatedServices|TestMaintenanceHandlersAgainstPostgres|TestPruneInvalidMacroTargetsAgainstPostgres|TestRecentEventResearchReplayIsVersionedAndIdempotent|TestHistoricalNewsEvidenceUsesPointInTimeRelationPriority)$' -count=1 -v
-          go test -race ./internal/httpapi -run '^(TestBatchThreeCommandsAgainstIsolatedServices|TestStepLimitedRatingAgainstIsolatedPostgres)$' -count=1 -v
+          go test -race ./internal/httpapi -run '^(TestBatchThreeCommandsAgainstIsolatedServices|TestStepLimitedRatingAgainstIsolatedPostgres|TestLiveWorkerCapacitiesOnlyCountsFreshHeartbeats)$' -count=1 -v
