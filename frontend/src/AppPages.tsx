@@ -3791,6 +3791,8 @@ type UniverseAsset = {
   association_reason: string;
   active: boolean;
   last_synced_at: string | null;
+  latest_rating?: string | null;
+  latest_rated_at?: string | null;
 };
 
 export function fundamentalAssetSearchTerm(value: string) {
@@ -4052,7 +4054,7 @@ export function AssetUniversePage({ apiBase }: { apiBase: string }) {
       </form>
       <div className="universe-table-wrap">
         <table className="universe-table">
-          <thead><tr><th>市场 / 代码</th><th>名称与别名</th><th>统一行业 / 原始行业</th><th>关联层级</th><th>类型</th><th>同步时间</th><th>操作</th></tr></thead>
+          <thead><tr><th>市场 / 代码</th><th>名称与别名</th><th>统一行业 / 原始行业</th><th>关联层级</th><th>类型</th><th>同步时间</th><th>评级</th><th>操作</th></tr></thead>
           <tbody>
             {assets.map((asset) => <tr key={asset.asset_id} className={asset.active ? "" : "inactive"}>
               <td><small>{universeMarketLabels[asset.market] || asset.market}</small><strong>{asset.symbol}</strong></td>
@@ -4061,6 +4063,7 @@ export function AssetUniversePage({ apiBase }: { apiBase: string }) {
               <td><strong>{asset.association_tier === "standard" ? "标准" : asset.association_tier === "exact_only" ? "仅精确" : "仅手动"}</strong><small>{associationReasonLabels[asset.association_reason] || asset.association_reason}</small></td>
               <td>{asset.instrument_type || "—"}</td>
               <td>{universeTime(asset.last_synced_at)}</td>
+              <td><strong>{asset.latest_rating ? recommendationRatingLabel(asset.latest_rating) : "未评级"}</strong>{asset.latest_rated_at ? <small>{new Date(asset.latest_rated_at).toLocaleString("zh-CN")}</small> : <small>暂无研究评级</small>}</td>
               <td><div className="universe-row-actions"><button type="button" disabled={researchingId === asset.asset_id || !asset.active} onClick={() => void researchAsset(asset)}>{researchingId === asset.asset_id ? "入队中…" : "研究"}</button><button type="button" onClick={() => beginEdit(asset)}>编辑</button></div></td>
             </tr>)}
           </tbody>

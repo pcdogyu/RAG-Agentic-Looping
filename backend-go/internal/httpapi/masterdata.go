@@ -97,7 +97,70 @@ func (s *Server) assetUniverse(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "asset universe query failed")
 		return
 	}
+	s.attachLatestRatings(r, items)
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": total, "offset": offset, "limit": limit})
+}
+
+// attachLatestRatings labels each asset page item with the software's most recent
+// rating for that asset, taken from the newest row in recommendations. Assets
+// without any completed research keep explicit null values.
+func (s *Server) attachLatestRatings(r *http.Request, items []any) {
+	for _, raw := range items {
+		item, _ := raw.(map[string]any)
+		if item != nil {
+			item["latest_rating"] = nil
+			item["latest_rated_at"] = nil
+		}
+	}
+	if len(items) == 0 {
+		return
+	}
+	ids := make([]string, 0, len(items))
+	for _, raw := range items {
+		item, _ := raw.(map[string]any)
+		if item == nil {
+			continue
+		}
+		if id := stringValue(item["asset_id"]); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	type ratingEntry struct {
+		rating  string
+		ratedAt string
+	}
+	rows, err := s.db.Query(r.Context(), `SELECT asset_id,rating,as_of FROM (
+		SELECT asset_id,rating,as_of,row_number() OVER (PARTITION BY asset_id ORDER BY as_of DESC,id DESC) AS rn
+		FROM recommendations WHERE asset_id = ANY($1)) ranked WHERE rn = 1`, ids)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	latest := map[string]ratingEntry{}
+	for rows.Next() {
+		var assetID, rating string
+		var asOf time.Time
+		if rows.Scan(&assetID, &rating, &asOf) != nil {
+			return
+		}
+		latest[assetID] = ratingEntry{rating: rating, ratedAt: jsonTime(asOf)}
+	}
+	if rows.Err() != nil {
+		return
+	}
+	for _, raw := range items {
+		item, _ := raw.(map[string]any)
+		if item == nil {
+			continue
+		}
+		if entry, ok := latest[stringValue(item["asset_id"])]; ok {
+			item["latest_rating"] = entry.rating
+			item["latest_rated_at"] = entry.ratedAt
+		}
+	}
 }
 
 func (s *Server) industries(w http.ResponseWriter, r *http.Request) {
