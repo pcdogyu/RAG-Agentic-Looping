@@ -459,15 +459,16 @@ func (s *Server) taskStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) modelInferenceQueues(w http.ResponseWriter, r *http.Request) {
+	advertised := s.liveWorkerCapacities(r.Context())
 	items := []map[string]any{
-		s.inferenceQueue(r.Context(), "assist", s.cfg.AssistModel, "股票映射", "新闻事件二次股票映射", true),
-		s.inferenceQueue(r.Context(), "code", s.cfg.CodeModel, "代码演进", evolutionBinding(s.cfg.EvolutionAutoMerge), s.cfg.EvolutionEnabled),
+		s.inferenceQueue(r.Context(), "assist", s.cfg.AssistModel, "股票映射", "新闻事件二次股票映射", true, advertised),
+		s.inferenceQueue(r.Context(), "code", s.cfg.CodeModel, "代码演进", evolutionBinding(s.cfg.EvolutionAutoMerge), s.cfg.EvolutionEnabled, advertised),
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"generated_at": time.Now().UTC(), "items": items})
 }
 
-func (s *Server) inferenceQueue(ctx context.Context, lane, model, purpose, binding string, enabled bool) map[string]any {
-	capacity := envIntValue("OLLAMA_"+strings.ToUpper(lane)+"_MAX_CONCURRENCY", 1)
+func (s *Server) inferenceQueue(ctx context.Context, lane, model, purpose, binding string, enabled bool, advertised map[string]int) map[string]any {
+	capacity := resolveLaneCapacity(advertised, lane, envIntValue("OLLAMA_"+strings.ToUpper(lane)+"_MAX_CONCURRENCY", 1))
 	deepCapacity := 0
 	if lane == "research" {
 		deepCapacity = envIntValue("OLLAMA_RESEARCH_DEEP_MAX_CONCURRENCY", 1)

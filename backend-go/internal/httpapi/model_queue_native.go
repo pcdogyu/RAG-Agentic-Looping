@@ -63,11 +63,12 @@ type nativeExecutionSamples struct {
 func (s *Server) buildNativeModelQueueOverview(ctx context.Context, limit int) map[string]any {
 	now := time.Now().UTC()
 	newsAgeFilter, newsAgeFilterErr := jobs.LoadResearchNewsAgeFilter(ctx, s.db)
+	advertised := s.liveWorkerCapacities(ctx)
 	specs := s.nativeModelQueueSpecs()
 	results := make(chan nativeModelQueueResult, len(specs))
 	for index, spec := range specs {
 		go func(index int, spec nativeModelQueueSpec) {
-			inference := s.inferenceQueue(ctx, spec.id, spec.model, spec.purpose, spec.binding, spec.enabled)
+			inference := s.inferenceQueue(ctx, spec.id, spec.model, spec.purpose, spec.binding, spec.enabled, advertised)
 			jobs, err := s.loadNativeModelJobs(ctx, spec.id, now.Add(-modelQueueTaskRetention))
 			if err != nil {
 				slog.Error("native model queue query failed", "queue", spec.id, "error", err)
