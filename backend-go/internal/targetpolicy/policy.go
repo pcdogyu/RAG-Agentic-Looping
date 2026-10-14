@@ -117,6 +117,9 @@ func Classify(name string) (string, bool) {
 	if !PlausibleName(name) {
 		return "", false
 	}
+	if exactCompanyNames[Normalized(name)] {
+		return "", false
+	}
 	return MacroKind(name)
 }
 
@@ -226,6 +229,15 @@ var instrumentPhrases = []string{
 	"大商所", "郑商所", "沪铜", "沪铝", "沪锌", "沪镍", "沪锡", "伦铜", "伦铝", "伦镍",
 	"伦锌", "伦锡", "股价", "涨跌", "成交额", "成交量", "布伦特", "西德克萨斯", "阿曼原油",
 	"stockprice", "shareprice", "stocks", "shares", "stockfuture",
+}
+
+// exactCompanyNames are companies whose full Chinese name is itself a readable
+// macro or industry phrase, so neither the markers nor the coverage rule rejects
+// them: "英国石油" is BP, yet it segments into the country and the sector word that
+// "英国石油进口" and "英国天然气" legitimately use. They are matched as the whole label
+// so a scoped object reading of the same words stays publishable.
+var exactCompanyNames = map[string]bool{
+	Normalized("英国石油"): true,
 }
 
 // MacroKind classifies a plausible label into one macro target type by segmenting the

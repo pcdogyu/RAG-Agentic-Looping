@@ -20,6 +20,8 @@ func TestClassifyAcceptsObjectsFromProductionResearch(t *testing.T) {
 		"美国银行业": Sector, "印度银行业": Sector, "航空业": Sector, "俄罗斯石油": CommodityPrice,
 		"伊朗港口": Shipping, "中国半导体": Sector, "中国港口": Shipping, "全球航空": Sector,
 		"国内航线": Shipping, "亚洲航空货运": Shipping,
+		// The same words with a scope read as an object, not as BP.
+		"英国石油进口": SupplyVolume,
 	}
 	for name, expected := range cases {
 		kind, ok := Classify(name)
@@ -63,6 +65,8 @@ func TestClassifyRejectsPublishedMacroJunk(t *testing.T) {
 		// name is built from vocabulary words.
 		"美国银行", "瑞士银行", "印度航空", "俄罗斯银行", "澳大利亚储备银行", "国家开发银行",
 		"世界银行", "中国人民银行",
+		// A company whose whole name is a readable industry phrase.
+		"英国石油",
 		// A bare flow word never names an object.
 		"库存", "出口", "价格",
 	}
