@@ -2715,19 +2715,45 @@ export function EventConclusionDetailModal({ detail, onClose }: { detail: EventC
   </div>;
 }
 
+export type TargetChangeViewMode = "list" | "card";
+
+export const targetChangeViewStorageKey = "market-loop-target-view";
+
+export function normalizeTargetChangeViewMode(value: string | null): TargetChangeViewMode {
+  return value === "card" ? "card" : "list";
+}
+
+export function readStoredTargetChangeViewMode(): TargetChangeViewMode {
+  if (typeof window === "undefined") return "list";
+  try {
+    return normalizeTargetChangeViewMode(window.localStorage.getItem(targetChangeViewStorageKey));
+  } catch {
+    return "list";
+  }
+}
+
 export function TargetChangeGrid({
   items,
   onOpen,
   detailLoadingId = "",
   researchStates = {},
   onResearch,
+  view = "list",
 }: {
   items: TargetChange[];
   onOpen: (item: TargetChange) => void;
   detailLoadingId?: string;
   researchStates?: Record<string, ConclusionResearchState>;
   onResearch?: (item: TargetChange) => void;
+  view?: TargetChangeViewMode;
 }) {
+  if (view === "list") return <TargetChangeList
+    items={items}
+    onOpen={onOpen}
+    detailLoadingId={detailLoadingId}
+    researchStates={researchStates}
+    onResearch={onResearch}
+  />;
   return <div className="target-change-grid unified-target-change-grid" data-columns={changedTargetDesktopColumns}>
     {items.map((item) => {
       const eventSignal = item.latest_event_signal;
@@ -2759,6 +2785,64 @@ export function TargetChangeGrid({
           <span>评级置信度<strong>{confidence === null ? "—" : `${Math.round(confidence * 100)}%`}</strong></span>
           {onResearch && <ResearchAgainButton state={researchStates[targetChangeResearchKey(item)]} onResearch={() => onResearch(item)} />}
         </div>
+      </article>;
+    })}
+  </div>;
+}
+
+export function TargetChangeList({
+  items,
+  onOpen,
+  detailLoadingId = "",
+  researchStates = {},
+  onResearch,
+}: {
+  items: TargetChange[];
+  onOpen: (item: TargetChange) => void;
+  detailLoadingId?: string;
+  researchStates?: Record<string, ConclusionResearchState>;
+  onResearch?: (item: TargetChange) => void;
+}) {
+  return <div className="target-change-list unified-target-change-list">
+    <div className="target-change-list-head" aria-hidden="true">
+      <span className="target-change-cell symbol">标的</span>
+      <span className="target-change-cell scope">类型 · 最近观测</span>
+      <span className="target-change-cell signal">最新新闻信号</span>
+      <span className="target-change-cell score">方向分</span>
+      <span className="target-change-cell news">新闻可信度</span>
+      <span className="target-change-cell confidence">评级置信度</span>
+      {onResearch && <span className="target-change-cell action">操作</span>}
+    </div>
+    {items.map((item) => {
+      const eventSignal = item.latest_event_signal;
+      const score = eventSignal?.direction_score ?? item.latest.direction_score;
+      const newsConfidence = eventSignal?.news_confidence ?? item.latest.news_confidence;
+      const confidence = eventSignal?.rating_confidence ?? item.latest.rating_confidence;
+      const changedAt = item.rating_state?.changed_at || item.observed_at || item.changed_at;
+      const scopeLabel = item.target_type === "commodity_price" || item.kind === "macro"
+        ? (targetTypeLabels[item.target_type] ?? item.target_type)
+        : item.market;
+      return <article className={`target-change-row ${item.kind}`} key={item.key}>
+        <div className="target-change-cell symbol">
+          <button
+            type="button"
+            className="target-change-identity"
+            title={item.label}
+            aria-label={`查看 ${item.symbol || item.label} 最新研究`}
+            aria-busy={detailLoadingId === item.key}
+            disabled={detailLoadingId === item.key}
+            onClick={() => onOpen(item)}
+          >
+            <strong>{item.symbol || item.label}</strong>
+            {item.symbol && <small>{item.label}</small>}
+          </button>
+        </div>
+        <div className="target-change-cell scope"><span>{scopeLabel}</span><small>{new Date(changedAt).toLocaleString("zh-CN")}</small></div>
+        <div className="target-change-cell signal" data-label="最新新闻信号"><strong>{recommendationRatingLabel(eventSignal?.rating || item.latest.rating)}</strong></div>
+        <div className="target-change-cell score" data-label="方向分"><b className={score === null ? "neutral" : score < 0 ? "negative" : score > 0 ? "positive" : "neutral"} title="本次事件原始方向分">{score === null ? "—" : `${score > 0 ? "+" : ""}${score}`}</b></div>
+        <div className="target-change-cell news" data-label="新闻可信度"><strong>{newsConfidence === null ? "—" : `${Math.round(newsConfidence * 100)}%`}</strong></div>
+        <div className="target-change-cell confidence" data-label="评级置信度"><strong>{confidence === null ? "—" : `${Math.round(confidence * 100)}%`}</strong></div>
+        {onResearch && <div className="target-change-cell action"><ResearchAgainButton state={researchStates[targetChangeResearchKey(item)]} onResearch={() => onResearch(item)} /></div>}
       </article>;
     })}
   </div>;
@@ -2799,6 +2883,7 @@ function TargetChangeSection({
   researchStates,
   onResearch,
   query,
+  view,
 }: {
   apiBase: string;
   kind: "macro" | "asset";
@@ -2809,6 +2894,7 @@ function TargetChangeSection({
   researchStates: Record<string, ConclusionResearchState>;
   onResearch?: (item: TargetChange) => void;
   query: string;
+  view: TargetChangeViewMode;
 }) {
   const [items, setItems] = useState<TargetChange[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
@@ -2866,7 +2952,7 @@ function TargetChangeSection({
     <header><div><p className="eyebrow">{kind === "macro" ? "MACRO / SECTOR" : "INSTRUMENT TARGETS"}</p><h2>{title}</h2><p>{copy}</p></div><button type="button" disabled={loading} onClick={() => void load()}>{loading ? "刷新中…" : "刷新"}</button></header>
     {error && <div className="page-error target-change-error"><span>{error}</span><button type="button" onClick={() => void load()}>重试</button></div>}
     {!items.length && !error && (loading ? <div className="page-message">正在加载{title}…</div> : <div className="page-empty">{query ? `未找到与“${query}”匹配的评级观测。` : "当前没有最近评级观测。"}</div>)}
-    {!!items.length && <TargetChangeGrid items={items} onOpen={onOpen} detailLoadingId={detailLoadingId} researchStates={researchStates} onResearch={onResearch} />}
+    {!!items.length && <TargetChangeGrid items={items} onOpen={onOpen} detailLoadingId={detailLoadingId} researchStates={researchStates} onResearch={onResearch} view={view} />}
     {cursor && <button className="load-more" type="button" disabled={loadingMore} onClick={() => void load(true)}>{loadingMore ? "正在加载…" : "加载更多"}</button>}
   </section>;
 }
@@ -2880,6 +2966,16 @@ export function ChangedTargetsPage({ apiBase }: { apiBase: string }) {
   const [selectedEvent, setSelectedEvent] = useState<EventConclusionDetail | null>(null);
   const [researchStates, setResearchStates] = useState<Record<string, ConclusionResearchState>>({});
   const researchInFlight = useRef(new Set<string>());
+  const [view, setView] = useState<TargetChangeViewMode>(readStoredTargetChangeViewMode);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(targetChangeViewStorageKey, view);
+    } catch {
+      // 存储不可用时，当前会话内的视图切换仍然生效。
+    }
+  }, [view]);
 
   useEffect(() => {
     const timer = window.setTimeout(
@@ -2925,15 +3021,21 @@ export function ChangedTargetsPage({ apiBase }: { apiBase: string }) {
   }
 
   return <section className="app-page targets-page">
-    <PageHeading eyebrow="RATING CHANGES" title="标的评级变化" copy="左侧追踪宏观经济、行业及跨资产目标，右侧追踪具体证券与商品价格；同时展示最近观测，未满足证据门槛的新闻信号不会改变总体评级。" />
+    <PageHeading eyebrow="RATING CHANGES" title="标的评级变化" copy="分别追踪宏观经济、行业及跨资产目标与具体证券和商品价格；同时展示最近观测，未满足证据门槛的新闻信号不会改变总体评级。" />
     {detailError && <div className="page-error target-detail-error"><span>{detailError}</span></div>}
     <form className="page-filters target-search" role="search" onSubmit={(event) => { event.preventDefault(); setDebouncedQuery(searchQuery.trim()); }}>
       <input type="search" aria-label="搜索评级变化" placeholder="搜索宏观、行业、代码或标的名称" value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} />
       {searchQuery && <button type="button" onClick={() => { setSearchQuery(""); setDebouncedQuery(""); }}>清除</button>}
     </form>
-    <div className="target-change-split">
-      <TargetChangeSection apiBase={apiBase} kind="macro" title="宏观经济与行业变化" copy="经济、行业、汇率、利率、供给、航运与风险资产的评级变化与最近观测。" query={debouncedQuery} onOpen={(item) => void openLatestResearch(item)} detailLoadingId={detailLoadingId} researchStates={researchStates} onResearch={(item) => void researchAgain(item)} />
-      <TargetChangeSection apiBase={apiBase} kind="asset" title="具体标的变化" copy="股票、加密资产与商品价格的总体评级变化、最近观测及最新新闻信号。" query={debouncedQuery} onOpen={(item) => void openLatestResearch(item)} detailLoadingId={detailLoadingId} researchStates={researchStates} onResearch={(item) => void researchAgain(item)} />
+    <div className="target-change-toolbar">
+      <div className="target-change-view-toggle" role="group" aria-label="标的展示方式">
+        <button type="button" className={view === "list" ? "active" : ""} aria-pressed={view === "list"} onClick={() => setView("list")}>列表</button>
+        <button type="button" className={view === "card" ? "active" : ""} aria-pressed={view === "card"} onClick={() => setView("card")}>卡片</button>
+      </div>
+    </div>
+    <div className={`target-change-split${view === "list" ? " list-view" : ""}`}>
+      <TargetChangeSection apiBase={apiBase} kind="macro" title="宏观经济与行业变化" copy="经济、行业、汇率、利率、供给、航运与风险资产的评级变化与最近观测。" query={debouncedQuery} onOpen={(item) => void openLatestResearch(item)} detailLoadingId={detailLoadingId} researchStates={researchStates} onResearch={(item) => void researchAgain(item)} view={view} />
+      <TargetChangeSection apiBase={apiBase} kind="asset" title="具体标的变化" copy="股票、加密资产与商品价格的总体评级变化、最近观测及最新新闻信号。" query={debouncedQuery} onOpen={(item) => void openLatestResearch(item)} detailLoadingId={detailLoadingId} researchStates={researchStates} onResearch={(item) => void researchAgain(item)} view={view} />
     </div>
     {selectedAsset && <ConclusionDetailModal detail={selectedAsset} onClose={() => setSelectedAsset(null)} />}
     {selectedEvent && <EventConclusionDetailModal detail={selectedEvent} onClose={() => setSelectedEvent(null)} />}

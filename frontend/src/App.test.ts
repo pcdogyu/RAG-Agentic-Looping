@@ -74,6 +74,8 @@ import {
   TargetChangeGrid,
   targetChangeResearchKey,
   targetChangeSearchDebounceMs,
+  normalizeTargetChangeViewMode,
+  readStoredTargetChangeViewMode,
   type TargetChange,
   TopNavigation,
   UnifiedModelQueuePanel,
@@ -982,6 +984,24 @@ describe("changed targets page", () => {
     expect(markup.indexOf("宏观经济与行业变化")).toBeLessThan(markup.indexOf("具体标的变化"));
   });
 
+  it("defaults the targets display to a list and exposes a card switch", () => {
+    expect(readStoredTargetChangeViewMode()).toBe("list");
+    const markup = renderToStaticMarkup(createElement(ChangedTargetsPage, { apiBase: "" }));
+
+    expect(markup).toContain('aria-label="标的展示方式"');
+    expect(markup).toContain('aria-pressed="true">列表</button>');
+    expect(markup).toContain('aria-pressed="false">卡片</button>');
+    expect(markup).toContain('class="target-change-split list-view"');
+    expect(markup).not.toContain("target-change-grid");
+  });
+
+  it("normalizes the stored target display preference", () => {
+    expect(normalizeTargetChangeViewMode(null)).toBe("list");
+    expect(normalizeTargetChangeViewMode("list")).toBe("list");
+    expect(normalizeTargetChangeViewMode("card")).toBe("card");
+    expect(normalizeTargetChangeViewMode("table")).toBe("list");
+  });
+
   it("builds trimmed server-side search and cursor parameters", () => {
     expect(targetChangeSearchDebounceMs).toBe(300);
     expect(targetChangePageSize).toBe(12);
@@ -1077,10 +1097,19 @@ describe("changed targets page", () => {
     ));
 
     expect(changedTargetDesktopColumns).toBe(4);
-    expect((markup.match(/data-columns="4"/g) || []).length).toBe(2);
-    expect((markup.match(/target-change-card (?:macro|asset)/g) || []).length).toBe(8);
+    expect((markup.match(/class="target-change-list unified-target-change-list"/g) || []).length).toBe(2);
+    expect((markup.match(/target-change-row (?:macro|asset)/g) || []).length).toBe(8);
     expect((markup.match(/class="research-again"/g) || []).length).toBe(8);
     expect(markup).toContain("已进入队列");
+    const cardMarkup = renderToStaticMarkup(createElement(TargetChangeGrid, {
+      items: macroItems,
+      onOpen: () => undefined,
+      onResearch: () => undefined,
+      view: "card",
+    }));
+    expect(cardMarkup).toContain('class="target-change-grid unified-target-change-grid" data-columns="4"');
+    expect((cardMarkup.match(/target-change-card macro/g) || []).length).toBe(4);
+    expect(cardMarkup).toContain("最新新闻信号");
     expect(targetChangeResearchKey(macroItems[0])).toBe("event:macro-detail-0");
     expect(targetChangeResearchKey(assetItems[0])).toBe("asset:asset-0");
     const commodityItem = {

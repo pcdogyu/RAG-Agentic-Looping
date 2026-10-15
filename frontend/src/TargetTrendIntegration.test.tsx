@@ -54,7 +54,7 @@ describe("target trend integration", () => {
       onOpen: () => undefined,
     }));
 
-    expect(markup.match(/target-change-card macro/g)?.length).toBe(1);
+    expect(markup.match(/target-change-row macro/g)?.length).toBe(1);
     expect(markup).toContain("数字资产");
     expect(markup).not.toContain("事件信号状态变化");
     expect(markup).not.toContain("总体评级");
