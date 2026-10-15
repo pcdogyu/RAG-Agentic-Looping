@@ -548,10 +548,10 @@ h1 span { color: var(--mint); font-weight: 400; }
 .target-change-view-toggle button:hover { color: var(--text); }
 .target-change-view-toggle button.active { color: var(--button-text); background: var(--mint); }
 .target-change-view-toggle button:focus-visible { outline: 2px solid var(--mint); outline-offset: 2px; }
-.target-change-split.list-view { grid-template-columns: 1fr; }
-.target-change-list { display: grid; min-width: 0; }
-.target-change-list-head, .target-change-row { display: grid; align-items: center; grid-template-columns: minmax(140px, 1.6fr) minmax(96px, .95fr) minmax(104px, 1fr) 60px 84px 84px 96px; gap: 8px; min-width: 0; }
+.target-change-list { display: grid; min-width: 0; overflow-x: auto; }
+.target-change-list-head, .target-change-row { display: grid; align-items: center; grid-template-columns: minmax(110px, 1.4fr) minmax(96px, 1fr) minmax(72px, .8fr) 42px 60px 60px 92px; gap: 6px; min-width: 594px; }
 .target-change-list-head { padding: 0 10px 7px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 9px; }
+.target-change-list-head > .target-change-cell { color: var(--muted); font: inherit; white-space: nowrap; }
 .target-change-row { padding: 9px 10px; border-bottom: 1px solid var(--line); border-left: 3px solid transparent; }
 .target-change-row:last-child { border-bottom: 0; }
 .target-change-row:hover { background: var(--soft-hover); }
@@ -1028,7 +1028,7 @@ h1 span { color: var(--mint); font-weight: 400; }
   .unified-target-change-grid { grid-template-columns: 1fr; }
   .target-change-card { min-height: 0; padding: 13px; }
   .target-change-list-head { display: none; }
-  .target-change-row { grid-template-columns: repeat(2, minmax(0, 1fr)); row-gap: 8px; padding: 11px 8px; }
+  .target-change-row { grid-template-columns: repeat(2, minmax(0, 1fr)); min-width: 0; row-gap: 8px; padding: 11px 8px; }
   .target-change-row .target-change-cell.symbol, .target-change-row .target-change-cell.scope, .target-change-row .target-change-cell.action { grid-column: 1 / -1; }
   .target-change-row .target-change-cell.scope { display: flex; gap: 6px; }
   .target-change-row .target-change-cell.signal::before, .target-change-row .target-change-cell.score::before, .target-change-row .target-change-cell.news::before, .target-change-row .target-change-cell.confidence::before { content: attr(data-label); display: block; margin-bottom: 2px; color: var(--muted); font-size: 8px; }
