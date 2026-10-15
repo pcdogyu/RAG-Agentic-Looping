@@ -1,0 +1,90 @@
+{
+  "categories": [
+    {
+      "key": "web3",
+      "name": "Web3 \u0026 Crypto",
+      "name_zh": "Web3与加密货币",
+      "description": "Cryptocurrency, blockchain, DeFi, NFT, and Web3 ecosystem",
+      "subcategories": [
+        {
+          "key": "defi",
+          "name": "DeFi \u0026 Infrastructure",
+          "name_zh": "DeFi与基础设施",
+          "description": "DeFi protocols, L1/L2 chains, exchanges, stablecoins, ETFs"
+        },
+        {
+          "key": "meme",
+          "name": "Meme \u0026 Trending Tokens",
+          "name_zh": "Meme与热门代币",
+          "description": "Meme coins, viral tokens, airdrops, trending narratives"
+        },
+        {
+          "key": "nft_gamefi",
+          "name": "NFT \u0026 GameFi",
+          "name_zh": "NFT与链游",
+          "description": "NFTs, blockchain gaming, DePIN, RWA, SocialFi"
+        },
+        {
+          "key": "regulation",
+          "name": "Regulation \u0026 Policy",
+          "name_zh": "监管与政策",
+          "description": "Government regulation, legal cases, and crypto policy"
+        }
+      ]
+    },
+    {
+      "key": "ai",
+      "name": "AI \u0026 Technology",
+      "name_zh": "人工智能与科技",
+      "description": "Artificial intelligence, semiconductors, and AI x Crypto",
+      "subcategories": [
+        {
+          "key": "models",
+          "name": "AI Models \u0026 Applications",
+          "name_zh": "AI模型与应用",
+          "description": "AI model releases, agents, applications, and research"
+        },
+        {
+          "key": "chips",
+          "name": "Semiconductors \u0026 Hardware",
+          "name_zh": "半导体与硬件",
+          "description": "Chip industry, GPU, and hardware"
+        },
+        {
+          "key": "crypto_ai",
+          "name": "Crypto x AI",
+          "name_zh": "加密AI",
+          "description": "AI tokens and intersection of AI with blockchain"
+        }
+      ]
+    },
+    {
+      "key": "macro",
+      "name": "Macro Finance",
+      "name_zh": "宏观金融",
+      "description": "Global macroeconomics, central banks, and geopolitics",
+      "subcategories": [
+        {
+          "key": "fed",
+          "name": "Central Banks \u0026 Rates",
+          "name_zh": "央行与利率",
+          "description": "Central bank decisions, interest rates, and monetary policy"
+        },
+        {
+          "key": "geopolitics",
+          "name": "Geopolitics",
+          "name_zh": "地缘政治",
+          "description": "Geopolitical events affecting markets"
+        },
+        {
+          "key": "markets",
+          "name": "Stock \u0026 Commodity Markets",
+          "name_zh": "股市与大宗商品",
+          "description": "Stock market, commodities, forex, and indices"
+        }
+      ]
+    }
+  ],
+  "success": true,
+  "updated_at": "2026-10-13T00:00:00Z"
+}

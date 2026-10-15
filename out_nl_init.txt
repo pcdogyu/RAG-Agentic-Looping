@@ -1,0 +1,15 @@
+HTTP/1.1 405 Method Not Allowed
+Age: 6671
+Cache-Control: public, max-age=0, must-revalidate
+Content-Disposition: inline
+Content-Length: 0
+Content-Type: text/html; charset=utf-8
+Date: Tue, 13 Oct 2026 07:40:26 GMT
+Referrer-Policy: strict-origin-when-cross-origin
+Server: Vercel
+Strict-Transport-Security: max-age=63072000; includeSubDomains; preload
+X-Content-Type-Options: nosniff
+X-Frame-Options: DENY
+X-Matched-Path: /mcp
+X-Vercel-Cache: HIT
+X-Vercel-Id: hnd1::znhzp-1791877226114-3a403ad71b4c
