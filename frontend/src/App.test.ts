@@ -18,6 +18,7 @@ import BuildFooter, { buildInfo } from "./BuildFooter";
 import { phaseTwoReadinessStatusLabel } from "./PhaseTwoReadiness";
 import {
   applyCancelledTaskTombstone,
+  aggregateQueueInstanceId,
   AssetUniversePage,
   changedTargetDesktopColumns,
   changedTargetLatestRecommendationId,
@@ -50,7 +51,9 @@ import {
 	tradabilityStatusLabel,
   scheduleDraftJSON,
   ModelInferenceQueuePanel,
+  modelQueueClearRequestUrl,
   modelQueueRetryRequest,
+  modelQueueRetryRequestUrl,
   modelQueuePanelColumns,
   modelQueueInstances,
   modelTaskRetryRequest,
@@ -1836,6 +1839,21 @@ describe("research queue page", () => {
     });
     expect(JSON.parse(String(modelTaskRetryRequest(research, task, true).body))).not.toHaveProperty("filter_recent_research");
     expect(modelQueueRetryRequest(research, true).body).toBeUndefined();
+  });
+
+  it("routes aggregate research panel actions to queue-level endpoints instead of a phantom instance", () => {
+    const research = { id: "research" } as Pick<ModelQueueOverviewItem, "id">;
+    const code = { id: "code" } as Pick<ModelQueueOverviewItem, "id">;
+    const aggregate = { id: aggregateQueueInstanceId };
+    expect(aggregateQueueInstanceId).toBe("全部实例");
+    expect(modelQueueClearRequestUrl("", research, aggregate))
+      .toBe("/api/v1/model-queues/research/clear");
+    expect(modelQueueRetryRequestUrl("", research, aggregate))
+      .toBe("/api/v1/model-queues/research/retry");
+    expect(modelQueueClearRequestUrl("", research, { id: "research-0" }))
+      .toBe("/api/v1/model-queues/research/instances/research-0/clear");
+    expect(modelQueueRetryRequestUrl("", code, { id: "code-0" }))
+      .toBe("/api/v1/model-queues/code/instances/code-0/retry");
   });
 
   it("includes the durable research run id in a queue-card manual retry", () => {

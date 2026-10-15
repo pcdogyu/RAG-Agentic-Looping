@@ -290,12 +290,14 @@ export type ModelQueuePanelItem = {
   instance: ModelQueueInstanceItem;
 };
 
+export const aggregateQueueInstanceId = "全部实例";
+
 export function modelQueueAggregateInstance(
   queue: ModelQueueOverviewItem,
 ): ModelQueueInstanceItem {
   const instances = modelQueueInstances(queue);
   return {
-    id: "全部实例",
+    id: aggregateQueueInstanceId,
     healthy: instances.every((instance) => instance.healthy),
     model_available: instances.every((instance) => instance.model_available),
     state: queue.state,
@@ -581,7 +583,7 @@ export function UnifiedModelQueuePanel({
   const activeInstance = instance ?? (queue.id === "research"
     ? modelQueueAggregateInstance(queue)
     : modelQueueInstances(queue)[0]);
-  const researchAggregate = queue.id === "research" && activeInstance.id === "全部实例";
+  const researchAggregate = queue.id === "research" && activeInstance.id === aggregateQueueInstanceId;
   const researchInstances = researchAggregate ? modelQueueInstances(queue) : [];
   const secondary = activeInstance.counts.retrying + activeInstance.counts.verifying;
   const activeCount = activeInstance.counts.queued + activeInstance.counts.running + secondary;
@@ -803,6 +805,26 @@ export function modelQueueRetryRequest(
   };
 }
 
+export function modelQueueClearRequestUrl(
+  apiBase: string,
+  queue: Pick<ModelQueueOverviewItem, "id">,
+  instance: Pick<ModelQueueInstanceItem, "id">,
+): string {
+  return instance.id === aggregateQueueInstanceId
+    ? `${apiBase}/api/v1/model-queues/${queue.id}/clear`
+    : `${apiBase}/api/v1/model-queues/${queue.id}/instances/${instance.id}/clear`;
+}
+
+export function modelQueueRetryRequestUrl(
+  apiBase: string,
+  queue: Pick<ModelQueueOverviewItem, "id">,
+  instance: Pick<ModelQueueInstanceItem, "id">,
+): string {
+  return instance.id === aggregateQueueInstanceId
+    ? `${apiBase}/api/v1/model-queues/${queue.id}/retry`
+    : `${apiBase}/api/v1/model-queues/${queue.id}/instances/${instance.id}/retry`;
+}
+
 export function QueuePage({ apiBase }: { apiBase: string }) {
   const [overview, setOverview] = useState<ModelQueueOverviewResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -893,19 +915,22 @@ export function QueuePage({ apiBase }: { apiBase: string }) {
       + instance.counts.retrying + instance.counts.verifying;
     const clearableCount = activeCount + instance.counts.failed;
     if (!clearableCount) return;
+    const aggregate = instance.id === aggregateQueueInstanceId;
     const actionId = `${queue.id}:${instance.id}`;
     setClearingQueueId(actionId);
     setActionMessage("");
     setError("");
     try {
-      const response = await fetch(`${apiBase}/api/v1/model-queues/${queue.id}/instances/${instance.id}/clear`, { method: "POST" });
+      const response = await fetch(modelQueueClearRequestUrl(apiBase, queue, instance), { method: "POST" });
       if (!response.ok) throw new Error(`清空${queue.purpose}队列失败（HTTP ${response.status}）`);
       const result = await response.json() as { cancelled: number };
-      removeQueueTasks(queue.id, (task) => task.instance_id === instance.id && [
+      removeQueueTasks(queue.id, (task) => (aggregate || task.instance_id === instance.id) && [
         "queued", "proposed", "running", "generating", "retrying", "verifying", "testing", "merging",
         "failed", "rejected", "rolled_back",
       ].includes(task.status));
-      setActionMessage(`已清空 ${queue.model} ${instance.id} 的 ${result.cancelled} 个当前${queue.purpose}任务；其他实例不受影响。`);
+      setActionMessage(aggregate
+        ? `已清空 ${queue.model} 全部实例的 ${result.cancelled} 个当前${queue.purpose}任务。`
+        : `已清空 ${queue.model} ${instance.id} 的 ${result.cancelled} 个当前${queue.purpose}任务；其他实例不受影响。`);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : `清空${queue.purpose}队列失败`);
     } finally {
@@ -950,7 +975,7 @@ export function QueuePage({ apiBase }: { apiBase: string }) {
     setError("");
     try {
       const response = await fetch(
-        `${apiBase}/api/v1/model-queues/${queue.id}/instances/${instance.id}/retry`,
+        modelQueueRetryRequestUrl(apiBase, queue, instance),
         modelQueueRetryRequest(queue, filterRecentResearch),
       );
       if (!response.ok) throw new Error(`批量重试失败（HTTP ${response.status}）`);
